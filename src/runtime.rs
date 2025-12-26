@@ -16,15 +16,12 @@ pub struct Runtime<A: Application> {
     app: Instance<A>,
     msg_tx: mpsc::UnboundedSender<A::Message>,
     msg_rx: mpsc::UnboundedReceiver<A::Message>,
-    quit_tx: mpsc::Sender<()>,
-    quit_rx: mpsc::Receiver<()>,
     subscription_manager: SubscriptionManager<A::Message>,
 }
 
 impl<A: Application> Runtime<A> {
     pub fn new(app: A) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let (quit_tx, quit_rx) = mpsc::channel(1);
         let instance = Instance { inner: app };
         let subscription_manager = SubscriptionManager::new(msg_tx.clone());
 
@@ -32,37 +29,35 @@ impl<A: Application> Runtime<A> {
             app: instance,
             msg_tx,
             msg_rx,
-            quit_tx,
-            quit_rx,
             subscription_manager,
         }
     }
 
-    fn process_messages(&mut self) {
+    async fn process_messages(&mut self) -> bool {
         while let Ok(msg) = self.msg_rx.try_recv() {
             let cmd = self.app.inner.update(msg);
 
-            let msg_tx = self.msg_tx.clone();
-            let quit_tx = self.quit_tx.clone();
             if let Some(mut stream) = cmd.stream {
-                tokio::spawn(async move {
-                    if let Some(action) = stream.next().await {
-                        match action {
-                            Action::Message(msg) => {
-                                let _ = msg_tx.send(msg);
-                            }
-                            Action::Quit => {
-                                let _ = quit_tx.send(()).await;
-                            }
+                // Process the command stream immediately to check for quit
+                if let Some(action) = stream.next().await {
+                    match action {
+                        Action::Message(msg) => {
+                            let _ = self.msg_tx.send(msg);
+                        }
+                        Action::Quit => {
+                            // Return immediately on quit
+                            return true;
                         }
                     }
-                });
+                }
             }
 
             // Restart subscriptions if needed
             self.subscription_manager
                 .update(self.app.inner.subscriptions());
         }
+
+        false
     }
 
     pub async fn run<B: Backend>(
@@ -80,12 +75,12 @@ impl<A: Application> Runtime<A> {
                 self.app.inner.view(frame);
             })?;
 
-            self.process_messages();
-
-            if self.quit_rx.try_recv().is_ok() {
+            // Process messages and check if quit was requested
+            if self.process_messages().await {
                 break;
             }
 
+            // Wait for next frame
             sleep(frame_duration).await;
         }
 
