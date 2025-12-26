@@ -1,5 +1,5 @@
 use futures::{
-    FutureExt, StreamExt,
+    FutureExt, Stream, StreamExt,
     stream::{self, BoxStream, select_all},
 };
 
@@ -48,6 +48,25 @@ impl<Msg: Send + 'static> Command<Msg> {
                 stream: Some(select_all(streams).boxed()),
             }
         }
+    }
+
+    /// Create a command from a stream of messages.
+    pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
+        Self {
+            stream: Some(stream.map(Action::Message).boxed()),
+        }
+    }
+
+    /// Run a stream and convert each item to a message.
+    /// This is useful for subscribing to external event sources.
+    pub fn run<A>(
+        stream: impl Stream<Item = A> + Send + 'static,
+        f: impl Fn(A) -> Msg + Send + 'static,
+    ) -> Self
+    where
+        Msg: 'static,
+    {
+        Self::stream(stream.map(f))
     }
 }
 
@@ -154,5 +173,90 @@ mod tests {
         }
 
         assert!(has_quit, "should receive quit action");
+    }
+
+    #[tokio::test]
+    async fn test_stream() {
+        use futures::stream;
+
+        let input_stream = stream::iter(vec![1, 2, 3]);
+        let cmd = Command::stream(input_stream);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        assert_eq!(results, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_run() {
+        use futures::stream;
+
+        let input_stream = stream::iter(vec![1, 2, 3]);
+        let cmd = Command::run(input_stream, |x| x * 2);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        assert_eq!(results, vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_run_with_conversion() {
+        use futures::stream;
+
+        #[derive(Debug, PartialEq)]
+        enum Message {
+            Number(i32),
+        }
+
+        let input_stream = stream::iter(vec![1, 2, 3]);
+        let cmd = Command::run(input_stream, |x| Message::Number(x * 10));
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        assert_eq!(
+            results,
+            vec![
+                Message::Number(10),
+                Message::Number(20),
+                Message::Number(30)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_with_empty_stream() {
+        use futures::stream;
+
+        let input_stream = stream::iter(Vec::<i32>::new());
+        let cmd = Command::run(input_stream, |x| x * 2);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let result = stream.next().await;
+
+        assert!(result.is_none(), "empty stream should produce no messages");
     }
 }
