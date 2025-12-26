@@ -51,6 +51,8 @@ impl Hash for TerminalSub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_terminal_sub_new() {
@@ -69,9 +71,6 @@ mod tests {
 
     #[test]
     fn test_terminal_sub_hash_consistency() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         let sub1 = TerminalSub::new();
         let sub2 = TerminalSub::new();
 
@@ -89,9 +88,6 @@ mod tests {
 
     #[test]
     fn test_terminal_sub_different_from_empty_hash() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         let terminal_sub = TerminalSub::new();
 
         let mut hasher1 = DefaultHasher::new();

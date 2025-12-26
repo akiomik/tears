@@ -205,6 +205,8 @@ pub trait Application: Sized {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Action;
+    use futures::StreamExt;
     use ratatui::Frame;
 
     // Test application implementation
@@ -348,9 +350,6 @@ mod tests {
 
         // Verify the command produces the expected message
         if let Some(mut stream) = cmd.stream {
-            use crate::command::Action;
-            use futures::StreamExt;
-
             if let Some(action) = stream.next().await {
                 match action {
                     Action::Message(msg) => assert_eq!(msg, "initialized"),
