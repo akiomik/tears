@@ -165,12 +165,20 @@ impl<A: Application> Runtime<A> {
         }
     }
 
-    async fn process_messages(&mut self) {
+    /// Process all pending messages and check for quit signal.
+    ///
+    /// Returns `true` if the application should quit.
+    async fn process_messages(&mut self) -> bool {
         while let Ok(msg) = self.msg_rx.try_recv() {
             let cmd = self.app.inner.update(msg);
 
             // Enqueue the command for asynchronous execution
             self.enqueue_command(cmd);
+
+            // Check quit immediately after each message to reduce quit latency
+            if self.quit_rx.try_recv().is_ok() {
+                return true;
+            }
         }
 
         // NOTE: Dynamic subscription updates are currently disabled due to the following issues:
@@ -192,6 +200,8 @@ impl<A: Application> Runtime<A> {
         // TODO: Implement proper subscription diffing to support dynamic subscriptions
         // - Cache the previous subscription set and compare with new one
         // - Only update when there's an actual difference
+
+        false
     }
 
     /// Run the application event loop.
@@ -273,16 +283,21 @@ impl<A: Application> Runtime<A> {
                 self.app.inner.view(frame);
             })?;
 
-            // Process messages
-            self.process_messages().await;
-
-            // Check if quit was requested
-            if self.quit_rx.try_recv().is_ok() {
+            // Process messages and check for immediate quit
+            if self.process_messages().await {
                 break;
             }
 
-            // Wait for next frame
-            sleep(frame_duration).await;
+            // Wait for next frame or quit signal (whichever comes first)
+            tokio::select! {
+                _ = sleep(frame_duration) => {
+                    // Continue to next frame
+                }
+                _ = self.quit_rx.recv() => {
+                    // Quit signal received during frame wait
+                    break;
+                }
+            }
         }
 
         // cancel all subscriptions
