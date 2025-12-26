@@ -168,7 +168,7 @@ impl<A: Application> Runtime<A> {
     /// Process all pending messages and check for quit signal.
     ///
     /// Returns `true` if the application should quit.
-    async fn process_messages(&mut self) -> bool {
+    fn process_messages(&mut self) -> bool {
         while let Ok(msg) = self.msg_rx.try_recv() {
             let cmd = self.app.inner.update(msg);
 
@@ -176,7 +176,7 @@ impl<A: Application> Runtime<A> {
             self.enqueue_command(cmd);
 
             // Check quit immediately after each message to reduce quit latency
-            if self.quit_rx.try_recv().is_ok() {
+            if self.check_quit() {
                 return true;
             }
         }
@@ -202,6 +202,30 @@ impl<A: Application> Runtime<A> {
         // - Only update when there's an actual difference
 
         false
+    }
+
+    /// Check if a quit signal has been received.
+    fn check_quit(&mut self) -> bool {
+        self.quit_rx.try_recv().is_ok()
+    }
+
+    /// Initialize subscriptions from the application.
+    fn initialize_subscriptions(&mut self) {
+        let subscriptions = self.app.inner.subscriptions();
+        self.subscription_manager.update(subscriptions);
+    }
+
+    /// Render the application's view to the terminal.
+    fn render<B: Backend>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
+        terminal.draw(|frame| {
+            self.app.inner.view(frame);
+        })?;
+        Ok(())
+    }
+
+    /// Perform cleanup when shutting down.
+    fn shutdown(&mut self) {
+        self.subscription_manager.shutdown();
     }
 
     /// Run the application event loop.
@@ -275,16 +299,13 @@ impl<A: Application> Runtime<A> {
     ) -> Result<()> {
         let frame_duration = Duration::from_millis(1000 / frame_rate as u64);
 
-        let subscriptions = self.app.inner.subscriptions();
-        self.subscription_manager.update(subscriptions);
+        self.initialize_subscriptions();
 
         loop {
-            terminal.draw(|frame| {
-                self.app.inner.view(frame);
-            })?;
+            self.render(terminal)?;
 
             // Process messages and check for immediate quit
-            if self.process_messages().await {
+            if self.process_messages() {
                 break;
             }
 
@@ -300,8 +321,7 @@ impl<A: Application> Runtime<A> {
             }
         }
 
-        // cancel all subscriptions
-        self.subscription_manager.shutdown();
+        self.shutdown();
 
         Ok(())
     }
@@ -506,5 +526,217 @@ mod tests {
     fn test_runtime_with_empty_string_flags() {
         let runtime = Runtime::<AppWithStringFlags>::new(String::new());
         assert_eq!(runtime.app.inner.name, "");
+    }
+
+    // Unit tests for extracted methods
+
+    #[test]
+    fn test_check_quit_no_signal() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+        assert!(!runtime.check_quit());
+    }
+
+    #[test]
+    fn test_check_quit_with_signal() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Send quit signal
+        let _ = runtime.quit_tx.send(());
+
+        assert!(runtime.check_quit());
+    }
+
+    #[test]
+    fn test_check_quit_multiple_signals() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Send multiple quit signals
+        let _ = runtime.quit_tx.send(());
+        let _ = runtime.quit_tx.send(());
+
+        // First check should return true
+        assert!(runtime.check_quit());
+        // Second check should also return true (signal still in queue)
+        assert!(runtime.check_quit());
+        // Third check should return false (no more signals)
+        assert!(!runtime.check_quit());
+    }
+
+    #[tokio::test]
+    async fn test_process_messages_no_messages() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // No messages, should return false
+        assert!(!runtime.process_messages());
+    }
+
+    #[tokio::test]
+    async fn test_process_messages_with_increment() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Send increment message
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+
+        // Process messages
+        assert!(!runtime.process_messages());
+
+        // Counter should be incremented
+        assert_eq!(runtime.app.inner.counter, 1);
+    }
+
+    #[tokio::test]
+    async fn test_process_messages_with_quit() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Send quit message
+        let _ = runtime.msg_tx.send(TestMessage::Quit);
+
+        // Process messages - this will enqueue the quit command
+        assert!(!runtime.process_messages());
+
+        // Give time for the async command to send quit signal
+        sleep(Duration::from_millis(50)).await;
+
+        // Now check_quit should return true
+        assert!(runtime.check_quit());
+    }
+
+    #[tokio::test]
+    async fn test_process_messages_multiple_messages() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Send multiple increment messages
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+
+        // Process all messages
+        assert!(!runtime.process_messages());
+
+        // Counter should be incremented 3 times
+        assert_eq!(runtime.app.inner.counter, 3);
+    }
+
+    #[tokio::test]
+    async fn test_process_messages_quit_stops_processing() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Manually send quit signal first
+        let _ = runtime.quit_tx.send(());
+
+        // Send increment messages
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.msg_tx.send(TestMessage::Increment);
+
+        // Process messages - should process first increment, then detect quit
+        assert!(runtime.process_messages());
+
+        // Only first increment should be processed (quit detected after first message)
+        assert_eq!(runtime.app.inner.counter, 1);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_subscriptions() {
+        struct AppWithSubs;
+
+        impl Application for AppWithSubs {
+            type Message = ();
+            type Flags = ();
+
+            fn new(_: ()) -> (Self, Command<()>) {
+                (AppWithSubs, Command::none())
+            }
+
+            fn update(&mut self, _: ()) -> Command<()> {
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<()>> {
+                use crate::subscription::time::TimeSub;
+                vec![Subscription::new(TimeSub::new(100)).map(|_| ())]
+            }
+        }
+
+        let mut runtime = Runtime::<AppWithSubs>::new(());
+
+        // Should not panic
+        runtime.initialize_subscriptions();
+    }
+
+    #[test]
+    fn test_initialize_subscriptions_empty() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Should not panic with empty subscriptions
+        runtime.initialize_subscriptions();
+    }
+
+    #[test]
+    fn test_render() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut runtime = Runtime::<TestApp>::new(0);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Should render without error
+        assert!(runtime.render(&mut terminal).is_ok());
+    }
+
+    #[test]
+    fn test_render_multiple_times() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut runtime = Runtime::<TestApp>::new(0);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Should be able to render multiple times
+        assert!(runtime.render(&mut terminal).is_ok());
+        assert!(runtime.render(&mut terminal).is_ok());
+        assert!(runtime.render(&mut terminal).is_ok());
+    }
+
+    #[test]
+    fn test_shutdown() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // Should not panic
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_after_initialize_subscriptions() {
+        struct AppWithSubs;
+
+        impl Application for AppWithSubs {
+            type Message = ();
+            type Flags = ();
+
+            fn new(_: ()) -> (Self, Command<()>) {
+                (AppWithSubs, Command::none())
+            }
+
+            fn update(&mut self, _: ()) -> Command<()> {
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<()>> {
+                use crate::subscription::time::TimeSub;
+                vec![Subscription::new(TimeSub::new(100)).map(|_| ())]
+            }
+        }
+
+        let mut runtime = Runtime::<AppWithSubs>::new(());
+        runtime.initialize_subscriptions();
+
+        // Should cancel subscriptions without panic
+        runtime.shutdown();
     }
 }
