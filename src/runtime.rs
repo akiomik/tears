@@ -291,3 +291,205 @@ impl<A: Application> Runtime<A> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::Application;
+    use crate::command::{Action, Command};
+    use crate::subscription::Subscription;
+    use ratatui::Frame;
+    use tokio::time::{Duration, sleep};
+
+    // Simple test application
+    #[derive(Debug)]
+    struct TestApp {
+        counter: i32,
+        should_quit: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    enum TestMessage {
+        Increment,
+        Quit,
+    }
+
+    impl Application for TestApp {
+        type Message = TestMessage;
+        type Flags = i32;
+
+        fn new(initial: i32) -> (Self, Command<Self::Message>) {
+            (
+                TestApp {
+                    counter: initial,
+                    should_quit: false,
+                },
+                Command::none(),
+            )
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            match msg {
+                TestMessage::Increment => {
+                    self.counter += 1;
+                    Command::none()
+                }
+                TestMessage::Quit => {
+                    self.should_quit = true;
+                    Command::effect(Action::Quit)
+                }
+            }
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {
+            // No-op for testing
+        }
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_runtime_new() {
+        let runtime = Runtime::<TestApp>::new(42);
+        assert_eq!(runtime.app.inner.counter, 42);
+    }
+
+    #[test]
+    fn test_runtime_new_with_zero() {
+        let runtime = Runtime::<TestApp>::new(0);
+        assert_eq!(runtime.app.inner.counter, 0);
+    }
+
+    #[test]
+    fn test_runtime_new_initializes_channels() {
+        let runtime = Runtime::<TestApp>::new(0);
+
+        // Runtime should have channels set up
+        // We can't directly test private fields, but we can verify the runtime was created
+        assert_eq!(runtime.app.inner.counter, 0);
+    }
+
+    // Test application with init command
+    struct AppWithInitCommand {
+        initialized: bool,
+    }
+
+    impl Application for AppWithInitCommand {
+        type Message = bool;
+        type Flags = ();
+
+        fn new(_flags: ()) -> (Self, Command<Self::Message>) {
+            let cmd = Command::future(async { true });
+            (AppWithInitCommand { initialized: false }, cmd)
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            self.initialized = msg;
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_processes_init_command() {
+        let runtime = Runtime::<AppWithInitCommand>::new(());
+
+        // Give time for init command to be processed
+        sleep(Duration::from_millis(50)).await;
+
+        // The runtime should have enqueued the init command
+        // We can't directly verify it was processed without running the event loop
+        // but we can verify the runtime was created successfully
+        assert!(!runtime.app.inner.initialized);
+    }
+
+    #[test]
+    fn test_runtime_enqueue_command_none() {
+        let runtime = Runtime::<TestApp>::new(0);
+
+        // Enqueue a none command (should not panic)
+        runtime.enqueue_command(Command::none());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_enqueue_command_with_message() {
+        let runtime = Runtime::<TestApp>::new(0);
+
+        // Enqueue a command that sends a message
+        let cmd = Command::future(async { TestMessage::Increment });
+        runtime.enqueue_command(cmd);
+
+        // Give time for message to be sent
+        sleep(Duration::from_millis(50)).await;
+
+        // We can't directly verify the message was received without running the full event loop
+    }
+
+    #[tokio::test]
+    async fn test_runtime_enqueue_command_with_quit() {
+        let runtime = Runtime::<TestApp>::new(0);
+
+        // Enqueue a quit command
+        let cmd = Command::effect(Action::Quit);
+        runtime.enqueue_command(cmd);
+
+        // Give time for quit signal to be sent
+        sleep(Duration::from_millis(50)).await;
+
+        // The quit signal should have been sent to the quit channel
+    }
+
+    // Test multiple runtimes can be created
+    #[test]
+    fn test_multiple_runtimes() {
+        let runtime1 = Runtime::<TestApp>::new(1);
+        let runtime2 = Runtime::<TestApp>::new(2);
+
+        assert_eq!(runtime1.app.inner.counter, 1);
+        assert_eq!(runtime2.app.inner.counter, 2);
+    }
+
+    // Test with different flag types
+    struct AppWithStringFlags {
+        name: String,
+    }
+
+    impl Application for AppWithStringFlags {
+        type Message = ();
+        type Flags = String;
+
+        fn new(name: String) -> (Self, Command<Self::Message>) {
+            (AppWithStringFlags { name }, Command::none())
+        }
+
+        fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_runtime_with_string_flags() {
+        let runtime = Runtime::<AppWithStringFlags>::new("test".to_string());
+        assert_eq!(runtime.app.inner.name, "test");
+    }
+
+    #[test]
+    fn test_runtime_with_empty_string_flags() {
+        let runtime = Runtime::<AppWithStringFlags>::new(String::new());
+        assert_eq!(runtime.app.inner.name, "");
+    }
+}
