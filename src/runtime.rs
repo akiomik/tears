@@ -11,11 +11,64 @@ use crate::{
     subscription::SubscriptionManager,
 };
 
+/// Internal wrapper for the application instance.
 #[repr(transparent)]
 struct Instance<A: Application> {
     inner: A,
 }
 
+/// The runtime manages the application lifecycle and event loop.
+///
+/// The runtime is responsible for:
+/// - Initializing the application
+/// - Running the event loop
+/// - Processing messages and updating the application state
+/// - Executing commands asynchronously
+/// - Managing subscriptions
+/// - Rendering the UI at the specified frame rate
+///
+/// # Type Parameters
+///
+/// * `A` - The application type that implements the [`Application`] trait
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use tears::{application::Application, command::Command, runtime::Runtime, subscription::Subscription};
+/// use ratatui::Frame;
+/// use std::io;
+/// use crossterm::terminal;
+/// use ratatui::prelude::CrosstermBackend;
+///
+/// # struct MyApp;
+/// # enum Message {}
+/// # impl Application for MyApp {
+/// #     type Message = Message;
+/// #     type Flags = ();
+/// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+/// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
+/// #     fn view(&self, frame: &mut Frame<'_>) {}
+/// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+/// # }
+/// #[tokio::main]
+/// async fn main() -> color_eyre::eyre::Result<()> {
+///     // Create the runtime with initial flags
+///     let runtime = Runtime::<MyApp>::new(());
+///
+///     // Setup terminal
+///     terminal::enable_raw_mode()?;
+///     let mut stdout = io::stdout();
+///     let backend = CrosstermBackend::new(stdout);
+///     let mut terminal = ratatui::Terminal::new(backend)?;
+///
+///     // Run the application at 60 FPS
+///     runtime.run(&mut terminal, 60).await?;
+///
+///     // Cleanup
+///     terminal::disable_raw_mode()?;
+///     Ok(())
+/// }
+/// ```
 pub struct Runtime<A: Application> {
     app: Instance<A>,
     msg_tx: mpsc::UnboundedSender<A::Message>,
@@ -26,6 +79,42 @@ pub struct Runtime<A: Application> {
 }
 
 impl<A: Application> Runtime<A> {
+    /// Create a new runtime instance with the given flags.
+    ///
+    /// This method:
+    /// 1. Creates the necessary channels for message passing
+    /// 2. Initializes the application by calling [`Application::new`]
+    /// 3. Executes any initialization commands returned by the application
+    /// 4. Sets up the subscription manager
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Configuration data to pass to the application's initialization
+    ///
+    /// # Returns
+    ///
+    /// A new `Runtime` instance ready to be executed
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::runtime::Runtime;
+    /// # use tears::{application::Application, command::Command, subscription::Subscription};
+    /// # use ratatui::Frame;
+    /// # struct MyApp;
+    /// # enum Message {}
+    /// # impl Application for MyApp {
+    /// #     type Message = Message;
+    /// #     type Flags = i32;
+    /// #     fn new(_: i32) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
+    /// #     fn view(&self, frame: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// # }
+    ///
+    /// // Create runtime with initial value
+    /// let runtime = Runtime::<MyApp>::new(42);
+    /// ```
     pub fn new(flags: A::Flags) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
@@ -105,6 +194,70 @@ impl<A: Application> Runtime<A> {
         // - Only update when there's an actual difference
     }
 
+    /// Run the application event loop.
+    ///
+    /// This method starts the main event loop and runs until the application quits.
+    /// It performs the following actions in each iteration:
+    ///
+    /// 1. Renders the UI by calling [`Application::view`]
+    /// 2. Processes all pending messages by calling [`Application::update`]
+    /// 3. Executes any commands returned by the update function
+    /// 4. Checks if a quit signal has been received
+    /// 5. Waits for the next frame based on the frame rate
+    ///
+    /// The event loop terminates when:
+    /// - A command returns [`Action::Quit`](crate::command::Action::Quit)
+    /// - An error occurs during rendering
+    ///
+    /// # Arguments
+    ///
+    /// * `terminal` - A mutable reference to the ratatui terminal
+    /// * `frame_rate` - The target frames per second (FPS) for rendering
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on successful completion, or an error if rendering fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use tears::{application::Application, command::Command, runtime::Runtime, subscription::Subscription};
+    /// # use ratatui::Frame;
+    /// # use std::io;
+    /// # use crossterm::terminal;
+    /// # use ratatui::prelude::CrosstermBackend;
+    /// # struct MyApp;
+    /// # enum Message {}
+    /// # impl Application for MyApp {
+    /// #     type Message = Message;
+    /// #     type Flags = ();
+    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
+    /// #     fn view(&self, frame: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// # }
+    /// #[tokio::main]
+    /// async fn main() -> color_eyre::eyre::Result<()> {
+    ///     let runtime = Runtime::<MyApp>::new(());
+    ///
+    ///     terminal::enable_raw_mode()?;
+    ///     let backend = CrosstermBackend::new(io::stdout());
+    ///     let mut terminal = ratatui::Terminal::new(backend)?;
+    ///
+    ///     // Run at 60 FPS
+    ///     runtime.run(&mut terminal, 60).await?;
+    ///
+    ///     terminal::disable_raw_mode()?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// The actual frame rate may vary depending on:
+    /// - The complexity of your UI rendering
+    /// - The time spent processing messages
+    /// - System performance
     pub async fn run<B: Backend>(
         mut self,
         terminal: &mut ratatui::Terminal<B>,
