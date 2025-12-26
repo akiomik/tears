@@ -201,3 +201,183 @@ pub trait Application: Sized {
     /// ```
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Frame;
+
+    // Test application implementation
+    #[derive(Debug)]
+    struct TestApp {
+        counter: i32,
+        initialized: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum TestMessage {
+        Increment,
+        Decrement,
+        Reset,
+    }
+
+    impl Application for TestApp {
+        type Message = TestMessage;
+        type Flags = i32;
+
+        fn new(initial_value: i32) -> (Self, Command<Self::Message>) {
+            let app = TestApp {
+                counter: initial_value,
+                initialized: true,
+            };
+            (app, Command::none())
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            match msg {
+                TestMessage::Increment => {
+                    self.counter += 1;
+                }
+                TestMessage::Decrement => {
+                    self.counter -= 1;
+                }
+                TestMessage::Reset => {
+                    self.counter = 0;
+                }
+            }
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {
+            // No-op for testing
+        }
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_application_new() {
+        let (app, cmd) = TestApp::new(42);
+        assert_eq!(app.counter, 42);
+        assert!(app.initialized);
+        assert!(cmd.stream.is_none()); // Command::none()
+    }
+
+    #[test]
+    fn test_application_new_with_zero() {
+        let (app, _) = TestApp::new(0);
+        assert_eq!(app.counter, 0);
+    }
+
+    #[test]
+    fn test_application_update_increment() {
+        let (mut app, _) = TestApp::new(0);
+        app.update(TestMessage::Increment);
+        assert_eq!(app.counter, 1);
+    }
+
+    #[test]
+    fn test_application_update_decrement() {
+        let (mut app, _) = TestApp::new(10);
+        app.update(TestMessage::Decrement);
+        assert_eq!(app.counter, 9);
+    }
+
+    #[test]
+    fn test_application_update_reset() {
+        let (mut app, _) = TestApp::new(42);
+        app.update(TestMessage::Reset);
+        assert_eq!(app.counter, 0);
+    }
+
+    #[test]
+    fn test_application_update_multiple() {
+        let (mut app, _) = TestApp::new(0);
+        app.update(TestMessage::Increment);
+        app.update(TestMessage::Increment);
+        app.update(TestMessage::Increment);
+        assert_eq!(app.counter, 3);
+    }
+
+    #[test]
+    fn test_application_update_mixed_operations() {
+        let (mut app, _) = TestApp::new(5);
+        app.update(TestMessage::Increment); // 6
+        app.update(TestMessage::Decrement); // 5
+        app.update(TestMessage::Increment); // 6
+        app.update(TestMessage::Increment); // 7
+        assert_eq!(app.counter, 7);
+    }
+
+    #[test]
+    fn test_application_subscriptions() {
+        let (app, _) = TestApp::new(0);
+        let subs = app.subscriptions();
+        assert!(subs.is_empty());
+    }
+
+    // Test application with command
+    struct AppWithCommand;
+
+    impl Application for AppWithCommand {
+        type Message = String;
+        type Flags = ();
+
+        fn new(_flags: ()) -> (Self, Command<Self::Message>) {
+            let cmd = Command::future(async { "initialized".to_string() });
+            (AppWithCommand, cmd)
+        }
+
+        fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_application_new_with_command() {
+        let (_, cmd) = AppWithCommand::new(());
+        assert!(cmd.stream.is_some());
+
+        // Verify the command produces the expected message
+        if let Some(mut stream) = cmd.stream {
+            use crate::command::Action;
+            use futures::StreamExt;
+
+            if let Some(action) = stream.next().await {
+                match action {
+                    Action::Message(msg) => assert_eq!(msg, "initialized"),
+                    Action::Quit => panic!("unexpected quit"),
+                }
+            }
+        }
+    }
+
+    // Test message traits
+    #[test]
+    fn test_message_debug() {
+        let msg = TestMessage::Increment;
+        let debug_str = format!("{:?}", msg);
+        assert!(debug_str.contains("Increment"));
+    }
+
+    #[test]
+    fn test_message_clone() {
+        let msg1 = TestMessage::Increment;
+        let msg2 = msg1.clone();
+        assert_eq!(msg1, msg2);
+    }
+
+    #[test]
+    fn test_message_equality() {
+        assert_eq!(TestMessage::Increment, TestMessage::Increment);
+        assert_ne!(TestMessage::Increment, TestMessage::Decrement);
+    }
+}
