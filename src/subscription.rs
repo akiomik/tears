@@ -1,3 +1,4 @@
+pub mod terminal;
 pub mod time;
 
 use std::{
