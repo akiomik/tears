@@ -1,19 +1,22 @@
 use std::io;
 
 use color_eyre::eyre::Result;
+use crossterm::event::{Event, KeyCode};
 use crossterm::{event, terminal};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::text::Text;
 use ratatui::{Frame, Terminal};
 use tears::application::Application;
-use tears::command::Command;
+use tears::command::{Action, Command};
 use tears::runtime::Runtime;
 use tears::subscription::Subscription;
+use tears::subscription::terminal::TerminalSub;
 use tears::subscription::time::{Message as TimeSubMessage, TimeSub};
 
 #[derive(Debug, Clone)]
 enum Message {
     TimeSub(TimeSubMessage),
+    Terminal(crossterm::event::Event),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -36,6 +39,16 @@ impl Application for Timer {
 
                 Command::none()
             }
+            Message::Terminal(event) => {
+                // Handle keyboard events
+                if let Event::Key(key) = event {
+                    if key.code == KeyCode::Char('q') {
+                        return Command::effect(Action::Quit);
+                    }
+                }
+
+                Command::none()
+            }
         }
     }
 
@@ -45,7 +58,10 @@ impl Application for Timer {
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-        vec![Subscription::new(TimeSub::new(1000)).map(Message::TimeSub)]
+        vec![
+            Subscription::new(TimeSub::new(1000)).map(Message::TimeSub),
+            Subscription::new(TerminalSub::new()).map(Message::Terminal),
+        ]
     }
 }
 
