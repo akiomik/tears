@@ -232,6 +232,8 @@ impl<Msg: Send + 'static> Command<Msg> {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use futures::stream;
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_batch_empty() {
@@ -335,8 +337,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream() {
-        use futures::stream;
-
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::stream(input_stream);
 
@@ -355,8 +355,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run() {
-        use futures::stream;
-
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::run(input_stream, |x| x * 2);
 
@@ -375,8 +373,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_conversion() {
-        use futures::stream;
-
         #[derive(Debug, PartialEq)]
         enum Message {
             Number(i32),
@@ -407,8 +403,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_empty_stream() {
-        use futures::stream;
-
         let input_stream = stream::iter(Vec::<i32>::new());
         let cmd = Command::run(input_stream, |x| x * 2);
 
@@ -416,5 +410,211 @@ mod tests {
         let result = stream.next().await;
 
         assert!(result.is_none(), "empty stream should produce no messages");
+    }
+
+    #[tokio::test]
+    async fn test_none() {
+        let cmd: Command<i32> = Command::none();
+        assert!(cmd.stream.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_future() {
+        let cmd = Command::future(async { 42 });
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, 42),
+            Action::Quit => panic!("unexpected quit"),
+        }
+
+        // Stream should be exhausted
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_perform() {
+        async fn fetch_value() -> i32 {
+            42
+        }
+
+        let cmd = Command::perform(fetch_value(), |x| x * 2);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, 84),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_perform_with_result() {
+        async fn fallible_operation() -> Result<String, String> {
+            Ok("success".to_string())
+        }
+
+        let cmd = Command::perform(fallible_operation(), |result| match result {
+            Ok(s) => format!("Got: {}", s),
+            Err(e) => format!("Error: {}", e),
+        });
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, "Got: success"),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_effect_with_message() {
+        let cmd = Command::effect(Action::Message(100));
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, 100),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_effect_with_quit() {
+        let cmd: Command<i32> = Command::effect(Action::Quit);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(_) => panic!("unexpected message"),
+            Action::Quit => {
+                // Expected
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_empty() {
+        let input_stream = stream::iter(Vec::<i32>::new());
+        let cmd = Command::stream(input_stream);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_nested() {
+        // Test batching commands that are themselves batches
+        let cmd1 = Command::future(async { 1 });
+        let cmd2 = Command::future(async { 2 });
+        let batch1 = Command::batch(vec![cmd1, cmd2]);
+
+        let cmd3 = Command::future(async { 3 });
+        let cmd4 = Command::future(async { 4 });
+        let batch2 = Command::batch(vec![cmd3, cmd4]);
+
+        let final_batch = Command::batch(vec![batch1, batch2]);
+
+        let mut stream = final_batch.stream.expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        results.sort();
+        assert_eq!(results, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_future_with_delay() {
+        let cmd = Command::future(async {
+            sleep(Duration::from_millis(10)).await;
+            "delayed".to_string()
+        });
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, "delayed"),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_perform_with_error_handling() {
+        async fn may_fail(should_fail: bool) -> Result<i32, &'static str> {
+            if should_fail {
+                Err("operation failed")
+            } else {
+                Ok(42)
+            }
+        }
+
+        // Test success case
+        let cmd = Command::perform(may_fail(false), |result| result.unwrap_or(-1));
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, 42),
+            Action::Quit => panic!("unexpected quit"),
+        }
+
+        // Test error case
+        let cmd = Command::perform(may_fail(true), |result| result.unwrap_or(-1));
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, -1),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_execution_order_independence() {
+        // Commands with different delays to test concurrent execution
+        let cmd1 = Command::future(async {
+            sleep(Duration::from_millis(30)).await;
+            1
+        });
+        let cmd2 = Command::future(async {
+            sleep(Duration::from_millis(10)).await;
+            2
+        });
+        let cmd3 = Command::future(async {
+            sleep(Duration::from_millis(20)).await;
+            3
+        });
+
+        let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        // Results should be received in order of completion (2, 3, 1)
+        // but we just verify all were received
+        results.sort();
+        assert_eq!(results, vec![1, 2, 3]);
     }
 }
