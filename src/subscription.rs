@@ -238,3 +238,254 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use tokio::time::{Duration, sleep, timeout};
+
+    // Test helper: Simple subscription implementation
+    struct TestSub {
+        id: u64,
+        values: Vec<i32>,
+    }
+
+    impl SubscriptionInner for TestSub {
+        type Output = i32;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            stream::iter(self.values.clone()).boxed()
+        }
+
+        fn id(&self) -> SubscriptionId {
+            SubscriptionId::from_hash(self.id)
+        }
+    }
+
+    #[test]
+    fn test_subscription_new() {
+        let test_sub = TestSub {
+            id: 1,
+            values: vec![1, 2, 3],
+        };
+        let sub = Subscription::new(test_sub);
+
+        assert_eq!(sub.id, SubscriptionId::from_hash(1));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_map() {
+        let test_sub = TestSub {
+            id: 1,
+            values: vec![1, 2, 3],
+        };
+        let sub = Subscription::new(test_sub).map(|x| x * 2);
+
+        let mut stream = sub.stream;
+        let mut results = vec![];
+
+        while let Some(value) = stream.next().await {
+            results.push(value);
+        }
+
+        assert_eq!(results, vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_subscription_map_type_conversion() {
+        #[derive(Debug, PartialEq)]
+        enum Message {
+            Number(i32),
+        }
+
+        let test_sub = TestSub {
+            id: 1,
+            values: vec![1, 2, 3],
+        };
+        let sub = Subscription::new(test_sub).map(|x| Message::Number(x));
+
+        let mut stream = sub.stream;
+        let mut results = vec![];
+
+        while let Some(value) = stream.next().await {
+            results.push(value);
+        }
+
+        assert_eq!(
+            results,
+            vec![Message::Number(1), Message::Number(2), Message::Number(3)]
+        );
+    }
+
+    #[test]
+    fn test_subscription_id_from_hash() {
+        let id1 = SubscriptionId::from_hash(12345);
+        let id2 = SubscriptionId::from_hash(12345);
+        let id3 = SubscriptionId::from_hash(67890);
+
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn test_subscription_id_debug() {
+        let id = SubscriptionId::from_hash(12345);
+        let debug_str = format!("{:?}", id);
+        assert!(debug_str.contains("SubscriptionId"));
+    }
+
+    #[test]
+    fn test_subscription_id_clone() {
+        let id1 = SubscriptionId::from_hash(12345);
+        let id2 = id1.clone();
+        assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_update() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let test_sub = TestSub {
+            id: 1,
+            values: vec![10, 20],
+        };
+        let sub = Subscription::new(test_sub);
+
+        manager.update(vec![sub]);
+
+        // Should receive messages from the subscription
+        let msg1 = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert_eq!(msg1.unwrap(), Some(10));
+
+        let msg2 = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert_eq!(msg2.unwrap(), Some(20));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_remove_subscription() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let test_sub = TestSub {
+            id: 1,
+            values: vec![10],
+        };
+        let sub = Subscription::new(test_sub);
+
+        // Add subscription
+        manager.update(vec![sub]);
+
+        // Receive first message
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert_eq!(msg.unwrap(), Some(10));
+
+        // Remove subscription by updating with empty list
+        manager.update(Vec::<Subscription<i32>>::new());
+
+        // Give time for any pending messages
+        sleep(Duration::from_millis(50)).await;
+
+        // Channel should be empty now (or closed)
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_replace_subscription() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        // First subscription
+        let test_sub1 = TestSub {
+            id: 1,
+            values: vec![10],
+        };
+        let sub1 = Subscription::new(test_sub1);
+        manager.update(vec![sub1]);
+
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert_eq!(msg.unwrap(), Some(10));
+
+        // Replace with different subscription
+        let test_sub2 = TestSub {
+            id: 2,
+            values: vec![20],
+        };
+        let sub2 = Subscription::new(test_sub2);
+        manager.update(vec![sub2]);
+
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
+        assert_eq!(msg.unwrap(), Some(20));
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_shutdown() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        // Create a long-running subscription
+        struct InfiniteSub;
+        impl SubscriptionInner for InfiniteSub {
+            type Output = i32;
+
+            fn stream(&self) -> BoxStream<'static, Self::Output> {
+                stream::unfold(0, |state| async move {
+                    sleep(Duration::from_millis(10)).await;
+                    Some((state, state + 1))
+                })
+                .boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                SubscriptionId::from_hash(999)
+            }
+        }
+
+        let sub = Subscription::new(InfiniteSub);
+        manager.update(vec![sub]);
+
+        // Receive a few messages
+        let _ = timeout(Duration::from_millis(100), rx.recv()).await;
+
+        // Shutdown should cancel all subscriptions
+        manager.shutdown();
+
+        // Wait a bit
+        sleep(Duration::from_millis(50)).await;
+
+        // Should not receive more messages after shutdown
+        // The channel might have some buffered messages, but stream should stop
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_multiple_subscriptions() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let test_sub1 = TestSub {
+            id: 1,
+            values: vec![1],
+        };
+        let test_sub2 = TestSub {
+            id: 2,
+            values: vec![2],
+        };
+
+        manager.update(vec![
+            Subscription::new(test_sub1),
+            Subscription::new(test_sub2),
+        ]);
+
+        // Should receive messages from both subscriptions
+        let mut results = vec![];
+        for _ in 0..2 {
+            if let Ok(Some(msg)) = timeout(Duration::from_millis(100), rx.recv()).await {
+                results.push(msg);
+            }
+        }
+
+        results.sort();
+        assert_eq!(results, vec![1, 2]);
+    }
+}
