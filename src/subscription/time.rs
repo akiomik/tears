@@ -40,7 +40,7 @@ impl SubscriptionInner for TimeSub {
     fn id(&self) -> SubscriptionId {
         let mut hasher = DefaultHasher::new();
         self.interval_ms.hash(&mut hasher);
-        SubscriptionId(hasher.finish())
+        SubscriptionId::from_hash(hasher.finish())
     }
 }
 

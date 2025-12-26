@@ -37,7 +37,7 @@ impl SubscriptionInner for TerminalSub {
         // Since TerminalSub is a singleton (no parameters), use a constant ID
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
-        SubscriptionId(hasher.finish())
+        SubscriptionId::from_hash(hasher.finish())
     }
 }
 
