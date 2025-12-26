@@ -1,5 +1,4 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::marker::PhantomData;
 use std::time::Duration;
 
 use futures::stream::BoxStream;
@@ -15,21 +14,17 @@ pub enum Message {
 
 /// Time-based subscription
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimeSub<Msg> {
+pub struct TimeSub {
     interval_ms: u64,
-    _phantom: PhantomData<Msg>,
 }
 
-impl<Msg> TimeSub<Msg> {
+impl TimeSub {
     pub fn new(interval_ms: u64) -> Self {
-        Self {
-            interval_ms,
-            _phantom: PhantomData,
-        }
+        Self { interval_ms }
     }
 }
 
-impl SubscriptionInner for TimeSub<Message> {
+impl SubscriptionInner for TimeSub {
     type Output = Message;
 
     fn stream(&self) -> BoxStream<'static, Message> {
@@ -49,7 +44,7 @@ impl SubscriptionInner for TimeSub<Message> {
     }
 }
 
-impl<M> Hash for TimeSub<M> {
+impl Hash for TimeSub {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.interval_ms.hash(state);
     }
