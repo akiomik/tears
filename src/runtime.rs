@@ -26,20 +26,28 @@ pub struct Runtime<A: Application> {
 }
 
 impl<A: Application> Runtime<A> {
-    pub fn new(app: A) -> Self {
+    pub fn new(flags: A::Flags) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
-        let instance = Instance { inner: app };
         let subscription_manager = SubscriptionManager::new(msg_tx.clone());
 
-        Self {
+        // Initialize the application with flags
+        let (app, init_cmd) = A::new(flags);
+        let instance = Instance { inner: app };
+
+        let runtime = Self {
             app: instance,
             msg_tx,
             msg_rx,
             quit_tx,
             quit_rx,
             subscription_manager,
-        }
+        };
+
+        // Enqueue the initial command
+        runtime.enqueue_command(init_cmd);
+
+        runtime
     }
 
     /// Enqueue a command to be executed asynchronously.

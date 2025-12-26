@@ -67,8 +67,7 @@ impl Application for Timer {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (app, _cmd) = Timer::new(());
-    let runtime = Runtime::new(app);
+    let runtime = Runtime::<Timer>::new(());
 
     // Setup terminal
     terminal::enable_raw_mode()?;
