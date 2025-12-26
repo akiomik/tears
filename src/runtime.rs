@@ -51,11 +51,27 @@ impl<A: Application> Runtime<A> {
                     }
                 }
             }
-
-            // Restart subscriptions if needed
-            self.subscription_manager
-                .update(self.app.inner.subscriptions());
         }
+
+        // NOTE: Dynamic subscription updates are currently disabled due to the following issues:
+        //
+        // Problem 1: Infinite loop when updating subscriptions in message loop
+        // - If we call subscription_manager.update() inside the while loop for each message,
+        //   new messages can arrive from subscriptions during processing, causing an infinite loop.
+        //
+        // Problem 2: Blocking when updating after all messages are processed
+        // - If we call subscription_manager.update() after the while loop only when has_messages is true,
+        //   the screen doesn't update until the next message arrives.
+        // - This is because subscriptions() creates new Subscription instances every time,
+        //   and calling update() may interfere with the message flow.
+        //
+        // Current solution: Update subscriptions only at initialization (line 69-70 in run())
+        // - This works for applications with static subscriptions
+        // - But prevents dynamic subscription changes based on application state
+        //
+        // TODO: Implement proper subscription diffing to support dynamic subscriptions
+        // - Cache the previous subscription set and compare with new one
+        // - Only update when there's an actual difference
 
         false
     }
