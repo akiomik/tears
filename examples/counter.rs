@@ -8,11 +8,12 @@ use ratatui::{Frame, Terminal};
 use tears::application::Application;
 use tears::command::Command;
 use tears::runtime::Runtime;
-use tears::subscription::time::TimeSub;
+use tears::subscription::Subscription;
+use tears::subscription::time::{Message as TimeSubMessage, TimeSub};
 
 #[derive(Debug, Clone)]
 enum Message {
-    Tick,
+    TimeSub(TimeSubMessage),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -20,7 +21,7 @@ struct Timer {
     count: u32,
 }
 
-impl Application<TimeSub<Message>> for Timer {
+impl Application for Timer {
     type Message = Message;
     type Flags = ();
 
@@ -30,7 +31,7 @@ impl Application<TimeSub<Message>> for Timer {
 
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
         match msg {
-            Message::Tick => {
+            Message::TimeSub(TimeSubMessage::Tick) => {
                 self.count += 1;
 
                 Command::none()
@@ -43,8 +44,8 @@ impl Application<TimeSub<Message>> for Timer {
         frame.render_widget(widget, frame.area());
     }
 
-    fn subscriptions(&self) -> Vec<TimeSub<Message>> {
-        vec![TimeSub::new(1000, || Message::Tick)]
+    fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+        vec![Subscription::new(TimeSub::new(1000)).map(Message::TimeSub)]
     }
 }
 

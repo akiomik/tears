@@ -1,49 +1,35 @@
-use std::{collections::HashMap, hash::Hash, marker::PhantomData, time::Duration};
+use std::time::Duration;
 
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
 use tokio::{sync::mpsc, time::sleep};
 
-use crate::{
-    application::Application,
-    subscription::{Handle, Subscription},
-};
+use crate::{application::Application, subscription::SubscriptionManager};
 
 #[repr(transparent)]
-struct Instance<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> {
+struct Instance<A: Application> {
     inner: A,
-    _phantom: PhantomData<S>,
 }
 
-pub struct Runtime<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> {
-    app: Instance<A, S>,
+pub struct Runtime<A: Application> {
+    app: Instance<A>,
     tx: mpsc::UnboundedSender<A::Message>,
     rx: mpsc::UnboundedReceiver<A::Message>,
-    #[allow(dead_code)]
-    handles: HashMap<S, Handle>,
+    subscription_manager: SubscriptionManager<A::Message>,
 }
 
-impl<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> Runtime<A, S> {
+impl<A: Application> Runtime<A> {
     pub fn new(app: A) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let instance = Instance {
-            inner: app,
-            _phantom: PhantomData,
-        };
-
-        // Start subscriptions
-        let mut handles = HashMap::new();
-        for sub in instance.inner.subscriptions() {
-            let handle = sub.start(tx.clone());
-            handles.insert(sub, handle);
-        }
+        let instance = Instance { inner: app };
+        let subscription_manager = SubscriptionManager::new(tx.clone());
 
         Self {
             app: instance,
             tx,
             rx,
-            handles,
+            subscription_manager,
         }
     }
 
@@ -60,7 +46,9 @@ impl<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> Runtime<A, S> {
                 });
             }
 
-            // TODO: Restart subscriptions if needed
+            // Restart subscriptions if needed
+            self.subscription_manager
+                .update(self.app.inner.subscriptions());
         }
     }
 
@@ -70,6 +58,9 @@ impl<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> Runtime<A, S> {
         frame_rate: u32,
     ) -> Result<()> {
         let frame_duration = Duration::from_millis(1000 / frame_rate as u64);
+
+        let subscriptions = self.app.inner.subscriptions();
+        self.subscription_manager.update(subscriptions);
 
         loop {
             terminal.draw(|frame| {
@@ -81,11 +72,8 @@ impl<A: Application<S>, S: Subscription<A::Message> + Hash + Eq> Runtime<A, S> {
             sleep(frame_duration).await;
         }
 
-        // NOTE: Currently unreacheable
-        // // Graceful shutdown: cancel all subscriptions
-        // for (_, handle) in self.handles {
-        //     handle.cancel().await;
-        // }
+        // // cancel all subscriptions
+        // self.subscription_manager.shutdown();
         //
         // Ok(())
     }

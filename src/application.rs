@@ -1,10 +1,8 @@
-use std::hash::Hash;
-
 use ratatui::Frame;
 
 use crate::{command::Command, subscription::Subscription};
 
-pub trait Application<S: Subscription<Self::Message> + Hash>: Sized {
+pub trait Application: Sized {
     type Message: Send + 'static;
     type Flags: Clone + Send;
 
@@ -18,5 +16,5 @@ pub trait Application<S: Subscription<Self::Message> + Hash>: Sized {
     fn view(&self, frame: &mut Frame<'_>);
 
     /// Subscriptions
-    fn subscriptions(&self) -> Vec<S>;
+    fn subscriptions(&self) -> Vec<Subscription<Self::Message>>;
 }
