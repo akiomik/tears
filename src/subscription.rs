@@ -84,7 +84,7 @@ use tokio::{
 /// ```
 pub struct Subscription<Msg: 'static> {
     pub(super) id: SubscriptionId,
-    pub(super) stream_builder: Box<dyn FnOnce() -> BoxStream<'static, Msg> + Send>,
+    pub(super) spawn: Box<dyn FnOnce() -> BoxStream<'static, Msg> + Send>,
 }
 
 impl<Msg: 'static> Subscription<Msg> {
@@ -108,7 +108,7 @@ impl<Msg: 'static> Subscription<Msg> {
 
         Self {
             id,
-            stream_builder: Box::new(move || inner.stream().boxed()),
+            spawn: Box::new(move || inner.stream().boxed()),
         }
     }
 
@@ -141,11 +141,11 @@ impl<Msg: 'static> Subscription<Msg> {
         Msg: 'static,
         NewMsg: 'static,
     {
-        let stream_builder = self.stream_builder;
+        let spawn = self.spawn;
         Subscription {
             id: self.id,
-            stream_builder: Box::new(move || {
-                let stream = stream_builder();
+            spawn: Box::new(move || {
+                let stream = spawn();
                 stream.map(f).boxed()
             }),
         }
@@ -309,12 +309,12 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     where
         I: IntoIterator<Item = Subscription<Msg>>,
     {
-        // NOTE: Store stream builders instead of streams to avoid creating
+        // NOTE: Store stream spawners instead of streams to avoid creating
         // streams unnecessarily. This is important for subscriptions like
         // TerminalEvents where creating the stream has side effects.
         let mut new_subs: HashMap<_, _> = subscriptions
             .into_iter()
-            .map(|sub| (sub.id, sub.stream_builder))
+            .map(|sub| (sub.id, sub.spawn))
             .collect();
         let new_ids: HashSet<_> = new_subs.keys().copied().collect();
         let current_ids: HashSet<_> = self.running.keys().copied().collect();
@@ -329,9 +329,9 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         }
 
         for id in to_add {
-            if let Some(stream_builder) = new_subs.remove(&id) {
-                // Only call the builder when we actually need to start the subscription
-                let stream = stream_builder();
+            if let Some(spawn) = new_subs.remove(&id) {
+                // Only call the spawner when we actually need to start the subscription
+                let stream = spawn();
                 let handle = self.spawn_subscription(stream);
                 self.running.insert(id, RunningSubscription { handle });
             }
@@ -404,7 +404,7 @@ mod tests {
         };
         let sub = Subscription::new(test_sub).map(|x| x * 2);
 
-        let mut stream = (sub.stream_builder)();
+        let mut stream = (sub.spawn)();
         let mut results = vec![];
 
         while let Some(value) = stream.next().await {
@@ -427,7 +427,7 @@ mod tests {
         };
         let sub = Subscription::new(test_sub).map(Message::Number);
 
-        let mut stream = (sub.stream_builder)();
+        let mut stream = (sub.spawn)();
         let mut results = vec![];
 
         while let Some(value) = stream.next().await {
