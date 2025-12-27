@@ -94,10 +94,7 @@ async fn test_dynamic_subscription_stops_when_disabled() {
                 }
                 Msg::Disable => {
                     self.enabled = false;
-                    // Quit after a delay to see if more ticks arrive
-                    Command::future(async {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    });
+                    // Quit immediately after disabling
                     Command::effect(Action::Quit)
                 }
             }
