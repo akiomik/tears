@@ -71,5 +71,6 @@
 
 pub mod application;
 pub mod command;
+pub mod prelude;
 pub mod runtime;
 pub mod subscription;

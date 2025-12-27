@@ -6,10 +6,7 @@ use crossterm::{event, terminal};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::text::Text;
 use ratatui::{Frame, Terminal};
-use tears::application::Application;
-use tears::command::{Action, Command};
-use tears::runtime::Runtime;
-use tears::subscription::Subscription;
+use tears::prelude::*;
 use tears::subscription::terminal::TerminalEvents;
 use tears::subscription::time::{Message as TimerMessage, Timer};
 
