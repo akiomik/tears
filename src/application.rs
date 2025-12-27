@@ -69,7 +69,7 @@ pub trait Application: Sized {
     ///
     /// Flags allow you to pass initial configuration when creating the application.
     /// Use `()` if no configuration is needed.
-    type Flags: Clone + Send;
+    type Flags;
 
     /// Initialize the application with the given flags.
     ///
