@@ -232,7 +232,7 @@ impl<A: Application> Runtime<A> {
     /// 5. Waits for the next frame based on the frame rate
     ///
     /// The event loop terminates when:
-    /// - A command returns [`Action::Quit`](crate::command::Action::Quit)
+    /// - A command returns [`Action::Quit`]
     /// - An error occurs during rendering
     ///
     /// # Arguments
