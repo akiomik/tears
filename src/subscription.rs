@@ -42,7 +42,7 @@ pub struct Subscription<Msg: 'static> {
 }
 
 impl<Msg: 'static> Subscription<Msg> {
-    /// Create a new subscription from a type implementing [`SubscriptionInner`].
+    /// Create a new subscription from a type implementing [`SubscriptionSource`].
     ///
     /// # Arguments
     ///
@@ -56,7 +56,7 @@ impl<Msg: 'static> Subscription<Msg> {
     /// // Create a timer subscription that ticks every second
     /// let sub = Subscription::new(TimeSub::new(1000));
     /// ```
-    pub fn new(inner: impl SubscriptionInner<Output = Msg> + 'static) -> Subscription<Msg> {
+    pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Subscription<Msg> {
         let id = inner.id();
 
         Self {
@@ -104,7 +104,7 @@ impl<Msg: 'static> Subscription<Msg> {
     }
 }
 
-impl<A: SubscriptionInner<Output = Msg> + 'static, Msg> From<A> for Subscription<Msg> {
+impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscription<Msg> {
     fn from(value: A) -> Self {
         Self::new(value)
     }
@@ -120,7 +120,7 @@ impl<A: SubscriptionInner<Output = Msg> + 'static, Msg> From<A> for Subscription
 /// # Example
 ///
 /// ```
-/// use tears::subscription::{SubscriptionInner, SubscriptionId};
+/// use tears::subscription::{SubscriptionSource, SubscriptionId};
 /// use futures::stream::{self, BoxStream};
 /// use futures::StreamExt;
 /// use std::hash::{Hash, Hasher};
@@ -129,7 +129,7 @@ impl<A: SubscriptionInner<Output = Msg> + 'static, Msg> From<A> for Subscription
 ///     interval_ms: u64,
 /// }
 ///
-/// impl SubscriptionInner for MySubscription {
+/// impl SubscriptionSource for MySubscription {
 ///     type Output = ();
 ///
 ///     fn stream(&self) -> BoxStream<'static, Self::Output> {
@@ -145,7 +145,7 @@ impl<A: SubscriptionInner<Output = Msg> + 'static, Msg> From<A> for Subscription
 ///     }
 /// }
 /// ```
-pub trait SubscriptionInner: Send {
+pub trait SubscriptionSource: Send {
     /// The type of messages this subscription produces.
     type Output;
 
@@ -172,7 +172,7 @@ pub struct SubscriptionId(u64);
 impl SubscriptionId {
     /// Create a subscription ID from a hash value.
     ///
-    /// This is typically used when implementing [`SubscriptionInner::id`].
+    /// This is typically used when implementing [`SubscriptionSource::id`].
     pub fn from_hash(hash: u64) -> Self {
         Self(hash)
     }
@@ -259,7 +259,7 @@ mod tests {
         values: Vec<i32>,
     }
 
-    impl SubscriptionInner for TestSub {
+    impl SubscriptionSource for TestSub {
         type Output = i32;
 
         fn stream(&self) -> BoxStream<'static, Self::Output> {
@@ -434,7 +434,7 @@ mod tests {
 
         // Create a long-running subscription
         struct InfiniteSub;
-        impl SubscriptionInner for InfiniteSub {
+        impl SubscriptionSource for InfiniteSub {
             type Output = i32;
 
             fn stream(&self) -> BoxStream<'static, Self::Output> {

@@ -5,7 +5,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use tokio::time::sleep;
 
-use super::{SubscriptionId, SubscriptionInner};
+use super::{SubscriptionId, SubscriptionSource};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -24,7 +24,7 @@ impl TimeSub {
     }
 }
 
-impl SubscriptionInner for TimeSub {
+impl SubscriptionSource for TimeSub {
     type Output = Message;
 
     fn stream(&self) -> BoxStream<'static, Message> {

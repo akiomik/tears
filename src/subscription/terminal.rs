@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use crossterm::event::{Event, EventStream};
 use futures::{StreamExt, stream::BoxStream};
 
-use super::{SubscriptionId, SubscriptionInner};
+use super::{SubscriptionId, SubscriptionSource};
 
 /// Terminal event subscription using crossterm's EventStream.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -15,7 +15,7 @@ impl TerminalSub {
     }
 }
 
-impl SubscriptionInner for TerminalSub {
+impl SubscriptionSource for TerminalSub {
     type Output = Event;
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
