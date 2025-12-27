@@ -31,28 +31,78 @@ crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 ```
 
-## Quick Start
+## Getting Started
+
+### Minimal Example
+
+Every tears application implements the `Application` trait with four required methods:
+
+```rust
+use tears::prelude::*;
+use ratatui::Frame;
+
+struct App;
+
+enum Message {}
+
+impl Application for App {
+    type Message = Message;  // Your message type
+    type Flags = ();         // Initialization data (use () if none)
+
+    // Initialize your app
+    fn new(_flags: ()) -> (Self, Command<Message>) {
+        (App, Command::none())
+    }
+
+    // Handle messages and update state
+    fn update(&mut self, _msg: Message) -> Command<Message> {
+        Command::none()
+    }
+
+    // Render your UI
+    fn view(&self, frame: &mut Frame) {
+        // Use ratatui widgets here
+    }
+
+    // Subscribe to events (keyboard, timers, etc.)
+    fn subscriptions(&self) -> Vec<Subscription<Message>> {
+        vec![]
+    }
+}
+```
+
+To run your application, create a `Runtime` and call `run()`:
+
+```rust
+#[tokio::main]
+async fn main() -> Result<()> {
+    let runtime = Runtime::<App>::new(());
+
+    // Setup terminal (see complete example below)
+    // ...
+
+    runtime.run(&mut terminal, 60).await?;
+    Ok(())
+}
+```
+
+### Complete Example
 
 Here's a simple counter application that increments every second:
 
 ```rust
-use std::io;
-use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
-use crossterm::{event, terminal};
-use ratatui::prelude::CrosstermBackend;
-use ratatui::text::Text;
-use ratatui::{Frame, Terminal};
+use ratatui::{Frame, text::Text};
 use tears::prelude::*;
 use tears::subscription::{terminal::TerminalEvents, time::{Message as TimerMessage, Timer}};
 
 #[derive(Debug, Clone)]
 enum Message {
-    Timer(TimerMessage),
-    Terminal(Event),
+    Tick,
+    Input(Event),
+    InputError(String),
 }
 
-#[derive(Debug, Clone, Default)]
 struct Counter {
     count: u32,
 }
@@ -61,56 +111,60 @@ impl Application for Counter {
     type Message = Message;
     type Flags = ();
 
-    fn new(_flags: Self::Flags) -> (Self, Command<Self::Message>) {
-        (Self::default(), Command::none())
+    fn new(_flags: ()) -> (Self, Command<Message>) {
+        (Counter { count: 0 }, Command::none())
     }
 
-    fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+    fn update(&mut self, msg: Message) -> Command<Message> {
         match msg {
-            Message::Timer(TimerMessage::Tick) => {
+            Message::Tick => {
                 self.count += 1;
                 Command::none()
             }
-            Message::Terminal(Event::Key(key)) => {
-                if key.code == KeyCode::Char('q') {
-                    return Command::effect(Action::Quit);
-                }
-                Command::none()
+            Message::Input(Event::Key(key)) if key.code == KeyCode::Char('q') => {
+                Command::effect(Action::Quit)
+            }
+            Message::InputError(e) => {
+                eprintln!("Input error: {e}");
+                Command::effect(Action::Quit)
             }
             _ => Command::none(),
         }
     }
 
-    fn view(&self, frame: &mut Frame<'_>) {
-        let widget = Text::raw(format!("Count: {}", self.count));
-        frame.render_widget(widget, frame.area());
+    fn view(&self, frame: &mut Frame) {
+        let text = Text::raw(format!("Count: {} (Press 'q' to quit)", self.count));
+        frame.render_widget(text, frame.area());
     }
 
-    fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+    fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![
-            Subscription::new(Timer::new(1000)).map(Message::Timer),
-            Subscription::new(TerminalEvents::new()).map(Message::Terminal),
+            Subscription::new(Timer::new(1000)).map(|_| Message::Tick),
+            Subscription::new(TerminalEvents::new()).map(|result| match result {
+                Ok(event) => Message::Input(event),
+                Err(e) => Message::InputError(e.to_string()),
+            }),
         ]
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> color_eyre::eyre::Result<()> {
+    use std::io;
+    use crossterm::{terminal, event};
+    use ratatui::{Terminal, prelude::CrosstermBackend};
+
     let runtime = Runtime::<Counter>::new(());
 
     // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        event::EnableMouseCapture
-    )?;
-
+    crossterm::execute!(stdout, terminal::EnterAlternateScreen, event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = runtime.run(&mut terminal, 16).await;
+    // Run application at 60 FPS
+    let result = runtime.run(&mut terminal, 60).await;
 
     // Restore terminal
     terminal::disable_raw_mode()?;
