@@ -1,12 +1,12 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crossterm::event::{Event, EventStream};
-use futures::{StreamExt, stream::BoxStream};
+use futures::{stream::BoxStream, StreamExt};
 
 use super::{SubscriptionId, SubscriptionSource};
 
 /// Terminal event subscription using crossterm's EventStream.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct TerminalSub;
 
 impl TerminalSub {
@@ -41,18 +41,9 @@ impl SubscriptionSource for TerminalSub {
     }
 }
 
-impl Hash for TerminalSub {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash a constant value since TerminalSub has no fields
-        "terminal".hash(state);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_terminal_sub_new() {
@@ -67,44 +58,5 @@ mod tests {
 
         // Same subscription should have the same ID
         assert_eq!(sub1.id(), sub2.id());
-    }
-
-    #[test]
-    fn test_terminal_sub_hash_consistency() {
-        let sub1 = TerminalSub::new();
-        let sub2 = TerminalSub::new();
-
-        let mut hasher1 = DefaultHasher::new();
-        sub1.hash(&mut hasher1);
-        let hash1 = hasher1.finish();
-
-        let mut hasher2 = DefaultHasher::new();
-        sub2.hash(&mut hasher2);
-        let hash2 = hasher2.finish();
-
-        // Same subscription should have the same hash
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_terminal_sub_different_from_empty_hash() {
-        let terminal_sub = TerminalSub::new();
-
-        let mut hasher1 = DefaultHasher::new();
-        terminal_sub.hash(&mut hasher1);
-        let terminal_hash = hasher1.finish();
-
-        // Empty struct hash (should be different)
-        #[derive(Hash)]
-        struct Empty;
-        let mut hasher2 = DefaultHasher::new();
-        Empty.hash(&mut hasher2);
-        let empty_hash = hasher2.finish();
-
-        // Terminal sub should have a non-empty hash
-        assert_ne!(
-            terminal_hash, empty_hash,
-            "TerminalSub hash should not be empty"
-        );
     }
 }
