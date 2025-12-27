@@ -145,10 +145,35 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
+    /// Send a single message immediately.
+    ///
+    /// This is a convenience method for sending a message without any asynchronous
+    /// work. It's equivalent to `Command::effect(Action::Message(msg))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    ///
+    /// enum Message {
+    ///     Refresh,
+    /// }
+    ///
+    /// // Send a message immediately
+    /// let cmd = Command::single(Message::Refresh);
+    /// ```
+    #[must_use]
+    pub fn single(msg: Msg) -> Self {
+        Self::effect(Action::Message(msg))
+    }
+
     /// Create a command that performs a single action immediately.
     ///
     /// This is useful for operations that need to happen synchronously,
-    /// such as quitting the application.
+    /// such as quitting the application or sending messages.
+    ///
+    /// For sending messages, consider using [`Command::single`] instead for
+    /// better clarity.
     ///
     /// # Examples
     ///
@@ -158,7 +183,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Quit the application
     /// let cmd: Command<i32> = Command::effect(Action::Quit);
     ///
-    /// // Send a message immediately
+    /// // Send a message immediately (prefer Command::single for this)
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
     #[must_use]
@@ -501,6 +526,35 @@ mod tests {
 
         match action {
             Action::Message(msg) => assert_eq!(msg, "Got: success"),
+            Action::Quit => panic!("unexpected quit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single() {
+        let cmd = Command::single(42);
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, 42),
+            Action::Quit => panic!("unexpected quit"),
+        }
+
+        // Stream should be exhausted
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_single_with_string() {
+        let cmd = Command::single("hello".to_string());
+
+        let mut stream = cmd.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        match action {
+            Action::Message(msg) => assert_eq!(msg, "hello"),
             Action::Quit => panic!("unexpected quit"),
         }
     }
