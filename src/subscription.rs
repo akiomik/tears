@@ -92,7 +92,7 @@ impl<Msg: 'static> Subscription<Msg> {
     ///
     /// # Arguments
     ///
-    /// * `inner` - The subscription implementation
+    /// * `source` - The subscription implementation
     ///
     /// # Examples
     ///
@@ -103,12 +103,12 @@ impl<Msg: 'static> Subscription<Msg> {
     /// let sub = Subscription::new(Timer::new(1000));
     /// ```
     #[must_use]
-    pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
-        let id = inner.id();
+    pub fn new(source: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
+        let id = source.id();
 
         Self {
             id,
-            spawn: Box::new(move || inner.stream().boxed()),
+            spawn: Box::new(move || source.stream().boxed()),
         }
     }
 
