@@ -16,6 +16,7 @@ use tears::subscription::{
 enum Message {
     Timer(TimerMessage),
     Terminal(crossterm::event::Event),
+    TerminalError(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +49,12 @@ impl Application for Counter {
 
                 Command::none()
             }
+            Message::TerminalError(e) => {
+                // Handle terminal event stream errors
+                // In this example, we just print the error and quit
+                eprintln!("Terminal error: {e}");
+                Command::effect(Action::Quit)
+            }
         }
     }
 
@@ -59,7 +66,10 @@ impl Application for Counter {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![
             Subscription::new(Timer::new(1000)).map(Message::Timer),
-            Subscription::new(TerminalEvents::new()).map(Message::Terminal),
+            Subscription::new(TerminalEvents::new()).map(|result| match result {
+                Ok(event) => Message::Terminal(event),
+                Err(e) => Message::TerminalError(e.to_string()),
+            }),
         ]
     }
 }

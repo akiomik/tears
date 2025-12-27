@@ -4,6 +4,7 @@
 //! terminal input events using crossterm.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io;
 
 use crossterm::event::{Event, EventStream};
 use futures::{StreamExt, stream::BoxStream};
@@ -23,11 +24,60 @@ use super::{SubscriptionId, SubscriptionSource};
 ///
 /// enum Message {
 ///     Input(Event),
+///     InputError(std::io::Error),
 /// }
 ///
 /// // Create a subscription for terminal events
 /// let sub = Subscription::new(TerminalEvents::new())
-///     .map(Message::Input);
+///     .map(|result| match result {
+///         Ok(event) => Message::Input(event),
+///         Err(e) => Message::InputError(e),
+///     });
+/// ```
+///
+/// # Error Handling
+///
+/// This subscription yields `Result<Event, io::Error>` values. Applications are
+/// responsible for handling errors appropriately. Common error scenarios include:
+///
+/// - **Terminal disconnection**: Usually unrecoverable, may want to exit gracefully
+/// - **I/O errors**: May be transient or permanent depending on the cause
+///
+/// You can choose to:
+/// - Log errors and continue (errors stop producing further events)
+/// - Display an error message to the user
+/// - Attempt to recreate the subscription
+/// - Exit the application
+///
+/// ```rust,no_run
+/// # use tears::prelude::*;
+/// # use crossterm::event::Event;
+/// # struct App;
+/// enum Message {
+///     Input(Event),
+///     InputError(std::io::Error),
+/// }
+/// # impl Application for App {
+/// #     type Message = Message;
+/// #     type Flags = ();
+/// #     fn new(_: ()) -> (Self, Command<Message>) { (App, Command::none()) }
+/// #     fn view(&self, _: &mut ratatui::Frame) {}
+/// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+///
+/// fn update(&mut self, msg: Message) -> Command<Message> {
+///     match msg {
+///         Message::Input(event) => {
+///             // Handle the event
+///             Command::none()
+///         }
+///         Message::InputError(e) => {
+///             // Handle the error (log, show UI, exit, etc.)
+///             eprintln!("Terminal error: {}", e);
+///             Command::effect(Action::Quit)
+///         }
+///     }
+/// }
+/// # }
 /// ```
 ///
 /// # Note
@@ -54,18 +104,17 @@ impl TerminalEvents {
 }
 
 impl SubscriptionSource for TerminalEvents {
-    type Output = Event;
+    type Output = Result<Event, io::Error>;
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
         let stream = EventStream::new();
 
-        // Create a stream that yields terminal events
+        // Create a stream that yields terminal events as Results
         futures::stream::unfold(stream, |mut stream| async move {
-            // NOTE: EventStream::next() returns Result<Event>, we need to handle errors
-            match stream.next().await {
-                Some(Ok(event)) => Some((event, stream)),
-                Some(Err(_)) | None => None, // Stop the stream on error or end
-            }
+            // NOTE: EventStream::next() returns Result<Event, io::Error>
+            // We pass the Result directly to the application, allowing users to
+            // decide how to handle errors (log, retry, show error UI, etc.)
+            stream.next().await.map(|result| (result, stream))
         })
         .boxed()
     }
