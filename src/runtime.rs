@@ -250,6 +250,11 @@ impl<A: Application> Runtime<A> {
     }
 
     /// Render the application's view to the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal I/O fails. Common causes include terminal
+    /// disconnection or broken pipe. These errors are typically unrecoverable.
     fn render<B: Backend>(&self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
         terminal.draw(|frame| {
             self.app.inner.view(frame);
@@ -285,6 +290,13 @@ impl<A: Application> Runtime<A> {
     /// # Returns
     ///
     /// `Ok(())` on successful completion, or an error if rendering fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal rendering fails (e.g., terminal disconnection,
+    /// I/O errors, broken pipe). Such errors typically indicate unrecoverable
+    /// terminal state, and the application will terminate. This behavior is
+    /// consistent with other TUI frameworks and ratatui best practices
     ///
     /// # Examples
     ///
