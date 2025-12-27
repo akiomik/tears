@@ -20,3 +20,21 @@ futures = "0.3"
 ratatui = { version = "0.29", features = ["serde", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
+
+[lints.clippy]
+# Pedantic lints for high code quality
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Allow some pedantic lints that are too strict for a library
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Enforce important correctness lints
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+
+# Allow similar names in tests (e.g., id_i32, id_u64)
+similar_names = "allow"

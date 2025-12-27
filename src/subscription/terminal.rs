@@ -47,7 +47,8 @@ impl TerminalEvents {
     ///
     /// let events = TerminalEvents::new();
     /// ```
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -63,8 +64,7 @@ impl SubscriptionSource for TerminalEvents {
             // NOTE: EventStream::next() returns Result<Event>, we need to handle errors
             match stream.next().await {
                 Some(Ok(event)) => Some((event, stream)),
-                Some(Err(_)) => None, // Stop the stream on error
-                None => None,
+                Some(Err(_)) | None => None, // Stop the stream on error or end
             }
         })
         .boxed()

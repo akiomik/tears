@@ -231,7 +231,7 @@ mod tests {
         type Flags = i32;
 
         fn new(initial_value: i32) -> (Self, Command<Self::Message>) {
-            let app = TestApp {
+            let app = Self {
                 counter: initial_value,
                 initialized: true,
             };
@@ -332,7 +332,7 @@ mod tests {
 
         fn new(_flags: ()) -> (Self, Command<Self::Message>) {
             let cmd = Command::future(async { "initialized".to_string() });
-            (AppWithCommand, cmd)
+            (Self, cmd)
         }
 
         fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn test_message_debug() {
         let msg = TestMessage::Increment;
-        let debug_str = format!("{:?}", msg);
+        let debug_str = format!("{msg:?}");
         assert!(debug_str.contains("Increment"));
     }
 

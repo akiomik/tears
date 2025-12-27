@@ -1,3 +1,6 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 // Integration tests for dynamic subscriptions
 
 use ratatui::{Frame, Terminal, backend::TestBackend};
@@ -20,11 +23,11 @@ async fn test_dynamic_subscription_starts_when_enabled() {
         type Message = ();
         type Flags = ();
 
-        fn new(_: ()) -> (Self, Command<()>) {
-            (AppWithEnabledTimer { tick_count: 0 }, Command::none())
+        fn new((): ()) -> (Self, Command<()>) {
+            (Self { tick_count: 0 }, Command::none())
         }
 
-        fn update(&mut self, _: ()) -> Command<()> {
+        fn update(&mut self, (): ()) -> Command<()> {
             self.tick_count += 1;
             if self.tick_count >= 2 {
                 Command::effect(Action::Quit)
@@ -69,13 +72,13 @@ async fn test_dynamic_subscription_stops_when_disabled() {
         type Message = Msg;
         type Flags = ();
 
-        fn new(_: ()) -> (Self, Command<Msg>) {
+        fn new((): ()) -> (Self, Command<Msg>) {
             let cmd = Command::future(async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 Msg::Disable
             });
             (
-                AppWithToggle {
+                Self {
                     enabled: true,
                     tick_count: 0,
                 },
@@ -141,18 +144,17 @@ async fn test_dynamic_subscription_changes_based_on_state() {
         type Message = Msg;
         type Flags = ();
 
-        fn new(_: ()) -> (Self, Command<Msg>) {
+        fn new((): ()) -> (Self, Command<Msg>) {
             let cmd = Command::future(async {
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 Msg::ChangeMode
             });
-            (StatefulApp { mode: 0 }, cmd)
+            (Self { mode: 0 }, cmd)
         }
 
         fn update(&mut self, msg: Msg) -> Command<Msg> {
             match msg {
-                Msg::FastTick => Command::none(),
-                Msg::SlowTick => Command::none(),
+                Msg::FastTick | Msg::SlowTick => Command::none(),
                 Msg::ChangeMode => {
                     self.mode += 1;
                     if self.mode >= 2 {
@@ -207,8 +209,8 @@ async fn test_dynamic_subscription_multiple_changes() {
         type Message = Msg;
         type Flags = ();
 
-        fn new(_: ()) -> (Self, Command<Msg>) {
-            (MultiChangeApp { cycle: 0 }, Command::none())
+        fn new((): ()) -> (Self, Command<Msg>) {
+            (Self { cycle: 0 }, Command::none())
         }
 
         fn update(&mut self, msg: Msg) -> Command<Msg> {

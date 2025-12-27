@@ -1,3 +1,6 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -32,7 +35,7 @@ async fn test_quit_responsiveness_low_framerate() {
     );
 
     // With the fix, quit should happen much faster than frame duration (62.5ms)
-    println!("Quit with low framerate took: {:?}", elapsed);
+    println!("Quit with low framerate took: {elapsed:?}");
     assert!(
         elapsed < Duration::from_millis(150),
         "Should quit quickly even with low framerate"
@@ -47,7 +50,7 @@ impl Application for InitQuitApp {
 
     fn new(_flags: ()) -> (Self, Command<Self::Message>) {
         // Quit immediately after initialization
-        (InitQuitApp, Command::effect(Action::Quit))
+        (Self, Command::effect(Action::Quit))
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -80,7 +83,7 @@ async fn test_quit_from_init_command() {
     );
 
     // Should quit very quickly (within a few frames)
-    println!("Init quit took: {:?}", elapsed);
+    println!("Init quit took: {elapsed:?}");
     assert!(
         elapsed < Duration::from_millis(200),
         "Should quit quickly from init command"
@@ -99,7 +102,7 @@ impl Application for DelayedQuitApp {
         let cmd = Command::future(async {
             sleep(Duration::from_millis(50)).await;
         });
-        (DelayedQuitApp, cmd)
+        (Self, cmd)
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -134,7 +137,7 @@ async fn test_quit_during_frame_wait() {
 
     // With tokio::select!, quit should happen around 50ms (command delay)
     // not 100ms+ (frame duration)
-    println!("Delayed quit took: {:?}", elapsed);
+    println!("Delayed quit took: {elapsed:?}");
     assert!(
         elapsed < Duration::from_millis(200),
         "Should quit quickly even during frame wait"
@@ -164,7 +167,7 @@ impl Application for MultiMessageQuitApp {
             Command::future(async { MultiMessage::Increment }),
             Command::future(async { MultiMessage::Quit }),
         ];
-        (MultiMessageQuitApp { counter: 0 }, Command::batch(commands))
+        (Self { counter: 0 }, Command::batch(commands))
     }
 
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
@@ -202,7 +205,7 @@ async fn test_quit_after_multiple_messages() {
         "Runtime should complete without error"
     );
 
-    println!("Multi-message quit took: {:?}", elapsed);
+    println!("Multi-message quit took: {elapsed:?}");
     assert!(
         elapsed < Duration::from_millis(300),
         "Should process messages and quit quickly"

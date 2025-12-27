@@ -1,3 +1,6 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 // Integration tests for Runtime::run
 // These tests verify end-to-end scenarios.
 // Unit tests for individual methods are in src/runtime.rs
@@ -37,7 +40,7 @@ impl Application for CounterApp {
         };
 
         (
-            CounterApp {
+            Self {
                 count: 0,
                 max_count,
             },
@@ -74,11 +77,11 @@ impl Application for SubApp {
     type Message = ();
     type Flags = ();
 
-    fn new(_: ()) -> (Self, Command<()>) {
-        (SubApp { tick_count: 0 }, Command::none())
+    fn new((): ()) -> (Self, Command<()>) {
+        (Self { tick_count: 0 }, Command::none())
     }
 
-    fn update(&mut self, _: ()) -> Command<()> {
+    fn update(&mut self, (): ()) -> Command<()> {
         self.tick_count += 1;
         if self.tick_count >= 3 {
             Command::effect(Action::Quit)
@@ -120,13 +123,13 @@ async fn test_runtime_run_end_to_end_with_commands() {
         type Message = String;
         type Flags = ();
 
-        fn new(_: ()) -> (Self, Command<String>) {
+        fn new((): ()) -> (Self, Command<String>) {
             let cmd = Command::batch(vec![
                 Command::future(async { "msg1".to_string() }),
                 Command::future(async { "msg2".to_string() }),
                 Command::future(async { "msg3".to_string() }),
             ]);
-            (MessageApp { received: vec![] }, cmd)
+            (Self { received: vec![] }, cmd)
         }
 
         fn update(&mut self, msg: String) -> Command<String> {

@@ -102,7 +102,7 @@ impl<Msg: 'static> Subscription<Msg> {
     /// // Create a timer subscription that ticks every second
     /// let sub = Subscription::new(Timer::new(1000));
     /// ```
-    pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Subscription<Msg> {
+    pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
         let id = inner.id();
 
         Self {
@@ -256,6 +256,7 @@ impl SubscriptionId {
     ///     }
     /// }
     /// ```
+    #[must_use]
     pub fn of<T: 'static>(hash: u64) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
@@ -284,6 +285,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// # Arguments
     ///
     /// * `msg_sender` - Channel sender for forwarding subscription messages
+    #[must_use]
     pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
             running: HashMap::new(),
@@ -421,7 +423,7 @@ mod tests {
             id: 1,
             values: vec![1, 2, 3],
         };
-        let sub = Subscription::new(test_sub).map(|x| Message::Number(x));
+        let sub = Subscription::new(test_sub).map(Message::Number);
 
         let mut stream = (sub.stream_builder)();
         let mut results = vec![];
@@ -537,9 +539,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_manager_shutdown() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(tx);
-
         // Create a long-running subscription
         struct InfiniteSub;
         impl SubscriptionSource for InfiniteSub {
@@ -557,6 +556,9 @@ mod tests {
                 SubscriptionId::of::<Self>(999)
             }
         }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
 
         let sub = Subscription::new(InfiniteSub);
         manager.update(vec![sub]);
@@ -601,7 +603,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2]);
     }
 }

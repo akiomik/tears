@@ -242,7 +242,7 @@ impl<A: Application> Runtime<A> {
     /// Update subscriptions based on current application state.
     ///
     /// This method is called every frame to support dynamic subscriptions.
-    /// The SubscriptionManager will diff the new subscriptions against
+    /// The `SubscriptionManager` will diff the new subscriptions against
     /// the currently running ones and only start/stop changed subscriptions.
     fn update_subscriptions(&mut self) {
         let subscriptions = self.app.inner.subscriptions();
@@ -250,7 +250,7 @@ impl<A: Application> Runtime<A> {
     }
 
     /// Render the application's view to the terminal.
-    fn render<B: Backend>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
+    fn render<B: Backend>(&self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
         terminal.draw(|frame| {
             self.app.inner.view(frame);
         })?;
@@ -331,7 +331,7 @@ impl<A: Application> Runtime<A> {
         terminal: &mut ratatui::Terminal<B>,
         frame_rate: u32,
     ) -> Result<()> {
-        let frame_duration = Duration::from_millis(1000 / frame_rate as u64);
+        let frame_duration = Duration::from_millis(1000 / u64::from(frame_rate));
 
         self.initialize_subscriptions();
 
@@ -350,7 +350,7 @@ impl<A: Application> Runtime<A> {
 
             // Wait for next frame or quit signal (whichever comes first)
             tokio::select! {
-                _ = sleep(frame_duration) => {
+                () = sleep(frame_duration) => {
                     // Continue to next frame
                 }
                 _ = self.quit_rx.recv() => {
@@ -395,7 +395,7 @@ mod tests {
 
         fn new(initial: i32) -> (Self, Command<Self::Message>) {
             (
-                TestApp {
+                Self {
                     counter: initial,
                     should_quit: false,
                 },
@@ -457,7 +457,7 @@ mod tests {
 
         fn new(_flags: ()) -> (Self, Command<Self::Message>) {
             let cmd = Command::future(async { true });
-            (AppWithInitCommand { initialized: false }, cmd)
+            (Self { initialized: false }, cmd)
         }
 
         fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
@@ -541,7 +541,7 @@ mod tests {
         type Flags = String;
 
         fn new(name: String) -> (Self, Command<Self::Message>) {
-            (AppWithStringFlags { name }, Command::none())
+            (Self { name }, Command::none())
         }
 
         fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -682,11 +682,11 @@ mod tests {
             type Message = ();
             type Flags = ();
 
-            fn new(_: ()) -> (Self, Command<()>) {
-                (AppWithSubs, Command::none())
+            fn new((): ()) -> (Self, Command<()>) {
+                (Self, Command::none())
             }
 
-            fn update(&mut self, _: ()) -> Command<()> {
+            fn update(&mut self, (): ()) -> Command<()> {
                 Command::none()
             }
 
@@ -717,7 +717,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut runtime = Runtime::<TestApp>::new(0);
+        let runtime = Runtime::<TestApp>::new(0);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -730,7 +730,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut runtime = Runtime::<TestApp>::new(0);
+        let runtime = Runtime::<TestApp>::new(0);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -756,11 +756,11 @@ mod tests {
             type Message = ();
             type Flags = ();
 
-            fn new(_: ()) -> (Self, Command<()>) {
-                (AppWithSubs, Command::none())
+            fn new((): ()) -> (Self, Command<()>) {
+                (Self, Command::none())
             }
 
-            fn update(&mut self, _: ()) -> Command<()> {
+            fn update(&mut self, (): ()) -> Command<()> {
                 Command::none()
             }
 

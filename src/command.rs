@@ -88,6 +88,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd: Command<i32> = Command::none();
     /// ```
+    #[must_use]
     pub fn none() -> Self {
         Self { stream: None }
     }
@@ -186,7 +187,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Command::none(), // This will be filtered out
     /// ]);
     /// ```
-    pub fn batch(commands: impl IntoIterator<Item = Command<Msg>>) -> Self {
+    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
         let streams: Vec<_> = commands.into_iter().filter_map(|cmd| cmd.stream).collect();
 
         if streams.is_empty() {
@@ -298,7 +299,7 @@ mod tests {
         }
 
         // All messages should be received (order may vary due to concurrent execution)
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3]);
     }
 
@@ -321,7 +322,7 @@ mod tests {
         }
 
         // Only non-none commands should produce messages
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 3]);
     }
 
@@ -357,6 +358,7 @@ mod tests {
         }
 
         assert!(has_quit, "should receive quit action");
+        assert!(!messages.is_empty());
     }
 
     #[tokio::test]
@@ -460,6 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform() {
+        #[allow(clippy::unused_async)]
         async fn fetch_value() -> i32 {
             42
         }
@@ -477,13 +480,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_result() {
+        #[allow(clippy::unused_async)]
         async fn fallible_operation() -> Result<String, String> {
             Ok("success".to_string())
         }
 
         let cmd = Command::perform(fallible_operation(), |result| match result {
-            Ok(s) => format!("Got: {}", s),
-            Err(e) => format!("Error: {}", e),
+            Ok(s) => format!("Got: {s}"),
+            Err(e) => format!("Error: {e}"),
         });
 
         let mut stream = cmd.stream.expect("stream should exist");
@@ -555,7 +559,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3, 4]);
     }
 
@@ -577,6 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_error_handling() {
+        #[allow(clippy::unused_async)]
         async fn may_fail(should_fail: bool) -> Result<i32, &'static str> {
             if should_fail {
                 Err("operation failed")
@@ -638,7 +643,7 @@ mod tests {
 
         // Results should be received in order of completion (2, 3, 1)
         // but we just verify all were received
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3]);
     }
 }

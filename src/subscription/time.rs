@@ -60,7 +60,8 @@ impl Timer {
     /// // Tick every 16ms (approximately 60 FPS)
     /// let fast_timer = Timer::new(16);
     /// ```
-    pub fn new(interval_ms: u64) -> Self {
+    #[must_use]
+    pub const fn new(interval_ms: u64) -> Self {
         Self { interval_ms }
     }
 }
@@ -70,7 +71,7 @@ impl SubscriptionSource for Timer {
 
     fn stream(&self) -> BoxStream<'static, Message> {
         let interval_ms = self.interval_ms;
-        stream::unfold((), move |_| async move {
+        stream::unfold((), move |()| async move {
             let interval = Duration::from_millis(interval_ms);
             sleep(interval).await;
             Some((Message::Tick, ()))
@@ -156,7 +157,7 @@ mod tests {
         let result = timeout(Duration::from_millis(100), stream.next()).await;
         assert!(result.is_ok());
 
-        if let Ok(Some(Message::Tick)) = result {
+        if matches!(result, Ok(Some(Message::Tick))) {
             // Expected
         } else {
             panic!("Expected tick message");
@@ -172,7 +173,7 @@ mod tests {
         let mut count = 0;
         for _ in 0..3 {
             let result = timeout(Duration::from_millis(100), stream.next()).await;
-            if let Ok(Some(Message::Tick)) = result {
+            if matches!(result, Ok(Some(Message::Tick))) {
                 count += 1;
             }
         }
@@ -183,14 +184,14 @@ mod tests {
     #[test]
     fn test_message_debug() {
         let msg = Message::Tick;
-        let debug_str = format!("{:?}", msg);
+        let debug_str = format!("{msg:?}");
         assert!(debug_str.contains("Tick"));
     }
 
     #[test]
     fn test_message_clone() {
         let msg1 = Message::Tick;
-        let msg2 = msg1.clone();
+        let msg2 = msg1;
 
         // Both should be Tick
         matches!(msg1, Message::Tick);
