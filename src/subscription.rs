@@ -14,8 +14,8 @@
 //!
 //! ```
 //! use tears::subscription::{SubscriptionSource, SubscriptionId, Subscription};
-//! use futures::stream::{self, BoxStream};
-//! use futures::StreamExt;
+//! use tears::BoxStream;
+//! use futures::{StreamExt, stream};
 //! use std::hash::{Hash, Hasher};
 //!
 //! struct MySubscription {
@@ -167,8 +167,8 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 ///
 /// ```
 /// use tears::subscription::{SubscriptionSource, SubscriptionId};
-/// use futures::stream::{self, BoxStream};
-/// use futures::StreamExt;
+/// use tears::BoxStream;
+/// use futures::{StreamExt, stream};
 /// use std::hash::{Hash, Hasher};
 ///
 /// struct MySubscription {

@@ -81,3 +81,7 @@ pub use application::Application;
 pub use command::{Action, Command};
 pub use runtime::Runtime;
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
+
+// Re-export commonly used external types
+// This allows users to implement custom subscriptions without directly depending on futures
+pub use futures::stream::BoxStream;
