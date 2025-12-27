@@ -354,10 +354,7 @@ mod tests {
         // Verify the command produces the expected message
         if let Some(mut stream) = cmd.stream {
             if let Some(action) = stream.next().await {
-                match action {
-                    Action::Message(msg) => assert_eq!(msg, "initialized"),
-                    Action::Quit => panic!("unexpected quit"),
-                }
+                assert!(matches!(action, Action::Message(msg) if msg == "initialized"));
             }
         }
     }

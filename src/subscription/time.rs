@@ -155,13 +155,7 @@ mod tests {
 
         // Should receive first tick
         let result = timeout(Duration::from_millis(100), stream.next()).await;
-        assert!(result.is_ok());
-
-        if matches!(result, Ok(Some(Message::Tick))) {
-            // Expected
-        } else {
-            panic!("Expected tick message");
-        }
+        assert!(matches!(result, Ok(Some(Message::Tick))));
     }
 
     #[tokio::test]

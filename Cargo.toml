@@ -40,7 +40,7 @@ module_name_repetitions = "allow"
 # Enforce important correctness lints
 unwrap_used = "warn"
 expect_used = "allow"
-panic = "allow"
+panic = "warn"
 
 # Allow similar names in tests (e.g., id_i32, id_u64)
 similar_names = "allow"

@@ -305,10 +305,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 1),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 1));
     }
 
     #[tokio::test]
@@ -482,10 +479,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 42),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 42));
 
         // Stream should be exhausted
         assert!(stream.next().await.is_none());
@@ -503,10 +497,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 84),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 84));
     }
 
     #[tokio::test]
@@ -524,10 +515,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, "Got: success"),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == "Got: success"));
     }
 
     #[tokio::test]
@@ -537,10 +525,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 42),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 42));
 
         // Stream should be exhausted
         assert!(stream.next().await.is_none());
@@ -553,10 +538,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, "hello"),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == "hello"));
     }
 
     #[tokio::test]
@@ -566,10 +548,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 100),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 100));
     }
 
     #[tokio::test]
@@ -579,12 +558,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(_) => panic!("unexpected message"),
-            Action::Quit => {
-                // Expected
-            }
-        }
+        assert!(matches!(action, Action::Quit));
     }
 
     #[tokio::test]
@@ -633,10 +607,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, "delayed"),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == "delayed"));
     }
 
     #[tokio::test]
@@ -656,10 +627,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, 42),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == 42));
 
         // Test error case
         let cmd = Command::perform(may_fail(true), |result| result.unwrap_or(-1));
@@ -667,10 +635,7 @@ mod tests {
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
-        match action {
-            Action::Message(msg) => assert_eq!(msg, -1),
-            Action::Quit => panic!("unexpected quit"),
-        }
+        assert!(matches!(action, Action::Message(msg) if msg == -1));
     }
 
     #[tokio::test]
