@@ -11,10 +11,8 @@
 //!
 //! ```rust,no_run
 //! use tears::prelude::*;
+//! # use color_eyre::eyre::Result;
 //! # use ratatui::Frame;
-//! # use std::io;
-//! # use crossterm::terminal;
-//! # use ratatui::prelude::CrosstermBackend;
 //! # struct MyApp;
 //! # enum Message {}
 //! # impl Application for MyApp {
@@ -27,16 +25,14 @@
 //! # }
 //!
 //! #[tokio::main]
-//! async fn main() -> color_eyre::eyre::Result<()> {
+//! async fn main() -> Result<()> {
 //!     let runtime = Runtime::<MyApp>::new(());
 //!
-//!     terminal::enable_raw_mode()?;
-//!     let backend = CrosstermBackend::new(io::stdout());
-//!     let mut terminal = ratatui::Terminal::new(backend)?;
+//!     let mut terminal = ratatui::init();
 //!
 //!     runtime.run(&mut terminal, 60).await?;
 //!
-//!     terminal::disable_raw_mode()?;
+//!     ratatui::restore();
 //!     Ok(())
 //! }
 //! ```
@@ -76,11 +72,9 @@ struct Instance<A: Application> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tears::prelude::*;
+/// use color_eyre::eyre::Result;
 /// use ratatui::Frame;
-/// use std::io;
-/// use crossterm::terminal;
-/// use ratatui::prelude::CrosstermBackend;
+/// use tears::prelude::*;
 ///
 /// # struct MyApp;
 /// # enum Message {}
@@ -93,21 +87,18 @@ struct Instance<A: Application> {
 /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
 /// # }
 /// #[tokio::main]
-/// async fn main() -> color_eyre::eyre::Result<()> {
+/// async fn main() -> Result<()> {
 ///     // Create the runtime with initial flags
 ///     let runtime = Runtime::<MyApp>::new(());
 ///
 ///     // Setup terminal
-///     terminal::enable_raw_mode()?;
-///     let mut stdout = io::stdout();
-///     let backend = CrosstermBackend::new(stdout);
-///     let mut terminal = ratatui::Terminal::new(backend)?;
+///     let mut terminal = ratatui::init();
 ///
 ///     // Run the application at 60 FPS
 ///     runtime.run(&mut terminal, 60).await?;
 ///
 ///     // Cleanup
-///     terminal::disable_raw_mode()?;
+///     ratatui::restore();
 ///     Ok(())
 /// }
 /// ```
@@ -302,11 +293,9 @@ impl<A: Application> Runtime<A> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tears::prelude::*;
+    /// # use color_eyre::eyre::Result;
     /// # use ratatui::Frame;
-    /// # use std::io;
-    /// # use crossterm::terminal;
-    /// # use ratatui::prelude::CrosstermBackend;
+    /// # use tears::prelude::*;
     /// # struct MyApp;
     /// # enum Message {}
     /// # impl Application for MyApp {
@@ -318,17 +307,15 @@ impl<A: Application> Runtime<A> {
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
     /// # }
     /// #[tokio::main]
-    /// async fn main() -> color_eyre::eyre::Result<()> {
+    /// async fn main() -> Result<()> {
     ///     let runtime = Runtime::<MyApp>::new(());
     ///
-    ///     terminal::enable_raw_mode()?;
-    ///     let backend = CrosstermBackend::new(io::stdout());
-    ///     let mut terminal = ratatui::Terminal::new(backend)?;
+    ///     let mut terminal = ratatui::init();
     ///
     ///     // Run at 60 FPS
     ///     runtime.run(&mut terminal, 60).await?;
     ///
-    ///     terminal::disable_raw_mode()?;
+    ///     ratatui::restore();
     ///     Ok(())
     /// }
     /// ```

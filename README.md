@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
 Here's a simple counter application that increments every second:
 
 ```rust
+use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Frame, text::Text};
 use tears::prelude::*;
@@ -149,31 +150,17 @@ impl Application for Counter {
 }
 
 #[tokio::main]
-async fn main() -> color_eyre::eyre::Result<()> {
-    use std::io;
-    use crossterm::{terminal, event};
-    use ratatui::{Terminal, prelude::CrosstermBackend};
-
+async fn main() -> Result<()> {
     let runtime = Runtime::<Counter>::new(());
 
     // Setup terminal
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(stdout, terminal::EnterAlternateScreen, event::EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
     let result = runtime.run(&mut terminal, 60).await;
 
     // Restore terminal
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        terminal::LeaveAlternateScreen,
-        event::DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    ratatui::restore();
 
     result
 }

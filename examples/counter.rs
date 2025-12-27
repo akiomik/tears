@@ -8,14 +8,10 @@
 //!
 //! Run with: cargo run --example counter
 
-use std::io;
-
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
-use crossterm::{event, terminal};
-use ratatui::prelude::CrosstermBackend;
+use ratatui::Frame;
 use ratatui::text::Text;
-use ratatui::{Frame, Terminal};
 use tears::prelude::*;
 use tears::subscription::{
     terminal::TerminalEvents,
@@ -101,28 +97,13 @@ async fn main() -> Result<()> {
     let runtime = Runtime::<Counter>::new(());
 
     // Setup terminal
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = ratatui::init();
 
     // Run the application at 16 FPS
     let result = runtime.run(&mut terminal, 16).await;
 
     // Restore terminal
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        terminal::LeaveAlternateScreen,
-        event::DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    ratatui::restore();
 
     result
 }
