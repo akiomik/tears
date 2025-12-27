@@ -102,6 +102,7 @@ impl<Msg: 'static> Subscription<Msg> {
     /// // Create a timer subscription that ticks every second
     /// let sub = Subscription::new(Timer::new(1000));
     /// ```
+    #[must_use]
     pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
         let id = inner.id();
 
@@ -133,6 +134,7 @@ impl<Msg: 'static> Subscription<Msg> {
     /// let sub = Subscription::new(Timer::new(1000))
     ///     .map(|_tick_msg| AppMessage::TimerTick);
     /// ```
+    #[must_use]
     pub fn map<F, NewMsg>(self, f: F) -> Subscription<NewMsg>
     where
         F: Fn(Msg) -> NewMsg + Send + 'static,

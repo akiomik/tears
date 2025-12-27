@@ -156,6 +156,7 @@ impl<A: Application> Runtime<A> {
     /// // Create runtime with initial value
     /// let runtime = Runtime::<MyApp>::new(42);
     /// ```
+    #[must_use]
     pub fn new(flags: A::Flags) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();

@@ -118,6 +118,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::perform(fetch_data(), Message::DataReceived);
     /// ```
+    #[must_use]
     pub fn perform<A>(
         future: impl Future<Output = A> + Send + 'static,
         f: impl FnOnce(A) -> Msg + Send + 'static,
@@ -137,6 +138,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::future(async { 42 });
     /// ```
+    #[must_use]
     pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
         Self {
             stream: Some(future.into_stream().map(Action::Message).boxed()),
@@ -159,6 +161,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Send a message immediately
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
+    #[must_use]
     pub fn effect(action: Action<Msg>) -> Self {
         Self {
             stream: Some(stream::once(async move { action }).boxed()),
@@ -187,6 +190,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Command::none(), // This will be filtered out
     /// ]);
     /// ```
+    #[must_use]
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
         let streams: Vec<_> = commands.into_iter().filter_map(|cmd| cmd.stream).collect();
 
@@ -213,6 +217,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let messages = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::stream(messages);
     /// ```
+    #[must_use]
     pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
         Self {
             stream: Some(stream.map(Action::Message).boxed()),
@@ -242,6 +247,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let numbers = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::run(numbers, |n| Message::NumberReceived(n * 2));
     /// ```
+    #[must_use]
     pub fn run<A>(
         stream: impl Stream<Item = A> + Send + 'static,
         f: impl Fn(A) -> Msg + Send + 'static,
