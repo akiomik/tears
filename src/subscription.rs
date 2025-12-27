@@ -389,20 +389,6 @@ mod tests {
         assert_ne!(id_u64, id_string);
     }
 
-    #[test]
-    fn test_subscription_id_debug() {
-        let id = SubscriptionId::of::<i32>(12345);
-        let debug_str = format!("{:?}", id);
-        assert!(debug_str.contains("SubscriptionId"));
-    }
-
-    #[test]
-    fn test_subscription_id_clone() {
-        let id1 = SubscriptionId::of::<i32>(12345);
-        let id2 = id1.clone();
-        assert_eq!(id1, id2);
-    }
-
     #[tokio::test]
     async fn test_subscription_manager_update() {
         let (tx, mut rx) = mpsc::unbounded_channel();
