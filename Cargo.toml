@@ -12,6 +12,14 @@ readme = "README.md"
 keywords = ["tui", "tea", "elm-architecture", "ratatui", "framework"]
 categories = ["command-line-interface", "asynchronous"]
 rust-version = "1.85.0"
+exclude = [
+    ".github/",
+    ".gitignore",
+    "justfile",
+    ".*.md",
+    "tmp*",
+    "Cargo.lock",
+]
 
 [dependencies]
 color-eyre = "0.6"
