@@ -1,5 +1,11 @@
 # tears
 
+[![Crates.io](https://img.shields.io/crates/v/tears.svg)](https://crates.io/crates/tears)
+[![Documentation](https://docs.rs/tears/badge.svg)](https://docs.rs/tears)
+[![CI](https://github.com/akiomik/tears/workflows/CI/badge.svg)](https://github.com/akiomik/tears/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/tears.svg)](LICENSE)
+[![Rust Version](https://img.shields.io/badge/rust-1.85.0%2B-blue.svg)](https://www.rust-lang.org)
+
 A simple and elegant framework for building TUI applications using **The Elm Architecture (TEA)**.
 
 Built on top of [ratatui](https://ratatui.rs/), Tears provides a clean, type-safe, and functional approach to terminal user interface development.
