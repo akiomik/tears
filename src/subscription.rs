@@ -28,14 +28,14 @@ use tokio::{
 /// # Example
 ///
 /// ```
-/// use tears::subscription::{Subscription, time::{TimeSub, Message as TimeMsg}};
+/// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
 ///
 /// enum Message {
 ///     Tick,
 /// }
 ///
 /// // Create a subscription that sends a message every second
-/// let sub = Subscription::new(TimeSub::new(1000)).map(|_| Message::Tick);
+/// let sub = Subscription::new(Timer::new(1000)).map(|_| Message::Tick);
 /// ```
 pub struct Subscription<Msg: 'static> {
     pub(super) id: SubscriptionId,
@@ -52,10 +52,10 @@ impl<Msg: 'static> Subscription<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::subscription::{Subscription, time::TimeSub};
+    /// use tears::subscription::{Subscription, time::Timer};
     ///
     /// // Create a timer subscription that ticks every second
-    /// let sub = Subscription::new(TimeSub::new(1000));
+    /// let sub = Subscription::new(Timer::new(1000));
     /// ```
     pub fn new(inner: impl SubscriptionSource<Output = Msg> + 'static) -> Subscription<Msg> {
         let id = inner.id();
@@ -78,14 +78,14 @@ impl<Msg: 'static> Subscription<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::subscription::{Subscription, time::{TimeSub, Message as TimeMsg}};
+    /// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
     ///
     /// enum AppMessage {
     ///     TimerTick,
     /// }
     ///
     /// // Create a timer and map its messages to your app's messages
-    /// let sub = Subscription::new(TimeSub::new(1000))
+    /// let sub = Subscription::new(Timer::new(1000))
     ///     .map(|_tick_msg| AppMessage::TimerTick);
     /// ```
     pub fn map<F, NewMsg>(self, f: F) -> Subscription<NewMsg>
@@ -242,7 +242,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     {
         // NOTE: Store stream builders instead of streams to avoid creating
         // streams unnecessarily. This is important for subscriptions like
-        // TerminalSub where creating the stream has side effects.
+        // TerminalEvents where creating the stream has side effects.
         let mut new_subs: HashMap<_, _> = subscriptions
             .into_iter()
             .map(|sub| (sub.id, sub.stream_builder))
@@ -295,12 +295,12 @@ mod tests {
     use tokio::time::{Duration, sleep, timeout};
 
     // Test helper: Simple subscription implementation
-    struct TestSub {
+    struct TestSource {
         id: u64,
         values: Vec<i32>,
     }
 
-    impl SubscriptionSource for TestSub {
+    impl SubscriptionSource for TestSource {
         type Output = i32;
 
         fn stream(&self) -> BoxStream<'static, Self::Output> {
@@ -314,18 +314,18 @@ mod tests {
 
     #[test]
     fn test_subscription_new() {
-        let test_sub = TestSub {
+        let test_sub = TestSource {
             id: 1,
             values: vec![1, 2, 3],
         };
         let sub = Subscription::new(test_sub);
 
-        assert_eq!(sub.id, SubscriptionId::of::<TestSub>(1));
+        assert_eq!(sub.id, SubscriptionId::of::<TestSource>(1));
     }
 
     #[tokio::test]
     async fn test_subscription_map() {
-        let test_sub = TestSub {
+        let test_sub = TestSource {
             id: 1,
             values: vec![1, 2, 3],
         };
@@ -348,7 +348,7 @@ mod tests {
             Number(i32),
         }
 
-        let test_sub = TestSub {
+        let test_sub = TestSource {
             id: 1,
             values: vec![1, 2, 3],
         };
@@ -394,7 +394,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
-        let test_sub = TestSub {
+        let test_sub = TestSource {
             id: 1,
             values: vec![10, 20],
         };
@@ -415,7 +415,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
-        let test_sub = TestSub {
+        let test_sub = TestSource {
             id: 1,
             values: vec![10],
         };
@@ -444,7 +444,7 @@ mod tests {
         let mut manager = SubscriptionManager::new(tx);
 
         // First subscription
-        let test_sub1 = TestSub {
+        let test_sub1 = TestSource {
             id: 1,
             values: vec![10],
         };
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(msg.unwrap(), Some(10));
 
         // Replace with different subscription
-        let test_sub2 = TestSub {
+        let test_sub2 = TestSource {
             id: 2,
             values: vec![20],
         };
@@ -510,11 +510,11 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
-        let test_sub1 = TestSub {
+        let test_sub1 = TestSource {
             id: 1,
             values: vec![1],
         };
-        let test_sub2 = TestSub {
+        let test_sub2 = TestSource {
             id: 2,
             values: vec![2],
         };

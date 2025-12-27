@@ -90,8 +90,8 @@ impl Application for SubApp {
     fn view(&self, _frame: &mut Frame<'_>) {}
 
     fn subscriptions(&self) -> Vec<Subscription<()>> {
-        use tears::subscription::time::TimeSub;
-        vec![Subscription::new(TimeSub::new(10)).map(|_| ())]
+        use tears::subscription::time::Timer;
+        vec![Subscription::new(Timer::new(10)).map(|_| ())]
     }
 }
 

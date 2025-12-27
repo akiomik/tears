@@ -36,8 +36,8 @@ async fn test_dynamic_subscription_starts_when_enabled() {
         fn view(&self, _frame: &mut Frame<'_>) {}
 
         fn subscriptions(&self) -> Vec<Subscription<()>> {
-            use tears::subscription::time::TimeSub;
-            vec![Subscription::new(TimeSub::new(10)).map(|_| ())]
+            use tears::subscription::time::Timer;
+            vec![Subscription::new(Timer::new(10)).map(|_| ())]
         }
     }
 
@@ -103,10 +103,10 @@ async fn test_dynamic_subscription_stops_when_disabled() {
         fn view(&self, _frame: &mut Frame<'_>) {}
 
         fn subscriptions(&self) -> Vec<Subscription<Msg>> {
-            use tears::subscription::time::TimeSub;
+            use tears::subscription::time::Timer;
 
             if self.enabled {
-                vec![Subscription::new(TimeSub::new(10)).map(|_| Msg::Tick)]
+                vec![Subscription::new(Timer::new(10)).map(|_| Msg::Tick)]
             } else {
                 vec![]
             }
@@ -170,11 +170,11 @@ async fn test_dynamic_subscription_changes_based_on_state() {
         fn view(&self, _frame: &mut Frame<'_>) {}
 
         fn subscriptions(&self) -> Vec<Subscription<Msg>> {
-            use tears::subscription::time::TimeSub;
+            use tears::subscription::time::Timer;
 
             match self.mode {
-                0 => vec![Subscription::new(TimeSub::new(5)).map(|_| Msg::FastTick)],
-                1 => vec![Subscription::new(TimeSub::new(20)).map(|_| Msg::SlowTick)],
+                0 => vec![Subscription::new(Timer::new(5)).map(|_| Msg::FastTick)],
+                1 => vec![Subscription::new(Timer::new(20)).map(|_| Msg::SlowTick)],
                 _ => vec![],
             }
         }
@@ -234,11 +234,11 @@ async fn test_dynamic_subscription_multiple_changes() {
         fn view(&self, _frame: &mut Frame<'_>) {}
 
         fn subscriptions(&self) -> Vec<Subscription<Msg>> {
-            use tears::subscription::time::TimeSub;
+            use tears::subscription::time::Timer;
 
             // Alternate between having timer and not having timer
             if self.cycle % 2 == 0 {
-                vec![Subscription::new(TimeSub::new(5)).map(|_| Msg::Tick)]
+                vec![Subscription::new(Timer::new(5)).map(|_| Msg::Tick)]
             } else {
                 vec![]
             }

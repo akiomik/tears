@@ -1,21 +1,21 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crossterm::event::{Event, EventStream};
-use futures::{stream::BoxStream, StreamExt};
+use futures::{StreamExt, stream::BoxStream};
 
 use super::{SubscriptionId, SubscriptionSource};
 
-/// Terminal event subscription using crossterm's EventStream.
+/// A stream of terminal events using crossterm's EventStream.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
-pub struct TerminalSub;
+pub struct TerminalEvents;
 
-impl TerminalSub {
+impl TerminalEvents {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl SubscriptionSource for TerminalSub {
+impl SubscriptionSource for TerminalEvents {
     type Output = Event;
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
@@ -34,7 +34,7 @@ impl SubscriptionSource for TerminalSub {
     }
 
     fn id(&self) -> SubscriptionId {
-        // Since TerminalSub is a singleton (no parameters), use a constant ID
+        // Since TerminalEvents is a singleton (no parameters), use a constant ID
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         SubscriptionId::of::<Self>(hasher.finish())
@@ -46,17 +46,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_terminal_sub_new() {
-        let sub = TerminalSub::new();
-        assert_eq!(sub, TerminalSub);
+    fn test_terminal_events_new() {
+        let events = TerminalEvents::new();
+        assert_eq!(events, TerminalEvents);
     }
 
     #[test]
-    fn test_terminal_sub_id_consistency() {
-        let sub1 = TerminalSub::new();
-        let sub2 = TerminalSub::new();
+    fn test_terminal_events_id_consistency() {
+        let events1 = TerminalEvents::new();
+        let events2 = TerminalEvents::new();
 
         // Same subscription should have the same ID
-        assert_eq!(sub1.id(), sub2.id());
+        assert_eq!(events1.id(), events2.id());
     }
 }

@@ -10,21 +10,21 @@ use tears::application::Application;
 use tears::command::{Action, Command};
 use tears::runtime::Runtime;
 use tears::subscription::Subscription;
-use tears::subscription::terminal::TerminalSub;
-use tears::subscription::time::{Message as TimeSubMessage, TimeSub};
+use tears::subscription::terminal::TerminalEvents;
+use tears::subscription::time::{Message as TimerMessage, Timer};
 
 #[derive(Debug, Clone)]
 enum Message {
-    TimeSub(TimeSubMessage),
+    Timer(TimerMessage),
     Terminal(crossterm::event::Event),
 }
 
 #[derive(Debug, Clone, Default)]
-struct Timer {
+struct Counter {
     count: u32,
 }
 
-impl Application for Timer {
+impl Application for Counter {
     type Message = Message;
     type Flags = ();
 
@@ -34,7 +34,7 @@ impl Application for Timer {
 
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
         match msg {
-            Message::TimeSub(TimeSubMessage::Tick) => {
+            Message::Timer(TimerMessage::Tick) => {
                 self.count += 1;
 
                 Command::none()
@@ -59,15 +59,15 @@ impl Application for Timer {
 
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![
-            Subscription::new(TimeSub::new(1000)).map(Message::TimeSub),
-            Subscription::new(TerminalSub::new()).map(Message::Terminal),
+            Subscription::new(Timer::new(1000)).map(Message::Timer),
+            Subscription::new(TerminalEvents::new()).map(Message::Terminal),
         ]
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let runtime = Runtime::<Timer>::new(());
+    let runtime = Runtime::<Counter>::new(());
 
     // Setup terminal
     terminal::enable_raw_mode()?;

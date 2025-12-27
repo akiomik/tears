@@ -12,19 +12,19 @@ pub enum Message {
     Tick,
 }
 
-/// Time-based subscription
+/// A timer that emits tick messages at regular intervals.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimeSub {
+pub struct Timer {
     interval_ms: u64,
 }
 
-impl TimeSub {
+impl Timer {
     pub fn new(interval_ms: u64) -> Self {
         Self { interval_ms }
     }
 }
 
-impl SubscriptionSource for TimeSub {
+impl SubscriptionSource for Timer {
     type Output = Message;
 
     fn stream(&self) -> BoxStream<'static, Message> {
@@ -44,7 +44,7 @@ impl SubscriptionSource for TimeSub {
     }
 }
 
-impl Hash for TimeSub {
+impl Hash for Timer {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.interval_ms.hash(state);
     }
@@ -57,59 +57,59 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     #[test]
-    fn test_time_sub_new() {
-        let sub = TimeSub::new(1000);
-        assert_eq!(sub.interval_ms, 1000);
+    fn test_timer_new() {
+        let timer = Timer::new(1000);
+        assert_eq!(timer.interval_ms, 1000);
     }
 
     #[test]
-    fn test_time_sub_equality() {
-        let sub1 = TimeSub::new(1000);
-        let sub2 = TimeSub::new(1000);
-        let sub3 = TimeSub::new(2000);
+    fn test_timer_equality() {
+        let timer1 = Timer::new(1000);
+        let timer2 = Timer::new(1000);
+        let timer3 = Timer::new(2000);
 
-        assert_eq!(sub1, sub2);
-        assert_ne!(sub1, sub3);
+        assert_eq!(timer1, timer2);
+        assert_ne!(timer1, timer3);
     }
 
     #[test]
-    fn test_time_sub_id_consistency() {
-        let sub1 = TimeSub::new(1000);
-        let sub2 = TimeSub::new(1000);
+    fn test_timer_id_consistency() {
+        let timer1 = Timer::new(1000);
+        let timer2 = Timer::new(1000);
 
         // Same configuration should produce the same ID
-        assert_eq!(sub1.id(), sub2.id());
+        assert_eq!(timer1.id(), timer2.id());
     }
 
     #[test]
-    fn test_time_sub_id_different_intervals() {
-        let sub1 = TimeSub::new(1000);
-        let sub2 = TimeSub::new(2000);
+    fn test_timer_id_different_intervals() {
+        let timer1 = Timer::new(1000);
+        let timer2 = Timer::new(2000);
 
         // Different intervals should produce different IDs
-        assert_ne!(sub1.id(), sub2.id());
+        assert_ne!(timer1.id(), timer2.id());
     }
 
     #[test]
-    fn test_time_sub_hash_consistency() {
-        let sub1 = TimeSub::new(1000);
-        let sub2 = TimeSub::new(1000);
+    fn test_timer_hash_consistency() {
+        let timer1 = Timer::new(1000);
+        let timer2 = Timer::new(1000);
 
         let mut hasher1 = DefaultHasher::new();
-        sub1.hash(&mut hasher1);
+        timer1.hash(&mut hasher1);
         let hash1 = hasher1.finish();
 
         let mut hasher2 = DefaultHasher::new();
-        sub2.hash(&mut hasher2);
+        timer2.hash(&mut hasher2);
         let hash2 = hasher2.finish();
 
         assert_eq!(hash1, hash2);
     }
 
     #[tokio::test]
-    async fn test_time_sub_stream_produces_ticks() {
-        let sub = TimeSub::new(10); // 10ms interval for fast test
-        let mut stream = sub.stream();
+    async fn test_timer_stream_produces_ticks() {
+        let timer = Timer::new(10); // 10ms interval for fast test
+        let mut stream = timer.stream();
 
         // Should receive first tick
         let result = timeout(Duration::from_millis(100), stream.next()).await;
@@ -123,9 +123,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_time_sub_stream_multiple_ticks() {
-        let sub = TimeSub::new(10); // 10ms interval
-        let mut stream = sub.stream();
+    async fn test_timer_stream_multiple_ticks() {
+        let timer = Timer::new(10); // 10ms interval
+        let mut stream = timer.stream();
 
         // Collect first 3 ticks
         let mut count = 0;

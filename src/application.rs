@@ -189,12 +189,12 @@ pub trait Application: Sized {
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// fn subscriptions(&self) -> Vec<Subscription<Message>> {
-    ///     use tears::subscription::time::{TimeSub, Message as TimeMsg};
-    ///     use tears::subscription::terminal::TerminalSub;
+    ///     use tears::subscription::time::{Timer, Message as TimeMsg};
+    ///     use tears::subscription::terminal::TerminalEvents;
     ///
     ///     vec![
-    ///         Subscription::new(TimeSub::new(1000)).map(|_| Message::Tick),
-    ///         Subscription::new(TerminalSub::new()).map(|_| Message::Input),
+    ///         Subscription::new(Timer::new(1000)).map(|_| Message::Tick),
+    ///         Subscription::new(TerminalEvents::new()).map(|_| Message::Input),
     ///     ]
     /// }
     /// # }

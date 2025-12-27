@@ -651,8 +651,8 @@ mod tests {
             fn view(&self, _frame: &mut Frame<'_>) {}
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
-                use crate::subscription::time::TimeSub;
-                vec![Subscription::new(TimeSub::new(100)).map(|_| ())]
+                use crate::subscription::time::Timer;
+                vec![Subscription::new(Timer::new(100)).map(|_| ())]
             }
         }
 
@@ -725,8 +725,8 @@ mod tests {
             fn view(&self, _frame: &mut Frame<'_>) {}
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
-                use crate::subscription::time::TimeSub;
-                vec![Subscription::new(TimeSub::new(100)).map(|_| ())]
+                use crate::subscription::time::Timer;
+                vec![Subscription::new(Timer::new(100)).map(|_| ())]
             }
         }
 
