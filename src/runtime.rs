@@ -12,7 +12,6 @@ use crate::{
 };
 
 /// Internal wrapper for the application instance.
-#[repr(transparent)]
 struct Instance<A: Application> {
     inner: A,
 }
