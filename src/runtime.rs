@@ -150,12 +150,15 @@ impl<A: Application> Runtime<A> {
                 while let Some(action) = stream.next().await {
                     match action {
                         Action::Message(msg) => {
-                            // Send message to the queue
-                            // NOTE: If the receiver is dropped, this will fail silently
+                            // NOTE: Send errors are silently ignored. The channel is closed only
+                            // when the Runtime is dropped, which means the application is shutting
+                            // down. In this case, dropping messages is the expected behavior.
+                            // This follows the same approach as iced and other Elm-like frameworks.
                             let _ = msg_tx.send(msg);
                         }
                         Action::Quit => {
-                            // Send quit signal
+                            // NOTE: Same reasoning as above. If the quit channel is closed,
+                            // the application is already shutting down.
                             let _ = quit_tx.send(());
                             break;
                         }
@@ -181,26 +184,6 @@ impl<A: Application> Runtime<A> {
             }
         }
 
-        // NOTE: Dynamic subscription updates are currently disabled due to the following issues:
-        //
-        // Problem 1: Infinite loop when updating subscriptions in message loop
-        // - If we call subscription_manager.update() inside the while loop for each message,
-        //   new messages can arrive from subscriptions during processing, causing an infinite loop.
-        //
-        // Problem 2: Blocking when updating after all messages are processed
-        // - If we call subscription_manager.update() after the while loop only when has_messages is true,
-        //   the screen doesn't update until the next message arrives.
-        // - This is because subscriptions() creates new Subscription instances every time,
-        //   and calling update() may interfere with the message flow.
-        //
-        // Current solution: Update subscriptions only at initialization (line 69-70 in run())
-        // - This works for applications with static subscriptions
-        // - But prevents dynamic subscription changes based on application state
-        //
-        // TODO: Implement proper subscription diffing to support dynamic subscriptions
-        // - Cache the previous subscription set and compare with new one
-        // - Only update when there's an actual difference
-
         false
     }
 
@@ -211,6 +194,16 @@ impl<A: Application> Runtime<A> {
 
     /// Initialize subscriptions from the application.
     fn initialize_subscriptions(&mut self) {
+        let subscriptions = self.app.inner.subscriptions();
+        self.subscription_manager.update(subscriptions);
+    }
+
+    /// Update subscriptions based on current application state.
+    ///
+    /// This method is called every frame to support dynamic subscriptions.
+    /// The SubscriptionManager will diff the new subscriptions against
+    /// the currently running ones and only start/stop changed subscriptions.
+    fn update_subscriptions(&mut self) {
         let subscriptions = self.app.inner.subscriptions();
         self.subscription_manager.update(subscriptions);
     }
@@ -308,6 +301,11 @@ impl<A: Application> Runtime<A> {
             if self.process_messages() {
                 break;
             }
+
+            // Update subscriptions based on current state (dynamic subscriptions)
+            // NOTE: This is called every frame. The SubscriptionManager efficiently
+            // diffs subscriptions and only starts/stops changed ones.
+            self.update_subscriptions();
 
             // Wait for next frame or quit signal (whichever comes first)
             tokio::select! {
