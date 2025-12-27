@@ -1,3 +1,48 @@
+//! Subscriptions for handling ongoing event sources.
+//!
+//! Subscriptions represent streams of events that your application can listen to,
+//! such as terminal input, timers, or any custom event source.
+//!
+//! # Built-in Subscriptions
+//!
+//! - [`terminal::TerminalEvents`] - Terminal input events (keyboard, mouse, resize)
+//! - [`time::Timer`] - Timer ticks at regular intervals
+//!
+//! # Creating Custom Subscriptions
+//!
+//! Implement the [`SubscriptionSource`] trait to create your own subscription types:
+//!
+//! ```
+//! use tears::subscription::{SubscriptionSource, SubscriptionId, Subscription};
+//! use futures::stream::{self, BoxStream};
+//! use futures::StreamExt;
+//! use std::hash::{Hash, Hasher};
+//!
+//! struct MySubscription {
+//!     id: u64,
+//! }
+//!
+//! impl SubscriptionSource for MySubscription {
+//!     type Output = String;
+//!
+//!     fn stream(&self) -> BoxStream<'static, Self::Output> {
+//!         stream::once(async { "Hello".to_string() }).boxed()
+//!     }
+//!
+//!     fn id(&self) -> SubscriptionId {
+//!         SubscriptionId::of::<Self>(self.id)
+//!     }
+//! }
+//!
+//! // Use it in your application
+//! enum Message {
+//!     MyEvent(String),
+//! }
+//!
+//! let sub = Subscription::new(MySubscription { id: 1 })
+//!     .map(Message::MyEvent);
+//! ```
+
 pub mod terminal;
 pub mod time;
 
@@ -223,12 +268,22 @@ struct RunningSubscription {
     handle: JoinHandle<()>,
 }
 
+/// Manages the lifecycle of active subscriptions.
+///
+/// This is used internally by the runtime to start, stop, and update subscriptions
+/// as the application state changes. You typically don't need to interact with this
+/// type directly.
 pub struct SubscriptionManager<Msg> {
     running: HashMap<SubscriptionId, RunningSubscription>,
     msg_sender: mpsc::UnboundedSender<Msg>,
 }
 
 impl<Msg: Send + 'static> SubscriptionManager<Msg> {
+    /// Create a new subscription manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_sender` - Channel sender for forwarding subscription messages
     pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
             running: HashMap::new(),
@@ -236,6 +291,16 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         }
     }
 
+    /// Update the set of active subscriptions.
+    ///
+    /// This method performs a diff between the current subscriptions and the new ones:
+    /// - Subscriptions that are no longer present will be cancelled
+    /// - New subscriptions will be started
+    /// - Subscriptions with the same ID will continue running
+    ///
+    /// # Arguments
+    ///
+    /// * `subscriptions` - The new set of subscriptions to run
     pub fn update<I>(&mut self, subscriptions: I)
     where
         I: IntoIterator<Item = Subscription<Msg>>,
@@ -281,6 +346,10 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         })
     }
 
+    /// Shut down all active subscriptions.
+    ///
+    /// This cancels all running subscription tasks. Called automatically
+    /// when the runtime shuts down.
     pub fn shutdown(&mut self) {
         for (_, running) in self.running.drain() {
             running.handle.abort();

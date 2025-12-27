@@ -1,3 +1,8 @@
+//! Terminal event subscription.
+//!
+//! This module provides the [`TerminalEvents`] subscription source for handling
+//! terminal input events using crossterm.
+
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crossterm::event::{Event, EventStream};
@@ -5,11 +10,43 @@ use futures::{StreamExt, stream::BoxStream};
 
 use super::{SubscriptionId, SubscriptionSource};
 
-/// A stream of terminal events using crossterm's EventStream.
+/// A subscription source for terminal events.
+///
+/// This provides a stream of terminal events such as keyboard input, mouse events,
+/// and window resize events using crossterm's `EventStream`.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use tears::subscription::{Subscription, terminal::TerminalEvents};
+/// use crossterm::event::{Event, KeyCode};
+///
+/// enum Message {
+///     Input(Event),
+/// }
+///
+/// // Create a subscription for terminal events
+/// let sub = Subscription::new(TerminalEvents::new())
+///     .map(Message::Input);
+/// ```
+///
+/// # Note
+///
+/// This is a singleton subscription - all instances are considered identical
+/// and only one terminal event stream will be active at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct TerminalEvents;
 
 impl TerminalEvents {
+    /// Create a new terminal events subscription.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tears::subscription::terminal::TerminalEvents;
+    ///
+    /// let events = TerminalEvents::new();
+    /// ```
     pub fn new() -> Self {
         Self
     }

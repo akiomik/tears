@@ -1,3 +1,8 @@
+//! Timer subscription for periodic events.
+//!
+//! This module provides the [`Timer`] subscription source for creating
+//! time-based events in your application.
+
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
@@ -7,18 +12,54 @@ use tokio::time::sleep;
 
 use super::{SubscriptionId, SubscriptionSource};
 
+/// Messages produced by the [`Timer`] subscription.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// A timer tick has occurred.
     Tick,
 }
 
-/// A timer that emits tick messages at regular intervals.
+/// A timer subscription that emits tick messages at regular intervals.
+///
+/// This is useful for creating animations, periodic updates, or any time-based
+/// behavior in your application.
+///
+/// # Example
+///
+/// ```rust
+/// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
+///
+/// enum AppMessage {
+///     Tick,
+/// }
+///
+/// // Create a timer that ticks every second (1000ms)
+/// let sub = Subscription::new(Timer::new(1000))
+///     .map(|_| AppMessage::Tick);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timer {
     interval_ms: u64,
 }
 
 impl Timer {
+    /// Create a new timer with the specified interval.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval_ms` - The interval between ticks in milliseconds
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tears::subscription::time::Timer;
+    ///
+    /// // Tick every second
+    /// let timer = Timer::new(1000);
+    ///
+    /// // Tick every 16ms (approximately 60 FPS)
+    /// let fast_timer = Timer::new(16);
+    /// ```
     pub fn new(interval_ms: u64) -> Self {
         Self { interval_ms }
     }

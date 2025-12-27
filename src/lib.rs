@@ -26,7 +26,7 @@
 //!
 //! ```rust,no_run
 //! use ratatui::Frame;
-//! use tears::{application::Application, command::Command, subscription::Subscription};
+//! use tears::prelude::*;
 //!
 //! #[derive(Debug)]
 //! enum Message {

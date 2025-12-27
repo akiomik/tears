@@ -1,3 +1,27 @@
+//! Commands for performing asynchronous side effects.
+//!
+//! Commands represent asynchronous operations that produce messages or actions.
+//! They are the primary way to perform side effects in the Elm Architecture,
+//! such as HTTP requests, file I/O, or any other async operation.
+//!
+//! # Examples
+//!
+//! ```
+//! use tears::prelude::*;
+//!
+//! enum Message {
+//!     DataLoaded(String),
+//! }
+//!
+//! async fn load_data() -> String {
+//!     // Perform async operation
+//!     "data".to_string()
+//! }
+//!
+//! // Create a command that performs an async operation
+//! let cmd = Command::perform(load_data(), Message::DataLoaded);
+//! ```
+
 use futures::{
     FutureExt, Stream, StreamExt,
     stream::{self, BoxStream, select_all},
@@ -36,7 +60,7 @@ pub enum Action<Msg> {
 /// # Examples
 ///
 /// ```
-/// use tears::command::Command;
+/// use tears::prelude::*;
 ///
 /// enum Message {
 ///     GotResult(i32),
@@ -60,7 +84,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     ///
     /// let cmd: Command<i32> = Command::none();
     /// ```
@@ -81,7 +105,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     ///
     /// async fn fetch_data() -> String {
     ///     "data".to_string()
@@ -108,7 +132,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     ///
     /// let cmd = Command::future(async { 42 });
     /// ```
@@ -126,7 +150,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::{Action, Command};
+    /// use tears::prelude::*;
     ///
     /// // Quit the application
     /// let cmd: Command<i32> = Command::effect(Action::Quit);
@@ -149,7 +173,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     ///
     /// enum Message {
     ///     First(i32),
@@ -182,7 +206,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     /// use futures::stream;
     ///
     /// let messages = stream::iter(vec![1, 2, 3]);
@@ -207,7 +231,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
-    /// use tears::command::Command;
+    /// use tears::prelude::*;
     /// use futures::stream;
     ///
     /// enum Message {

@@ -1,3 +1,8 @@
+//! Application trait and core types.
+//!
+//! This module contains the [`Application`] trait, which is the main interface
+//! for defining TUI applications using the Elm Architecture pattern.
+
 use ratatui::Frame;
 
 use crate::{command::Command, subscription::Subscription};
@@ -16,7 +21,7 @@ use crate::{command::Command, subscription::Subscription};
 ///
 /// ```
 /// use ratatui::Frame;
-/// use tears::{application::Application, command::Command, subscription::Subscription};
+/// use tears::prelude::*;
 ///
 /// #[derive(Debug, Clone)]
 /// enum Message {
@@ -80,9 +85,8 @@ pub trait Application: Sized {
     /// # Examples
     ///
     /// ```
-    /// # use tears::{application::Application, command::Command};
+    /// # use tears::prelude::*;
     /// # use ratatui::Frame;
-    /// # use tears::subscription::Subscription;
     /// # struct MyApp { initialized: bool }
     /// # #[derive(Clone)] enum Message { InitComplete }
     /// # impl Application for MyApp {
@@ -120,9 +124,8 @@ pub trait Application: Sized {
     /// # Examples
     ///
     /// ```
-    /// # use tears::{application::Application, command::{Command, Action}};
+    /// # use tears::prelude::*;
     /// # use ratatui::Frame;
-    /// # use tears::subscription::Subscription;
     /// # struct MyApp;
     /// # enum Message { Save, Quit }
     /// # impl Application for MyApp {
@@ -178,7 +181,7 @@ pub trait Application: Sized {
     /// # Examples
     ///
     /// ```
-    /// # use tears::{application::Application, command::Command, subscription::Subscription};
+    /// # use tears::prelude::*;
     /// # use ratatui::Frame;
     /// # struct MyApp;
     /// # enum Message { Tick, Input }

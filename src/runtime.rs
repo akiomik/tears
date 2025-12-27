@@ -1,3 +1,46 @@
+//! Runtime for executing TUI applications.
+//!
+//! The [`Runtime`] manages the application lifecycle, including:
+//! - Initializing the application
+//! - Running the event loop
+//! - Processing messages and commands
+//! - Managing subscriptions
+//! - Rendering the UI
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use tears::prelude::*;
+//! # use ratatui::Frame;
+//! # use std::io;
+//! # use crossterm::terminal;
+//! # use ratatui::prelude::CrosstermBackend;
+//! # struct MyApp;
+//! # enum Message {}
+//! # impl Application for MyApp {
+//! #     type Message = Message;
+//! #     type Flags = ();
+//! #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+//! #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
+//! #     fn view(&self, frame: &mut Frame<'_>) {}
+//! #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+//! # }
+//!
+//! #[tokio::main]
+//! async fn main() -> color_eyre::eyre::Result<()> {
+//!     let runtime = Runtime::<MyApp>::new(());
+//!
+//!     terminal::enable_raw_mode()?;
+//!     let backend = CrosstermBackend::new(io::stdout());
+//!     let mut terminal = ratatui::Terminal::new(backend)?;
+//!
+//!     runtime.run(&mut terminal, 60).await?;
+//!
+//!     terminal::disable_raw_mode()?;
+//!     Ok(())
+//! }
+//! ```
+
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
@@ -33,7 +76,7 @@ struct Instance<A: Application> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tears::{application::Application, command::Command, runtime::Runtime, subscription::Subscription};
+/// use tears::prelude::*;
 /// use ratatui::Frame;
 /// use std::io;
 /// use crossterm::terminal;
@@ -97,8 +140,7 @@ impl<A: Application> Runtime<A> {
     /// # Examples
     ///
     /// ```
-    /// use tears::runtime::Runtime;
-    /// # use tears::{application::Application, command::Command, subscription::Subscription};
+    /// use tears::prelude::*;
     /// # use ratatui::Frame;
     /// # struct MyApp;
     /// # enum Message {}
@@ -247,7 +289,7 @@ impl<A: Application> Runtime<A> {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # use tears::{application::Application, command::Command, runtime::Runtime, subscription::Subscription};
+    /// # use tears::prelude::*;
     /// # use ratatui::Frame;
     /// # use std::io;
     /// # use crossterm::terminal;
