@@ -38,7 +38,7 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 
 # Enforce important correctness lints
-unwrap_used = "allow"
+unwrap_used = "warn"
 expect_used = "allow"
 panic = "allow"
 

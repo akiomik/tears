@@ -713,31 +713,35 @@ mod tests {
     }
 
     #[test]
-    fn test_render() {
+    fn test_render() -> Result<()> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let runtime = Runtime::<TestApp>::new(0);
         let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = Terminal::new(backend)?;
 
         // Should render without error
         assert!(runtime.render(&mut terminal).is_ok());
+
+        Ok(())
     }
 
     #[test]
-    fn test_render_multiple_times() {
+    fn test_render_multiple_times() -> Result<()> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let runtime = Runtime::<TestApp>::new(0);
         let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = Terminal::new(backend)?;
 
         // Should be able to render multiple times
         assert!(runtime.render(&mut terminal).is_ok());
         assert!(runtime.render(&mut terminal).is_ok());
         assert!(runtime.render(&mut terminal).is_ok());
+
+        Ok(())
     }
 
     #[test]

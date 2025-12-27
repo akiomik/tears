@@ -364,6 +364,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use color_eyre::eyre::Result;
     use futures::stream;
     use tokio::time::{Duration, sleep, timeout};
 
@@ -463,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_update() {
+    async fn test_subscription_manager_update() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
@@ -476,15 +477,17 @@ mod tests {
         manager.update(vec![sub]);
 
         // Should receive messages from the subscription
-        let msg1 = timeout(Duration::from_millis(100), rx.recv()).await;
-        assert_eq!(msg1.unwrap(), Some(10));
+        let msg1 = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg1, Some(10));
 
-        let msg2 = timeout(Duration::from_millis(100), rx.recv()).await;
-        assert_eq!(msg2.unwrap(), Some(20));
+        let msg2 = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg2, Some(20));
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_remove_subscription() {
+    async fn test_subscription_manager_remove_subscription() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
@@ -498,8 +501,8 @@ mod tests {
         manager.update(vec![sub]);
 
         // Receive first message
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
-        assert_eq!(msg.unwrap(), Some(10));
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(10));
 
         // Remove subscription by updating with empty list
         manager.update(Vec::<Subscription<i32>>::new());
@@ -509,10 +512,12 @@ mod tests {
 
         // Channel should be empty now (or closed)
         assert!(rx.try_recv().is_err());
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_replace_subscription() {
+    async fn test_subscription_manager_replace_subscription() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
@@ -524,8 +529,8 @@ mod tests {
         let sub1 = Subscription::new(test_sub1);
         manager.update(vec![sub1]);
 
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
-        assert_eq!(msg.unwrap(), Some(10));
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(10));
 
         // Replace with different subscription
         let test_sub2 = TestSource {
@@ -535,8 +540,10 @@ mod tests {
         let sub2 = Subscription::new(test_sub2);
         manager.update(vec![sub2]);
 
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await;
-        assert_eq!(msg.unwrap(), Some(20));
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(20));
+
+        Ok(())
     }
 
     #[tokio::test]

@@ -1,8 +1,6 @@
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-
 // Integration tests for dynamic subscriptions
 
+use color_eyre::eyre::Result;
 use ratatui::{Frame, Terminal, backend::TestBackend};
 use tears::{
     application::Application,
@@ -13,7 +11,7 @@ use tears::{
 use tokio::time::{Duration, timeout};
 
 #[tokio::test]
-async fn test_dynamic_subscription_starts_when_enabled() {
+async fn test_dynamic_subscription_starts_when_enabled() -> Result<()> {
     // Test that subscription starts when enabled
     struct AppWithEnabledTimer {
         tick_count: u32,
@@ -45,17 +43,18 @@ async fn test_dynamic_subscription_starts_when_enabled() {
     }
 
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<AppWithEnabledTimer>::new(());
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().is_ok());
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_dynamic_subscription_stops_when_disabled() {
+async fn test_dynamic_subscription_stops_when_disabled() -> Result<()> {
     // Test that subscription stops when disabled
     struct AppWithToggle {
         enabled: bool,
@@ -114,17 +113,18 @@ async fn test_dynamic_subscription_stops_when_disabled() {
     }
 
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<AppWithToggle>::new(());
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().is_ok());
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_dynamic_subscription_changes_based_on_state() {
+async fn test_dynamic_subscription_changes_based_on_state() -> Result<()> {
     // Test subscription changes when app state changes
     struct StatefulApp {
         mode: u32,
@@ -180,17 +180,18 @@ async fn test_dynamic_subscription_changes_based_on_state() {
     }
 
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<StatefulApp>::new(());
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().is_ok());
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_dynamic_subscription_multiple_changes() {
+async fn test_dynamic_subscription_multiple_changes() -> Result<()> {
     // Test multiple subscription add/remove cycles
     struct MultiChangeApp {
         cycle: u32,
@@ -245,11 +246,12 @@ async fn test_dynamic_subscription_multiple_changes() {
     }
 
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<MultiChangeApp>::new(());
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().is_ok());
+
+    Ok(())
 }

@@ -1,10 +1,8 @@
-#![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-
 // Integration tests for Runtime::run
 // These tests verify end-to-end scenarios.
 // Unit tests for individual methods are in src/runtime.rs
 
+use color_eyre::eyre::Result;
 use ratatui::{Frame, Terminal, backend::TestBackend};
 use tears::{
     application::Application,
@@ -99,21 +97,22 @@ impl Application for SubApp {
 }
 
 #[tokio::test]
-async fn test_runtime_run_end_to_end_basic() {
+async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<CounterApp>::new(0); // Quit immediately
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
-    assert!(result.is_ok(), "Runtime should complete");
-    assert!(result.unwrap().is_ok(), "Runtime should not error");
+    assert!(result.is_ok(), "Runtime should not error");
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_runtime_run_end_to_end_with_commands() {
+async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
     // End-to-end: Message processing from commands
     struct MessageApp {
         received: Vec<String>,
@@ -149,26 +148,28 @@ async fn test_runtime_run_end_to_end_with_commands() {
     }
 
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<MessageApp>::new(());
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
     assert!(result.is_ok());
-    assert!(result.unwrap().is_ok());
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_runtime_run_end_to_end_with_subscriptions() {
+async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     // End-to-end: Subscription message processing
     let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)?;
 
     let runtime = Runtime::<SubApp>::new(());
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
 
-    assert!(result.is_ok(), "Runtime should complete with subscriptions");
-    assert!(result.unwrap().is_ok());
+    assert!(result.is_ok());
+
+    Ok(())
 }
