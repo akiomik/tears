@@ -4,12 +4,7 @@
 
 use color_eyre::eyre::Result;
 use ratatui::{Frame, Terminal, backend::TestBackend};
-use tears::{
-    application::Application,
-    command::{Action, Command},
-    runtime::Runtime,
-    subscription::Subscription,
-};
+use tears::prelude::*;
 use tokio::time::{Duration, timeout};
 
 // Helper: Simple counter app

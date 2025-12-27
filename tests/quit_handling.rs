@@ -2,12 +2,7 @@ use color_eyre::eyre::Result;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use tears::{
-    application::Application,
-    command::{Action, Command},
-    runtime::Runtime,
-    subscription::Subscription,
-};
+use tears::prelude::*;
 use tokio::time::{Duration, Instant, sleep, timeout};
 
 // Test application that sends quit from init command
