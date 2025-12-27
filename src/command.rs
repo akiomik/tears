@@ -89,7 +89,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd: Command<i32> = Command::none();
     /// ```
     #[must_use]
-    pub fn none() -> Self {
+    pub const fn none() -> Self {
         Self { stream: None }
     }
 
