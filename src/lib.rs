@@ -17,10 +17,10 @@
 //!
 //! ## Core Components
 //!
-//! - [`Application`](application::Application): The main trait that defines your application
-//! - [`Runtime`](runtime::Runtime): Manages the application lifecycle and event loop
-//! - [`Command`](command::Command): Represents asynchronous side effects
-//! - [`Subscription`](subscription::Subscription): Represents ongoing event sources
+//! - [`application::Application`]: The main trait that defines your application
+//! - [`runtime::Runtime`]: Manages the application lifecycle and event loop
+//! - [`command::Command`]: Represents asynchronous side effects
+//! - [`subscription::Subscription`]: Represents ongoing event sources
 //!
 //! ## Example
 //!
@@ -74,3 +74,10 @@ pub mod command;
 pub mod prelude;
 pub mod runtime;
 pub mod subscription;
+
+// Re-export the most commonly used types at the crate root
+// This allows users to import them directly: `use tears::Application;`
+pub use application::Application;
+pub use command::{Action, Command};
+pub use runtime::Runtime;
+pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};

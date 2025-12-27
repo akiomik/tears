@@ -38,8 +38,7 @@ use ratatui::prelude::CrosstermBackend;
 use ratatui::text::Text;
 use ratatui::{Frame, Terminal};
 use tears::prelude::*;
-use tears::subscription::terminal::TerminalEvents;
-use tears::subscription::time::{Message as TimerMessage, Timer};
+use tears::subscription::{terminal::TerminalEvents, time::{Message as TimerMessage, Timer}};
 
 #[derive(Debug, Clone)]
 enum Message {
