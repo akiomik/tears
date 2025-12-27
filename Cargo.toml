@@ -30,9 +30,16 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 
 [lints.clippy]
-# Pedantic lints for high code quality
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+
+# Allow some cargo lints
+multiple_crate_versions = "allow"
 
 # Allow some pedantic lints that are too strict for a library
 module_name_repetitions = "allow"
