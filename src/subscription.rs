@@ -2,6 +2,7 @@ pub mod terminal;
 pub mod time;
 
 use std::{
+    any::TypeId,
     collections::{HashMap, HashSet},
     hash::Hash,
 };
@@ -141,7 +142,7 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 ///         // Create a unique ID based on the subscription's configuration
 ///         let mut hasher = std::collections::hash_map::DefaultHasher::new();
 ///         self.interval_ms.hash(&mut hasher);
-///         SubscriptionId::from_hash(hasher.finish())
+///         SubscriptionId::of::<Self>(hasher.finish())
 ///     }
 /// }
 /// ```
@@ -166,15 +167,55 @@ pub trait SubscriptionSource: Send {
 /// Subscription IDs are used to track and manage active subscriptions.
 /// Two subscriptions with the same ID are considered identical, and
 /// the runtime will not create duplicate subscriptions.
+///
+/// The ID includes both type information and a hash value to prevent
+/// collisions between different subscription types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SubscriptionId(u64);
+pub struct SubscriptionId {
+    type_id: TypeId,
+    hash: u64,
+}
 
 impl SubscriptionId {
-    /// Create a subscription ID from a hash value.
+    /// Create a subscription ID from a type and a hash value.
+    ///
+    /// This ensures that subscriptions of different types cannot collide
+    /// even if they have the same hash value.
     ///
     /// This is typically used when implementing [`SubscriptionSource::id`].
-    pub fn from_hash(hash: u64) -> Self {
-        Self(hash)
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The type of the subscription source, typically `Self`
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - A hash value representing the subscription's configuration
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::subscription::SubscriptionId;
+    /// use std::hash::{Hash, Hasher};
+    /// use std::collections::hash_map::DefaultHasher;
+    ///
+    /// struct MySubscription {
+    ///     interval_ms: u64,
+    /// }
+    ///
+    /// impl MySubscription {
+    ///     fn compute_id(&self) -> SubscriptionId {
+    ///         let mut hasher = DefaultHasher::new();
+    ///         self.interval_ms.hash(&mut hasher);
+    ///         SubscriptionId::of::<Self>(hasher.finish())
+    ///     }
+    /// }
+    /// ```
+    pub fn of<T: 'static>(hash: u64) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            hash,
+        }
     }
 }
 
@@ -267,7 +308,7 @@ mod tests {
         }
 
         fn id(&self) -> SubscriptionId {
-            SubscriptionId::from_hash(self.id)
+            SubscriptionId::of::<Self>(self.id)
         }
     }
 
@@ -279,7 +320,7 @@ mod tests {
         };
         let sub = Subscription::new(test_sub);
 
-        assert_eq!(sub.id, SubscriptionId::from_hash(1));
+        assert_eq!(sub.id, SubscriptionId::of::<TestSub>(1));
     }
 
     #[tokio::test]
@@ -327,25 +368,37 @@ mod tests {
     }
 
     #[test]
-    fn test_subscription_id_from_hash() {
-        let id1 = SubscriptionId::from_hash(12345);
-        let id2 = SubscriptionId::from_hash(12345);
-        let id3 = SubscriptionId::from_hash(67890);
+    fn test_subscription_id_of() {
+        let id1 = SubscriptionId::of::<i32>(12345);
+        let id2 = SubscriptionId::of::<i32>(12345);
+        let id3 = SubscriptionId::of::<i32>(67890);
 
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
     }
 
     #[test]
+    fn test_subscription_id_different_types() {
+        // Same hash value but different types should produce different IDs
+        let id_i32 = SubscriptionId::of::<i32>(12345);
+        let id_u64 = SubscriptionId::of::<u64>(12345);
+        let id_string = SubscriptionId::of::<String>(12345);
+
+        assert_ne!(id_i32, id_u64);
+        assert_ne!(id_i32, id_string);
+        assert_ne!(id_u64, id_string);
+    }
+
+    #[test]
     fn test_subscription_id_debug() {
-        let id = SubscriptionId::from_hash(12345);
+        let id = SubscriptionId::of::<i32>(12345);
         let debug_str = format!("{:?}", id);
         assert!(debug_str.contains("SubscriptionId"));
     }
 
     #[test]
     fn test_subscription_id_clone() {
-        let id1 = SubscriptionId::from_hash(12345);
+        let id1 = SubscriptionId::of::<i32>(12345);
         let id2 = id1.clone();
         assert_eq!(id1, id2);
     }
@@ -446,7 +499,7 @@ mod tests {
             }
 
             fn id(&self) -> SubscriptionId {
-                SubscriptionId::from_hash(999)
+                SubscriptionId::of::<Self>(999)
             }
         }
 
