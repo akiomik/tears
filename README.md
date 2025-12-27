@@ -5,6 +5,7 @@
 [![CI](https://github.com/akiomik/tears/workflows/CI/badge.svg)](https://github.com/akiomik/tears/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/tears.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.85.0%2B-blue.svg)](https://www.rust-lang.org)
+[![codecov](https://codecov.io/gh/akiomik/tears/graph/badge.svg?token=QF9SO8I0AM)](https://codecov.io/gh/akiomik/tears)
 
 A simple and elegant framework for building TUI applications using **The Elm Architecture (TEA)**.
 
