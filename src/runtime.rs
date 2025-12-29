@@ -173,11 +173,20 @@ impl<A: Application> Runtime<A> {
     }
 
     /// Enqueue a command to be executed asynchronously.
-    /// The command's actions will be sent to the message queue.
+    ///
+    /// Commands are spawned as separate tokio tasks that will execute concurrently
+    /// with the main event loop. Actions produced by the command stream are sent
+    /// back to the runtime via channels:
+    /// - `Action::Message` values are sent to the message queue for processing
+    /// - `Action::Quit` signals are sent to the quit channel to terminate the loop
+    ///
+    /// The spawned task will run on the tokio runtime and complete independently
+    /// of the main event loop timing.
     fn enqueue_command(&self, cmd: Command<A::Message>) {
         if let Some(stream) = cmd.stream {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
+
             tokio::spawn(async move {
                 futures::pin_mut!(stream);
                 while let Some(action) = stream.next().await {
@@ -201,26 +210,29 @@ impl<A: Application> Runtime<A> {
         }
     }
 
-    /// Process all pending messages and check for quit signal.
+    /// Process all pending messages in the message queue.
     ///
-    /// Returns `true` if the application should quit.
-    fn process_messages(&mut self) -> bool {
+    /// This method processes messages synchronously by:
+    /// 1. Draining all pending messages from the message queue using `try_recv`
+    /// 2. Calling [`Application::update`] for each message
+    /// 3. Enqueuing any returned commands for asynchronous execution
+    ///
+    /// Commands returned by `update` are spawned as async tasks but are not
+    /// guaranteed to execute before this method returns. The runtime yields
+    /// control after calling this method to allow spawned tasks to run.
+    fn process_messages(&mut self) {
         while let Ok(msg) = self.msg_rx.try_recv() {
             let cmd = self.app.inner.update(msg);
 
             // Enqueue the command for asynchronous execution
             self.enqueue_command(cmd);
-
-            // Check quit immediately after each message to reduce quit latency
-            if self.check_quit() {
-                return true;
-            }
         }
-
-        false
     }
 
     /// Check if a quit signal has been received.
+    ///
+    /// Returns `true` if at least one quit signal is in the queue.
+    /// This uses `try_recv` for non-blocking check, consuming one signal if present.
     fn check_quit(&mut self) -> bool {
         self.quit_rx.try_recv().is_ok()
     }
@@ -266,9 +278,24 @@ impl<A: Application> Runtime<A> {
     ///
     /// 1. Renders the UI by calling [`Application::view`]
     /// 2. Processes all pending messages by calling [`Application::update`]
-    /// 3. Executes any commands returned by the update function
+    /// 3. Yields control to the async runtime to execute spawned command tasks
     /// 4. Checks if a quit signal has been received
-    /// 5. Waits for the next frame based on the frame rate
+    /// 5. Updates subscriptions based on current application state
+    /// 6. Waits for the next frame or quit signal (whichever comes first)
+    ///
+    /// ## Command Execution Model
+    ///
+    /// Commands returned by [`Application::update`] are executed asynchronously
+    /// as separate tokio tasks. The runtime yields control after processing messages
+    /// (using [`tokio::task::yield_now`]) to ensure that these command tasks have
+    /// an opportunity to execute before the next quit check. This design guarantees
+    /// that quit commands are processed promptly without blocking on frame timing.
+    ///
+    /// This behavior is similar to how Elm's runtime processes commands in the
+    /// JavaScript event loop - commands are scheduled to execute "soon" but not
+    /// necessarily synchronously with the update that produced them.
+    ///
+    /// ## Termination
     ///
     /// The event loop terminates when:
     /// - A command returns [`Action::Quit`]
@@ -338,8 +365,15 @@ impl<A: Application> Runtime<A> {
         loop {
             self.render(terminal)?;
 
-            // Process messages and check for immediate quit
-            if self.process_messages() {
+            // Process all pending messages
+            self.process_messages();
+
+            // Yield to allow spawned quit tasks to execute
+            // This ensures quit signals from commands are processed promptly
+            tokio::task::yield_now().await;
+
+            // Check quit after yielding
+            if self.check_quit() {
                 break;
             }
 
@@ -605,8 +639,11 @@ mod tests {
     async fn test_process_messages_no_messages() {
         let mut runtime = Runtime::<TestApp>::new(0);
 
-        // No messages, should return false
-        assert!(!runtime.process_messages());
+        // No messages, should just return without doing anything
+        runtime.process_messages();
+
+        // Counter should remain unchanged
+        assert_eq!(runtime.app.inner.counter, 0);
     }
 
     #[tokio::test]
@@ -617,7 +654,7 @@ mod tests {
         let _ = runtime.msg_tx.send(TestMessage::Increment);
 
         // Process messages
-        assert!(!runtime.process_messages());
+        runtime.process_messages();
 
         // Counter should be incremented
         assert_eq!(runtime.app.inner.counter, 1);
@@ -631,7 +668,7 @@ mod tests {
         let _ = runtime.msg_tx.send(TestMessage::Quit);
 
         // Process messages - this will enqueue the quit command
-        assert!(!runtime.process_messages());
+        runtime.process_messages();
 
         // Give time for the async command to send quit signal
         sleep(Duration::from_millis(50)).await;
@@ -650,14 +687,14 @@ mod tests {
         let _ = runtime.msg_tx.send(TestMessage::Increment);
 
         // Process all messages
-        assert!(!runtime.process_messages());
+        runtime.process_messages();
 
         // Counter should be incremented 3 times
         assert_eq!(runtime.app.inner.counter, 3);
     }
 
     #[tokio::test]
-    async fn test_process_messages_quit_stops_processing() {
+    async fn test_process_messages_processes_all_messages() {
         let mut runtime = Runtime::<TestApp>::new(0);
 
         // Manually send quit signal first
@@ -667,11 +704,14 @@ mod tests {
         let _ = runtime.msg_tx.send(TestMessage::Increment);
         let _ = runtime.msg_tx.send(TestMessage::Increment);
 
-        // Process messages - should process first increment, then detect quit
-        assert!(runtime.process_messages());
+        // Process messages - should process all messages regardless of quit signal
+        runtime.process_messages();
 
-        // Only first increment should be processed (quit detected after first message)
-        assert_eq!(runtime.app.inner.counter, 1);
+        // Both increments should be processed (quit doesn't stop message processing)
+        assert_eq!(runtime.app.inner.counter, 2);
+
+        // Quit signal should still be available
+        assert!(runtime.check_quit());
     }
 
     #[tokio::test]
