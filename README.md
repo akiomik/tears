@@ -141,7 +141,11 @@ impl Application for Counter {
 
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![
-            Subscription::new(Timer::new(1000)).map(|_| Message::Tick),
+            Subscription::new(Timer::new(1000)).map(|timer_msg| {
+                match timer_msg {
+                    TimerMessage::Tick => Message::Tick,
+                }
+            }),
             Subscription::new(TerminalEvents::new()).map(|result| match result {
                 Ok(event) => Message::Input(event),
                 Err(e) => Message::InputError(e.to_string()),
@@ -205,11 +209,13 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 Check out the [`examples/`](examples/) directory for more examples:
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
+- [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
 
 Run an example:
 
 ```bash
 cargo run --example counter
+cargo run --example views
 ```
 
 ## Design Philosophy
