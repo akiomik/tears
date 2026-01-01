@@ -204,18 +204,30 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 - **Subscriptions**: External event sources (keyboard, timers, network, etc.)
 - **Commands**: Asynchronous side effects that produce messages
 
+### Built-in Subscriptions
+
+Tears provides several built-in subscription sources:
+
+- **Terminal Events** (`subscription::terminal::TerminalEvents`): Keyboard, mouse, and window resize events
+- **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
+- **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
+
+You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
+
 ## Examples
 
 Check out the [`examples/`](examples/) directory for more examples:
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
+- [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
 
 Run an example:
 
 ```bash
 cargo run --example counter
 cargo run --example views
+cargo run --example signals
 ```
 
 ## Design Philosophy
