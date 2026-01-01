@@ -354,6 +354,8 @@ fn render_list(frame: &mut Frame, items: &[String], selected: usize) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    color_eyre::install()?;
+
     let runtime = Runtime::<App>::new(());
 
     // Setup terminal

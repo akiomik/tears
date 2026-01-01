@@ -94,6 +94,8 @@ impl Application for Counter {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    color_eyre::install()?;
+
     let runtime = Runtime::<Counter>::new(());
 
     // Setup terminal
