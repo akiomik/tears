@@ -295,26 +295,22 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     #[cfg(unix)]
-    println!("Starting signal handling example (Unix)");
-    #[cfg(unix)]
-    println!("PID: {}", process::id());
-    #[cfg(unix)]
-    println!("You can test signals from another terminal:");
-    #[cfg(unix)]
-    println!("  kill -INT {}  (same as Ctrl+C)", process::id());
-    #[cfg(unix)]
-    println!("  kill -TERM {}", process::id());
-    #[cfg(unix)]
-    println!("  kill -HUP {}", process::id());
-    #[cfg(unix)]
-    println!();
+    {
+        println!("Starting signal handling example (Unix)");
+        println!("PID: {}", process::id());
+        println!("You can test signals from another terminal:");
+        println!("  kill -INT {}  (same as Ctrl+C)", process::id());
+        println!("  kill -TERM {}", process::id());
+        println!("  kill -HUP {}", process::id());
+        println!();
+    }
 
     #[cfg(windows)]
-    println!("Starting signal handling example (Windows)");
-    #[cfg(windows)]
-    println!("Try pressing Ctrl+C or Ctrl+Break");
-    #[cfg(windows)]
-    println!();
+    {
+        println!("Starting signal handling example (Windows)");
+        println!("Try pressing Ctrl+C or Ctrl+Break");
+        println!();
+    }
 
     let runtime = Runtime::<App>::new(());
 
