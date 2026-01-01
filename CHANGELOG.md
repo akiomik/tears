@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Signal subscription support for handling OS signals
+  - Unix: `signal::Signal` for SIGINT, SIGTERM, SIGHUP, SIGQUIT, and 20+ other signals
+  - Windows: `signal::CtrlC` and `signal::CtrlBreak` for Ctrl+C and Ctrl+Break events
+  - Uses `tokio::signal` types directly (no unnecessary wrappers)
+  - Returns `Result<(), io::Error>` for proper error handling
+  - Example: `examples/signals.rs` demonstrating signal handling with graceful shutdown
+
 ## v0.1.0
 
 ### Added

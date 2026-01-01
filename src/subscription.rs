@@ -7,6 +7,9 @@
 //!
 //! - [`terminal::TerminalEvents`] - Terminal input events (keyboard, mouse, resize)
 //! - [`time::Timer`] - Timer ticks at regular intervals
+//! - [`signal::Signal`] (Unix) - Unix signals (SIGINT, SIGTERM, etc.)
+//! - `signal::CtrlC` (Windows) - Ctrl+C events
+//! - `signal::CtrlBreak` (Windows) - Ctrl+Break events
 //!
 //! # Creating Custom Subscriptions
 //!
@@ -43,6 +46,7 @@
 //!     .map(Message::MyEvent);
 //! ```
 
+pub mod signal;
 pub mod terminal;
 pub mod time;
 
