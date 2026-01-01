@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-01-01
+
 ### Added
 
 - Signal subscription support for handling OS signals
@@ -16,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Returns `Result<(), io::Error>` for proper error handling
   - Example: `examples/signals.rs` demonstrating signal handling with graceful shutdown
 
-## v0.1.0
+### Fixed
+
+- Downgraded `crossterm` from 0.29 to 0.28 to match `ratatui`'s dependency requirements
+
+## [0.1.0] - 2025-12-30
 
 ### Added
 
