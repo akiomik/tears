@@ -241,6 +241,7 @@ Tears provides several built-in subscription sources:
 - **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
 - **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
 - **WebSocket** (`subscription::websocket::WebSocket`, requires `ws` feature): Real-time WebSocket connections for bi-directional communication
+- **MockSource** (`subscription::mock::MockSource`): Controllable mock for testing
 
 You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
 
