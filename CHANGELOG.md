@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed signal subscriptions emitting spurious events on initialization, causing `ignore_initial()` grace period to not work correctly
+
 ## [0.2.0] - 2026-01-02
 
 ### Added

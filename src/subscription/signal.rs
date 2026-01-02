@@ -174,28 +174,19 @@ mod unix_signal {
             // If it fails, try_unfold yields a single error and ends the stream
             // If it succeeds, it yields Ok(()) for each signal received
             stream::try_unfold(None, move |state: Option<TokioSignal>| async move {
-                match state {
-                    None => {
-                        // First call: initialize the signal handler
-                        let sig = signal(kind)?;
-                        Ok(Some(((), Some(sig))))
-                    }
-                    Some(mut sig) => {
-                        // Subsequent calls: wait for signals
-                        loop {
-                            match sig.recv().await {
-                                Some(()) => {
-                                    // Check if we're still in the grace period
-                                    if start_time.elapsed() < grace_period {
-                                        // Ignore this signal and continue waiting
-                                        continue;
-                                    }
-                                    // Grace period has passed (or is zero), emit the signal
-                                    return Ok(Some(((), Some(sig))));
-                                }
-                                None => return Ok(None), // End the stream
-                            }
-                        }
+                let mut sig = match state {
+                    // First call: initialize the signal handler
+                    None => signal(kind)?,
+                    Some(sig) => sig,
+                };
+
+                // Wait for signals
+                loop {
+                    match sig.recv().await {
+                        // Check if we're still in the grace period
+                        Some(()) if start_time.elapsed() < grace_period => {} // Ignore this signal and continue waiting
+                        Some(()) => return Ok(Some(((), Some(sig)))), // Grace period has passed (or is zero), emit the signal
+                        None => return Ok(None),                      // End the stream
                     }
                 }
             })
@@ -427,28 +418,19 @@ mod windows_signal {
             // If it fails, try_unfold yields a single error and ends the stream
             // If it succeeds, it yields Ok(()) for each event received
             stream::try_unfold(None, move |state: Option<TokioCtrlC>| async move {
-                match state {
-                    None => {
-                        // First call: initialize the signal handler
-                        let sig = ctrl_c()?;
-                        Ok(Some(((), Some(sig))))
-                    }
-                    Some(mut sig) => {
-                        // Subsequent calls: wait for signals
-                        loop {
-                            match sig.recv().await {
-                                Some(()) => {
-                                    // Check if we're still in the grace period
-                                    if start_time.elapsed() < grace_period {
-                                        // Ignore this signal and continue waiting
-                                        continue;
-                                    }
-                                    // Grace period has passed (or is zero), emit the signal
-                                    return Ok(Some(((), Some(sig))));
-                                }
-                                None => return Ok(None), // End the stream
-                            }
-                        }
+                let mut sig = match state {
+                    // First call: initialize the signal handler
+                    None => ctrl_c()?,
+                    Some(sig) => sig,
+                };
+
+                // Wait for signals
+                loop {
+                    match sig.recv().await {
+                        // Check if we're still in the grace period
+                        Some(()) if start_time.elapsed() < grace_period => {} // Ignore this signal and continue waiting
+                        Some(()) => return Ok(Some(((), Some(sig)))), // Grace period has passed (or is zero), emit the signal
+                        None => return Ok(None),                      // End the stream
                     }
                 }
             })
@@ -572,28 +554,19 @@ mod windows_signal {
             // If it fails, try_unfold yields a single error and ends the stream
             // If it succeeds, it yields Ok(()) for each event received
             stream::try_unfold(None, move |state: Option<TokioCtrlBreak>| async move {
-                match state {
-                    None => {
-                        // First call: initialize the signal handler
-                        let sig = ctrl_break()?;
-                        Ok(Some(((), Some(sig))))
-                    }
-                    Some(mut sig) => {
-                        // Subsequent calls: wait for signals
-                        loop {
-                            match sig.recv().await {
-                                Some(()) => {
-                                    // Check if we're still in the grace period
-                                    if start_time.elapsed() < grace_period {
-                                        // Ignore this signal and continue waiting
-                                        continue;
-                                    }
-                                    // Grace period has passed (or is zero), emit the signal
-                                    return Ok(Some(((), Some(sig))));
-                                }
-                                None => return Ok(None), // End the stream
-                            }
-                        }
+                let mut sig = match state {
+                    // First call: initialize the signal handler
+                    None => ctrl_break()?,
+                    Some(sig) => sig,
+                };
+
+                // Wait for signals
+                loop {
+                    match sig.recv().await {
+                        // Check if we're still in the grace period
+                        Some(()) if start_time.elapsed() < grace_period => {} // Ignore this signal and continue waiting
+                        Some(()) => return Ok(Some(((), Some(sig)))), // Grace period has passed (or is zero), emit the signal
+                        None => return Ok(None),                      // End the stream
                     }
                 }
             })
