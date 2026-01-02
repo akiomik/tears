@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Improved `Timer` subscription performance and accuracy
+  - Migrated from `tokio::time::sleep` to `tokio::time::interval` for better timing accuracy
+  - Uses `MissedTickBehavior::Skip` to maintain consistent tick rate (drops missed ticks instead of catching up)
+  - Provides drift correction for high frame rates (60+ FPS)
+  - Added `tokio-stream` dependency for interval stream support
+
 ## [0.3.0] - 2026-01-02
 
 ### Fixed
