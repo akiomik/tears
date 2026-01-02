@@ -42,7 +42,8 @@ use std::time::Duration;
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::sync::mpsc;
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
     application::Application,
@@ -360,6 +361,12 @@ impl<A: Application> Runtime<A> {
     ) -> Result<()> {
         let frame_duration = Duration::from_millis(1000 / u64::from(frame_rate));
 
+        // Use interval instead of sleep for more accurate frame timing with drift correction
+        let mut frame_interval = interval(frame_duration);
+        // Skip missed frames rather than trying to catch up
+        // This maintains consistent frame rate even if rendering takes longer than expected
+        frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         self.initialize_subscriptions();
 
         loop {
@@ -384,7 +391,7 @@ impl<A: Application> Runtime<A> {
 
             // Wait for next frame or quit signal (whichever comes first)
             tokio::select! {
-                () = sleep(frame_duration) => {
+                _ = frame_interval.tick() => {
                     // Continue to next frame
                 }
                 _ = self.quit_rx.recv() => {

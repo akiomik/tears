@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Uses `MissedTickBehavior::Skip` to maintain consistent tick rate (drops missed ticks instead of catching up)
   - Provides drift correction for high frame rates (60+ FPS)
   - Added `tokio-stream` dependency for interval stream support
+- Improved `Runtime` frame timing accuracy
+  - Migrated from `tokio::time::sleep` to `tokio::time::interval` for consistent frame rate
+  - Uses `MissedTickBehavior::Skip` to skip missed frames when rendering takes longer than frame duration
+  - Provides more accurate and stable FPS delivery
 
 ## [0.3.0] - 2026-01-02
 
