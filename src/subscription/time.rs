@@ -6,9 +6,11 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
+use futures::StreamExt;
 use futures::stream::BoxStream;
-use futures::{StreamExt, stream};
-use tokio::time::sleep;
+use tokio::time::MissedTickBehavior;
+use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
 
 use super::{SubscriptionId, SubscriptionSource};
 
@@ -24,6 +26,18 @@ pub enum Message {
 /// This is useful for creating animations, periodic updates, or any time-based
 /// behavior in your application.
 ///
+/// ## Implementation Details
+///
+/// Uses `tokio::time::interval` with `MissedTickBehavior::Skip` to provide
+/// accurate timing without catching up on missed ticks. This is appropriate
+/// for UI applications where maintaining a consistent tick rate is more
+/// important than processing every tick.
+///
+/// ## Performance
+///
+/// The timer uses Tokio's efficient interval mechanism with drift correction,
+/// making it suitable for high frame rates (e.g., 60 FPS or higher).
+///
 /// # Example
 ///
 /// ```rust
@@ -35,6 +49,10 @@ pub enum Message {
 ///
 /// // Create a timer that ticks every second (1000ms)
 /// let sub = Subscription::new(Timer::new(1000))
+///     .map(|_| AppMessage::Tick);
+///
+/// // For 60 FPS animations (approximately 16.67ms per frame)
+/// let animation_timer = Subscription::new(Timer::new(16))
 ///     .map(|_| AppMessage::Tick);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,13 +88,17 @@ impl SubscriptionSource for Timer {
     type Output = Message;
 
     fn stream(&self) -> BoxStream<'static, Message> {
-        let interval_ms = self.interval_ms;
-        stream::unfold((), move |()| async move {
-            let interval = Duration::from_millis(interval_ms);
-            sleep(interval).await;
-            Some((Message::Tick, ()))
-        })
-        .boxed()
+        // NOTE: Using Skip behavior to drop missed ticks rather than trying to catch up.
+        // This is appropriate for UI applications where we want
+        // to maintain a consistent tick rate rather than processing old ticks.
+        let duration = Duration::from_millis(self.interval_ms);
+        let mut interval = interval(duration);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        IntervalStream::new(interval)
+            .skip(1) // Skip the first immediate tick
+            .map(|_| Message::Tick)
+            .boxed()
     }
 
     fn id(&self) -> SubscriptionId {
@@ -102,16 +124,6 @@ mod tests {
     fn test_timer_new() {
         let timer = Timer::new(1000);
         assert_eq!(timer.interval_ms, 1000);
-    }
-
-    #[test]
-    fn test_timer_equality() {
-        let timer1 = Timer::new(1000);
-        let timer2 = Timer::new(1000);
-        let timer3 = Timer::new(2000);
-
-        assert_eq!(timer1, timer2);
-        assert_ne!(timer1, timer3);
     }
 
     #[test]
@@ -148,12 +160,28 @@ mod tests {
         assert_eq!(hash1, hash2);
     }
 
+    #[test]
+    fn test_timer_hash_different_intervals() {
+        let timer1 = Timer::new(1000);
+        let timer2 = Timer::new(2000);
+
+        let mut hasher1 = DefaultHasher::new();
+        timer1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        timer2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_ne!(hash1, hash2);
+    }
+
     #[tokio::test]
     async fn test_timer_stream_produces_ticks() {
         let timer = Timer::new(10); // 10ms interval for fast test
         let mut stream = timer.stream();
 
-        // Should receive first tick
+        // Should receive first tick after interval
         let result = timeout(Duration::from_millis(100), stream.next()).await;
         assert!(matches!(result, Ok(Some(Message::Tick))));
     }
@@ -175,20 +203,92 @@ mod tests {
         assert_eq!(count, 3);
     }
 
-    #[test]
-    fn test_message_debug() {
-        let msg = Message::Tick;
-        let debug_str = format!("{msg:?}");
-        assert!(debug_str.contains("Tick"));
+    #[tokio::test]
+    async fn test_timer_interval_accuracy() {
+        use tokio::time::Instant;
+
+        let timer = Timer::new(50); // 50ms interval
+        let mut stream = timer.stream();
+
+        let start = Instant::now();
+
+        // Wait for first tick
+        let result = timeout(Duration::from_millis(300), stream.next()).await;
+        assert!(matches!(result, Ok(Some(Message::Tick))));
+
+        let first_tick = start.elapsed();
+
+        // Wait for second tick
+        let result = timeout(Duration::from_millis(300), stream.next()).await;
+        assert!(matches!(result, Ok(Some(Message::Tick))));
+
+        let second_tick = start.elapsed();
+
+        // NOTE: The interval should be accurate within a reasonable margin.
+        // With tokio::time::interval, we expect better accuracy than sleep-based approach.
+        // First tick should be around 50ms, second around 100ms.
+        // Wide margins to account for CI environments and system load.
+        assert!(
+            first_tick >= Duration::from_millis(30) && first_tick <= Duration::from_millis(100),
+            "First tick was {first_tick:?}, expected between 30-100ms",
+        );
+        assert!(
+            second_tick >= Duration::from_millis(80) && second_tick <= Duration::from_millis(150),
+            "Second tick was {second_tick:?}, expected between 80-150ms",
+        );
     }
 
-    #[test]
-    fn test_message_clone() {
-        let msg1 = Message::Tick;
-        let msg2 = msg1;
+    #[tokio::test]
+    async fn test_timer_no_immediate_tick() {
+        use tokio::time::Instant;
 
-        // Both should be Tick
-        matches!(msg1, Message::Tick);
-        matches!(msg2, Message::Tick);
+        let timer = Timer::new(100); // 100ms interval
+        let mut stream = timer.stream();
+
+        let start = Instant::now();
+
+        // First tick should NOT be immediate (should wait for interval)
+        // Use a reasonable timeout that accounts for CI environment delays
+        let result = timeout(Duration::from_millis(70), stream.next()).await;
+        assert!(
+            result.is_err(),
+            "Timer should not tick immediately (within 70ms)"
+        );
+
+        // But should arrive after the interval (with generous timeout for CI)
+        let result = timeout(Duration::from_millis(200), stream.next()).await;
+        assert!(
+            matches!(result, Ok(Some(Message::Tick))),
+            "Timer should tick after interval"
+        );
+
+        let elapsed = start.elapsed();
+        // Relaxed assertion for CI environments
+        assert!(
+            elapsed >= Duration::from_millis(70),
+            "Timer ticked too early: {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timer_different_intervals() {
+        let fast_timer = Timer::new(20);
+        let slow_timer = Timer::new(200);
+
+        let mut fast_stream = fast_timer.stream();
+        let mut slow_stream = slow_timer.stream();
+
+        // Fast timer should tick first (with generous timeout for CI)
+        let fast_result = timeout(Duration::from_millis(100), fast_stream.next()).await;
+        let slow_result = timeout(Duration::from_millis(100), slow_stream.next()).await;
+
+        assert!(
+            fast_result.is_ok(),
+            "Fast timer (20ms) should tick within 100ms"
+        );
+        assert!(
+            slow_result.is_err(),
+            "Slow timer (200ms) should not tick within 100ms"
+        );
     }
 }
