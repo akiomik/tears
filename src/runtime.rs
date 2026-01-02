@@ -52,8 +52,8 @@ use crate::{
 };
 
 /// Internal wrapper for the application instance.
-struct Instance<A: Application> {
-    inner: A,
+struct Instance<App: Application> {
+    inner: App,
 }
 
 /// The runtime manages the application lifecycle and event loop.
@@ -68,7 +68,7 @@ struct Instance<A: Application> {
 ///
 /// # Type Parameters
 ///
-/// * `A` - The application type that implements the [`Application`] trait
+/// * `App` - The application type that implements the [`Application`] trait
 ///
 /// # Example
 ///
@@ -103,16 +103,16 @@ struct Instance<A: Application> {
 ///     Ok(())
 /// }
 /// ```
-pub struct Runtime<A: Application> {
-    app: Instance<A>,
-    msg_tx: mpsc::UnboundedSender<A::Message>,
-    msg_rx: mpsc::UnboundedReceiver<A::Message>,
+pub struct Runtime<App: Application> {
+    app: Instance<App>,
+    msg_tx: mpsc::UnboundedSender<App::Message>,
+    msg_rx: mpsc::UnboundedReceiver<App::Message>,
     quit_tx: mpsc::UnboundedSender<()>,
     quit_rx: mpsc::UnboundedReceiver<()>,
-    subscription_manager: SubscriptionManager<A::Message>,
+    subscription_manager: SubscriptionManager<App::Message>,
 }
 
-impl<A: Application> Runtime<A> {
+impl<App: Application> Runtime<App> {
     /// Create a new runtime instance with the given flags.
     ///
     /// This method:
@@ -149,13 +149,13 @@ impl<A: Application> Runtime<A> {
     /// let runtime = Runtime::<MyApp>::new(42);
     /// ```
     #[must_use]
-    pub fn new(flags: A::Flags) -> Self {
+    pub fn new(flags: App::Flags) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
         let subscription_manager = SubscriptionManager::new(msg_tx.clone());
 
         // Initialize the application with flags
-        let (app, init_cmd) = A::new(flags);
+        let (app, init_cmd) = App::new(flags);
         let instance = Instance { inner: app };
 
         let runtime = Self {
@@ -183,7 +183,7 @@ impl<A: Application> Runtime<A> {
     ///
     /// The spawned task will run on the tokio runtime and complete independently
     /// of the main event loop timing.
-    fn enqueue_command(&self, cmd: Command<A::Message>) {
+    fn enqueue_command(&self, cmd: Command<App::Message>) {
         if let Some(stream) = cmd.stream {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
