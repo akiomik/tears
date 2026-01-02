@@ -213,7 +213,6 @@ Tears provides several built-in subscription sources:
 - **Terminal Events** (`subscription::terminal::TerminalEvents`): Keyboard, mouse, and window resize events
 - **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
 - **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
-  - Includes `ignore_initial()` method to filter spurious signals during TUI initialization
 
 You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
 

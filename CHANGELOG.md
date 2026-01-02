@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fixed signal subscriptions emitting spurious events on initialization, causing `ignore_initial()` grace period to not work correctly
+- Fixed signal subscriptions emitting spurious events on initialization
+
+### Removed
+
+- **BREAKING**: Removed `ignore_initial()` method from signal subscriptions (`Signal`, `CtrlC`, `CtrlBreak`) as it is no longer needed after fixing the spurious event bug
 
 ## [0.2.0] - 2026-01-02
 
