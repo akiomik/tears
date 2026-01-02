@@ -32,6 +32,33 @@ crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 ```
 
+### Optional Features
+
+Tears provides optional features that can be enabled in your `Cargo.toml`:
+
+#### WebSocket Support
+
+To enable WebSocket subscriptions, add the `ws` feature:
+
+```toml
+[dependencies]
+tears = { version = "0.4", features = ["ws"] }
+```
+
+For secure WebSocket connections (wss://), you also need to enable a TLS backend:
+
+```toml
+[dependencies]
+# Using native TLS (recommended for most cases)
+tears = { version = "0.4", features = ["ws", "native-tls"] }
+
+# Or using rustls with ring crypto provider (pure Rust implementation)
+tears = { version = "0.4", features = ["ws", "rustls"] }
+
+# Or using rustls with webpki roots
+tears = { version = "0.4", features = ["ws", "rustls-tls-webpki-roots"] }
+```
+
 ## Getting Started
 
 ### Minimal Example
@@ -213,6 +240,7 @@ Tears provides several built-in subscription sources:
 - **Terminal Events** (`subscription::terminal::TerminalEvents`): Keyboard, mouse, and window resize events
 - **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
 - **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
+- **WebSocket** (`subscription::websocket::WebSocket`, requires `ws` feature): Real-time WebSocket connections for bi-directional communication
 
 You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
 
@@ -223,6 +251,7 @@ Check out the [`examples/`](examples/) directory for more examples:
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
+- [`websocket.rs`](examples/websocket.rs) - WebSocket echo chat demonstrating real-time communication (requires `ws` feature)
 
 Run an example:
 
@@ -230,6 +259,7 @@ Run an example:
 cargo run --example counter
 cargo run --example views
 cargo run --example signals
+cargo run --example websocket --features ws,rustls
 ```
 
 ## Design Philosophy

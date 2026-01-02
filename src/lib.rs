@@ -64,6 +64,26 @@
 //! }
 //! ```
 //!
+//! ## Optional Features
+//!
+//! Tears provides optional features that can be enabled in your `Cargo.toml`:
+//!
+//! ### WebSocket Support
+//!
+//! - **`ws`**: Enables WebSocket subscription support via `subscription::websocket::WebSocket`
+//!
+//! Requires one of the following TLS features for secure connections (`wss://`):
+//! - **`native-tls`**: Uses the platform's native TLS implementation
+//! - **`rustls`**: Uses rustls with ring crypto provider and native root certificates
+//! - **`rustls-tls-webpki-roots`**: Uses rustls with ring crypto provider and webpki root certificates
+//!
+//! Example:
+//!
+//! ```toml
+//! [dependencies]
+//! tears = { version = "0.4", features = ["ws", "native-tls"] }
+//! ```
+//!
 //! ## Design Inspiration
 //!
 //! This framework is inspired by [iced](https://github.com/iced-rs/iced) 0.12,
