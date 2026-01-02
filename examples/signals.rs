@@ -176,40 +176,33 @@ impl Application for App {
         // Platform-specific signal subscriptions
         #[cfg(unix)]
         {
-            use std::time::Duration;
             use tears::subscription::signal::Signal;
             use tokio::signal::unix::SignalKind;
 
-            // Use ignore_initial() to filter out spurious signals during TUI initialization
-            let grace_period = Duration::from_millis(500);
-
             subs.push(
-                Subscription::new(
-                    Signal::new(SignalKind::interrupt()).ignore_initial(grace_period),
-                )
-                .map(|result| match result {
-                    Ok(()) => Message::SignalInterrupt,
-                    Err(e) => Message::SignalError(e),
-                }),
-            );
-
-            subs.push(
-                Subscription::new(
-                    Signal::new(SignalKind::terminate()).ignore_initial(grace_period),
-                )
-                .map(|result| match result {
-                    Ok(()) => Message::SignalTerminate,
-                    Err(e) => Message::SignalError(e),
-                }),
-            );
-
-            subs.push(
-                Subscription::new(Signal::new(SignalKind::hangup()).ignore_initial(grace_period))
-                    .map(|result| match result {
-                        Ok(()) => Message::SignalHangup,
+                Subscription::new(Signal::new(SignalKind::interrupt())).map(
+                    |result| match result {
+                        Ok(()) => Message::SignalInterrupt,
                         Err(e) => Message::SignalError(e),
-                    }),
+                    },
+                ),
             );
+
+            subs.push(
+                Subscription::new(Signal::new(SignalKind::terminate())).map(
+                    |result| match result {
+                        Ok(()) => Message::SignalTerminate,
+                        Err(e) => Message::SignalError(e),
+                    },
+                ),
+            );
+
+            subs.push(Subscription::new(Signal::new(SignalKind::hangup())).map(
+                |result| match result {
+                    Ok(()) => Message::SignalHangup,
+                    Err(e) => Message::SignalError(e),
+                },
+            ));
         }
 
         #[cfg(windows)]
