@@ -15,9 +15,9 @@
 //! - Send SIGTERM from another terminal: `kill -TERM <pid>`
 //! - Press 'q' to quit normally
 
+use std::io;
 #[cfg(unix)]
 use std::process;
-use std::{io, time::Instant};
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -56,7 +56,6 @@ enum Message {
 struct App {
     should_quit: bool,
     signal_log: Vec<String>,
-    start_time: std::time::Instant,
 }
 
 impl Application for App {
@@ -68,7 +67,6 @@ impl Application for App {
             Self {
                 should_quit: false,
                 signal_log: vec!["Application started".to_string()],
-                start_time: Instant::now(),
             },
             Command::none(),
         )
@@ -105,23 +103,13 @@ impl Application for App {
             }
             #[cfg(unix)]
             Message::SignalInterrupt => {
-                // Ignore signals received in the first 500ms (likely spurious)
-                if self.start_time.elapsed().as_millis() < 500 {
-                    self.signal_log.push("Ignoring early SIGINT".to_string());
-                } else {
-                    self.signal_log.push("Received SIGINT (Ctrl+C)".to_string());
-                    self.should_quit = true;
-                }
+                self.signal_log.push("Received SIGINT".to_string());
+                self.should_quit = true;
             }
             #[cfg(unix)]
             Message::SignalTerminate => {
-                // Ignore signals received in the first 500ms (likely spurious)
-                if self.start_time.elapsed().as_millis() < 500 {
-                    self.signal_log.push("Ignoring early SIGTERM".to_string());
-                } else {
-                    self.signal_log.push("Received SIGTERM".to_string());
-                    self.should_quit = true;
-                }
+                self.signal_log.push("Received SIGTERM".to_string());
+                self.should_quit = true;
             }
             #[cfg(unix)]
             Message::SignalHangup => {
@@ -188,33 +176,40 @@ impl Application for App {
         // Platform-specific signal subscriptions
         #[cfg(unix)]
         {
+            use std::time::Duration;
             use tears::subscription::signal::Signal;
             use tokio::signal::unix::SignalKind;
 
-            subs.push(
-                Subscription::new(Signal::new(SignalKind::interrupt())).map(
-                    |result| match result {
-                        Ok(()) => Message::SignalInterrupt,
-                        Err(e) => Message::SignalError(e),
-                    },
-                ),
-            );
+            // Use ignore_initial() to filter out spurious signals during TUI initialization
+            let grace_period = Duration::from_millis(500);
 
             subs.push(
-                Subscription::new(Signal::new(SignalKind::terminate())).map(
-                    |result| match result {
-                        Ok(()) => Message::SignalTerminate,
-                        Err(e) => Message::SignalError(e),
-                    },
-                ),
-            );
-
-            subs.push(Subscription::new(Signal::new(SignalKind::hangup())).map(
-                |result| match result {
-                    Ok(()) => Message::SignalHangup,
+                Subscription::new(
+                    Signal::new(SignalKind::interrupt()).ignore_initial(grace_period),
+                )
+                .map(|result| match result {
+                    Ok(()) => Message::SignalInterrupt,
                     Err(e) => Message::SignalError(e),
-                },
-            ));
+                }),
+            );
+
+            subs.push(
+                Subscription::new(
+                    Signal::new(SignalKind::terminate()).ignore_initial(grace_period),
+                )
+                .map(|result| match result {
+                    Ok(()) => Message::SignalTerminate,
+                    Err(e) => Message::SignalError(e),
+                }),
+            );
+
+            subs.push(
+                Subscription::new(Signal::new(SignalKind::hangup()).ignore_initial(grace_period))
+                    .map(|result| match result {
+                        Ok(()) => Message::SignalHangup,
+                        Err(e) => Message::SignalError(e),
+                    }),
+            );
         }
 
         #[cfg(windows)]
