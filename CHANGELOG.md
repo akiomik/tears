@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- WebSocket subscription support for real-time bi-directional communication
+  - New `subscription::websocket::WebSocket` subscription source (requires `ws` feature)
+  - Supports both secure (wss://) and insecure (ws://) connections
+  - TLS backend options:
+    - `native-tls` - Platform's native TLS implementation
+    - `rustls` - Pure Rust TLS with ring crypto provider and native root certificates
+    - `rustls-tls-webpki-roots` - Pure Rust TLS with ring crypto provider and webpki root certificates
+  - Automatic connection management and reconnection handling
+  - Streams all WebSocket message types (Text, Binary, Ping, Pong, Close)
+  - Example: `examples/websocket.rs` demonstrating WebSocket echo chat
+  - Comprehensive documentation with usage examples and TLS configuration guide
+
 ## [0.4.0] - 2026-01-03
 
 ### Changed

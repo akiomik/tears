@@ -10,6 +10,15 @@
 //! - [`signal::Signal`] (Unix) - Unix signals (SIGINT, SIGTERM, etc.)
 //! - `signal::CtrlC` (Windows) - Ctrl+C events
 //! - `signal::CtrlBreak` (Windows) - Ctrl+Break events
+#![cfg_attr(
+    feature = "ws",
+    doc = "- [`websocket::WebSocket`] - WebSocket connections (requires `ws` feature)"
+)]
+#![cfg_attr(
+    not(feature = "ws"),
+    doc = "- `websocket::WebSocket` - WebSocket connections (requires `ws` feature)"
+)]
+//!
 //!
 //! # Creating Custom Subscriptions
 //!
@@ -49,6 +58,8 @@
 pub mod signal;
 pub mod terminal;
 pub mod time;
+#[cfg(feature = "ws")]
+pub mod websocket;
 
 use std::{
     any::TypeId,

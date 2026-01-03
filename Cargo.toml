@@ -21,14 +21,28 @@ exclude = [
     "Cargo.lock",
 ]
 
+[features]
+default = []
+
+ws = ["tokio-tungstenite/connect", "tokio-tungstenite/handshake"]
+native-tls = ["tokio-tungstenite?/native-tls"]
+rustls = ["dep:rustls", "tokio-tungstenite?/rustls-tls-native-roots"]
+rustls-tls-webpki-roots = ["dep:rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
+
 [dependencies]
 color-eyre = "0.6"
 crossterm = { version = "0.28", features = ["serde", "event-stream"] }
 futures = "0.3"
 ratatui = { version = "0.29", features = ["serde", "macros"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.28", default-features = false, optional = true }
 tokio-util = "0.7"
+
+[[example]]
+name = "websocket"
+required-features = ["ws", "rustls"]
 
 [lints.clippy]
 cargo = { level = "warn", priority = -1 }
