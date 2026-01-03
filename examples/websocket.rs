@@ -18,8 +18,12 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tears::{
     prelude::*,
-    subscription::{terminal::TerminalEvents, websocket::WebSocket},
+    subscription::{
+        terminal::TerminalEvents,
+        websocket::{WebSocket, WebSocketCommand, WebSocketMessage},
+    },
 };
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Messages that the application can receive
@@ -29,19 +33,30 @@ pub enum Msg {
     Terminal(Event),
     /// Terminal event stream error
     TerminalError(io::Error),
-    /// WebSocket message (text, binary, or control frames)
-    WebSocketMessage(Message),
+    /// WebSocket message from subscription
+    WebSocket(WebSocketMessage),
     /// Quit the application
     Quit,
 }
 
 /// Application state for the WebSocket echo chat
-#[derive(Default)]
 pub struct EchoChat {
     /// Current input text being typed by the user
     input: String,
     /// History of sent and received messages
     messages: Vec<String>,
+    /// WebSocket command sender for sending messages
+    ws_sender: Option<mpsc::UnboundedSender<WebSocketCommand>>,
+}
+
+impl Default for EchoChat {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            messages: vec!["Connecting to WebSocket...".to_string()],
+            ws_sender: None,
+        }
+    }
 }
 
 impl EchoChat {
@@ -69,16 +84,23 @@ impl EchoChat {
         }
 
         let text = self.input.clone();
-        self.messages.push(format!("Sent: {text}"));
         self.input.clear();
 
-        // Send the message through WebSocket
-        // Note: This is a demonstration. In a real application, you would send
-        // the message through the WebSocket connection, not via a Command.
-        Command::perform(
-            async move { Message::Text(text.into()) },
-            Msg::WebSocketMessage,
-        )
+        // Send the message through WebSocket if connected
+        if let Some(sender) = &self.ws_sender {
+            if sender
+                .send(WebSocketCommand::SendText(text.clone()))
+                .is_ok()
+            {
+                self.messages.push(format!("Sent: {text}"));
+            } else {
+                self.messages.push("Failed to send message".to_string());
+            }
+        } else {
+            self.messages.push("Not connected to WebSocket".to_string());
+        }
+
+        Command::none()
     }
 
     /// Determine the style for a message based on its prefix
@@ -117,20 +139,33 @@ impl Application for EchoChat {
                 Command::none()
             }
             // Handle WebSocket messages
-            Msg::WebSocketMessage(msg) => {
-                match msg {
-                    Message::Text(text) => {
-                        self.messages.push(format!("Received: {text}"));
+            Msg::WebSocket(ws_msg) => {
+                match ws_msg {
+                    WebSocketMessage::Connected { sender } => {
+                        self.ws_sender = Some(sender);
+                        self.messages.push("Connected to WebSocket!".to_string());
                     }
-                    Message::Binary(data) => {
+                    WebSocketMessage::Disconnected => {
                         self.messages
-                            .push(format!("Received binary: {} bytes", data.len()));
+                            .push("Disconnected from WebSocket".to_string());
+                        self.ws_sender = None;
                     }
-                    Message::Close(_) => {
-                        self.messages.push("Connection closed".to_string());
+                    WebSocketMessage::Received(msg) => {
+                        match msg {
+                            Message::Text(text) => {
+                                self.messages.push(format!("Received: {text}"));
+                            }
+                            Message::Binary(data) => {
+                                self.messages
+                                    .push(format!("Received binary: {} bytes", data.len()));
+                            }
+                            // Ping/Pong frames (usually handled automatically by tungstenite)
+                            _ => {}
+                        }
                     }
-                    // Ignore Ping/Pong and other control frames
-                    _ => {}
+                    WebSocketMessage::Error { error } => {
+                        self.messages.push(format!("Error: {error}"));
+                    }
                 }
                 Command::none()
             }
@@ -161,9 +196,8 @@ impl Application for EchoChat {
                 Ok(event) => Msg::Terminal(event),
                 Err(e) => Msg::TerminalError(e),
             }),
-            // WebSocket connection to echo server
-            Subscription::new(WebSocket::new("wss://echo.websocket.org"))
-                .map(Msg::WebSocketMessage),
+            // WebSocket connection (always active)
+            Subscription::new(WebSocket::new("wss://echo.websocket.org")).map(Msg::WebSocket),
         ]
     }
 }

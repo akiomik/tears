@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: WebSocket subscription now supports bidirectional communication
+  - Added `WebSocketCommand` enum for sending messages (`SendText`, `SendBinary`, `Close`)
+  - Added `WebSocketMessage` enum for subscription output (`Connected`, `Disconnected`, `Received`, `Error`)
+  - `WebSocket` subscription now emits `WebSocketMessage` instead of raw `Message`
+  - `WebSocketMessage::Connected` provides command sender when successfully connected
+  - `WebSocketMessage::Disconnected` is emitted on normal connection closure
+  - `Message::Close` frames are handled internally and result in `Disconnected` event
+  - Single WebSocket connection handles both receiving and sending
+  - Updated `examples/websocket.rs` to demonstrate bidirectional communication
+
 ## [0.4.1] - 2026-01-04
 
 ### Added
