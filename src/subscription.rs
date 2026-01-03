@@ -10,6 +10,7 @@
 //! - [`signal::Signal`] (Unix) - Unix signals (SIGINT, SIGTERM, etc.)
 //! - `signal::CtrlC` (Windows) - Ctrl+C events
 //! - `signal::CtrlBreak` (Windows) - Ctrl+Break events
+//! - [`mock::MockSource`] - Controllable mock for testing
 #![cfg_attr(
     feature = "ws",
     doc = "- [`websocket::WebSocket`] - WebSocket connections (requires `ws` feature)"
@@ -54,7 +55,37 @@
 //! let sub = Subscription::new(MySubscription { id: 1 })
 //!     .map(Message::MyEvent);
 //! ```
+//!
+//! # Testing
+//!
+//! Use [`mock::MockSource`] for deterministic testing without real I/O:
+//!
+//! ```no_run
+//! use tears::subscription::mock::MockSource;
+//! use tears::subscription::Subscription;
+//! use futures::StreamExt;
+//!
+//! #[tokio::test]
+//! async fn test_example() {
+//!     // Create a controllable mock
+//!     let mock = MockSource::<i32>::new();
+//!
+//!     // Create a subscription and spawn its stream (creates a receiver)
+//!     let subscription = Subscription::new(mock.clone());
+//!     let mut stream = (subscription.spawn)();
+//!
+//!     // Control events from your test
+//!     mock.emit(42).expect("should emit");
+//!
+//!     // Receive the value
+//!     let value = stream.next().await;
+//!     assert_eq!(value, Some(42));
+//! }
+//! ```
+//!
+//! See the [`mock`] module documentation for complete testing examples.
 
+pub mod mock;
 pub mod signal;
 pub mod terminal;
 pub mod time;
@@ -379,81 +410,79 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subscription::mock::MockSource;
     use color_eyre::eyre::Result;
-    use futures::stream;
     use tokio::time::{Duration, sleep, timeout};
-
-    // Test helper: Simple subscription implementation
-    struct TestSource {
-        id: u64,
-        values: Vec<i32>,
-    }
-
-    impl SubscriptionSource for TestSource {
-        type Output = i32;
-
-        fn stream(&self) -> BoxStream<'static, Self::Output> {
-            stream::iter(self.values.clone()).boxed()
-        }
-
-        fn id(&self) -> SubscriptionId {
-            SubscriptionId::of::<Self>(self.id)
-        }
-    }
 
     #[test]
     fn test_subscription_new() {
-        let test_sub = TestSource {
-            id: 1,
-            values: vec![1, 2, 3],
-        };
-        let sub = Subscription::new(test_sub);
+        use crate::subscription::mock::MockSource;
 
-        assert_eq!(sub.id, SubscriptionId::of::<TestSource>(1));
+        let mock = MockSource::<i32>::new();
+        let sub = Subscription::new(mock);
+
+        // Should have correct ID type
+        assert_eq!(sub.id.type_id, TypeId::of::<MockSource<i32>>());
     }
 
     #[tokio::test]
-    async fn test_subscription_map() {
-        let test_sub = TestSource {
-            id: 1,
-            values: vec![1, 2, 3],
-        };
-        let sub = Subscription::new(test_sub).map(|x| x * 2);
+    async fn test_subscription_map() -> Result<()> {
+        use crate::subscription::mock::MockSource;
+
+        let mock = MockSource::new();
+        let sub = Subscription::new(mock.clone()).map(|x: i32| x * 2);
 
         let mut stream = (sub.spawn)();
-        let mut results = vec![];
 
-        while let Some(value) = stream.next().await {
-            results.push(value);
+        // Emit values
+        mock.emit(1)?;
+        mock.emit(2)?;
+        mock.emit(3)?;
+
+        // Collect mapped values
+        let mut results = vec![];
+        for _ in 0..3 {
+            if let Some(value) = stream.next().await {
+                results.push(value);
+            }
         }
 
         assert_eq!(results, vec![2, 4, 6]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subscription_map_type_conversion() {
+    async fn test_subscription_map_type_conversion() -> Result<()> {
+        use crate::subscription::mock::MockSource;
+
         #[derive(Debug, PartialEq)]
         enum Message {
             Number(i32),
         }
 
-        let test_sub = TestSource {
-            id: 1,
-            values: vec![1, 2, 3],
-        };
-        let sub = Subscription::new(test_sub).map(Message::Number);
+        let mock = MockSource::new();
+        let sub = Subscription::new(mock.clone()).map(Message::Number);
 
         let mut stream = (sub.spawn)();
-        let mut results = vec![];
 
-        while let Some(value) = stream.next().await {
-            results.push(value);
+        // Emit values
+        mock.emit(1)?;
+        mock.emit(2)?;
+        mock.emit(3)?;
+
+        // Collect mapped values
+        let mut results = vec![];
+        for _ in 0..3 {
+            if let Some(value) = stream.next().await {
+                results.push(value);
+            }
         }
 
         assert_eq!(
             results,
             vec![Message::Number(1), Message::Number(2), Message::Number(3)]
         );
+        Ok(())
     }
 
     #[test]
@@ -479,17 +508,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_update() -> Result<()> {
+    async fn test_subscription_manager_basic_update() -> Result<()> {
+        use crate::subscription::mock::MockSource;
+
+        // Test basic subscription update functionality
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
-        let test_sub = TestSource {
-            id: 1,
-            values: vec![10, 20],
-        };
-        let sub = Subscription::new(test_sub);
+        let mock = MockSource::new();
+        let sub = Subscription::new(mock.clone());
 
         manager.update(vec![sub]);
+        sleep(Duration::from_millis(10)).await;
+
+        // Emit values
+        mock.emit(10)?;
+        mock.emit(20)?;
 
         // Should receive messages from the subscription
         let msg1 = timeout(Duration::from_millis(100), rx.recv()).await?;
@@ -502,67 +536,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_remove_subscription() -> Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(tx);
-
-        let test_sub = TestSource {
-            id: 1,
-            values: vec![10],
-        };
-        let sub = Subscription::new(test_sub);
-
-        // Add subscription
-        manager.update(vec![sub]);
-
-        // Receive first message
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
-        assert_eq!(msg, Some(10));
-
-        // Remove subscription by updating with empty list
-        manager.update(Vec::<Subscription<i32>>::new());
-
-        // Give time for any pending messages
-        sleep(Duration::from_millis(50)).await;
-
-        // Channel should be empty now (or closed)
-        assert!(rx.try_recv().is_err());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_subscription_manager_replace_subscription() -> Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(tx);
-
-        // First subscription
-        let test_sub1 = TestSource {
-            id: 1,
-            values: vec![10],
-        };
-        let sub1 = Subscription::new(test_sub1);
-        manager.update(vec![sub1]);
-
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
-        assert_eq!(msg, Some(10));
-
-        // Replace with different subscription
-        let test_sub2 = TestSource {
-            id: 2,
-            values: vec![20],
-        };
-        let sub2 = Subscription::new(test_sub2);
-        manager.update(vec![sub2]);
-
-        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
-        assert_eq!(msg, Some(20));
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_subscription_manager_shutdown() {
+        use futures::stream;
+
         // Create a long-running subscription
         struct InfiniteSub;
         impl SubscriptionSource for InfiniteSub {
@@ -601,23 +577,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_multiple_subscriptions() {
+    async fn test_subscription_manager_multiple_subscriptions() -> Result<()> {
+        use crate::subscription::mock::MockSource;
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
-        let test_sub1 = TestSource {
-            id: 1,
-            values: vec![1],
-        };
-        let test_sub2 = TestSource {
-            id: 2,
-            values: vec![2],
-        };
+        let mock1 = MockSource::new();
+        let mock2 = MockSource::new();
 
         manager.update(vec![
-            Subscription::new(test_sub1),
-            Subscription::new(test_sub2),
+            Subscription::new(mock1.clone()),
+            Subscription::new(mock2.clone()),
         ]);
+        sleep(Duration::from_millis(10)).await;
+
+        // Emit from both subscriptions
+        mock1.emit(1)?;
+        mock2.emit(2)?;
 
         // Should receive messages from both subscriptions
         let mut results = vec![];
@@ -629,5 +606,137 @@ mod tests {
 
         results.sort_unstable();
         assert_eq!(results, vec![1, 2]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_subscription_starts_when_enabled() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let mock = MockSource::new();
+
+        // Initially no subscriptions
+        manager.update(Vec::<Subscription<i32>>::new());
+        sleep(Duration::from_millis(10)).await;
+
+        // Enable subscription
+        manager.update(vec![Subscription::new(mock.clone())]);
+        sleep(Duration::from_millis(10)).await;
+
+        // Emit event
+        mock.emit(42)?;
+
+        // Should receive the event
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(42));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_subscription_stops_when_disabled() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let mock = MockSource::new();
+
+        // Start with subscription enabled
+        manager.update(vec![Subscription::new(mock.clone())]);
+        sleep(Duration::from_millis(10)).await;
+
+        // Emit event - should be received
+        mock.emit(1)?;
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(1));
+
+        // Disable subscription
+        manager.update(Vec::<Subscription<i32>>::new());
+        sleep(Duration::from_millis(10)).await;
+
+        // Emit event - should NOT be received
+        let _ = mock.emit(2); // May fail if no receivers
+        sleep(Duration::from_millis(10)).await;
+
+        // Channel should be empty
+        assert!(rx.try_recv().is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_subscription_changes_based_on_state() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let mock1 = MockSource::new();
+        let mock2 = MockSource::new();
+
+        // Start with subscription 1
+        manager.update(vec![Subscription::new(mock1.clone())]);
+        sleep(Duration::from_millis(10)).await;
+
+        mock1.emit(100)?;
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(100));
+
+        // Switch to subscription 2
+        manager.update(vec![Subscription::new(mock2.clone())]);
+        sleep(Duration::from_millis(10)).await;
+
+        // mock1 should no longer work (no receivers)
+        let _ = mock1.emit(200);
+
+        // mock2 should work
+        mock2.emit(300)?;
+        let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(msg, Some(300));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_subscription_multiple_changes() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        let mock = MockSource::new();
+
+        // Enable
+        manager.update(vec![Subscription::new(mock.clone())]);
+        sleep(Duration::from_millis(10)).await;
+        mock.emit(1)?;
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(1)
+        );
+
+        // Disable
+        manager.update(Vec::<Subscription<i32>>::new());
+        sleep(Duration::from_millis(10)).await;
+
+        // Re-enable
+        manager.update(vec![Subscription::new(mock.clone())]);
+        sleep(Duration::from_millis(10)).await;
+        mock.emit(2)?;
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(2)
+        );
+
+        // Disable again
+        manager.update(Vec::<Subscription<i32>>::new());
+        sleep(Duration::from_millis(10)).await;
+
+        // Re-enable again
+        manager.update(vec![Subscription::new(mock.clone())]);
+        sleep(Duration::from_millis(10)).await;
+        mock.emit(3)?;
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(3)
+        );
+
+        Ok(())
     }
 }
