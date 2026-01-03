@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mock subscription source for deterministic testing
+  - New `subscription::mock::MockSource` for controllable event emission in tests
+  - Enables testing without real I/O or time dependencies
+  - Shared (cloneable) design allows use in both application code and test code
+  - Based on `tokio::sync::broadcast` for efficient multi-receiver support
+  - Comprehensive documentation with testing examples in README.md
+  - Added `sync` feature to `tokio-stream` dependency for broadcast stream support
 - WebSocket subscription support for real-time bi-directional communication
   - New `subscription::websocket::WebSocket` subscription source (requires `ws` feature)
   - Supports both secure (wss://) and insecure (ws://) connections
