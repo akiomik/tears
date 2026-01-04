@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.4", features = ["ws"] }
+//! tears = { version = "0.5", features = ["ws"] }
 //! ```
 //!
 //! ## TLS Support
@@ -25,7 +25,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.4", features = ["ws", "native-tls"] }
+//! tears = { version = "0.5", features = ["ws", "native-tls"] }
 //! ```
 
 use std::hash::{DefaultHasher, Hash, Hasher};
