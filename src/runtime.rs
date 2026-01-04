@@ -210,17 +210,27 @@ impl<App: Application> Runtime<App> {
     /// This method processes messages synchronously by:
     /// 1. Draining all pending messages from the message queue using `try_recv`
     /// 2. Calling [`Application::update`] for each message
-    /// 3. Enqueuing any returned commands for asynchronous execution
+    /// 3. Collecting all returned commands
+    /// 4. Batching and enqueuing the commands for asynchronous execution
     ///
     /// Commands returned by `update` are spawned as async tasks but are not
     /// guaranteed to execute before this method returns. The runtime yields
     /// control after calling this method to allow spawned tasks to run.
+    ///
+    /// By batching commands, we avoid spawning multiple tokio tasks when
+    /// processing multiple messages in a single frame, which improves
+    /// performance when there are many pending messages.
     fn process_messages(&mut self) {
+        let mut commands = Vec::new();
+
         while let Ok(msg) = self.msg_rx.try_recv() {
             let cmd = self.app.update(msg);
+            commands.push(cmd);
+        }
 
-            // Enqueue the command for asynchronous execution
-            self.enqueue_command(cmd);
+        // Batch all commands and enqueue them as a single operation
+        if !commands.is_empty() {
+            self.enqueue_command(Command::batch(commands));
         }
     }
 
