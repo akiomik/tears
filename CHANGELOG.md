@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgraded `ratatui` from 0.29 to 0.30
+- Upgraded `crossterm` from 0.28 to 0.29
+- Updated MSRV (Minimum Supported Rust Version) from 1.85.0 to 1.86.0
+- Updated `Runtime::render` and `Runtime::run` return types to use generic backend error types
 - **BREAKING**: WebSocket subscription now supports bidirectional communication
   - Added `WebSocketCommand` enum for sending messages (`SendText`, `SendBinary`, `Close`)
   - Added `WebSocketMessage` enum for subscription output (`Connected`, `Disconnected`, `Received`, `Error`)

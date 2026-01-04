@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/tears/badge.svg)](https://docs.rs/tears)
 [![CI](https://github.com/akiomik/tears/workflows/CI/badge.svg)](https://github.com/akiomik/tears/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/tears.svg)](LICENSE)
-[![Rust Version](https://img.shields.io/badge/rust-1.85.0%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.86.0%2B-blue.svg)](https://www.rust-lang.org)
 [![codecov](https://codecov.io/gh/akiomik/tears/graph/badge.svg?token=QF9SO8I0AM)](https://codecov.io/gh/akiomik/tears)
 
 A simple and elegant framework for building TUI applications using **The Elm Architecture (TEA)**.
@@ -27,8 +27,8 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 tears = "0.4"
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -282,7 +282,7 @@ This framework is heavily inspired by:
 
 ## Minimum Supported Rust Version (MSRV)
 
-Tears requires Rust 1.85.0 or later (uses edition 2024).
+Tears requires Rust 1.86.0 or later (uses edition 2024).
 
 ## License
 
