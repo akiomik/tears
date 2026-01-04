@@ -51,11 +51,6 @@ use crate::{
     subscription::SubscriptionManager,
 };
 
-/// Internal wrapper for the application instance.
-struct Instance<App: Application> {
-    inner: App,
-}
-
 /// The runtime manages the application lifecycle and event loop.
 ///
 /// The runtime is responsible for:
@@ -104,7 +99,7 @@ struct Instance<App: Application> {
 /// }
 /// ```
 pub struct Runtime<App: Application> {
-    app: Instance<App>,
+    app: App,
     msg_tx: mpsc::UnboundedSender<App::Message>,
     msg_rx: mpsc::UnboundedReceiver<App::Message>,
     quit_tx: mpsc::UnboundedSender<()>,
@@ -156,10 +151,9 @@ impl<App: Application> Runtime<App> {
 
         // Initialize the application with flags
         let (app, init_cmd) = App::new(flags);
-        let instance = Instance { inner: app };
 
         let runtime = Self {
-            app: instance,
+            app,
             msg_tx,
             msg_rx,
             quit_tx,
@@ -223,7 +217,7 @@ impl<App: Application> Runtime<App> {
     /// control after calling this method to allow spawned tasks to run.
     fn process_messages(&mut self) {
         while let Ok(msg) = self.msg_rx.try_recv() {
-            let cmd = self.app.inner.update(msg);
+            let cmd = self.app.update(msg);
 
             // Enqueue the command for asynchronous execution
             self.enqueue_command(cmd);
@@ -240,7 +234,7 @@ impl<App: Application> Runtime<App> {
 
     /// Initialize subscriptions from the application.
     fn initialize_subscriptions(&mut self) {
-        let subscriptions = self.app.inner.subscriptions();
+        let subscriptions = self.app.subscriptions();
         self.subscription_manager.update(subscriptions);
     }
 
@@ -250,7 +244,7 @@ impl<App: Application> Runtime<App> {
     /// The `SubscriptionManager` will diff the new subscriptions against
     /// the currently running ones and only start/stop changed subscriptions.
     fn update_subscriptions(&mut self) {
-        let subscriptions = self.app.inner.subscriptions();
+        let subscriptions = self.app.subscriptions();
         self.subscription_manager.update(subscriptions);
     }
 
@@ -265,7 +259,7 @@ impl<App: Application> Runtime<App> {
         terminal: &mut ratatui::Terminal<B>,
     ) -> Result<(), <B as Backend>::Error> {
         terminal.draw(|frame| {
-            self.app.inner.view(frame);
+            self.app.view(frame);
         })?;
         Ok(())
     }
@@ -472,13 +466,13 @@ mod tests {
     #[test]
     fn test_runtime_new() {
         let runtime = Runtime::<TestApp>::new(42);
-        assert_eq!(runtime.app.inner.counter, 42);
+        assert_eq!(runtime.app.counter, 42);
     }
 
     #[test]
     fn test_runtime_new_with_zero() {
         let runtime = Runtime::<TestApp>::new(0);
-        assert_eq!(runtime.app.inner.counter, 0);
+        assert_eq!(runtime.app.counter, 0);
     }
 
     #[test]
@@ -487,7 +481,7 @@ mod tests {
 
         // Runtime should have channels set up
         // We can't directly test private fields, but we can verify the runtime was created
-        assert_eq!(runtime.app.inner.counter, 0);
+        assert_eq!(runtime.app.counter, 0);
     }
 
     // Test application with init command
@@ -526,7 +520,7 @@ mod tests {
         // The runtime should have enqueued the init command
         // We can't directly verify it was processed without running the event loop
         // but we can verify the runtime was created successfully
-        assert!(!runtime.app.inner.initialized);
+        assert!(!runtime.app.initialized);
     }
 
     #[test]
@@ -571,8 +565,8 @@ mod tests {
         let runtime1 = Runtime::<TestApp>::new(1);
         let runtime2 = Runtime::<TestApp>::new(2);
 
-        assert_eq!(runtime1.app.inner.counter, 1);
-        assert_eq!(runtime2.app.inner.counter, 2);
+        assert_eq!(runtime1.app.counter, 1);
+        assert_eq!(runtime2.app.counter, 2);
     }
 
     // Test with different flag types
@@ -602,13 +596,13 @@ mod tests {
     #[test]
     fn test_runtime_with_string_flags() {
         let runtime = Runtime::<AppWithStringFlags>::new("test".to_string());
-        assert_eq!(runtime.app.inner.name, "test");
+        assert_eq!(runtime.app.name, "test");
     }
 
     #[test]
     fn test_runtime_with_empty_string_flags() {
         let runtime = Runtime::<AppWithStringFlags>::new(String::new());
-        assert_eq!(runtime.app.inner.name, "");
+        assert_eq!(runtime.app.name, "");
     }
 
     // Unit tests for extracted methods
@@ -653,7 +647,7 @@ mod tests {
         runtime.process_messages();
 
         // Counter should remain unchanged
-        assert_eq!(runtime.app.inner.counter, 0);
+        assert_eq!(runtime.app.counter, 0);
     }
 
     #[tokio::test]
@@ -667,7 +661,7 @@ mod tests {
         runtime.process_messages();
 
         // Counter should be incremented
-        assert_eq!(runtime.app.inner.counter, 1);
+        assert_eq!(runtime.app.counter, 1);
     }
 
     #[tokio::test]
@@ -700,7 +694,7 @@ mod tests {
         runtime.process_messages();
 
         // Counter should be incremented 3 times
-        assert_eq!(runtime.app.inner.counter, 3);
+        assert_eq!(runtime.app.counter, 3);
     }
 
     #[tokio::test]
@@ -718,7 +712,7 @@ mod tests {
         runtime.process_messages();
 
         // Both increments should be processed (quit doesn't stop message processing)
-        assert_eq!(runtime.app.inner.counter, 2);
+        assert_eq!(runtime.app.counter, 2);
 
         // Quit signal should still be available
         assert!(runtime.check_quit());
