@@ -137,10 +137,10 @@ impl Application for App {
             Message::MenuSelect => {
                 if let View::Menu { selected } = self.view {
                     match selected {
-                        0 => Command::single(Message::GoToCounter),
-                        1 => Command::single(Message::GoToInput),
-                        2 => Command::single(Message::GoToList),
-                        3 => Command::single(Message::Quit),
+                        0 => Command::message(Message::GoToCounter),
+                        1 => Command::message(Message::GoToInput),
+                        2 => Command::message(Message::GoToList),
+                        3 => Command::message(Message::Quit),
                         _ => Command::none(),
                     }
                 } else {
@@ -241,29 +241,29 @@ impl Application for App {
 fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
     match view {
         View::Menu { .. } => match key.code {
-            KeyCode::Up => Command::single(Message::MenuUp),
-            KeyCode::Down => Command::single(Message::MenuDown),
-            KeyCode::Enter => Command::single(Message::MenuSelect),
-            KeyCode::Char('q') => Command::single(Message::Quit),
+            KeyCode::Up => Command::message(Message::MenuUp),
+            KeyCode::Down => Command::message(Message::MenuDown),
+            KeyCode::Enter => Command::message(Message::MenuSelect),
+            KeyCode::Char('q') => Command::message(Message::Quit),
             _ => Command::none(),
         },
         View::Counter { .. } => match key.code {
-            KeyCode::Char('b') | KeyCode::Esc => Command::single(Message::GoToMenu),
-            KeyCode::Char('q') => Command::single(Message::Quit),
+            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu),
+            KeyCode::Char('q') => Command::message(Message::Quit),
             _ => Command::none(),
         },
         View::Input { .. } => match key.code {
-            KeyCode::Char(c) => Command::single(Message::InputChar(c)),
-            KeyCode::Backspace => Command::single(Message::InputBackspace),
-            KeyCode::Enter => Command::single(Message::InputSubmit),
-            KeyCode::Esc => Command::single(Message::GoToMenu),
+            KeyCode::Char(c) => Command::message(Message::InputChar(c)),
+            KeyCode::Backspace => Command::message(Message::InputBackspace),
+            KeyCode::Enter => Command::message(Message::InputSubmit),
+            KeyCode::Esc => Command::message(Message::GoToMenu),
             _ => Command::none(),
         },
         View::List { .. } => match key.code {
-            KeyCode::Up => Command::single(Message::ListUp),
-            KeyCode::Down => Command::single(Message::ListDown),
-            KeyCode::Char('b') | KeyCode::Esc => Command::single(Message::GoToMenu),
-            KeyCode::Char('q') => Command::single(Message::Quit),
+            KeyCode::Up => Command::message(Message::ListUp),
+            KeyCode::Down => Command::message(Message::ListDown),
+            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu),
+            KeyCode::Char('q') => Command::message(Message::Quit),
             _ => Command::none(),
         },
     }
