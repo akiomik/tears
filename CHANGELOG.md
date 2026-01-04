@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Simplified `Runtime` internals by removing `Instance` wrapper
+  - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
+  - Eliminates unnecessary indirection (`.inner`) throughout the codebase
+  - Improves code readability with no functional changes
+
 ## [0.5.0] - 2026-01-04
 
 ### Changed
