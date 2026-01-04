@@ -63,7 +63,7 @@ impl EchoChat {
     /// Handle keyboard input and return appropriate commands
     fn handle_key(&mut self, code: KeyCode) -> Command<Msg> {
         match code {
-            KeyCode::Char('q') => Command::single(Msg::Quit),
+            KeyCode::Char('q') => Command::message(Msg::Quit),
             KeyCode::Char(c) => {
                 self.input.push(c);
                 Command::none()

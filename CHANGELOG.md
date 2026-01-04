@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Command::message()` - Send a message to the application immediately
+  - This is a tears-specific feature for immediate message dispatch
+  - Replaces `Command::single()` with a clearer name that better represents the operation
+  - More explicit than `single` and reserves `send`/`dispatch`/`emit` for future extensions
+
 ### Changed
 
+- **BREAKING**: `Command::single()` has been removed
+  - Use `Command::message()` instead for sending messages immediately
+  - This change aligns with iced v0.14.0 design principles while maintaining tears' self-messaging feature
 - Simplified `Runtime` internals by removing `Instance` wrapper
   - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
   - Eliminates unnecessary indirection (`.inner`) throughout the codebase
@@ -17,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Message::TerminalError` now holds `io::Error` instead of `String`
   - Preserves full error information instead of converting to string
   - Removed unnecessary `Clone` derives from `Message` and `Counter`
+
+### Migration Guide (v0.5.0 → v0.6.0)
+
+#### Command API Changes
+
+Replace all uses of `Command::single()` with `Command::message()`:
+
+```rust
+// Before (v0.5.0)
+Command::single(Message::Refresh)
+
+// After (v0.6.0)
+Command::message(Message::Refresh)
+```
+
+This is a mechanical replacement with identical functionality.
+The new name better clarifies the intent and reserves more generic verbs (`send`, `dispatch`, `emit`) for potential future features.
 
 ## [0.5.0] - 2026-01-04
 

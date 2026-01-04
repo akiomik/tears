@@ -145,10 +145,18 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
-    /// Send a single message immediately.
+    /// Send a message to the application immediately.
     ///
-    /// This is a convenience method for sending a message without any asynchronous
-    /// work. It's equivalent to `Command::effect(Action::Message(msg))`.
+    /// This is a tears-specific feature that allows immediate message dispatch
+    /// within the update cycle. It's useful for state transitions and converting
+    /// input events to messages.
+    ///
+    /// # Why `message` and not `send` or `dispatch`?
+    ///
+    /// We chose `message` to be explicit about what this method does: it sends
+    /// a message to the application's update function. This keeps the API surface
+    /// clear for future extensions like `send()` for stream operations or
+    /// `dispatch()` for task management.
     ///
     /// # Examples
     ///
@@ -156,24 +164,31 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// use tears::prelude::*;
     ///
     /// enum Message {
+    ///     GoToMenu,
     ///     Refresh,
     /// }
     ///
     /// // Send a message immediately
-    /// let cmd = Command::single(Message::Refresh);
+    /// let cmd = Command::message(Message::Refresh);
+    ///
+    /// // State transition
+    /// let cmd = Command::message(Message::GoToMenu);
     /// ```
+    ///
+    /// # Comparison with iced
+    ///
+    /// Unlike iced, tears supports self-messaging through commands. In iced,
+    /// such cases would typically be handled directly in the update function.
     #[must_use]
-    pub fn single(msg: Msg) -> Self {
+    pub fn message(msg: Msg) -> Self {
         Self::effect(Action::Message(msg))
     }
 
     /// Create a command that performs a single action immediately.
     ///
-    /// This is useful for operations that need to happen synchronously,
-    /// such as quitting the application or sending messages.
-    ///
-    /// For sending messages, consider using [`Command::single`] instead for
-    /// better clarity.
+    /// This is the fundamental way to execute actions in tears, compatible with
+    /// iced's `effect` API design (v0.14.0). For sending messages specifically,
+    /// consider using [`Command::message`] for better ergonomics.
     ///
     /// # Examples
     ///
@@ -183,9 +198,15 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Quit the application
     /// let cmd: Command<i32> = Command::effect(Action::Quit);
     ///
-    /// // Send a message immediately (prefer Command::single for this)
+    /// // Send a message immediately (prefer Command::message for this)
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
+    ///
+    /// # Comparison with iced
+    ///
+    /// This is similar to iced's `Task::effect` (v0.14.0), which accepts
+    /// actions without output. However, tears allows `Action::Message` for
+    /// consistency with its self-messaging feature.
     #[must_use]
     pub fn effect(action: Action<Msg>) -> Self {
         Self {
@@ -519,8 +540,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single() {
-        let cmd = Command::single(42);
+    async fn test_message() {
+        let cmd = Command::message(42);
 
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
@@ -532,8 +553,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_with_string() {
-        let cmd = Command::single("hello".to_string());
+    async fn test_message_with_string() {
+        let cmd = Command::message("hello".to_string());
 
         let mut stream = cmd.stream.expect("stream should exist");
         let action = stream.next().await.expect("should have action");
