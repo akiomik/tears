@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
   - Eliminates unnecessary indirection (`.inner`) throughout the codebase
   - Improves code readability with no functional changes
+- Optimized `Runtime::process_messages()` for better performance
+  - Now collects all pending messages and batches their commands together
+  - Reduces tokio task spawning overhead when processing multiple messages
+  - Improves performance when there are many pending messages in a single frame
 - Improved error handling in `examples/counter.rs`
   - `Message::TerminalError` now holds `io::Error` instead of `String`
   - Preserves full error information instead of converting to string
