@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
   - Eliminates unnecessary indirection (`.inner`) throughout the codebase
   - Improves code readability with no functional changes
+- Improved error handling in `examples/counter.rs`
+  - `Message::TerminalError` now holds `io::Error` instead of `String`
+  - Preserves full error information instead of converting to string
+  - Removed unnecessary `Clone` derives from `Message` and `Counter`
 
 ## [0.5.0] - 2026-01-04
 

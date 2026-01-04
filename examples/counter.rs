@@ -8,6 +8,8 @@
 //!
 //! Run with: cargo run --example counter
 
+use std::io;
+
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
 use ratatui::Frame;
@@ -19,18 +21,18 @@ use tears::subscription::{
 };
 
 /// Messages that the application can receive
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Message {
     /// Timer tick message (sent every second)
     Timer(TimerMessage),
     /// Terminal input event (keyboard, mouse, resize)
     Terminal(crossterm::event::Event),
     /// Terminal event stream error
-    TerminalError(String),
+    TerminalError(io::Error),
 }
 
 /// Application state
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct Counter {
     count: u32,
 }
@@ -86,7 +88,7 @@ impl Application for Counter {
             // Note: Returns Result to handle potential I/O errors
             Subscription::new(TerminalEvents::new()).map(|result| match result {
                 Ok(event) => Message::Terminal(event),
-                Err(e) => Message::TerminalError(e.to_string()),
+                Err(e) => Message::TerminalError(e),
             }),
         ]
     }
