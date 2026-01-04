@@ -260,7 +260,10 @@ impl<App: Application> Runtime<App> {
     ///
     /// Returns an error if terminal I/O fails. Common causes include terminal
     /// disconnection or broken pipe. These errors are typically unrecoverable.
-    fn render<B: Backend>(&self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
+    fn render<B: Backend>(
+        &self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> Result<(), <B as Backend>::Error> {
         terminal.draw(|frame| {
             self.app.inner.view(frame);
         })?;
@@ -358,7 +361,7 @@ impl<App: Application> Runtime<App> {
         mut self,
         terminal: &mut ratatui::Terminal<B>,
         frame_rate: u32,
-    ) -> Result<()> {
+    ) -> Result<(), <B as Backend>::Error> {
         let frame_duration = Duration::from_millis(1000 / u64::from(frame_rate));
 
         // Use interval instead of sleep for more accurate frame timing with drift correction

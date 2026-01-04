@@ -312,5 +312,7 @@ async fn main() -> Result<()> {
     ratatui::restore();
 
     println!("Application shut down gracefully.");
-    result
+    result?;
+
+    Ok(())
 }

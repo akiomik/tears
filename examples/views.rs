@@ -367,5 +367,7 @@ async fn main() -> Result<()> {
     // Restore terminal
     ratatui::restore();
 
-    result
+    result?;
+
+    Ok(())
 }
