@@ -4,6 +4,17 @@
 //! WebSocket connections, receiving messages from WebSocket servers, and sending
 //! messages to them.
 //!
+//! # Design Pattern: Stream-based Bidirectional Communication
+//!
+//! WebSocket uses the **stream-based bidirectional** pattern. The subscription
+//! manages a long-lived connection and provides an `mpsc::UnboundedSender` for
+//! immediate send operations. This design reflects the real-time, streaming
+//! nature of WebSocket communication.
+//!
+//! For more details on why this pattern is used instead of `Command`-based
+//! sending, see the "Design Philosophy" section in the [`subscription`](crate::subscription)
+//! module documentation.
+//!
 //! # Feature Flag
 //!
 //! This module is only available when the `ws` feature is enabled:

@@ -3,6 +3,162 @@
 //! Subscriptions represent streams of events that your application can listen to,
 //! such as terminal input, timers, or any custom event source.
 //!
+//! # Design Philosophy
+//!
+//! tears distinguishes between three types of subscriptions based on their
+//! communication patterns. Understanding these patterns helps you choose the
+//! right approach for your use case.
+//!
+//! ## 1. Unidirectional Event Sources
+//!
+//! These subscriptions only emit events without any need for sending data back.
+//!
+//! **Examples**: [`terminal::TerminalEvents`], [`time::Timer`], [`signal::Signal`]
+//!
+//! **Characteristics**:
+//! - Simple event streaming from external sources
+//! - No application-to-source communication needed
+//! - Only implement [`SubscriptionSource::stream`]
+//!
+//! ```rust
+//! use tears::subscription::{Subscription, time::Timer};
+//!
+//! # enum Message { Tick }
+//! // Timer only emits tick events
+//! let timer = Subscription::new(Timer::new(1000)) // 1000ms = 1 second
+//!     .map(|_| Message::Tick);
+//! ```
+//!
+//! ## 2. Stream-based Bidirectional Communication
+//!
+//! These subscriptions manage long-lived connections where both receiving and
+//! sending happen continuously within a single stream.
+//!
+//! **Examples**: `websocket::WebSocket`, future gRPC streams
+//!
+//! **Characteristics**:
+//! - Long-lived connection managed by the subscription
+//! - Sending is part of the ongoing communication stream
+//! - Provides `mpsc::Sender` (or similar handle) for immediate send operations
+//! - The subscription itself is the side effect; sending through it is control
+//!
+//! **Design Rationale**: In stream-based protocols, sending data is not a new
+//! side effect but rather a control operation on an existing connection. The
+//! connection itself is managed by the subscription, and sending through it is
+//! immediate and stream-like in nature. Using `Command` for each send would be
+//! unnatural for real-time applications like chat or live feeds.
+//!
+//! ```rust,ignore
+//! use tears::prelude::*;
+//! use tears::subscription::{Subscription, websocket::{WebSocket, WebSocketMessage, WebSocketCommand}};
+//! use tokio::sync::mpsc;
+//!
+//! # enum Message {
+//! #     WebSocket(WebSocketMessage),
+//! #     SendText(String),
+//! # }
+//! struct App {
+//!     ws_sender: Option<mpsc::UnboundedSender<WebSocketCommand>>,
+//! }
+//!
+//! impl Application for App {
+//! #   type Message = Message;
+//! #   type Flags = ();
+//! #   fn new(_: ()) -> (Self, Command<Message>) { (Self { ws_sender: None }, Command::none()) }
+//! #   fn view(&self, _: &mut ratatui::Frame) {}
+//!     fn update(&mut self, msg: Message) -> Command<Message> {
+//!         match msg {
+//!             Message::WebSocket(WebSocketMessage::Connected { sender }) => {
+//!                 self.ws_sender = Some(sender);
+//!                 Command::none()
+//!             }
+//!             Message::SendText(text) => {
+//!                 // Immediate send - natural for stream-based communication
+//!                 if let Some(sender) = &self.ws_sender {
+//!                     let _ = sender.send(WebSocketCommand::SendText(text));
+//!                 }
+//!                 Command::none()
+//!             }
+//!             _ => Command::none()
+//!         }
+//!     }
+//!
+//!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
+//!         vec![
+//!             Subscription::new(WebSocket::new("wss://example.com"))
+//!                 .map(Message::WebSocket)
+//!         ]
+//!     }
+//! }
+//! ```
+//!
+//! ## 3. Transaction-based Operations
+//!
+//! These represent discrete request/response cycles where each operation is
+//! a distinct side effect.
+//!
+//! **Examples**: HTTP queries/mutations, database operations, file I/O
+//!
+//! **Characteristics**:
+//! - Discrete request/response cycles
+//! - Each request is a new side effect that should be initiated explicitly
+//! - Operations return [`Command`](crate::Command) to maintain TEA principles
+//! - State may be shared via `Arc<Client>` for connection pooling or caching
+//!
+//! **Design Rationale**: Transaction-based operations have a clear beginning
+//! (the request) and end (the response). Each request is a new side effect that
+//! should be explicitly initiated and tracked. Using `Command` makes these
+//! operations testable, composable, and allows for future features like
+//! cancellation and retry.
+//!
+//! ```rust,ignore
+//! use tears::prelude::*;
+//! use tears::subscription::http::query::{Query, QueryError};
+//! use tears::subscription::http::QueryClient;
+//! use std::sync::Arc;
+//! use futures::future::BoxFuture;
+//!
+//! # enum Message {
+//! #     LoadUser(String),
+//! #     UserLoaded(Result<String, QueryError>),
+//! # }
+//! # fn fetch_user_from_api() -> BoxFuture<'static, Result<String, QueryError>> {
+//! #     Box::pin(async { Ok("user".to_string()) })
+//! # }
+//! struct App {
+//!     query_client: Arc<QueryClient>,
+//! }
+//!
+//! impl Application for App {
+//! #   type Message = Message;
+//! #   type Flags = ();
+//! #   fn new(_: ()) -> (Self, Command<Message>) {
+//! #       (Self { query_client: Arc::new(QueryClient::new()) }, Command::none())
+//! #   }
+//! #   fn view(&self, _: &mut ratatui::Frame) {}
+//!     fn update(&mut self, msg: Message) -> Command<Message> {
+//!         match msg {
+//!             Message::LoadUser(id) => {
+//!                 // Returns Command - natural for transaction-based operations
+//!                 Query::new(self.query_client.clone())
+//!                     .fetch(id, fetch_user_from_api, Message::UserLoaded)
+//!             }
+//!             _ => Command::none()
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## Choosing the Right Pattern
+//!
+//! - **Unidirectional**: Use when you only need to receive events (timers, signals, input)
+//! - **Stream-based**: Use for real-time, continuous bidirectional communication (WebSocket, gRPC streams)
+//! - **Transaction-based**: Use for discrete operations with clear start/end (HTTP, database, files)
+//!
+//! The key distinction between stream-based and transaction-based is:
+//! - Stream-based: Sending is **control** of an ongoing connection
+//! - Transaction-based: Each operation is a **new side effect** to initiate
+//!
 //! # Built-in Subscriptions
 //!
 //! - [`terminal::TerminalEvents`] - Terminal input events (keyboard, mouse, resize)
