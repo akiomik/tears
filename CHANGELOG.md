@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-01-05
+
 ### Added
 
 - `Command::message()` - Send a message to the application immediately
@@ -31,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Message::TerminalError` now holds `io::Error` instead of `String`
   - Preserves full error information instead of converting to string
   - Removed unnecessary `Clone` derives from `Message` and `Counter`
+- Upgraded `tokio` from 1.48.0 to 1.49.0
+- Upgraded `tokio-stream` from 0.1.17 to 0.1.18
+- Upgraded `tokio-util` from 0.7.17 to 0.7.18
 
 ### Migration Guide (v0.5.0 → v0.6.0)
 
