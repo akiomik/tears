@@ -32,32 +32,7 @@ crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
 ```
 
-### Optional Features
-
-Tears provides optional features that can be enabled in your `Cargo.toml`:
-
-#### WebSocket Support
-
-To enable WebSocket subscriptions, add the `ws` feature:
-
-```toml
-[dependencies]
-tears = { version = "0.6", features = ["ws"] }
-```
-
-For secure WebSocket connections (wss://), you also need to enable a TLS backend:
-
-```toml
-[dependencies]
-# Using native TLS (recommended for most cases)
-tears = { version = "0.6", features = ["ws", "native-tls"] }
-
-# Or using rustls with ring crypto provider (pure Rust implementation)
-tears = { version = "0.6", features = ["ws", "rustls"] }
-
-# Or using rustls with webpki roots
-tears = { version = "0.6", features = ["ws", "rustls-tls-webpki-roots"] }
-```
+See the [Optional Features](#optional-features) section for information about enabling `ws` (WebSocket) and `http` (HTTP Query/Mutation) features.
 
 ## Getting Started
 
@@ -241,6 +216,8 @@ Tears provides several built-in subscription sources:
 - **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
 - **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
 - **WebSocket** (`subscription::websocket::WebSocket`, requires `ws` feature): Real-time WebSocket connections for bi-directional communication
+- **Query** (`subscription::http::Query`, requires `http` feature): HTTP data fetching with automatic caching and stale-while-revalidate
+- **Mutation** (`subscription::http::Mutation`, requires `http` feature): HTTP data modifications (POST, PUT, PATCH, DELETE) with command-based API
 - **MockSource** (`subscription::mock::MockSource`): Controllable mock for testing
 
 You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
@@ -253,6 +230,7 @@ Check out the [`examples/`](examples/) directory for more examples:
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
 - [`websocket.rs`](examples/websocket.rs) - WebSocket echo chat demonstrating real-time communication (requires `ws` feature)
+- [`http_todo.rs`](examples/http_todo.rs) - HTTP Todo list with Query subscription, Mutation, and cache management (requires `http` feature)
 
 Run an example:
 
@@ -261,7 +239,37 @@ cargo run --example counter
 cargo run --example views
 cargo run --example signals
 cargo run --example websocket --features ws,rustls
+cargo run --example http_todo --features http
 ```
+
+## Optional Features
+
+Tears supports optional features that can be enabled in your `Cargo.toml`:
+
+### WebSocket Support
+
+```toml
+[dependencies]
+tears = { version = "0.6", features = ["ws", "rustls"] }
+```
+
+- **`ws`**: Enables WebSocket subscription support
+- **TLS backends** (choose one for `wss://` support):
+  - `native-tls` - Platform's native TLS
+  - `rustls` - Pure Rust TLS with native certificates
+  - `rustls-tls-webpki-roots` - Pure Rust TLS with webpki certificates
+
+### HTTP Support
+
+```toml
+[dependencies]
+tears = { version = "0.6", features = ["http"] }
+```
+
+- **`http`**: Enables HTTP Query and Mutation support
+  - `Query` subscription for automatic data fetching with caching
+  - `Mutation` for data modifications (POST, PUT, PATCH, DELETE)
+  - `QueryClient` for cache management and invalidation
 
 ## Design Philosophy
 

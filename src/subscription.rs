@@ -241,6 +241,8 @@
 //!
 //! See the [`mock`] module documentation for complete testing examples.
 
+#[cfg(feature = "http")]
+pub mod http;
 pub mod mock;
 pub mod signal;
 pub mod terminal;
