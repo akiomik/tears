@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`http` feature** for HTTP subscription and mutation support
+  - New optional feature that can be enabled with `features = ["http"]`
+  - Adds `subscription::http` module with Query and Mutation types
+- HTTP subscription support for data fetching and mutations (requires `http` feature)
+  - `Query` subscription for automatic data fetching with caching
+    - Subscription-based design: monitors cache state and automatically refetches when needed
+    - Stale-while-revalidate pattern: shows cached data while refetching in background
+    - Automatic cache management with configurable stale time and cache time
+    - `QueryClient` for cache management and invalidation
+    - `QueryState` enum for Loading/Success/Error states with stale flag
+  - `Mutation` for HTTP data modifications (POST, PUT, PATCH, DELETE)
+    - Command-based API: returns `Command<Result<T, QueryError>>`
+    - Works seamlessly with `Command::map` for flexible result handling
+  - `QueryClient::invalidate()` for cache invalidation (returns `Command`)
+    - Automatically triggers refetch in active Query subscriptions
+    - TEA-compliant: all side effects expressed as Commands
+  - Design philosophy documentation explaining subscription-based vs transaction-based patterns
+  - Example: `examples/http_todo.rs` demonstrating Query, Mutation, and cache invalidation
+- `Command::map` for transforming command message types
+  - Similar to iced's `Task::map` (v0.14.0)
+  - Enables flexible message type conversion
+  - Preserves `Action::Quit` correctly
+  - Used with `Mutation` for result handling without `to_message` parameter
+- Added `reqwest` 0.12 with `json` feature (dev dependency for examples)
+- Added `serde` 1.0 with `derive` feature (dev dependency for examples)
+- Added `serde_json` 1.0 (dev dependency for examples)
+
 ## [0.6.0] - 2026-01-05
 
 ### Added

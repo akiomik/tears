@@ -84,6 +84,20 @@
 //! tears = { version = "0.6", features = ["ws", "native-tls"] }
 //! ```
 //!
+//! ### HTTP Support
+//!
+//! - **`http`**: Enables HTTP subscription and mutation support via `subscription::http`
+//!   - `Query` subscription for automatic data fetching with caching
+//!   - `Mutation` for data modifications (POST, PUT, PATCH, DELETE)
+//!   - `QueryClient` for cache management and invalidation
+//!
+//! Example:
+//!
+//! ```toml
+//! [dependencies]
+//! tears = { version = "0.6", features = ["http"] }
+//! ```
+//!
 //! ## Design Inspiration
 //!
 //! This framework is inspired by [iced](https://github.com/iced-rs/iced) 0.12,

@@ -303,6 +303,69 @@ impl<Msg: Send + 'static> Command<Msg> {
     {
         Self::stream(stream.map(f))
     }
+
+    /// Transform the message type of this command.
+    ///
+    /// This allows you to adapt a command that produces messages of one type
+    /// to produce messages of another type. This is particularly useful when
+    /// composing commands from different parts of your application or when
+    /// working with generic operations like HTTP mutations.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Function to convert messages from type `Msg` to type `T`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    ///
+    /// enum Message {
+    ///     DataLoaded(Result<String, String>),
+    ///     Error(String),
+    /// }
+    ///
+    /// // Create a command that produces Result<String, String>
+    /// let cmd: Command<Result<String, String>> = Command::future(async {
+    ///     Ok("data".to_string())
+    /// });
+    ///
+    /// // Map it to your application's message type
+    /// let cmd = cmd.map(Message::DataLoaded);
+    /// ```
+    ///
+    /// # Advanced Example with Mutation
+    ///
+    /// ```rust,ignore
+    /// use tears::subscription::http::Mutation;
+    ///
+    /// enum Message {
+    ///     UserUpdated(User),
+    ///     UpdateFailed(String),
+    /// }
+    ///
+    /// // Mutation returns Command<Result<User, Error>>
+    /// let cmd = Mutation::mutate(user_data, update_user_api)
+    ///     .map(|result| match result {
+    ///         Ok(user) => Message::UserUpdated(user),
+    ///         Err(e) => Message::UpdateFailed(e.to_string()),
+    ///     });
+    /// ```
+    #[must_use]
+    pub fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Command<T>
+    where
+        T: Send + 'static,
+    {
+        self.stream.map_or_else(Command::none, |stream| {
+            let mapped = stream.map(move |action| match action {
+                Action::Message(msg) => Action::Message(f(msg)),
+                Action::Quit => Action::Quit,
+            });
+            Command {
+                stream: Some(mapped.boxed()),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -691,5 +754,73 @@ mod tests {
         // but we just verify all were received
         results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_map() {
+        let cmd = Command::future(async { 42 });
+        let mapped = cmd.map(|x| x * 2);
+
+        let mut stream = mapped.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(msg) if msg == 84));
+    }
+
+    #[tokio::test]
+    async fn test_map_with_type_conversion() {
+        #[derive(Debug, PartialEq)]
+        enum Message {
+            Number(i32),
+        }
+
+        let cmd: Command<i32> = Command::future(async { 42 });
+        let mapped = cmd.map(Message::Number);
+
+        let mut stream = mapped.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(Message::Number(42))));
+    }
+
+    #[tokio::test]
+    async fn test_map_with_result() {
+        #[derive(Debug, PartialEq)]
+        enum Message {
+            Success(String),
+            Error(String),
+        }
+
+        let cmd: Command<Result<String, String>> =
+            Command::future(async { Ok("data".to_string()) });
+
+        let mapped = cmd.map(|result| match result {
+            Ok(s) => Message::Success(s),
+            Err(e) => Message::Error(e),
+        });
+
+        let mut stream = mapped.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(Message::Success(ref s)) if s == "data"));
+    }
+
+    #[tokio::test]
+    async fn test_map_none() {
+        let cmd: Command<i32> = Command::none();
+        let mapped = cmd.map(|x| x * 2);
+
+        assert!(mapped.stream.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_map_preserves_quit() {
+        let cmd: Command<i32> = Command::effect(Action::Quit);
+        let mapped = cmd.map(|x| x * 2);
+
+        let mut stream = mapped.stream.expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Quit));
     }
 }
