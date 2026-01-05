@@ -26,7 +26,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tears = "0.5"
+tears = "0.6"
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
@@ -42,7 +42,7 @@ To enable WebSocket subscriptions, add the `ws` feature:
 
 ```toml
 [dependencies]
-tears = { version = "0.5", features = ["ws"] }
+tears = { version = "0.6", features = ["ws"] }
 ```
 
 For secure WebSocket connections (wss://), you also need to enable a TLS backend:
@@ -50,13 +50,13 @@ For secure WebSocket connections (wss://), you also need to enable a TLS backend
 ```toml
 [dependencies]
 # Using native TLS (recommended for most cases)
-tears = { version = "0.5", features = ["ws", "native-tls"] }
+tears = { version = "0.6", features = ["ws", "native-tls"] }
 
 # Or using rustls with ring crypto provider (pure Rust implementation)
-tears = { version = "0.5", features = ["ws", "rustls"] }
+tears = { version = "0.6", features = ["ws", "rustls"] }
 
 # Or using rustls with webpki roots
-tears = { version = "0.5", features = ["ws", "rustls-tls-webpki-roots"] }
+tears = { version = "0.6", features = ["ws", "rustls-tls-webpki-roots"] }
 ```
 
 ## Getting Started

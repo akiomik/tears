@@ -81,7 +81,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.5", features = ["ws", "native-tls"] }
+//! tears = { version = "0.6", features = ["ws", "native-tls"] }
 //! ```
 //!
 //! ## Design Inspiration
