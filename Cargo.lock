@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "tears"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "color-eyre",
  "crossterm 0.29.0",
