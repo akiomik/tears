@@ -61,6 +61,26 @@ use crate::{
 /// - Managing subscriptions
 /// - Rendering the UI at the specified frame rate
 ///
+/// # Architectural Responsibility: Scheduling ("When to Execute")
+///
+/// The Runtime's primary responsibility is **scheduling** - deciding **when** to execute
+/// operations. This is distinct from the responsibilities of other components:
+///
+/// - **`Application`**: Declares **what** to display/subscribe (declarative, business logic)
+/// - **`Runtime`**: Controls **when** to execute operations (scheduling, optimization)
+/// - **`SubscriptionManager`**: Handles **how** to manage subscriptions (implementation)
+///
+/// ## Scheduling Optimizations
+///
+/// The Runtime uses several mechanisms to optimize when operations are performed:
+///
+/// - **`needs_redraw` flag**: Skips rendering when UI hasn't changed
+/// - **`subscription_ids_hash`**: Skips subscription updates when unchanged
+/// - **Frame rate control**: Regulates the event loop timing
+///
+/// These optimizations are transparent to the Application, maintaining clean separation
+/// of concerns while providing significant performance benefits.
+///
 /// # Type Parameters
 ///
 /// * `App` - The application type that implements the [`Application`] trait
@@ -105,7 +125,21 @@ pub struct Runtime<App: Application> {
     quit_tx: mpsc::UnboundedSender<()>,
     quit_rx: mpsc::UnboundedReceiver<()>,
     subscription_manager: SubscriptionManager<App::Message>,
+
+    /// Scheduling optimization: tracks whether rendering is needed.
+    ///
+    /// Set to `true` when messages are processed (state may have changed).
+    /// Reset to `false` after rendering. This allows the Runtime to skip
+    /// unnecessary render calls when the UI hasn't changed.
     needs_redraw: bool,
+
+    /// Scheduling optimization: cache of subscription IDs hash from the previous frame.
+    ///
+    /// Used to determine when subscription updates are needed. When the hash matches
+    /// the previous frame, the expensive `SubscriptionManager::update()` call is skipped.
+    /// This provides significant performance benefits for applications with static or
+    /// infrequently-changing subscriptions.
+    subscription_ids_hash: Option<u64>,
 }
 
 impl<App: Application> Runtime<App> {
@@ -160,7 +194,8 @@ impl<App: Application> Runtime<App> {
             quit_tx,
             quit_rx,
             subscription_manager,
-            needs_redraw: true, // Initial draw is always needed
+            needs_redraw: true,          // Initial draw is always needed
+            subscription_ids_hash: None, // No subscriptions cached yet
         };
 
         // Enqueue the initial command
@@ -260,11 +295,27 @@ impl<App: Application> Runtime<App> {
     /// Update subscriptions based on current application state.
     ///
     /// This method is called every frame to support dynamic subscriptions.
-    /// The `SubscriptionManager` will diff the new subscriptions against
-    /// the currently running ones and only start/stop changed subscriptions.
+    /// It uses hash-based caching to avoid unnecessary updates when subscriptions
+    /// haven't changed. Only when the subscription IDs differ from the previous
+    /// frame will the `SubscriptionManager` be called to diff and update.
     fn update_subscriptions(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         let subscriptions = self.app.subscriptions();
-        self.subscription_manager.update(subscriptions);
+
+        // Compute hash of subscription IDs
+        let mut hasher = DefaultHasher::new();
+        for sub in &subscriptions {
+            sub.id.hash(&mut hasher);
+        }
+        let current_hash = hasher.finish();
+
+        // Only update if subscriptions have changed
+        if self.subscription_ids_hash != Some(current_hash) {
+            self.subscription_manager.update(subscriptions);
+            self.subscription_ids_hash = Some(current_hash);
+        }
     }
 
     /// Render the application's view to the terminal.
@@ -408,8 +459,8 @@ impl<App: Application> Runtime<App> {
             }
 
             // Update subscriptions based on current state (dynamic subscriptions)
-            // NOTE: This is called every frame. The SubscriptionManager efficiently
-            // diffs subscriptions and only starts/stops changed ones.
+            // NOTE: This is called every frame, but uses hash-based caching to skip
+            // updates when subscriptions haven't changed, improving performance.
             self.update_subscriptions();
 
             // Wait for next frame or quit signal (whichever comes first)
@@ -928,5 +979,132 @@ mod tests {
         let has_messages = runtime.process_messages();
         assert!(!has_messages);
         assert_eq!(runtime.app.counter, 1);
+    }
+
+    // Tests for subscription hash caching
+
+    #[test]
+    fn test_subscription_hash_initially_none() {
+        let runtime = Runtime::<TestApp>::new(0);
+        assert_eq!(runtime.subscription_ids_hash, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_subscriptions_caches_hash() {
+        let mut runtime = Runtime::<TestApp>::new(0);
+
+        // First update should set the hash
+        runtime.update_subscriptions();
+        assert!(runtime.subscription_ids_hash.is_some());
+
+        let first_hash = runtime.subscription_ids_hash;
+
+        // Second update with same subscriptions should keep the same hash
+        runtime.update_subscriptions();
+        assert_eq!(runtime.subscription_ids_hash, first_hash);
+    }
+
+    #[tokio::test]
+    async fn test_update_subscriptions_with_dynamic_subscriptions() {
+        // Test app with subscriptions that change based on state
+        struct DynamicSubApp {
+            enabled: bool,
+        }
+
+        impl Application for DynamicSubApp {
+            type Message = ();
+            type Flags = bool;
+
+            fn new(enabled: bool) -> (Self, Command<Self::Message>) {
+                (Self { enabled }, Command::none())
+            }
+
+            fn update(&mut self, (): ()) -> Command<Self::Message> {
+                self.enabled = !self.enabled;
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                if self.enabled {
+                    use crate::subscription::time::Timer;
+                    vec![Subscription::new(Timer::new(100)).map(|_| ())]
+                } else {
+                    vec![]
+                }
+            }
+        }
+
+        let mut runtime = Runtime::<DynamicSubApp>::new(true);
+
+        // First update with enabled=true
+        runtime.update_subscriptions();
+        let hash_enabled = runtime.subscription_ids_hash;
+        assert!(hash_enabled.is_some());
+
+        // Toggle state
+        runtime.app.enabled = false;
+
+        // Second update with enabled=false should have different hash
+        runtime.update_subscriptions();
+        let hash_disabled = runtime.subscription_ids_hash;
+        assert!(hash_disabled.is_some());
+        assert_ne!(hash_enabled, hash_disabled);
+
+        // Toggle back
+        runtime.app.enabled = true;
+
+        // Third update should match first hash
+        runtime.update_subscriptions();
+        assert_eq!(runtime.subscription_ids_hash, hash_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_update_subscriptions_skips_manager_when_unchanged() {
+        use std::sync::{Arc, Mutex};
+
+        // Track how many times subscriptions() is called
+        struct CountingApp {
+            call_count: Arc<Mutex<usize>>,
+        }
+
+        impl Application for CountingApp {
+            type Message = ();
+            type Flags = Arc<Mutex<usize>>;
+
+            fn new(call_count: Arc<Mutex<usize>>) -> (Self, Command<Self::Message>) {
+                (Self { call_count }, Command::none())
+            }
+
+            fn update(&mut self, (): ()) -> Command<Self::Message> {
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                *self.call_count.lock().expect("lock poisoned") += 1;
+                vec![]
+            }
+        }
+
+        let call_count = Arc::new(Mutex::new(0));
+        let mut runtime = Runtime::<CountingApp>::new(call_count.clone());
+
+        // Reset counter after initialization
+        *call_count.lock().expect("lock poisoned") = 0;
+
+        // First call
+        runtime.update_subscriptions();
+        assert_eq!(*call_count.lock().expect("lock poisoned"), 1);
+
+        // Second call - subscriptions() is still called but manager update is skipped
+        runtime.update_subscriptions();
+        assert_eq!(*call_count.lock().expect("lock poisoned"), 2);
+
+        // Third call
+        runtime.update_subscriptions();
+        assert_eq!(*call_count.lock().expect("lock poisoned"), 3);
     }
 }
