@@ -15,10 +15,11 @@ rust-version = "1.86.0"
 exclude = [
     ".github/",
     ".gitignore",
-    "justfile",
     ".*.md",
-    "tmp*",
     "Cargo.lock",
+    "flamegraph*.svg",
+    "justfile",
+    "tmp*",
 ]
 
 [features]
