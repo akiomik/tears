@@ -1,163 +1,47 @@
 //! Subscriptions for handling ongoing event sources.
 //!
-//! Subscriptions represent streams of events that your application can listen to,
-//! such as terminal input, timers, or any custom event source.
+//! Subscriptions represent streams of events like terminal input, timers,
+//! or WebSocket connections.
 //!
-//! # Design Philosophy
+//! # Overview
 //!
-//! tears distinguishes between three types of subscriptions based on their
-//! communication patterns. Understanding these patterns helps you choose the
-//! right approach for your use case.
+//! tears supports three patterns for different communication needs:
+//! - **Unidirectional**: Events only (timers, signals, input)
+//! - **Stream-based**: Bidirectional real-time communication (WebSocket, gRPC)
+//! - **Transaction-based**: Discrete operations (HTTP, database, files)
 //!
-//! ## 1. Unidirectional Event Sources
+//! # Examples
 //!
-//! These subscriptions only emit events without any need for sending data back.
-//!
-//! **Examples**: [`terminal::TerminalEvents`], [`time::Timer`], [`signal::Signal`]
-//!
-//! **Characteristics**:
-//! - Simple event streaming from external sources
-//! - No application-to-source communication needed
-//! - Only implement [`SubscriptionSource::stream`]
+//! ## Unidirectional (Timer)
 //!
 //! ```rust
 //! use tears::subscription::{Subscription, time::Timer};
 //!
 //! # enum Message { Tick }
-//! // Timer only emits tick events
-//! let timer = Subscription::new(Timer::new(1000)) // 1000ms = 1 second
-//!     .map(|_| Message::Tick);
+//! let timer = Subscription::new(Timer::new(1000)).map(|_| Message::Tick);
 //! ```
 //!
-//! ## 2. Stream-based Bidirectional Communication
-//!
-//! These subscriptions manage long-lived connections where both receiving and
-//! sending happen continuously within a single stream.
-//!
-//! **Examples**: `websocket::WebSocket`, future gRPC streams
-//!
-//! **Characteristics**:
-//! - Long-lived connection managed by the subscription
-//! - Sending is part of the ongoing communication stream
-//! - Provides `mpsc::Sender` (or similar handle) for immediate send operations
-//! - The subscription itself is the side effect; sending through it is control
-//!
-//! **Design Rationale**: In stream-based protocols, sending data is not a new
-//! side effect but rather a control operation on an existing connection. The
-//! connection itself is managed by the subscription, and sending through it is
-//! immediate and stream-like in nature. Using `Command` for each send would be
-//! unnatural for real-time applications like chat or live feeds.
+//! ## Stream-based (WebSocket)
 //!
 //! ```rust,ignore
-//! use tears::prelude::*;
-//! use tears::subscription::{Subscription, websocket::{WebSocket, WebSocketMessage, WebSocketCommand}};
+//! use tears::subscription::websocket::{WebSocket, WebSocketMessage, WebSocketCommand};
 //! use tokio::sync::mpsc;
 //!
-//! # enum Message {
-//! #     WebSocket(WebSocketMessage),
-//! #     SendText(String),
-//! # }
 //! struct App {
 //!     ws_sender: Option<mpsc::UnboundedSender<WebSocketCommand>>,
 //! }
 //!
-//! impl Application for App {
-//! #   type Message = Message;
-//! #   type Flags = ();
-//! #   fn new(_: ()) -> (Self, Command<Message>) { (Self { ws_sender: None }, Command::none()) }
-//! #   fn view(&self, _: &mut ratatui::Frame) {}
-//!     fn update(&mut self, msg: Message) -> Command<Message> {
-//!         match msg {
-//!             Message::WebSocket(WebSocketMessage::Connected { sender }) => {
-//!                 self.ws_sender = Some(sender);
-//!                 Command::none()
-//!             }
-//!             Message::SendText(text) => {
-//!                 // Immediate send - natural for stream-based communication
-//!                 if let Some(sender) = &self.ws_sender {
-//!                     let _ = sender.send(WebSocketCommand::SendText(text));
-//!                 }
-//!                 Command::none()
-//!             }
-//!             _ => Command::none()
-//!         }
-//!     }
-//!
-//!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
-//!         vec![
-//!             Subscription::new(WebSocket::new("wss://example.com"))
-//!                 .map(Message::WebSocket)
-//!         ]
-//!     }
-//! }
+//! // Store sender on connection, use it to send messages immediately
 //! ```
 //!
-//! ## 3. Transaction-based Operations
-//!
-//! These represent discrete request/response cycles where each operation is
-//! a distinct side effect.
-//!
-//! **Examples**: HTTP queries/mutations, database operations, file I/O
-//!
-//! **Characteristics**:
-//! - Discrete request/response cycles
-//! - Each request is a new side effect that should be initiated explicitly
-//! - Operations return [`Command`](crate::Command) to maintain TEA principles
-//! - State may be shared via `Arc<Client>` for connection pooling or caching
-//!
-//! **Design Rationale**: Transaction-based operations have a clear beginning
-//! (the request) and end (the response). Each request is a new side effect that
-//! should be explicitly initiated and tracked. Using `Command` makes these
-//! operations testable, composable, and allows for future features like
-//! cancellation and retry.
+//! ## Transaction-based (HTTP)
 //!
 //! ```rust,ignore
-//! use tears::prelude::*;
-//! use tears::subscription::http::query::{Query, QueryError};
-//! use tears::subscription::http::QueryClient;
-//! use std::sync::Arc;
-//! use futures::future::BoxFuture;
+//! use tears::subscription::http::query::Query;
 //!
-//! # enum Message {
-//! #     LoadUser(String),
-//! #     UserLoaded(Result<String, QueryError>),
-//! # }
-//! # fn fetch_user_from_api() -> BoxFuture<'static, Result<String, QueryError>> {
-//! #     Box::pin(async { Ok("user".to_string()) })
-//! # }
-//! struct App {
-//!     query_client: Arc<QueryClient>,
-//! }
-//!
-//! impl Application for App {
-//! #   type Message = Message;
-//! #   type Flags = ();
-//! #   fn new(_: ()) -> (Self, Command<Message>) {
-//! #       (Self { query_client: Arc::new(QueryClient::new()) }, Command::none())
-//! #   }
-//! #   fn view(&self, _: &mut ratatui::Frame) {}
-//!     fn update(&mut self, msg: Message) -> Command<Message> {
-//!         match msg {
-//!             Message::LoadUser(id) => {
-//!                 // Returns Command - natural for transaction-based operations
-//!                 Query::new(self.query_client.clone())
-//!                     .fetch(id, fetch_user_from_api, Message::UserLoaded)
-//!             }
-//!             _ => Command::none()
-//!         }
-//!     }
-//! }
+//! // In update():
+//! Query::new(client).fetch(id, fetch_fn, Message::UserLoaded)
 //! ```
-//!
-//! ## Choosing the Right Pattern
-//!
-//! - **Unidirectional**: Use when you only need to receive events (timers, signals, input)
-//! - **Stream-based**: Use for real-time, continuous bidirectional communication (WebSocket, gRPC streams)
-//! - **Transaction-based**: Use for discrete operations with clear start/end (HTTP, database, files)
-//!
-//! The key distinction between stream-based and transaction-based is:
-//! - Stream-based: Sending is **control** of an ongoing connection
-//! - Transaction-based: Each operation is a **new side effect** to initiate
 //!
 //! # Built-in Subscriptions
 //!
@@ -294,16 +178,11 @@ pub struct Subscription<Msg: 'static> {
 impl<Msg: 'static> Subscription<Msg> {
     /// Create a new subscription from a type implementing [`SubscriptionSource`].
     ///
-    /// # Arguments
-    ///
-    /// * `source` - The subscription implementation
-    ///
     /// # Examples
     ///
     /// ```
     /// use tears::subscription::{Subscription, time::Timer};
     ///
-    /// // Create a timer subscription that ticks every second
     /// let sub = Subscription::new(Timer::new(1000));
     /// ```
     #[must_use]
@@ -318,25 +197,15 @@ impl<Msg: 'static> Subscription<Msg> {
 
     /// Transform the messages produced by this subscription.
     ///
-    /// This is useful for converting subscription-specific messages into your
-    /// application's message type.
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - Function to transform each message
-    ///
     /// # Examples
     ///
     /// ```
-    /// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
+    /// use tears::subscription::{Subscription, time::Timer};
     ///
-    /// enum AppMessage {
-    ///     TimerTick,
-    /// }
+    /// enum AppMessage { TimerTick }
     ///
-    /// // Create a timer and map its messages to your app's messages
     /// let sub = Subscription::new(Timer::new(1000))
-    ///     .map(|_tick_msg| AppMessage::TimerTick);
+    ///     .map(|_| AppMessage::TimerTick);
     /// ```
     #[must_use]
     pub fn map<F, NewMsg>(self, f: F) -> Subscription<NewMsg>
@@ -364,11 +233,6 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 
 /// Trait for types that can be used as subscription sources.
 ///
-/// Implement this trait to create custom subscription types.
-/// The trait requires:
-/// - A stream of output messages
-/// - A unique identifier for the subscription
-///
 /// # Example
 ///
 /// ```
@@ -385,12 +249,10 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 ///     type Output = ();
 ///
 ///     fn stream(&self) -> BoxStream<'static, Self::Output> {
-///         // Implementation details...
 ///         stream::empty().boxed()
 ///     }
 ///
 ///     fn id(&self) -> SubscriptionId {
-///         // Create a unique ID based on the subscription's configuration
 ///         let mut hasher = std::collections::hash_map::DefaultHasher::new();
 ///         self.interval_ms.hash(&mut hasher);
 ///         SubscriptionId::of::<Self>(hasher.finish())
@@ -402,25 +264,18 @@ pub trait SubscriptionSource: Send {
     type Output;
 
     /// Create the stream of messages for this subscription.
-    ///
-    /// This method is called when the subscription is started.
     fn stream(&self) -> BoxStream<'static, Self::Output>;
 
     /// Get a unique identifier for this subscription.
     ///
-    /// The ID is used to determine if a subscription has changed.
     /// Subscriptions with the same ID are considered identical.
     fn id(&self) -> SubscriptionId;
 }
 
 /// A unique identifier for a subscription.
 ///
-/// Subscription IDs are used to track and manage active subscriptions.
-/// Two subscriptions with the same ID are considered identical, and
-/// the runtime will not create duplicate subscriptions.
-///
-/// The ID includes both type information and a hash value to prevent
-/// collisions between different subscription types.
+/// Two subscriptions with the same ID are considered identical.
+/// The ID includes type information and a hash value to prevent collisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionId {
     type_id: TypeId,
@@ -430,18 +285,7 @@ pub struct SubscriptionId {
 impl SubscriptionId {
     /// Create a subscription ID from a type and a hash value.
     ///
-    /// This ensures that subscriptions of different types cannot collide
-    /// even if they have the same hash value.
-    ///
-    /// This is typically used when implementing [`SubscriptionSource::id`].
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - The type of the subscription source, typically `Self`
-    ///
-    /// # Arguments
-    ///
-    /// * `hash` - A hash value representing the subscription's configuration
+    /// Typically used when implementing [`SubscriptionSource::id`].
     ///
     /// # Examples
     ///
@@ -450,9 +294,7 @@ impl SubscriptionId {
     /// use std::hash::{Hash, Hasher};
     /// use std::collections::hash_map::DefaultHasher;
     ///
-    /// struct MySubscription {
-    ///     interval_ms: u64,
-    /// }
+    /// struct MySubscription { interval_ms: u64 }
     ///
     /// impl MySubscription {
     ///     fn compute_id(&self) -> SubscriptionId {
@@ -477,9 +319,7 @@ struct RunningSubscription {
 
 /// Manages the lifecycle of active subscriptions.
 ///
-/// This is used internally by the runtime to start, stop, and update subscriptions
-/// as the application state changes. You typically don't need to interact with this
-/// type directly.
+/// Used internally by the runtime. You typically don't interact with this directly.
 pub struct SubscriptionManager<Msg> {
     running: HashMap<SubscriptionId, RunningSubscription>,
     msg_sender: mpsc::UnboundedSender<Msg>,
@@ -487,10 +327,6 @@ pub struct SubscriptionManager<Msg> {
 
 impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// Create a new subscription manager.
-    ///
-    /// # Arguments
-    ///
-    /// * `msg_sender` - Channel sender for forwarding subscription messages
     #[must_use]
     pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
         Self {

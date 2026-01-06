@@ -29,13 +29,9 @@
 //! use tears::prelude::*;
 //!
 //! #[derive(Debug)]
-//! enum Message {
-//!     Increment,
-//! }
+//! enum Message { Increment }
 //!
-//! struct Counter {
-//!     count: u32,
-//! }
+//! struct Counter { count: u32 }
 //!
 //! impl Application for Counter {
 //!     type Message = Message;
@@ -55,7 +51,7 @@
 //!     }
 //!
 //!     fn view(&self, frame: &mut Frame<'_>) {
-//!         // Render your UI here
+//!         // Render UI
 //!     }
 //!
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
@@ -66,42 +62,24 @@
 //!
 //! ## Optional Features
 //!
-//! Tears provides optional features that can be enabled in your `Cargo.toml`:
-//!
 //! ### WebSocket Support
-//!
-//! - **`ws`**: Enables WebSocket subscription support via `subscription::websocket::WebSocket`
-//!
-//! Requires one of the following TLS features for secure connections (`wss://`):
-//! - **`native-tls`**: Uses the platform's native TLS implementation
-//! - **`rustls`**: Uses rustls with ring crypto provider and native root certificates
-//! - **`rustls-tls-webpki-roots`**: Uses rustls with ring crypto provider and webpki root certificates
-//!
-//! Example:
 //!
 //! ```toml
 //! [dependencies]
 //! tears = { version = "0.6", features = ["ws", "native-tls"] }
 //! ```
 //!
+//! Enables `subscription::websocket::WebSocket`. Requires a TLS feature for `wss://`:
+//! `native-tls`, `rustls`, or `rustls-tls-webpki-roots`.
+//!
 //! ### HTTP Support
-//!
-//! - **`http`**: Enables HTTP subscription and mutation support via `subscription::http`
-//!   - `Query` subscription for automatic data fetching with caching
-//!   - `Mutation` for data modifications (POST, PUT, PATCH, DELETE)
-//!   - `QueryClient` for cache management and invalidation
-//!
-//! Example:
 //!
 //! ```toml
 //! [dependencies]
 //! tears = { version = "0.6", features = ["http"] }
 //! ```
 //!
-//! ## Design Inspiration
-//!
-//! This framework is inspired by [iced](https://github.com/iced-rs/iced) 0.12,
-//! adapted for TUI applications.
+//! Enables `subscription::http` with Query and Mutation support.
 
 pub mod application;
 pub mod command;
@@ -109,13 +87,9 @@ pub mod prelude;
 pub mod runtime;
 pub mod subscription;
 
-// Re-export the most commonly used types at the crate root
-// This allows users to import them directly: `use tears::Application;`
+// Re-export commonly used types
 pub use application::Application;
 pub use command::{Action, Command};
+pub use futures::stream::BoxStream;
 pub use runtime::Runtime;
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
-
-// Re-export commonly used external types
-// This allows users to implement custom subscriptions without directly depending on futures
-pub use futures::stream::BoxStream;

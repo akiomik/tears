@@ -210,17 +210,15 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 
 ### Built-in Subscriptions
 
-Tears provides several built-in subscription sources:
+- **Terminal Events** (`terminal::TerminalEvents`): Keyboard, mouse, and resize events
+- **Timer** (`time::Timer`): Periodic tick events
+- **Signal** (`signal::Signal`): OS signal handling (Unix/Windows)
+- **WebSocket** (`websocket::WebSocket`, requires `ws`): Real-time bidirectional communication
+- **Query** (`http::Query`, requires `http`): HTTP data fetching with caching
+- **Mutation** (`http::Mutation`, requires `http`): HTTP data modifications
+- **MockSource** (`mock::MockSource`): Controllable mock for testing
 
-- **Terminal Events** (`subscription::terminal::TerminalEvents`): Keyboard, mouse, and window resize events
-- **Timer** (`subscription::time::Timer`): Periodic tick events at configurable intervals
-- **Signal** (Unix: `subscription::signal::Signal`, Windows: `subscription::signal::CtrlC`, `subscription::signal::CtrlBreak`): OS signal handling for graceful shutdown and interrupt handling
-- **WebSocket** (`subscription::websocket::WebSocket`, requires `ws` feature): Real-time WebSocket connections for bi-directional communication
-- **Query** (`subscription::http::Query`, requires `http` feature): HTTP data fetching with automatic caching and stale-while-revalidate
-- **Mutation** (`subscription::http::Mutation`, requires `http` feature): HTTP data modifications (POST, PUT, PATCH, DELETE) with command-based API
-- **MockSource** (`subscription::mock::MockSource`): Controllable mock for testing
-
-You can also create custom subscriptions by implementing the `SubscriptionSource` trait.
+Create custom subscriptions by implementing the `SubscriptionSource` trait.
 
 ## Examples
 
@@ -271,22 +269,19 @@ tears = { version = "0.6", features = ["http"] }
   - `Mutation` for data modifications (POST, PUT, PATCH, DELETE)
   - `QueryClient` for cache management and invalidation
 
-## Design Philosophy
+## Inspiration & Design Philosophy
 
-Tears is designed with these principles in mind:
-
-1. **Simplicity First**: Keep the API minimal and easy to understand
-2. **Thin Framework**: Minimal abstraction over ratatui - you have full control
-3. **Proven Patterns**: Based on battle-tested architectures (Elm, iced)
-4. **Type Safety**: Leverage Rust's type system for correctness
-
-## Inspiration
-
-This framework is heavily inspired by:
+Tears is inspired by battle-tested architectures:
 
 - **[Elm](https://elm-lang.org/)**: The original Elm Architecture
 - **[iced](https://github.com/iced-rs/iced)**: Rust GUI framework (v0.12 design)
 - **[Bubble Tea](https://github.com/charmbracelet/bubbletea)**: Go TUI framework with TEA
+
+The framework is designed with these principles:
+
+- **Simplicity First**: Minimal and easy-to-understand API
+- **Thin Framework**: Minimal abstraction over ratatui - you have full control
+- **Type Safety**: Leverage Rust's type system for correctness
 
 ## Minimum Supported Rust Version (MSRV)
 
