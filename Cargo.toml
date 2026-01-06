@@ -14,12 +14,15 @@ categories = ["command-line-interface", "asynchronous"]
 rust-version = "1.86.0"
 exclude = [
     ".github/",
+    "scripts/",
     ".gitignore",
     ".*.md",
     "Cargo.lock",
+    "clippy.toml",
     "flamegraph*.svg",
     "justfile",
     "tmp*",
+    "typos.toml",
 ]
 
 [features]
