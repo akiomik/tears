@@ -105,3 +105,7 @@ watch:
 # Watch for changes and run clippy
 watch-clippy:
     cargo watch -x clippy
+
+# Run an example with flamegraph (usage: just framegraph counter)
+flamegraph EXAMPLE:
+  CARGO_PROFILE_RELEASE_DEBUG=true cargo flamegraph --root --example {{EXAMPLE}}
