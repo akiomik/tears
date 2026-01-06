@@ -28,49 +28,27 @@ use futures::{
 };
 
 /// An action that can be performed by a command.
-///
-/// Actions represent side effects that can be executed as a result of processing commands.
-/// They are emitted by command streams and processed by the runtime.
 pub enum Action<Msg> {
     /// Send a message to the application's update function.
-    ///
-    /// This is the most common action, used to communicate results of
-    /// asynchronous operations back to the application.
     Message(Msg),
 
     /// Request the application to quit.
-    ///
-    /// When this action is emitted, the runtime will terminate the event loop
-    /// and shut down the application gracefully.
     Quit,
 }
 
 /// A command that can be executed to perform side effects.
 ///
-/// Commands represent asynchronous operations that produce messages or actions.
-/// They are the primary way to perform side effects in the Elm architecture,
-/// such as:
-/// - Running async tasks (HTTP requests, file I/O, etc.)
-/// - Subscribing to event sources
-/// - Performing computations in the background
-///
-/// Commands are returned from `Application::new` and `Application::update`,
-/// and are executed by the runtime.
+/// Commands represent asynchronous operations that produce messages,
+/// such as HTTP requests, file I/O, or background computations.
 ///
 /// # Examples
 ///
 /// ```
 /// use tears::prelude::*;
 ///
-/// enum Message {
-///     GotResult(i32),
-/// }
+/// enum Message { GotResult(i32) }
 ///
-/// // Create a command that performs an async operation
-/// let cmd = Command::perform(
-///     async { 42 },
-///     |result| Message::GotResult(result)
-/// );
+/// let cmd = Command::perform(async { 42 }, Message::GotResult);
 /// ```
 pub struct Command<Msg: Send + 'static> {
     pub(super) stream: Option<BoxStream<'static, Action<Msg>>>,
@@ -78,8 +56,6 @@ pub struct Command<Msg: Send + 'static> {
 
 impl<Msg: Send + 'static> Command<Msg> {
     /// Create a command that does nothing.
-    ///
-    /// This is useful when you need to return a command but have no side effects to perform.
     ///
     /// # Examples
     ///
@@ -95,26 +71,14 @@ impl<Msg: Send + 'static> Command<Msg> {
 
     /// Perform an asynchronous operation and convert its result to a message.
     ///
-    /// This is one of the most common ways to create commands. It runs a future
-    /// and applies a function to convert the result into a message.
-    ///
-    /// # Arguments
-    ///
-    /// * `future` - The async operation to perform
-    /// * `f` - Function to convert the result into a message
-    ///
     /// # Examples
     ///
     /// ```
     /// use tears::prelude::*;
     ///
-    /// async fn fetch_data() -> String {
-    ///     "data".to_string()
-    /// }
+    /// enum Message { DataReceived(String) }
     ///
-    /// enum Message {
-    ///     DataReceived(String),
-    /// }
+    /// async fn fetch_data() -> String { "data".to_string() }
     ///
     /// let cmd = Command::perform(fetch_data(), Message::DataReceived);
     /// ```
@@ -127,9 +91,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     }
 
     /// Create a command from a future that produces a message.
-    ///
-    /// Unlike `perform`, this method expects the future to directly produce a message
-    /// without any conversion function.
     ///
     /// # Examples
     ///
@@ -147,48 +108,23 @@ impl<Msg: Send + 'static> Command<Msg> {
 
     /// Send a message to the application immediately.
     ///
-    /// This is a tears-specific feature that allows immediate message dispatch
-    /// within the update cycle. It's useful for state transitions and converting
-    /// input events to messages.
-    ///
-    /// # Why `message` and not `send` or `dispatch`?
-    ///
-    /// We chose `message` to be explicit about what this method does: it sends
-    /// a message to the application's update function. This keeps the API surface
-    /// clear for future extensions like `send()` for stream operations or
-    /// `dispatch()` for task management.
+    /// Useful for state transitions and converting input events to messages.
     ///
     /// # Examples
     ///
     /// ```
     /// use tears::prelude::*;
     ///
-    /// enum Message {
-    ///     GoToMenu,
-    ///     Refresh,
-    /// }
+    /// enum Message { GoToMenu, Refresh }
     ///
-    /// // Send a message immediately
     /// let cmd = Command::message(Message::Refresh);
-    ///
-    /// // State transition
-    /// let cmd = Command::message(Message::GoToMenu);
     /// ```
-    ///
-    /// # Comparison with iced
-    ///
-    /// Unlike iced, tears supports self-messaging through commands. In iced,
-    /// such cases would typically be handled directly in the update function.
     #[must_use]
     pub fn message(msg: Msg) -> Self {
         Self::effect(Action::Message(msg))
     }
 
     /// Create a command that performs a single action immediately.
-    ///
-    /// This is the fundamental way to execute actions in tears, compatible with
-    /// iced's `effect` API design (v0.14.0). For sending messages specifically,
-    /// consider using [`Command::message`] for better ergonomics.
     ///
     /// # Examples
     ///
@@ -198,15 +134,9 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Quit the application
     /// let cmd: Command<i32> = Command::effect(Action::Quit);
     ///
-    /// // Send a message immediately (prefer Command::message for this)
+    /// // Send a message (prefer Command::message for this)
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
-    ///
-    /// # Comparison with iced
-    ///
-    /// This is similar to iced's `Task::effect` (v0.14.0), which accepts
-    /// actions without output. However, tears allows `Action::Message` for
-    /// consistency with its self-messaging feature.
     #[must_use]
     pub fn effect(action: Action<Msg>) -> Self {
         Self {
@@ -216,24 +146,18 @@ impl<Msg: Send + 'static> Command<Msg> {
 
     /// Batch multiple commands into a single command.
     ///
-    /// All commands will be executed concurrently. The order in which
-    /// messages arrive is not guaranteed. Commands that are `Command::none()`
-    /// are automatically filtered out.
+    /// All commands execute concurrently. `Command::none()` is filtered out.
     ///
     /// # Examples
     ///
     /// ```
     /// use tears::prelude::*;
     ///
-    /// enum Message {
-    ///     First(i32),
-    ///     Second(String),
-    /// }
+    /// enum Message { First(i32), Second(String) }
     ///
     /// let cmd = Command::batch(vec![
     ///     Command::perform(async { 1 }, Message::First),
     ///     Command::perform(async { "data".to_string() }, Message::Second),
-    ///     Command::none(), // This will be filtered out
     /// ]);
     /// ```
     #[must_use]
@@ -250,9 +174,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     }
 
     /// Create a command from a stream of messages.
-    ///
-    /// The stream will be consumed and each item will be sent as a message
-    /// to the application's update function.
     ///
     /// # Examples
     ///
@@ -272,23 +193,13 @@ impl<Msg: Send + 'static> Command<Msg> {
 
     /// Run a stream and convert each item to a message.
     ///
-    /// This is useful for subscribing to external event sources where you need
-    /// to transform the stream's items into your application's message type.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` - The stream to consume
-    /// * `f` - Function to convert each stream item into a message
-    ///
     /// # Examples
     ///
     /// ```
     /// use tears::prelude::*;
     /// use futures::stream;
     ///
-    /// enum Message {
-    ///     NumberReceived(i32),
-    /// }
+    /// enum Message { NumberReceived(i32) }
     ///
     /// let numbers = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::run(numbers, |n| Message::NumberReceived(n * 2));

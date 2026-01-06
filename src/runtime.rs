@@ -1,41 +1,9 @@
 //! Runtime for executing TUI applications.
 //!
-//! The [`Runtime`] manages the application lifecycle, including:
-//! - Initializing the application
-//! - Running the event loop
-//! - Processing messages and commands
-//! - Managing subscriptions
-//! - Rendering the UI
+//! The [`Runtime`] manages the application lifecycle based on The Elm Architecture,
+//! coordinating message processing, command execution, subscription management, and rendering.
 //!
-//! # Example
-//!
-//! ```rust,no_run
-//! use tears::prelude::*;
-//! # use color_eyre::eyre::Result;
-//! # use ratatui::Frame;
-//! # struct MyApp;
-//! # enum Message {}
-//! # impl Application for MyApp {
-//! #     type Message = Message;
-//! #     type Flags = ();
-//! #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
-//! #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
-//! #     fn view(&self, frame: &mut Frame<'_>) {}
-//! #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
-//! # }
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     let runtime = Runtime::<MyApp>::new(());
-//!
-//!     let mut terminal = ratatui::init();
-//!
-//!     runtime.run(&mut terminal, 60).await?;
-//!
-//!     ratatui::restore();
-//!     Ok(())
-//! }
-//! ```
+//! See [`Runtime`] for detailed documentation and examples.
 
 use std::time::Duration;
 
@@ -53,33 +21,21 @@ use crate::{
 
 /// The runtime manages the application lifecycle and event loop.
 ///
-/// The runtime is responsible for:
-/// - Initializing the application
-/// - Running the event loop
-/// - Processing messages and updating the application state
-/// - Executing commands asynchronously
-/// - Managing subscriptions
-/// - Rendering the UI at the specified frame rate
+/// # Responsibility: Scheduling ("When to Execute")
 ///
-/// # Architectural Responsibility: Scheduling ("When to Execute")
+/// The Runtime's core responsibility is **scheduling** - controlling **when** operations
+/// are executed. This is distinct from other components:
 ///
-/// The Runtime's primary responsibility is **scheduling** - deciding **when** to execute
-/// operations. This is distinct from the responsibilities of other components:
+/// - **`Application`**: Declares **what** to display/subscribe (declarative)
+/// - **`Runtime`**: Controls **when** to execute (scheduling, optimization)
+/// - **`SubscriptionManager`**: Handles **how** subscriptions work (implementation)
 ///
-/// - **`Application`**: Declares **what** to display/subscribe (declarative, business logic)
-/// - **`Runtime`**: Controls **when** to execute operations (scheduling, optimization)
-/// - **`SubscriptionManager`**: Handles **how** to manage subscriptions (implementation)
+/// The Runtime uses several optimizations to improve performance:
+/// - Skip rendering when UI hasn't changed (`needs_redraw`)
+/// - Skip subscription updates when unchanged (`subscription_ids_hash`)
+/// - Regulate timing via frame rate control
 ///
-/// ## Scheduling Optimizations
-///
-/// The Runtime uses several mechanisms to optimize when operations are performed:
-///
-/// - **`needs_redraw` flag**: Skips rendering when UI hasn't changed
-/// - **`subscription_ids_hash`**: Skips subscription updates when unchanged
-/// - **Frame rate control**: Regulates the event loop timing
-///
-/// These optimizations are transparent to the Application, maintaining clean separation
-/// of concerns while providing significant performance benefits.
+/// These are transparent to the Application, maintaining separation of concerns.
 ///
 /// # Type Parameters
 ///
@@ -104,26 +60,25 @@ use crate::{
 /// # }
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
-///     // Create the runtime with initial flags
 ///     let runtime = Runtime::<MyApp>::new(());
-///
-///     // Setup terminal
 ///     let mut terminal = ratatui::init();
-///
-///     // Run the application at 60 FPS
 ///     runtime.run(&mut terminal, 60).await?;
-///
-///     // Cleanup
 ///     ratatui::restore();
 ///     Ok(())
 /// }
 /// ```
 pub struct Runtime<App: Application> {
+    /// The application instance
     app: App,
+    /// Channel sender for application messages
     msg_tx: mpsc::UnboundedSender<App::Message>,
+    /// Channel receiver for application messages
     msg_rx: mpsc::UnboundedReceiver<App::Message>,
+    /// Channel sender for quit signals
     quit_tx: mpsc::UnboundedSender<()>,
+    /// Channel receiver for quit signals
     quit_rx: mpsc::UnboundedReceiver<()>,
+    /// Manages subscription lifecycle
     subscription_manager: SubscriptionManager<App::Message>,
 
     /// Scheduling optimization: tracks whether rendering is needed.
@@ -145,19 +100,12 @@ pub struct Runtime<App: Application> {
 impl<App: Application> Runtime<App> {
     /// Create a new runtime instance with the given flags.
     ///
-    /// This method:
-    /// 1. Creates the necessary channels for message passing
-    /// 2. Initializes the application by calling [`Application::new`]
-    /// 3. Executes any initialization commands returned by the application
-    /// 4. Sets up the subscription manager
+    /// Initializes the application by calling [`Application::new`] and executes
+    /// any initialization commands returned.
     ///
     /// # Arguments
     ///
-    /// * `flags` - Configuration data to pass to the application's initialization
-    ///
-    /// # Returns
-    ///
-    /// A new `Runtime` instance ready to be executed
+    /// * `flags` - Configuration data for application initialization
     ///
     /// # Examples
     ///
@@ -175,7 +123,6 @@ impl<App: Application> Runtime<App> {
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
     /// # }
     ///
-    /// // Create runtime with initial value
     /// let runtime = Runtime::<MyApp>::new(42);
     /// ```
     #[must_use]
@@ -206,14 +153,8 @@ impl<App: Application> Runtime<App> {
 
     /// Enqueue a command to be executed asynchronously.
     ///
-    /// Commands are spawned as separate tokio tasks that will execute concurrently
-    /// with the main event loop. Actions produced by the command stream are sent
-    /// back to the runtime via channels:
-    /// - `Action::Message` values are sent to the message queue for processing
-    /// - `Action::Quit` signals are sent to the quit channel to terminate the loop
-    ///
-    /// The spawned task will run on the tokio runtime and complete independently
-    /// of the main event loop timing.
+    /// Commands are spawned as tokio tasks that execute concurrently with the event loop.
+    /// Actions are sent back via channels (Message → message queue, Quit → quit channel).
     fn enqueue_command(&self, cmd: Command<App::Message>) {
         if let Some(stream) = cmd.stream {
             let msg_tx = self.msg_tx.clone();
@@ -242,24 +183,12 @@ impl<App: Application> Runtime<App> {
         }
     }
 
-    /// Process all pending messages in the message queue.
+    /// Process all pending messages in the queue.
     ///
-    /// This method processes messages synchronously by:
-    /// 1. Draining all pending messages from the message queue using `try_recv`
-    /// 2. Calling [`Application::update`] for each message
-    /// 3. Collecting all returned commands
-    /// 4. Batching and enqueuing the commands for asynchronous execution
+    /// Drains the message queue, calls [`Application::update`] for each message,
+    /// and batches the resulting commands for execution.
     ///
-    /// Commands returned by `update` are spawned as async tasks but are not
-    /// guaranteed to execute before this method returns. The runtime yields
-    /// control after calling this method to allow spawned tasks to run.
-    ///
-    /// By batching commands, we avoid spawning multiple tokio tasks when
-    /// processing multiple messages in a single frame, which improves
-    /// performance when there are many pending messages.
-    ///
-    /// Returns `true` if any messages were processed, `false` otherwise.
-    /// This is used to determine if a redraw is needed.
+    /// Returns `true` if any messages were processed.
     fn process_messages(&mut self) -> bool {
         let mut has_messages = false;
         let mut commands = Vec::new();
@@ -279,9 +208,6 @@ impl<App: Application> Runtime<App> {
     }
 
     /// Check if a quit signal has been received.
-    ///
-    /// Returns `true` if at least one quit signal is in the queue.
-    /// This uses `try_recv` for non-blocking check, consuming one signal if present.
     fn check_quit(&mut self) -> bool {
         self.quit_rx.try_recv().is_ok()
     }
@@ -292,12 +218,9 @@ impl<App: Application> Runtime<App> {
         self.subscription_manager.update(subscriptions);
     }
 
-    /// Update subscriptions based on current application state.
+    /// Update subscriptions if they have changed.
     ///
-    /// This method is called every frame to support dynamic subscriptions.
-    /// It uses hash-based caching to avoid unnecessary updates when subscriptions
-    /// haven't changed. Only when the subscription IDs differ from the previous
-    /// frame will the `SubscriptionManager` be called to diff and update.
+    /// Uses hash-based caching to skip updates when subscriptions are unchanged.
     fn update_subscriptions(&mut self) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -318,12 +241,11 @@ impl<App: Application> Runtime<App> {
         }
     }
 
-    /// Render the application's view to the terminal.
+    /// Render the application to the terminal.
     ///
     /// # Errors
     ///
-    /// Returns an error if terminal I/O fails. Common causes include terminal
-    /// disconnection or broken pipe. These errors are typically unrecoverable.
+    /// Returns an error if terminal I/O fails.
     fn render<B: Backend>(
         &self,
         terminal: &mut ratatui::Terminal<B>,
@@ -334,56 +256,38 @@ impl<App: Application> Runtime<App> {
         Ok(())
     }
 
-    /// Perform cleanup when shutting down.
+    /// Clean up resources on shutdown.
     fn shutdown(&mut self) {
         self.subscription_manager.shutdown();
     }
 
     /// Run the application event loop.
     ///
-    /// This method starts the main event loop and runs until the application quits.
-    /// It performs the following actions in each iteration:
+    /// Runs the main event loop until the application quits. Each iteration:
+    /// 1. Processes pending messages via [`Application::update`]
+    /// 2. Renders the UI if needed via [`Application::view`]
+    /// 3. Updates subscriptions based on current state
+    /// 4. Waits for the next frame or quit signal
     ///
-    /// 1. Renders the UI by calling [`Application::view`]
-    /// 2. Processes all pending messages by calling [`Application::update`]
-    /// 3. Yields control to the async runtime to execute spawned command tasks
-    /// 4. Checks if a quit signal has been received
-    /// 5. Updates subscriptions based on current application state
-    /// 6. Waits for the next frame or quit signal (whichever comes first)
+    /// # Command Execution
     ///
-    /// ## Command Execution Model
+    /// Commands from [`Application::update`] execute asynchronously as tokio tasks.
+    /// The runtime yields control to ensure quit commands are processed promptly.
     ///
-    /// Commands returned by [`Application::update`] are executed asynchronously
-    /// as separate tokio tasks. The runtime yields control after processing messages
-    /// (using [`tokio::task::yield_now`]) to ensure that these command tasks have
-    /// an opportunity to execute before the next quit check. This design guarantees
-    /// that quit commands are processed promptly without blocking on frame timing.
+    /// # Termination
     ///
-    /// This behavior is similar to how Elm's runtime processes commands in the
-    /// JavaScript event loop - commands are scheduled to execute "soon" but not
-    /// necessarily synchronously with the update that produced them.
-    ///
-    /// ## Termination
-    ///
-    /// The event loop terminates when:
-    /// - A command returns [`Action::Quit`]
-    /// - An error occurs during rendering
+    /// The loop terminates when a quit signal is received (via [`Action::Quit`])
+    /// or when rendering fails.
     ///
     /// # Arguments
     ///
-    /// * `terminal` - A mutable reference to the ratatui terminal
-    /// * `frame_rate` - The target frames per second (FPS) for rendering
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on successful completion, or an error if rendering fails
+    /// * `terminal` - Ratatui terminal instance
+    /// * `frame_rate` - Target frames per second (actual rate may vary based on load)
     ///
     /// # Errors
     ///
-    /// Returns an error if terminal rendering fails (e.g., terminal disconnection,
-    /// I/O errors, broken pipe). Such errors typically indicate unrecoverable
-    /// terminal state, and the application will terminate. This behavior is
-    /// consistent with other TUI frameworks and ratatui best practices
+    /// Returns an error if terminal rendering fails (e.g., disconnection, I/O error).
+    /// Such errors are typically unrecoverable.
     ///
     /// # Examples
     ///
@@ -404,23 +308,12 @@ impl<App: Application> Runtime<App> {
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let runtime = Runtime::<MyApp>::new(());
-    ///
     ///     let mut terminal = ratatui::init();
-    ///
-    ///     // Run at 60 FPS
     ///     runtime.run(&mut terminal, 60).await?;
-    ///
     ///     ratatui::restore();
     ///     Ok(())
     /// }
     /// ```
-    ///
-    /// # Note
-    ///
-    /// The actual frame rate may vary depending on:
-    /// - The complexity of your UI rendering
-    /// - The time spent processing messages
-    /// - System performance
     pub async fn run<B: Backend>(
         mut self,
         terminal: &mut ratatui::Terminal<B>,

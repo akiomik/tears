@@ -7,15 +7,12 @@ use ratatui::Frame;
 
 use crate::{command::Command, subscription::Subscription};
 
-/// The main trait that defines a TUI application following the Elm Architecture.
-///
-/// This trait encapsulates all the core concepts of the Elm Architecture:
-/// initialization, updates, view rendering, and subscriptions.
+/// The main trait for defining TUI applications following The Elm Architecture.
 ///
 /// # Type Parameters
 ///
-/// * `Message` - The type of messages that your application handles. Must be `Send + 'static`.
-/// * `Flags` - Configuration data passed at initialization. Must be `Clone + Send`.
+/// * `Message` - Messages that your application handles
+/// * `Flags` - Configuration data for initialization
 ///
 /// # Example
 ///
@@ -24,18 +21,13 @@ use crate::{command::Command, subscription::Subscription};
 /// use tears::prelude::*;
 ///
 /// #[derive(Debug, Clone)]
-/// enum Message {
-///     Increment,
-///     Decrement,
-/// }
+/// enum Message { Increment, Decrement }
 ///
-/// struct Counter {
-///     value: i32,
-/// }
+/// struct Counter { value: i32 }
 ///
 /// impl Application for Counter {
 ///     type Message = Message;
-///     type Flags = i32; // Initial value
+///     type Flags = i32;
 ///
 ///     fn new(initial: i32) -> (Self, Command<Message>) {
 ///         (Counter { value: initial }, Command::none())
@@ -50,7 +42,7 @@ use crate::{command::Command, subscription::Subscription};
 ///     }
 ///
 ///     fn view(&self, frame: &mut Frame<'_>) {
-///         // Render UI here
+///         // Render UI
 ///     }
 ///
 ///     fn subscriptions(&self) -> Vec<Subscription<Message>> {
@@ -60,45 +52,28 @@ use crate::{command::Command, subscription::Subscription};
 /// ```
 pub trait Application: Sized {
     /// The type of messages your application processes.
-    ///
-    /// Messages represent all possible events that can occur in your application.
-    /// They are produced by user interactions, subscriptions, or commands.
     type Message: Send + 'static;
 
     /// Configuration data for initializing your application.
-    ///
-    /// Flags allow you to pass initial configuration when creating the application.
-    /// Use `()` if no configuration is needed.
     type Flags;
 
     /// Initialize the application with the given flags.
     ///
-    /// This method is called once when the application starts. It returns
-    /// the initial state and an optional command to run at startup.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(Self, Command<Self::Message>)` containing:
-    /// - The initial application state
-    /// - An optional command to execute (use `Command::none()` if not needed)
+    /// Returns the initial state and an optional initialization command.
     ///
     /// # Examples
     ///
     /// ```
     /// # use tears::prelude::*;
     /// # use ratatui::Frame;
-    /// # struct MyApp { initialized: bool }
-    /// # #[derive(Clone)] enum Message { InitComplete }
+    /// # struct MyApp;
+    /// # enum Message { Init }
     /// # impl Application for MyApp {
     /// #     type Message = Message;
-    /// #     type Flags = ();
-    /// fn new(_flags: ()) -> (Self, Command<Message>) {
-    ///     let app = MyApp { initialized: false };
-    ///     let cmd = Command::perform(
-    ///         async { /* initialization work */ },
-    ///         |_| Message::InitComplete
-    ///     );
-    ///     (app, cmd)
+    /// #     type Flags = String;
+    /// fn new(config: String) -> (Self, Command<Message>) {
+    ///     let cmd = Command::perform(async { /* async init */ }, |_| Message::Init);
+    ///     (MyApp, cmd)
     /// }
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
@@ -109,17 +84,8 @@ pub trait Application: Sized {
 
     /// Process a message and update the application state.
     ///
-    /// This is the heart of the Elm Architecture. All state changes happen here
-    /// in response to messages. The method can return a command to perform
-    /// asynchronous operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `msg` - The message to process
-    ///
-    /// # Returns
-    ///
-    /// A `Command` to execute after the update (use `Command::none()` if not needed)
+    /// All state changes happen here in response to messages. Can return a command
+    /// to perform asynchronous operations.
     ///
     /// # Examples
     ///
@@ -134,13 +100,8 @@ pub trait Application: Sized {
     /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
     /// fn update(&mut self, msg: Message) -> Command<Message> {
     ///     match msg {
-    ///         Message::Save => {
-    ///             // Update state and perform async save
-    ///             Command::perform(async { /* save */ }, |_| Message::Quit)
-    ///         }
-    ///         Message::Quit => {
-    ///             Command::effect(Action::Quit)
-    ///         }
+    ///         Message::Save => Command::perform(async { /* save */ }, |_| Message::Quit),
+    ///         Message::Quit => Command::effect(Action::Quit),
     ///     }
     /// }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
@@ -166,39 +127,32 @@ pub trait Application: Sized {
 
     /// Define subscriptions for external event sources.
     ///
-    /// Subscriptions represent ongoing sources of messages, such as:
-    /// - Keyboard/mouse input
-    /// - Timers
-    /// - WebSocket connections
-    /// - File watchers
+    /// Subscriptions represent ongoing sources of messages, such as timers,
+    /// keyboard input, WebSocket connections, or file watchers.
     ///
-    /// This method is called during initialization to set up subscriptions.
-    ///
-    /// # Returns
-    ///
-    /// A vector of subscriptions that the application wants to listen to
+    /// This method can return different subscriptions based on application state,
+    /// enabling dynamic subscription management.
     ///
     /// # Examples
     ///
     /// ```
     /// # use tears::prelude::*;
     /// # use ratatui::Frame;
-    /// # struct MyApp;
-    /// # enum Message { Tick, Input }
+    /// # struct MyApp { enabled: bool }
+    /// # enum Message { Tick }
     /// # impl Application for MyApp {
     /// #     type Message = Message;
     /// #     type Flags = ();
-    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp { enabled: true }, Command::none()) }
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// fn subscriptions(&self) -> Vec<Subscription<Message>> {
-    ///     use tears::subscription::time::{Timer, Message as TimeMsg};
-    ///     use tears::subscription::terminal::TerminalEvents;
-    ///
-    ///     vec![
-    ///         Subscription::new(Timer::new(1000)).map(|_| Message::Tick),
-    ///         Subscription::new(TerminalEvents::new()).map(|_| Message::Input),
-    ///     ]
+    ///     if self.enabled {
+    ///         use tears::subscription::time::Timer;
+    ///         vec![Subscription::new(Timer::new(1000)).map(|_| Message::Tick)]
+    ///     } else {
+    ///         vec![]
+    ///     }
     /// }
     /// # }
     /// ```
