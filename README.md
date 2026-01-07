@@ -26,7 +26,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tears = "0.6"
+tears = "0.7"
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
@@ -247,7 +247,7 @@ Tears supports optional features that can be enabled in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tears = { version = "0.6", features = ["ws", "rustls"] }
+tears = { version = "0.7", features = ["ws", "rustls"] }
 ```
 
 - **`ws`**: Enables WebSocket subscription support
@@ -260,7 +260,7 @@ tears = { version = "0.6", features = ["ws", "rustls"] }
 
 ```toml
 [dependencies]
-tears = { version = "0.6", features = ["http"] }
+tears = { version = "0.7", features = ["http"] }
 ```
 
 - **`http`**: Enables HTTP Query and Mutation support
