@@ -74,17 +74,17 @@ impl Application for App {
 }
 ```
 
-To run your application, create a `Runtime` and call `run()`:
+To run your application, create an `Runtime` and call `run()`:
 
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
-    let runtime = Runtime::<App>::new(());
+    let runtime = Runtime::<App>::new((), 60);
 
     // Setup terminal (see complete example below)
     // ...
 
-    runtime.run(&mut terminal, 60).await?;
+    runtime.run(&mut terminal).await?;
     Ok(())
 }
 ```
@@ -160,13 +160,12 @@ impl Application for Counter {
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let runtime = Runtime::<Counter>::new(());
-
     // Setup terminal
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let result = runtime.run(&mut terminal, 60).await;
+    let runtime = Runtime::<Counter>::new((), 60);
+    let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
     ratatui::restore();

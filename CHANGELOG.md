@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING**: Simplified Runtime API
+  - Changed from `Runtime::new(flags).run(&mut terminal, frame_rate)` to `Runtime::new(flags, frame_rate).run(&mut terminal)`
+  - Frame rate is now specified during Runtime creation instead of when calling `run()`
+  - Example:
+    ```rust
+    // Before
+    let runtime = Runtime::<MyApp>::new(());
+    runtime.run(&mut terminal, 60).await?;
+
+    // After
+    let runtime = Runtime::<MyApp>::new((), 60);
+    runtime.run(&mut terminal).await?;
+    ```
+
 - **Performance**: Event-driven message processing for improved input responsiveness
   - Runtime now processes messages immediately as they arrive via `tokio::select!`
   - Message processing is no longer bound to frame rate interval

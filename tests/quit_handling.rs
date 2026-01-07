@@ -14,11 +14,11 @@ async fn test_quit_responsiveness_low_framerate() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<InitQuitApp>::new(());
+    let runtime = Runtime::<InitQuitApp>::new((), 16);
 
     let start = Instant::now();
     // Use low frame rate (16 FPS = 62.5ms per frame)
-    let result = timeout(Duration::from_millis(200), runtime.run(&mut terminal, 16)).await?;
+    let result = timeout(Duration::from_millis(200), runtime.run(&mut terminal)).await?;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Runtime should complete without error");
@@ -61,10 +61,10 @@ async fn test_quit_from_init_command() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<InitQuitApp>::new(());
+    let runtime = Runtime::<InitQuitApp>::new((), 60);
 
     let start = Instant::now();
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Runtime should complete without error");
@@ -111,11 +111,11 @@ async fn test_quit_during_frame_wait() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<DelayedQuitApp>::new(());
+    let runtime = Runtime::<DelayedQuitApp>::new((), 10);
 
     let start = Instant::now();
     // Use very low frame rate (10 FPS = 100ms per frame)
-    let result = timeout(Duration::from_millis(300), runtime.run(&mut terminal, 10)).await?;
+    let result = timeout(Duration::from_millis(300), runtime.run(&mut terminal)).await?;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Runtime should complete without error");
@@ -180,10 +180,10 @@ async fn test_quit_after_multiple_messages() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<MultiMessageQuitApp>::new(());
+    let runtime = Runtime::<MultiMessageQuitApp>::new((), 60);
 
     let start = Instant::now();
-    let result = timeout(Duration::from_millis(500), runtime.run(&mut terminal, 60)).await?;
+    let result = timeout(Duration::from_millis(500), runtime.run(&mut terminal)).await?;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "Runtime should complete without error");

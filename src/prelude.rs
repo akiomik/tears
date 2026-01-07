@@ -10,7 +10,7 @@
 //! - [`Command`] - For performing side effects
 //! - [`Action`] - Actions that commands can perform
 //! - [`Subscription`] - For handling event sources
-//! - [`Runtime`] - The application runtime
+//! - [`Runtime`] - The runtime for running applications
 
 pub use crate::application::Application;
 pub use crate::command::{Action, Command};

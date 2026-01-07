@@ -300,13 +300,12 @@ async fn main() -> Result<()> {
         println!();
     }
 
-    let runtime = Runtime::<App>::new(());
-
     // Setup terminal
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let result = runtime.run(&mut terminal, 60).await;
+    let runtime = Runtime::<App>::new((), 60);
+    let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
     ratatui::restore();
