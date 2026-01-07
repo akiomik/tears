@@ -36,10 +36,10 @@ rustls-tls-webpki-roots = ["dep:rustls", "tokio-tungstenite?/rustls-tls-webpki-r
 
 [dependencies]
 color-eyre = "0.6"
-crossterm = { version = "0.29", features = ["serde", "event-stream"] }
+crossterm = { version = "0.28", features = ["serde", "event-stream"] }
 dashmap = { version = "6", default-features = false, optional = true }
 futures = "0.3"
-ratatui = { version = "0.30", features = ["serde", "macros"] }
+ratatui = { version = "0.29", features = ["serde", "macros"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 thiserror = { version = "1", default-features = false, optional = true }
 tokio = { version = "1", features = ["full"] }

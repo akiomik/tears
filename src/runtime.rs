@@ -243,7 +243,7 @@ impl<App: Application> Runtime<App> {
     fn process_frame_tick<B: Backend>(
         &mut self,
         terminal: &mut ratatui::Terminal<B>,
-    ) -> Result<bool, <B as Backend>::Error> {
+    ) -> Result<bool> {
         // Render only if state has changed
         if self.needs_redraw {
             self.state.render(terminal)?;
@@ -342,10 +342,7 @@ impl<App: Application> Runtime<App> {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn run<B: Backend>(
-        mut self,
-        terminal: &mut ratatui::Terminal<B>,
-    ) -> Result<(), <B as Backend>::Error> {
+    pub async fn run<B: Backend>(mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
         self.state.initialize_subscriptions();
 
         loop {
@@ -468,10 +465,7 @@ impl<App: Application> ApplicationState<App> {
     /// # Errors
     ///
     /// Returns an error if the terminal backend fails (e.g., I/O error).
-    fn render<B: Backend>(
-        &self,
-        terminal: &mut ratatui::Terminal<B>,
-    ) -> Result<(), <B as Backend>::Error> {
+    fn render<B: Backend>(&self, terminal: &mut ratatui::Terminal<B>) -> Result<()> {
         terminal.draw(|frame| {
             self.app.view(frame);
         })?;
