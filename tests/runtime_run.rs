@@ -97,9 +97,9 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<CounterApp>::new(0); // Quit immediately
+    let runtime = Runtime::<CounterApp>::new(0, 60); // Quit immediately
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
     assert!(result.is_ok(), "Runtime should not error");
 
@@ -145,9 +145,9 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<MessageApp>::new(());
+    let runtime = Runtime::<MessageApp>::new((), 60);
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
     assert!(result.is_ok());
 
@@ -160,9 +160,9 @@ async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend)?;
 
-    let runtime = Runtime::<SubApp>::new(());
+    let runtime = Runtime::<SubApp>::new((), 60);
 
-    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal, 60)).await?;
+    let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
     assert!(result.is_ok());
 
