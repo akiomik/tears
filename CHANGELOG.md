@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Performance**: Event-driven message processing for improved input responsiveness
+  - Runtime now processes messages immediately as they arrive via `tokio::select!`
+  - Message processing is no longer bound to frame rate interval
+  - User input (keyboard, mouse) is now handled with sub-millisecond latency
+  - Frame rate interval is still used for periodic subscription updates and batch rendering
+  - Significantly improves perceived responsiveness, especially at lower frame rates (e.g., 16 FPS)
+  - Combines with `should_render()` check to avoid unnecessary renders while maintaining instant input feedback
+
 ## [0.6.1] - 2026-01-06
 
 ### Added
