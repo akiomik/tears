@@ -5,7 +5,7 @@
 //!
 //! See [`Runtime`] for detailed documentation and examples.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
@@ -183,30 +183,6 @@ impl<App: Application> Runtime<App> {
         }
     }
 
-    /// Process all pending messages in the queue.
-    ///
-    /// Drains the message queue, calls [`Application::update`] for each message,
-    /// and batches the resulting commands for execution.
-    ///
-    /// Returns `true` if any messages were processed.
-    fn process_messages(&mut self) -> bool {
-        let mut has_messages = false;
-        let mut commands = Vec::new();
-
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            has_messages = true;
-            let cmd = self.app.update(msg);
-            commands.push(cmd);
-        }
-
-        // Batch all commands and enqueue them as a single operation
-        if !commands.is_empty() {
-            self.enqueue_command(Command::batch(commands));
-        }
-
-        has_messages
-    }
-
     /// Check if a quit signal has been received.
     fn check_quit(&mut self) -> bool {
         self.quit_rx.try_recv().is_ok()
@@ -321,48 +297,60 @@ impl<App: Application> Runtime<App> {
     ) -> Result<(), <B as Backend>::Error> {
         let frame_duration = Duration::from_millis(1000 / u64::from(frame_rate));
 
-        // Use interval instead of sleep for more accurate frame timing with drift correction
+        // Use interval for accurate frame timing with drift correction
         let mut frame_interval = interval(frame_duration);
         // Skip missed frames rather than trying to catch up
-        // This maintains consistent frame rate even if rendering takes longer than expected
         frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         self.initialize_subscriptions();
 
         loop {
-            // Process all pending messages and check if redraw is needed
-            let has_messages = self.process_messages();
-            if has_messages {
-                self.needs_redraw = true;
-            }
-
-            // Render only if needed
-            if self.needs_redraw {
-                self.render(terminal)?;
-                self.needs_redraw = false;
-            }
-
-            // Yield to allow spawned quit tasks to execute
-            // This ensures quit signals from commands are processed promptly
-            tokio::task::yield_now().await;
-
-            // Check quit after yielding
-            if self.check_quit() {
-                break;
-            }
-
-            // Update subscriptions based on current state (dynamic subscriptions)
-            // NOTE: This is called every frame, but uses hash-based caching to skip
-            // updates when subscriptions haven't changed, improving performance.
-            self.update_subscriptions();
-
-            // Wait for next frame or quit signal (whichever comes first)
             tokio::select! {
-                _ = frame_interval.tick() => {
-                    // Continue to next frame
+                // Message received: batch process messages that arrive in quick succession
+                Some(msg) = self.msg_rx.recv() => {
+                    // Process the first message
+                    let cmd = self.app.update(msg);
+                    self.enqueue_command(cmd);
+
+                    // Micro-batching: process additional messages that arrived during a short window
+                    // This prevents excessive rendering when messages arrive in bursts
+                    // (e.g., rapid key presses, high-frequency timer events)
+                    let batch_deadline = Instant::now() + Duration::from_micros(100);
+                    while Instant::now() < batch_deadline {
+                        match self.msg_rx.try_recv() {
+                            Ok(msg) => {
+                                let cmd = self.app.update(msg);
+                                self.enqueue_command(cmd);
+                            }
+                            Err(_) => break, // No more messages available
+                        }
+                    }
+
+                    // Mark that a redraw is needed
+                    self.needs_redraw = true;
                 }
+
+                // Frame tick: render if needed and update subscriptions
+                _ = frame_interval.tick() => {
+                    // Render only if state has changed
+                    if self.needs_redraw {
+                        self.render(terminal)?;
+                        self.needs_redraw = false;
+                    }
+
+                    // Update subscriptions based on current state (dynamic subscriptions)
+                    // NOTE: Uses hash-based caching to skip updates when subscriptions
+                    // haven't changed, improving performance.
+                    self.update_subscriptions();
+
+                    // Check for quit signal (non-blocking)
+                    if self.check_quit() {
+                        break;
+                    }
+                }
+
+                // Quit signal received
                 _ = self.quit_rx.recv() => {
-                    // Quit signal received during frame wait
                     break;
                 }
             }
@@ -610,91 +598,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_messages_no_messages() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // No messages, should return false
-        let has_messages = runtime.process_messages();
-
-        assert!(!has_messages);
-        // Counter should remain unchanged
-        assert_eq!(runtime.app.counter, 0);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_with_increment() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Send increment message
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Process messages - should return true since we processed a message
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-        // Counter should be incremented
-        assert_eq!(runtime.app.counter, 1);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_with_quit() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Send quit message
-        let _ = runtime.msg_tx.send(TestMessage::Quit);
-
-        // Process messages - this will enqueue the quit command
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-
-        // Give time for the async command to send quit signal
-        sleep(Duration::from_millis(50)).await;
-
-        // Now check_quit should return true
-        assert!(runtime.check_quit());
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_multiple_messages() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Send multiple increment messages
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Process all messages - should return true
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-        // Counter should be incremented 3 times
-        assert_eq!(runtime.app.counter, 3);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_processes_all_messages() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Manually send quit signal first
-        let _ = runtime.quit_tx.send(());
-
-        // Send increment messages
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Process messages - should process all messages regardless of quit signal
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-        // Both increments should be processed (quit doesn't stop message processing)
-        assert_eq!(runtime.app.counter, 2);
-
-        // Quit signal should still be available
-        assert!(runtime.check_quit());
-    }
-
-    #[tokio::test]
     async fn test_initialize_subscriptions() {
         struct AppWithSubs;
 
@@ -811,67 +714,6 @@ mod tests {
 
         // Initial redraw should always be needed
         assert!(runtime.needs_redraw);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_returns_false_when_no_messages() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Process with no messages
-        let has_messages = runtime.process_messages();
-
-        assert!(!has_messages);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_returns_true_when_messages_exist() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Send a message
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Process messages
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_returns_true_for_multiple_messages() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // Send multiple messages
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Process messages - should return true even with multiple messages
-        let has_messages = runtime.process_messages();
-
-        assert!(has_messages);
-        assert_eq!(runtime.app.counter, 3);
-    }
-
-    #[tokio::test]
-    async fn test_process_messages_consecutive_calls() {
-        let mut runtime = Runtime::<TestApp>::new(0);
-
-        // First call with no messages
-        let has_messages = runtime.process_messages();
-        assert!(!has_messages);
-
-        // Send a message
-        let _ = runtime.msg_tx.send(TestMessage::Increment);
-
-        // Second call with message
-        let has_messages = runtime.process_messages();
-        assert!(has_messages);
-        assert_eq!(runtime.app.counter, 1);
-
-        // Third call with no new messages
-        let has_messages = runtime.process_messages();
-        assert!(!has_messages);
-        assert_eq!(runtime.app.counter, 1);
     }
 
     // Tests for subscription hash caching
