@@ -10,13 +10,15 @@
 //!
 //! Run with: `cargo run --example http_todo --features http`
 
+use std::io;
 use std::sync::Arc;
 
+use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::io;
 use tears::prelude::*;
 use tears::subscription::http::{
     Mutation, Query, QueryClient, QueryError, QueryResult, QueryState,
@@ -39,7 +41,7 @@ enum Message {
     /// Terminal input event
     Terminal(Event),
     /// Terminal error
-    TerminalError(std::io::Error),
+    TerminalError(io::Error),
     /// Query result for todos
     TodosQuery(QueryResult<Vec<Todo>>),
     /// Create todo result
@@ -132,7 +134,7 @@ impl Application for App {
                     },
                     |todo| {
                         Box::pin(async move {
-                            let client = reqwest::Client::new();
+                            let client = Client::new();
                             let response = client
                                 .post("https://jsonplaceholder.typicode.com/todos")
                                 .json(&todo)
@@ -204,7 +206,7 @@ impl Application for App {
                 &"todos",
                 || {
                     Box::pin(async {
-                        let client = reqwest::Client::new();
+                        let client = Client::new();
                         let response = client
                             .get("https://jsonplaceholder.typicode.com/todos")
                             .query(&[("_limit", "10")]) // Limit to 10 for demo
@@ -268,7 +270,9 @@ impl App {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<()> {
+    color_eyre::install()?;
+
     // Setup terminal
     let mut terminal = ratatui::init();
 
@@ -279,5 +283,7 @@ async fn main() -> io::Result<()> {
     // Restore terminal
     ratatui::restore();
 
-    result
+    result?;
+
+    Ok(())
 }
