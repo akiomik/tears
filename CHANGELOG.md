@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Added `#[must_use]` attribute to `Command` type to prevent accidental ignoring of side effects
+- **BREAKING**: Upgraded `thiserror` from 1.0 to 2.0 (used in `http` feature)
+  - This is a breaking change for downstream crates that depend on `tears` with the `http` feature and also depend on `thiserror` 1.x
+  - The `QueryError` type is part of the public API and derives from `thiserror::Error`
+  - If you use `thiserror` 1.x in your project alongside `tears`, you may need to upgrade to `thiserror` 2.0 to avoid dependency conflicts
 
 ## [0.7.0] - 2026-01-07
 

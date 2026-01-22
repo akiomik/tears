@@ -41,7 +41,7 @@ dashmap = { version = "6", default-features = false, optional = true }
 futures = "0.3"
 ratatui = { version = "0.30", features = ["serde", "macros"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
-thiserror = { version = "1", default-features = false, optional = true }
+thiserror = { version = "2", default-features = false, optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = { version = "0.28", default-features = false, optional = true }
