@@ -221,7 +221,7 @@ mod tests {
         let (app, cmd) = TestApp::new(42);
         assert_eq!(app.counter, 42);
         assert!(app.initialized);
-        assert!(cmd.stream.is_none()); // Command::none()
+        assert!(cmd.is_none()); // Command::none()
     }
 
     #[test]
@@ -303,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn test_application_new_with_command() {
         let (_, cmd) = AppWithCommand::new(());
-        assert!(cmd.stream.is_some());
+        assert!(cmd.is_some());
 
         // Verify the command produces the expected message
         if let Some(mut stream) = cmd.stream {

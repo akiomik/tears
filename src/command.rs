@@ -69,6 +69,42 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self { stream: None }
     }
 
+    /// Returns `true` if the command does nothing (is `none`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    ///
+    /// let cmd: Command<i32> = Command::none();
+    /// assert!(cmd.is_none());
+    ///
+    /// let cmd = Command::perform(async { 42 }, |x| x);
+    /// assert!(!cmd.is_none());
+    /// ```
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.stream.is_none()
+    }
+
+    /// Returns `true` if the command will perform some action.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    ///
+    /// let cmd = Command::perform(async { 42 }, |x| x);
+    /// assert!(cmd.is_some());
+    ///
+    /// let cmd: Command<i32> = Command::none();
+    /// assert!(!cmd.is_some());
+    /// ```
+    #[must_use]
+    pub fn is_some(&self) -> bool {
+        self.stream.is_some()
+    }
+
     /// Perform an asynchronous operation and convert its result to a message.
     ///
     /// # Examples
@@ -281,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_empty() {
         let cmd: Command<i32> = Command::batch(vec![]);
-        assert!(cmd.stream.is_none());
+        assert!(cmd.is_none());
     }
 
     #[tokio::test]
@@ -347,7 +383,7 @@ mod tests {
         let cmd2 = Command::<i32>::none();
 
         let cmd = Command::batch(vec![cmd1, cmd2]);
-        assert!(cmd.stream.is_none());
+        assert!(cmd.is_none());
     }
 
     #[tokio::test]
@@ -456,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn test_none() {
         let cmd: Command<i32> = Command::none();
-        assert!(cmd.stream.is_none());
+        assert!(cmd.is_none());
     }
 
     #[tokio::test]
@@ -713,7 +749,7 @@ mod tests {
         let cmd: Command<i32> = Command::none();
         let mapped = cmd.map(|x| x * 2);
 
-        assert!(mapped.stream.is_none());
+        assert!(mapped.is_none());
     }
 
     #[tokio::test]
@@ -725,5 +761,85 @@ mod tests {
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Quit));
+    }
+
+    #[test]
+    fn test_is_none() {
+        let cmd: Command<i32> = Command::none();
+        assert!(cmd.is_none());
+        assert!(!cmd.is_some());
+    }
+
+    #[test]
+    fn test_is_some() {
+        let cmd = Command::perform(async { 42 }, |x| x);
+        assert!(cmd.is_some());
+        assert!(!cmd.is_none());
+    }
+
+    #[test]
+    fn test_is_some_with_future() {
+        let cmd = Command::future(async { 100 });
+        assert!(cmd.is_some());
+        assert!(!cmd.is_none());
+    }
+
+    #[test]
+    fn test_is_some_with_message() {
+        let cmd = Command::message("test");
+        assert!(cmd.is_some());
+        assert!(!cmd.is_none());
+    }
+
+    #[test]
+    fn test_is_some_with_effect() {
+        let cmd: Command<i32> = Command::effect(Action::Quit);
+        assert!(cmd.is_some());
+        assert!(!cmd.is_none());
+    }
+
+    #[test]
+    fn test_is_none_after_batch_empty() {
+        let cmd: Command<i32> = Command::batch(vec![]);
+        assert!(cmd.is_none());
+        assert!(!cmd.is_some());
+    }
+
+    #[test]
+    fn test_is_none_after_batch_all_none() {
+        let cmd = Command::batch(vec![
+            Command::<i32>::none(),
+            Command::<i32>::none(),
+            Command::<i32>::none(),
+        ]);
+        assert!(cmd.is_none());
+        assert!(!cmd.is_some());
+    }
+
+    #[test]
+    fn test_is_some_after_batch_with_some() {
+        let cmd = Command::batch(vec![
+            Command::<i32>::none(),
+            Command::future(async { 42 }),
+            Command::<i32>::none(),
+        ]);
+        assert!(cmd.is_some());
+        assert!(!cmd.is_none());
+    }
+
+    #[test]
+    fn test_is_none_after_map_none() {
+        let cmd: Command<i32> = Command::none();
+        let mapped = cmd.map(|x| x * 2);
+        assert!(mapped.is_none());
+        assert!(!mapped.is_some());
+    }
+
+    #[test]
+    fn test_is_some_after_map_some() {
+        let cmd = Command::future(async { 42 });
+        let mapped = cmd.map(|x| x * 2);
+        assert!(mapped.is_some());
+        assert!(!mapped.is_none());
     }
 }
