@@ -50,6 +50,7 @@ pub enum Action<Msg> {
 ///
 /// let cmd = Command::perform(async { 42 }, Message::GotResult);
 /// ```
+#[must_use = "Commands represent side effects in the Elm Architecture and must be handled by the runtime. Ignoring a command means the intended side effect will not occur."]
 pub struct Command<Msg: Send + 'static> {
     pub(super) stream: Option<BoxStream<'static, Action<Msg>>>,
 }
@@ -64,7 +65,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd: Command<i32> = Command::none();
     /// ```
-    #[must_use]
     pub const fn none() -> Self {
         Self { stream: None }
     }
@@ -82,7 +82,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::perform(fetch_data(), Message::DataReceived);
     /// ```
-    #[must_use]
     pub fn perform<A>(
         future: impl Future<Output = A> + Send + 'static,
         f: impl FnOnce(A) -> Msg + Send + 'static,
@@ -99,7 +98,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::future(async { 42 });
     /// ```
-    #[must_use]
     pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
         Self {
             stream: Some(future.into_stream().map(Action::Message).boxed()),
@@ -119,7 +117,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::message(Message::Refresh);
     /// ```
-    #[must_use]
     pub fn message(msg: Msg) -> Self {
         Self::effect(Action::Message(msg))
     }
@@ -137,7 +134,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Send a message (prefer Command::message for this)
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
-    #[must_use]
     pub fn effect(action: Action<Msg>) -> Self {
         Self {
             stream: Some(stream::once(async move { action }).boxed()),
@@ -160,7 +156,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Command::perform(async { "data".to_string() }, Message::Second),
     /// ]);
     /// ```
-    #[must_use]
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
         let streams: Vec<_> = commands.into_iter().filter_map(|cmd| cmd.stream).collect();
 
@@ -184,7 +179,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let messages = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::stream(messages);
     /// ```
-    #[must_use]
     pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
         Self {
             stream: Some(stream.map(Action::Message).boxed()),
@@ -204,7 +198,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let numbers = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::run(numbers, |n| Message::NumberReceived(n * 2));
     /// ```
-    #[must_use]
     pub fn run<A>(
         stream: impl Stream<Item = A> + Send + 'static,
         f: impl Fn(A) -> Msg + Send + 'static,
@@ -262,7 +255,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///         Err(e) => Message::UpdateFailed(e.to_string()),
     ///     });
     /// ```
-    #[must_use]
     pub fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Command<T>
     where
         T: Send + 'static,
