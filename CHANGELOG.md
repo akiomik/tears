@@ -270,3 +270,15 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Full async/await support with tokio
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
+
+[unreleased]: https://github.com/akiomik/tears/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/akiomik/tears/releases/tag/v0.7.0
+[0.6.1]: https://github.com/akiomik/tears/releases/tag/v0.6.1
+[0.6.0]: https://github.com/akiomik/tears/releases/tag/v0.6.0
+[0.5.0]: https://github.com/akiomik/tears/releases/tag/v0.5.0
+[0.4.1]: https://github.com/akiomik/tears/releases/tag/v0.4.1
+[0.4.0]: https://github.com/akiomik/tears/releases/tag/v0.4.0
+[0.3.0]: https://github.com/akiomik/tears/releases/tag/v0.3.0
+[0.2.0]: https://github.com/akiomik/tears/releases/tag/v0.2.0
+[0.1.1]: https://github.com/akiomik/tears/releases/tag/v0.1.1
+[0.1.0]: https://github.com/akiomik/tears/releases/tag/v0.1.0
