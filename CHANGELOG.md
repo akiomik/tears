@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Added `#[must_use]` attribute to `Command` type to prevent accidental ignoring of side effects
+
 ## [0.7.0] - 2026-01-07
 
 ### Changed

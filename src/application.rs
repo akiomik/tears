@@ -233,40 +233,40 @@ mod tests {
     #[test]
     fn test_application_update_increment() {
         let (mut app, _) = TestApp::new(0);
-        app.update(TestMessage::Increment);
+        let _ = app.update(TestMessage::Increment);
         assert_eq!(app.counter, 1);
     }
 
     #[test]
     fn test_application_update_decrement() {
         let (mut app, _) = TestApp::new(10);
-        app.update(TestMessage::Decrement);
+        let _ = app.update(TestMessage::Decrement);
         assert_eq!(app.counter, 9);
     }
 
     #[test]
     fn test_application_update_reset() {
         let (mut app, _) = TestApp::new(42);
-        app.update(TestMessage::Reset);
+        let _ = app.update(TestMessage::Reset);
         assert_eq!(app.counter, 0);
     }
 
     #[test]
     fn test_application_update_multiple() {
         let (mut app, _) = TestApp::new(0);
-        app.update(TestMessage::Increment);
-        app.update(TestMessage::Increment);
-        app.update(TestMessage::Increment);
+        let _ = app.update(TestMessage::Increment);
+        let _ = app.update(TestMessage::Increment);
+        let _ = app.update(TestMessage::Increment);
         assert_eq!(app.counter, 3);
     }
 
     #[test]
     fn test_application_update_mixed_operations() {
         let (mut app, _) = TestApp::new(5);
-        app.update(TestMessage::Increment); // 6
-        app.update(TestMessage::Decrement); // 5
-        app.update(TestMessage::Increment); // 6
-        app.update(TestMessage::Increment); // 7
+        let _ = app.update(TestMessage::Increment); // 6
+        let _ = app.update(TestMessage::Decrement); // 5
+        let _ = app.update(TestMessage::Increment); // 6
+        let _ = app.update(TestMessage::Increment); // 7
         assert_eq!(app.counter, 7);
     }
 
