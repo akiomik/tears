@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `Command::is_none()` and `Command::is_some()` methods for checking command state
+  - Useful for testing whether `update()` returns the expected command type
+  - Provides better encapsulation than accessing internal `stream` field directly
+
 ### Changed
 
 - Added `#[must_use]` attribute to `Command` type to prevent accidental ignoring of side effects
