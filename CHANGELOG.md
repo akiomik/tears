@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     keys were fetched over time
   - Entries older than `cache_time` are now garbage collected automatically on each cache
     insertion, and can also be reclaimed manually via `QueryClient::gc()`
+- Fixed `Query` subscriptions permanently terminating when invalidation notifications lagged
+  (requires `http` feature)
+  - A burst of invalidations exceeding the broadcast channel capacity caused the watcher to
+    receive a `Lagged` error, which was treated as a closed channel and silently ended the
+    subscription, so it never refetched again
+  - A lagged receiver now refetches (since a dropped notification may have been for its key)
+    and only a genuinely closed channel ends the subscription
 
 ## [0.8.0] - 2026-01-22
 
