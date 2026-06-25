@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     subscription, so it never refetched again
   - A lagged receiver now refetches (since a dropped notification may have been for its key)
     and only a genuinely closed channel ends the subscription
+- Improved frame rate timing accuracy in `Runtime`
+  - The frame interval was computed with integer millisecond division (`1000 / frame_rate`),
+    truncating the period; for example 60 FPS ran at 16ms (~62.5 FPS) and 144 FPS at 6ms
+  - The period is now derived from an exact `Duration` division, so the requested frame rate
+    is honored precisely
 
 ## [0.8.0] - 2026-01-22
 
