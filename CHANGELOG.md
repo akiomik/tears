@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Performance**: Subscriptions are no longer re-evaluated on every frame
+  - `Runtime` previously called `Application::subscriptions()` on every frame tick (e.g. 60×/s),
+    allocating a `Vec` and rebuilding every `Subscription` (boxing spawners, cloning `Arc`s) even
+    while idle
+  - Since `subscriptions()` is a pure function of the application state, it is now re-evaluated
+    only after a message is processed, eliminating this per-frame work for idle applications
+  - Fully backward compatible for applications whose `subscriptions()` depends only on their state
+
 ### Added
 
 - `QueryClient::gc()` to manually garbage collect expired cache entries (requires `http` feature)

@@ -133,6 +133,15 @@ pub trait Application: Sized {
     /// This method can return different subscriptions based on application state,
     /// enabling dynamic subscription management.
     ///
+    /// # Contract
+    ///
+    /// This method must be a **pure function of the application state**: its result
+    /// may only change as a result of [`Application::update`]. The runtime
+    /// re-evaluates subscriptions only after a message is processed, so any change
+    /// driven by something else (wall-clock time, interior mutability, or background
+    /// tasks mutating shared state) that affects the returned subscription IDs may
+    /// not be detected. Express such changes as messages handled in `update` instead.
+    ///
     /// # Examples
     ///
     /// ```
