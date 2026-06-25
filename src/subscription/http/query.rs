@@ -52,7 +52,7 @@
 //! }
 //! ```
 
-use std::any::Any;
+use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ use tokio::sync::broadcast;
 use crate::Command;
 use crate::subscription::{SubscriptionId, SubscriptionSource};
 
-use super::cache::CacheEntry;
+use super::cache::{AnyCacheEntry, CacheEntry};
 use super::config::QueryConfig;
 
 /// Error type for query operations.
@@ -153,11 +153,22 @@ impl<T> QueryResult<T> {
 ///
 /// let client = Arc::new(QueryClient::with_config(config));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QueryClient {
-    cache: Arc<DashMap<String, Box<dyn Any + Send + Sync>>>,
+    cache: Arc<DashMap<String, Box<dyn AnyCacheEntry>>>,
     invalidation_tx: broadcast::Sender<String>,
     config: QueryConfig,
+}
+
+impl fmt::Debug for QueryClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The cached values are type-erased and may not be `Debug`, so only
+        // expose the number of cached keys rather than their contents.
+        f.debug_struct("QueryClient")
+            .field("cached_keys", &self.cache.len())
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl QueryClient {
@@ -227,12 +238,47 @@ impl QueryClient {
     fn get_cache<T: Clone + Send + Sync + 'static>(&self, key: &str) -> Option<CacheEntry<T>> {
         self.cache
             .get(key)
-            .and_then(|entry| entry.downcast_ref::<CacheEntry<T>>().cloned())
+            .and_then(|entry| entry.as_any().downcast_ref::<CacheEntry<T>>().cloned())
     }
 
     /// Sets a cached entry for the given key.
+    ///
+    /// Performs a garbage-collection sweep before inserting so that entries
+    /// older than `cache_time` are removed and the cache does not grow without
+    /// bound as new keys are fetched over time.
     fn set_cache<T: Clone + Send + Sync + 'static>(&self, key: String, entry: CacheEntry<T>) {
+        self.gc_expired();
         self.cache.insert(key, Box::new(entry));
+    }
+
+    /// Removes cached entries that have outlived `cache_time`.
+    ///
+    /// This is called automatically on every cache insertion. Applications can
+    /// also call [`QueryClient::gc`] to trigger a sweep explicitly (for example
+    /// when no further fetches are expected for a while).
+    fn gc_expired(&self) {
+        let cache_time = self.config.cache_time;
+        self.cache.retain(|_, entry| !entry.is_expired(cache_time));
+    }
+
+    /// Removes cached entries that have outlived the configured `cache_time`.
+    ///
+    /// Cache entries are also garbage collected automatically whenever a new
+    /// entry is inserted. Use this method to reclaim memory for keys that are
+    /// no longer being fetched (which would otherwise wait for the next
+    /// insertion to be swept).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use tears::subscription::http::QueryClient;
+    ///
+    /// let client = QueryClient::new();
+    /// // ... time passes, queries become inactive ...
+    /// client.gc();
+    /// ```
+    pub fn gc(&self) {
+        self.gc_expired();
     }
 
     /// Gets the query configuration.
@@ -714,5 +760,84 @@ mod tests {
         // Same key but different types should produce different IDs
         // because SubscriptionId::of::<Self> includes the type information
         assert_ne!(query1.id(), query2.id());
+    }
+
+    #[test]
+    fn test_set_cache_evicts_expired_entries() {
+        use std::thread::sleep;
+
+        // Short cache_time so entries expire quickly.
+        let config = QueryConfig::new(Duration::from_secs(0), Duration::from_millis(10));
+        let client = QueryClient::with_config(config);
+
+        client.set_cache("old".to_string(), CacheEntry::new(1));
+        assert!(client.get_cache::<i32>("old").is_some());
+
+        // Let the entry exceed cache_time.
+        sleep(Duration::from_millis(20));
+
+        // Inserting another entry must trigger a GC sweep that removes the
+        // expired one, so the cache does not grow without bound.
+        client.set_cache("new".to_string(), CacheEntry::new(2));
+
+        assert!(
+            client.get_cache::<i32>("old").is_none(),
+            "expired entry should be evicted on insert"
+        );
+        assert!(
+            client.get_cache::<i32>("new").is_some(),
+            "fresh entry should remain"
+        );
+    }
+
+    #[test]
+    fn test_gc_removes_expired_entries() {
+        use std::thread::sleep;
+
+        let config = QueryConfig::new(Duration::from_secs(0), Duration::from_millis(10));
+        let client = QueryClient::with_config(config);
+
+        client.set_cache("a".to_string(), CacheEntry::new(1));
+        assert_eq!(client.cache.len(), 1);
+
+        sleep(Duration::from_millis(20));
+
+        client.gc();
+
+        assert!(client.get_cache::<i32>("a").is_none());
+        assert_eq!(client.cache.len(), 0);
+    }
+
+    #[test]
+    fn test_gc_keeps_fresh_entries() {
+        // Long cache_time so nothing expires during the test.
+        let config = QueryConfig::new(Duration::from_secs(0), Duration::from_secs(300));
+        let client = QueryClient::with_config(config);
+
+        client.set_cache("a".to_string(), CacheEntry::new(1));
+        client.set_cache("b".to_string(), CacheEntry::new(2));
+
+        client.gc();
+
+        assert!(client.get_cache::<i32>("a").is_some());
+        assert!(client.get_cache::<i32>("b").is_some());
+        assert_eq!(client.cache.len(), 2);
+    }
+
+    #[test]
+    fn test_gc_preserves_entries_of_different_types() {
+        let config = QueryConfig::new(Duration::from_secs(0), Duration::from_secs(300));
+        let client = QueryClient::with_config(config);
+
+        client.set_cache("int".to_string(), CacheEntry::new(42));
+        client.set_cache("str".to_string(), CacheEntry::new("hello".to_string()));
+
+        client.gc();
+
+        assert_eq!(client.get_cache::<i32>("int").map(|e| e.data), Some(42));
+        assert_eq!(
+            client.get_cache::<String>("str").map(|e| e.data),
+            Some("hello".to_string())
+        );
     }
 }

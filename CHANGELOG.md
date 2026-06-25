@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `QueryClient::gc()` to manually garbage collect expired cache entries (requires `http` feature)
+  - Removes cached entries older than the configured `cache_time`
+  - Useful for reclaiming memory for keys that are no longer being fetched
+
+### Fixed
+
+- Fixed WebSocket connections leaking when a subscription is cancelled (requires `ws` feature)
+  - The connection task could stay parked on `read.next()` and `cmd_rx.recv()` after the
+    subscription's message stream was dropped, keeping the underlying connection open
+  - The connection task now observes the dropped message receiver via `msg_tx.closed()` and
+    shuts the connection down cleanly, during both connection setup and the main loop
+- Fixed the query cache growing without bound (requires `http` feature)
+  - Cached entries were never removed, so `cache_time` had no effect and memory grew as new
+    keys were fetched over time
+  - Entries older than `cache_time` are now garbage collected automatically on each cache
+    insertion, and can also be reclaimed manually via `QueryClient::gc()`
+
 ## [0.8.0] - 2026-01-22
 
 ### Added
