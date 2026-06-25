@@ -13,7 +13,10 @@ pub struct QueryConfig {
 
     /// How long cached data is retained before being garbage collected.
     ///
-    /// Cached data that hasn't been accessed for this duration will be removed.
+    /// Cached data is removed once this much time has elapsed since it was
+    /// last fetched or updated. Garbage collection happens automatically when
+    /// new entries are inserted, and can be triggered manually via
+    /// [`QueryClient::gc`](crate::subscription::http::QueryClient::gc).
     pub cache_time: Duration,
 }
 

@@ -1,4 +1,31 @@
+use std::any::Any;
 use std::time::{Duration, Instant};
+
+/// A type-erased view over a [`CacheEntry`] used by the query cache.
+///
+/// The cache stores entries for arbitrary value types behind `Box<dyn ...>`.
+/// This trait exposes the operations the cache needs without knowing the
+/// concrete value type: downcasting for retrieval and expiry checks for
+/// garbage collection.
+pub trait AnyCacheEntry: Send + Sync {
+    /// Returns the entry as `&dyn Any` so callers can downcast to the
+    /// concrete `CacheEntry<T>`.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Returns `true` if the entry has outlived `cache_time` and should be
+    /// garbage collected.
+    fn is_expired(&self, cache_time: Duration) -> bool;
+}
+
+impl<T: Send + Sync + 'static> AnyCacheEntry for CacheEntry<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_expired(&self, cache_time: Duration) -> bool {
+        self.should_gc(cache_time)
+    }
+}
 
 /// A cached entry with timestamp and staleness information.
 #[derive(Debug, Clone)]
@@ -41,7 +68,6 @@ impl<T> CacheEntry<T> {
     }
 
     /// Checks if this entry should be garbage collected based on cache time.
-    #[allow(dead_code)]
     pub fn should_gc(&self, cache_time: Duration) -> bool {
         self.timestamp.elapsed() > cache_time
     }
