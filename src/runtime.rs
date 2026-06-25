@@ -191,7 +191,16 @@ impl<App: Application> Runtime<App> {
     pub fn new(flags: App::Flags, frame_rate: u32) -> Self {
         let state = ApplicationState::new(flags);
 
-        let frame_duration = Duration::from_millis(1000 / u64::from(frame_rate));
+        // Divide a one-second `Duration` directly so the period is exact (e.g.
+        // 60 FPS -> 16.667ms) instead of truncating to whole milliseconds (the
+        // old `1000 / frame_rate` gave 16ms, an effective ~62.5 FPS).
+        //
+        // FIXME(v0.9.0): `frame_rate` is not validated. `frame_rate == 0`
+        // panics (divide by zero) and extremely large values round the period
+        // down to zero, which panics `interval`. Resolve by validating the
+        // range, likely by making this constructor return a `Result` (a
+        // breaking API change).
+        let frame_duration = Duration::from_secs(1) / frame_rate;
         let mut frame_interval = interval(frame_duration);
         // Skip missed frames rather than trying to catch up
         frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -842,6 +851,27 @@ mod tests {
         let _runtime2 = Runtime::<TestApp>::new(0, 144);
 
         // Should handle different frame rates without panic
+    }
+
+    #[tokio::test]
+    async fn test_runtime_frame_interval_period_is_accurate() {
+        // 60 FPS should yield a ~16.667ms period. The previous integer
+        // millisecond division (1000 / 60 = 16ms) truncated this, producing
+        // an effective ~62.5 FPS.
+        let runtime = Runtime::<TestApp>::new(0, 60);
+        let period = runtime.frame_interval.period();
+        assert!(
+            period >= Duration::from_micros(16_600) && period <= Duration::from_micros(16_700),
+            "60 FPS period should be ~16.667ms, got {period:?}",
+        );
+
+        // 144 FPS should yield a ~6.944ms period (not the truncated 6ms).
+        let runtime = Runtime::<TestApp>::new(0, 144);
+        let period = runtime.frame_interval.period();
+        assert!(
+            period >= Duration::from_micros(6_900) && period <= Duration::from_micros(6_950),
+            "144 FPS period should be ~6.944ms, got {period:?}",
+        );
     }
 
     #[tokio::test]
