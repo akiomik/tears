@@ -22,8 +22,9 @@
 //!   batched together for processing, reducing overhead and improving responsiveness
 //! - **Conditional Rendering**: The UI is only re-rendered when the application state
 //!   changes, skipping unnecessary draw operations
-//! - **Subscription Caching**: Subscriptions are only updated when their IDs change,
-//!   using hash-based comparison for efficiency
+//! - **Subscription Caching**: Subscriptions are only re-evaluated after a message is
+//!   processed (idle frames are skipped), and the subscription manager is only updated
+//!   when their IDs change, using hash-based comparison for efficiency
 //!
 //! # Example
 //!
@@ -131,7 +132,8 @@ struct ApplicationState<App: Application> {
 /// - **Frame Rate Control**: Regulates rendering at the specified FPS (e.g., 60 FPS)
 /// - **Micro-batching**: Processes messages arriving within 100μs together, reducing overhead
 /// - **Conditional Rendering**: Only renders when state changes, saving CPU cycles
-/// - **Subscription Caching**: Updates subscriptions only when their IDs change
+/// - **Subscription Caching**: Re-evaluates subscriptions only after a message is processed,
+///   and updates the subscription manager only when their IDs change
 ///
 /// # Type Parameters
 ///
@@ -147,6 +149,13 @@ pub struct Runtime<App: Application> {
     frame_interval: Interval,
     /// Whether the UI needs to be re-rendered (conditional rendering optimization)
     needs_redraw: bool,
+    /// Whether subscriptions may have changed and should be re-evaluated.
+    ///
+    /// `subscriptions()` is a pure function of the application state, which only
+    /// changes when a message is processed. This flag is set after each message
+    /// batch so that subscriptions are re-evaluated only when the state may have
+    /// changed, rather than on every frame.
+    subscriptions_dirty: bool,
     /// Cached hash of subscription IDs from previous frame (subscription caching optimization)
     subscription_ids_hash: Option<u64>,
 }
@@ -208,7 +217,10 @@ impl<App: Application> Runtime<App> {
         Self {
             state,
             frame_interval,
-            needs_redraw: true,          // Initial draw is always needed
+            needs_redraw: true, // Initial draw is always needed
+            // Initial subscriptions are started by `initialize_subscriptions`,
+            // so no re-evaluation is needed until a message is processed.
+            subscriptions_dirty: false,
             subscription_ids_hash: None, // No subscriptions cached yet
         }
     }
@@ -219,7 +231,7 @@ impl<App: Application> Runtime<App> {
     /// that arrived within 100μs. This reduces overhead by batching rapid message sequences
     /// (e.g., keyboard input, rapid timers) while maintaining responsiveness.
     ///
-    /// Always sets `needs_redraw` to true after processing.
+    /// Always sets `needs_redraw` and `subscriptions_dirty` to true after processing.
     fn process_message_batch(&mut self, first_msg: App::Message) {
         // Process the first message
         let cmd = self.state.app.update(first_msg);
@@ -237,14 +249,16 @@ impl<App: Application> Runtime<App> {
             }
         }
 
-        // Mark that a redraw is needed
+        // Mark that a redraw is needed and that subscriptions may have changed
         self.needs_redraw = true;
+        self.subscriptions_dirty = true;
     }
 
     /// Processes a frame tick: renders if needed and updates subscriptions.
     ///
     /// Only renders when `needs_redraw` is true (conditional rendering optimization).
-    /// Always updates subscriptions using hash-based caching to detect changes.
+    /// Only re-evaluates subscriptions when `subscriptions_dirty` is true, i.e. when
+    /// a message has been processed since the last evaluation.
     ///
     /// # Returns
     ///
@@ -259,10 +273,16 @@ impl<App: Application> Runtime<App> {
             self.needs_redraw = false;
         }
 
-        // Update subscriptions based on current state (dynamic subscriptions)
-        // NOTE: Uses hash-based caching to skip updates when subscriptions
-        // haven't changed, improving performance.
-        self.update_subscriptions();
+        // Re-evaluate subscriptions only when the state may have changed.
+        // Since `subscriptions()` is a pure function of the application state,
+        // an idle frame (no messages processed) cannot change the subscription
+        // set, so we skip the (potentially costly) evaluation entirely.
+        if self.subscriptions_dirty {
+            // NOTE: Uses hash-based caching to skip the manager update when the
+            // subscription IDs haven't actually changed.
+            self.update_subscriptions();
+            self.subscriptions_dirty = false;
+        }
 
         // Check for quit signal (non-blocking)
         Ok(self.state.check_quit())
@@ -1015,11 +1035,99 @@ mod tests {
         // Initially no hash
         assert_eq!(runtime.subscription_ids_hash, None);
 
+        // Subscriptions are only re-evaluated when marked dirty (after a
+        // message). Simulate that here.
+        runtime.subscriptions_dirty = true;
+
         // Process frame tick (should update subscriptions)
         runtime.process_frame_tick(&mut terminal)?;
 
         // Hash should be set
         assert!(runtime.subscription_ids_hash.is_some());
+
+        Ok(())
+    }
+
+    // App that counts how many times `subscriptions()` is evaluated.
+    struct SubCountingApp {
+        sub_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Application for SubCountingApp {
+        type Message = ();
+        type Flags = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+        fn new(
+            sub_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        ) -> (Self, Command<Self::Message>) {
+            (Self { sub_calls }, Command::none())
+        }
+
+        fn update(&mut self, (): ()) -> Command<Self::Message> {
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            self.sub_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_not_reevaluated_on_idle_frames() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), 60);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Several frame ticks without any messages must not re-evaluate
+        // subscriptions, since the app state cannot have changed.
+        runtime.process_frame_tick(&mut terminal)?;
+        runtime.process_frame_tick(&mut terminal)?;
+        runtime.process_frame_tick(&mut terminal)?;
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "subscriptions() should not be called on idle frames"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscriptions_reevaluated_after_message() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), 60);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Idle frame: no evaluation.
+        runtime.process_frame_tick(&mut terminal)?;
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        // Processing a message marks subscriptions dirty.
+        runtime.process_message_batch(());
+
+        // The next frame tick re-evaluates subscriptions exactly once.
+        runtime.process_frame_tick(&mut terminal)?;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Subsequent idle frames do not re-evaluate again.
+        runtime.process_frame_tick(&mut terminal)?;
+        runtime.process_frame_tick(&mut terminal)?;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
 
         Ok(())
     }
