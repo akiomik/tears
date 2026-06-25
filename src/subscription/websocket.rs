@@ -219,15 +219,23 @@ impl WebSocket {
         mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
         cmd_tx: mpsc::UnboundedSender<WebSocketCommand>,
     ) {
-        // Attempt to connect to WebSocket server
-        let ws_stream = match connect_async(&url).await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
-                let _ = msg_tx.send(WebSocketMessage::Error {
-                    error: format!("Connection failed: {e}"),
-                });
-                return;
-            }
+        // Attempt to connect to WebSocket server.
+        // Race the connection against `msg_tx.closed()` so that a subscription
+        // cancelled during connection setup terminates promptly instead of
+        // leaking the in-flight connection attempt.
+        let ws_stream = tokio::select! {
+            // The message receiver was dropped (subscription cancelled) before
+            // the connection completed: abort the connection attempt.
+            () = msg_tx.closed() => return,
+            result = connect_async(&url) => match result {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    let _ = msg_tx.send(WebSocketMessage::Error {
+                        error: format!("Connection failed: {e}"),
+                    });
+                    return;
+                }
+            },
         };
 
         // Notify that connection was successful and provide command sender
@@ -243,6 +251,12 @@ impl WebSocket {
 
         loop {
             tokio::select! {
+                // The message receiver was dropped (subscription cancelled).
+                // Stop reading and close the connection cleanly so the task
+                // does not leak the connection while parked on `read.next()`.
+                () = msg_tx.closed() => {
+                    break;
+                }
                 // Handle incoming messages from WebSocket server
                 msg = read.next() => {
                     match msg {
