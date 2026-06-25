@@ -1,3 +1,4 @@
 /target
 .*.md
 flamegraph*.svg
+/tmp
