@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-25
+
 ### Changed
 
 - **Performance**: Subscriptions are no longer re-evaluated on every frame
@@ -314,7 +316,8 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.8.0...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/akiomik/tears/releases/tag/v0.8.1
 [0.8.0]: https://github.com/akiomik/tears/releases/tag/v0.8.0
 [0.7.0]: https://github.com/akiomik/tears/releases/tag/v0.7.0
 [0.6.1]: https://github.com/akiomik/tears/releases/tag/v0.6.1
