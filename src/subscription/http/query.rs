@@ -52,6 +52,7 @@
 //! }
 //! ```
 
+use std::any::TypeId;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -156,7 +157,10 @@ impl<T> QueryResult<T> {
 /// ```
 #[derive(Clone)]
 pub struct QueryClient {
-    cache: Arc<DashMap<String, Box<dyn AnyCacheEntry>>>,
+    // Keyed by (TypeId, user-provided key) so that Query<i32> and Query<String>
+    // sharing the same string key occupy independent cache slots and do not
+    // overwrite each other.
+    cache: Arc<DashMap<(TypeId, String), Box<dyn AnyCacheEntry>>>,
     invalidation_tx: broadcast::Sender<String>,
     config: QueryConfig,
 }
@@ -237,8 +241,9 @@ impl QueryClient {
 
     /// Gets a cached entry for the given key.
     fn get_cache<T: Clone + Send + Sync + 'static>(&self, key: &str) -> Option<CacheEntry<T>> {
+        let typed_key = (TypeId::of::<T>(), key.to_string());
         self.cache
-            .get(key)
+            .get(&typed_key)
             .and_then(|entry| entry.as_any().downcast_ref::<CacheEntry<T>>().cloned())
     }
 
@@ -249,7 +254,7 @@ impl QueryClient {
     /// bound as new keys are fetched over time.
     fn set_cache<T: Clone + Send + Sync + 'static>(&self, key: String, entry: CacheEntry<T>) {
         self.gc_expired();
-        self.cache.insert(key, Box::new(entry));
+        self.cache.insert((TypeId::of::<T>(), key), Box::new(entry));
     }
 
     /// Removes cached entries that have outlived `cache_time`.
@@ -861,6 +866,100 @@ mod tests {
         assert_eq!(
             client.get_cache::<String>("str").map(|e| e.data),
             Some("hello".to_string())
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Regression tests for same-key / different-type cache collision.
+    //
+    // Before the fix the cache was keyed by the plain string key, so
+    // `Query<i32>` and `Query<String>` sharing the same key would overwrite
+    // each other's entries.  The second query to fetch would always see a cache
+    // miss (downcast to the wrong type fails), wasting a network round-trip and
+    // potentially causing alternating overwrites on every invalidation cycle.
+    // ---------------------------------------------------------------------------
+
+    /// Two queries with the same string key but different value types must
+    /// occupy independent cache slots and never overwrite each other.
+    #[test]
+    fn test_same_key_different_types_use_independent_cache_slots() {
+        let client = QueryClient::new();
+
+        // Store an i32 and a String under the same string key.
+        client.set_cache("data".to_string(), CacheEntry::new(42i32));
+        client.set_cache("data".to_string(), CacheEntry::new("hello".to_string()));
+
+        // Both entries must be independently readable without either one
+        // having been overwritten by the other.
+        assert_eq!(
+            client.get_cache::<i32>("data").map(|e| e.data),
+            Some(42),
+            "i32 entry should not be overwritten by the String entry"
+        );
+        assert_eq!(
+            client.get_cache::<String>("data").map(|e| e.data),
+            Some("hello".to_string()),
+            "String entry should not be overwritten by the i32 entry"
+        );
+    }
+
+    /// A cache hit for one value type must not be seen as a miss when a
+    /// different type uses the same string key.
+    #[tokio::test]
+    async fn test_same_key_different_types_fetch_independently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let client = Arc::new(QueryClient::new());
+        let i32_fetches = Arc::new(AtomicUsize::new(0));
+        let str_fetches = Arc::new(AtomicUsize::new(0));
+
+        let i32_fetches_clone = i32_fetches.clone();
+        let query_i32 = Query::new(
+            &"data",
+            move || {
+                let count = i32_fetches_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<i32, QueryError>(1)
+                })
+            },
+            client.clone(),
+        );
+
+        let str_fetches_clone = str_fetches.clone();
+        let query_str = Query::new(
+            &"data",
+            move || {
+                let count = str_fetches_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<String, QueryError>("one".to_string())
+                })
+            },
+            client.clone(),
+        );
+
+        let mut stream_i32 = query_i32.stream();
+        let mut stream_str = query_str.stream();
+
+        // Both streams start in Loading (cache is empty).
+        let _ = stream_i32.next().await; // Loading
+        let _ = stream_i32.next().await; // Success (fetch completes, populates cache)
+
+        let _ = stream_str.next().await; // Loading
+        let _ = stream_str.next().await; // Success
+
+        // Each type should have been fetched exactly once; the cache hit of
+        // one type must not cause a spurious miss for the other.
+        assert_eq!(
+            i32_fetches.load(Ordering::SeqCst),
+            1,
+            "i32 query should have fetched exactly once"
+        );
+        assert_eq!(
+            str_fetches.load(Ordering::SeqCst),
+            1,
+            "String query should have fetched exactly once; a type-collision cache miss would cause it to fetch again"
         );
     }
 

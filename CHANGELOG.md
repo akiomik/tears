@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `Query` subscriptions with the same string key but different value types
+  overwriting each other's cache entries (requires `http` feature)
+  - The cache was keyed by the plain string key, so `Query<i32>` and `Query<String>`
+    using the same key would each overwrite the other's entry; every `downcast_ref`
+    to the "wrong" type would fail and cause an unnecessary refetch
+  - The cache is now keyed by `(TypeId, string key)` so each value type has its
+    own independent slot regardless of what other types share the same string key
+
 - Fixed subscriptions not being restarted after their task completes naturally
   - If a subscription's underlying task finished on its own (e.g., a WebSocket connection
     dropped, or a finite stream reached its end), `SubscriptionManager::update()` still
