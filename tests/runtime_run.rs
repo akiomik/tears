@@ -2,8 +2,10 @@
 // These tests verify end-to-end scenarios.
 // Unit tests for individual methods are in src/runtime.rs
 
+mod common;
+
 use color_eyre::eyre::Result;
-use ratatui::{Frame, Terminal, backend::TestBackend};
+use ratatui::Frame;
 use tears::prelude::*;
 use tokio::time::{Duration, timeout};
 
@@ -94,8 +96,7 @@ impl Application for SubApp {
 #[tokio::test]
 async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<CounterApp>::new(0, 60); // Quit immediately
 
@@ -142,8 +143,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
         }
     }
 
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<MessageApp>::new((), 60);
 
@@ -157,8 +157,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
 #[tokio::test]
 async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     // End-to-end: Subscription message processing
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<SubApp>::new((), 60);
 

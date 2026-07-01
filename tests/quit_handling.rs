@@ -1,8 +1,9 @@
+mod common;
+
 use color_eyre::eyre::Result;
 use ratatui::Frame;
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
 use tears::prelude::*;
+
 use tokio::time::{Duration, Instant, sleep, timeout};
 
 // Test application that sends quit from init command
@@ -11,8 +12,7 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 async fn test_quit_responsiveness_low_framerate() -> Result<()> {
     // Test that quit is responsive even with low frame rate (16 FPS = 62.5ms per frame)
     // This test uses InitQuitApp which sends quit from init command
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<InitQuitApp>::new((), 16);
 
@@ -58,8 +58,7 @@ impl Application for InitQuitApp {
 #[tokio::test]
 async fn test_quit_from_init_command() -> Result<()> {
     // Test that quit from init command is processed quickly
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<InitQuitApp>::new((), 60);
 
@@ -108,8 +107,7 @@ impl Application for DelayedQuitApp {
 #[tokio::test]
 async fn test_quit_during_frame_wait() -> Result<()> {
     // Test that quit signal during frame wait is processed immediately
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<DelayedQuitApp>::new((), 10);
 
@@ -177,8 +175,7 @@ impl Application for MultiMessageQuitApp {
 #[tokio::test]
 async fn test_quit_after_multiple_messages() -> Result<()> {
     // Test that quit is processed quickly even after multiple messages
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = common::test_terminal()?;
 
     let runtime = Runtime::<MultiMessageQuitApp>::new((), 60);
 
