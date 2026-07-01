@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed WebSocket TCP connections not being released during runtime shutdown
+  when `SubscriptionManager::shutdown()` aborts the subscription task via
+  `handle.abort()` (requires `ws` feature)
+  - Previously, `stream()` spawned a background `run_subscription_loop` task
+    that held the WebSocket TCP handles; when the outer consumer task was
+    aborted the background task needed to be scheduled to react, but during
+    Tokio runtime teardown it might never get that chance and the TCP
+    connection was left open
+  - The WebSocket connection loop now runs entirely inside the `stream::unfold`
+    future (no separate `tokio::spawn`); aborting the outer task drops the
+    TCP handles synchronously, so the OS-level connection is released
+    regardless of whether the runtime has already started tearing down
+  - **Note**: a WebSocket-level `Message::Close` frame is still not sent on
+    task abort — Rust has no async `Drop`.  For a clean WebSocket close,
+    send `WebSocketCommand::Close` before the runtime shuts down.  A future
+    improvement could add a cooperative shutdown path via a `CancellationToken`
+    combined with a grace period in `SubscriptionManager::shutdown()`
+
 - Fixed `CacheEntry::check_staleness` having a misleading `&mut self` signature
   (requires `http` feature)
   - The method set `self.is_stale = true` on the receiver, but `QueryClient::get_cache`
