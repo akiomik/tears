@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `Query` subscriptions missing invalidations broadcast while a fetch is in-flight
+  (requires `http` feature)
+  - Previously, `perform_fetch` subscribed to the invalidation channel *after*
+    `fetcher().await` returned, so any invalidation broadcast during the fetch was
+    silently dropped; the subscription would serve stale data indefinitely until the
+    next explicit invalidation
+  - Also fixed a narrower window in `State::Initial` where an invalidation could arrive
+    between the cache read and the subscription setup in the fresh-data path
+  - A single `broadcast::Receiver` is now subscribed at the very start of `State::Initial`
+    and threaded through the entire state machine so no invalidation is ever missed
+
 ## [0.8.1] - 2026-06-25
 
 ### Changed
