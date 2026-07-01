@@ -340,7 +340,8 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// This method performs a diff between the current subscriptions and the new ones:
     /// - Subscriptions that are no longer present will be cancelled
     /// - New subscriptions will be started
-    /// - Subscriptions with the same ID will continue running
+    /// - Subscriptions whose tasks have finished will be restarted if still present
+    /// - Subscriptions with the same ID and a running task will continue unchanged
     ///
     /// # Arguments
     ///
@@ -357,6 +358,11 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             .map(|sub| (sub.id, sub.spawn))
             .collect();
         let new_ids: HashSet<_> = new_subs.keys().copied().collect();
+
+        // Discard entries whose tasks have already finished so they are treated
+        // as absent: restarted if still requested, silently dropped otherwise.
+        self.running.retain(|_, rs| !rs.handle.is_finished());
+
         let current_ids: HashSet<_> = self.running.keys().copied().collect();
 
         let to_remove: Vec<_> = current_ids.difference(&new_ids).copied().collect();
@@ -685,6 +691,86 @@ mod tests {
         mock2.emit(300)?;
         let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
         assert_eq!(msg, Some(300));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_completed_subscription_is_restarted() -> Result<()> {
+        use futures::stream;
+
+        // A subscription that emits one value and then ends.
+        struct OneshotSource {
+            value: i32,
+        }
+
+        impl SubscriptionSource for OneshotSource {
+            type Output = i32;
+
+            fn stream(&self) -> BoxStream<'static, i32> {
+                let v = self.value;
+                stream::once(async move { v }).boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                SubscriptionId::of::<Self>(0)
+            }
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        // Start the first one-shot subscription.
+        manager.update(vec![Subscription::new(OneshotSource { value: 1 })]);
+        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(first, Some(1));
+
+        // Give the task time to reach the finished state.
+        sleep(Duration::from_millis(10)).await;
+
+        // Update with the same subscription ID. Because the previous task
+        // finished, it must be restarted rather than silently skipped.
+        manager.update(vec![Subscription::new(OneshotSource { value: 2 })]);
+        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(second, Some(2), "finished subscription should be restarted");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_completed_subscription_cleaned_up_when_not_requested() -> Result<()> {
+        use futures::stream;
+
+        struct OneshotSource;
+
+        impl SubscriptionSource for OneshotSource {
+            type Output = i32;
+
+            fn stream(&self) -> BoxStream<'static, i32> {
+                stream::once(async move { 42 }).boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                SubscriptionId::of::<Self>(0)
+            }
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        // Start and let the task finish.
+        manager.update(vec![Subscription::new(OneshotSource)]);
+        let _ = timeout(Duration::from_millis(100), rx.recv()).await?;
+        sleep(Duration::from_millis(10)).await;
+
+        // Update without any subscriptions — the stale map entry must be removed.
+        manager.update(Vec::<Subscription<i32>>::new());
+
+        assert_eq!(
+            manager.running.len(),
+            0,
+            "dead entry for a no-longer-requested subscription should be removed"
+        );
 
         Ok(())
     }
