@@ -41,7 +41,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use futures::stream::{BoxStream, SplitSink};
+use futures::stream::{BoxStream, SplitSink, SplitStream};
 use futures::{SinkExt as _, StreamExt as _, stream};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -167,6 +167,12 @@ pub enum WebSocketMessage {
 /// - Each unique URL creates a separate WebSocket connection
 /// - Connections are maintained as long as the subscription is active
 /// - The command sender can be cloned and shared across different parts of the application
+/// - The WebSocket read loop runs inline inside the `stream::unfold` future, so the server
+///   is only read from when the consumer polls `stream.next()`.  For typical TUI applications
+///   (low message rate, fast `update()`) this is transparent.  If a server sends messages at
+///   a very high rate and the consumer is slower than the arrival rate, TCP receive-window
+///   pressure will propagate back to the server.  Applications that need to decouple
+///   consumption speed from network read speed should add their own buffering layer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WebSocket {
     url: String,
@@ -192,145 +198,133 @@ impl WebSocket {
     }
 }
 
-impl WebSocket {
-    /// Handle a single command and send the message through WebSocket
-    async fn handle_command(
-        cmd: WebSocketCommand,
-        write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
-        msg_tx: &mpsc::UnboundedSender<WebSocketMessage>,
-    ) {
-        let result = match cmd {
-            WebSocketCommand::SendText(text) => write.send(Message::Text(text.into())).await,
-            WebSocketCommand::SendBinary(data) => write.send(Message::Binary(data.into())).await,
-            WebSocketCommand::Close(frame) => write.send(Message::Close(frame)).await,
-        };
+type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-        if let Err(e) = result {
-            let _ = msg_tx.send(WebSocketMessage::Error {
-                error: e.to_string(),
-            });
-        }
-    }
-
-    /// Main subscription loop that processes incoming messages and outgoing commands
-    async fn run_subscription_loop(
+enum WsStreamState {
+    Connecting {
         url: String,
-        msg_tx: mpsc::UnboundedSender<WebSocketMessage>,
-        mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
         cmd_tx: mpsc::UnboundedSender<WebSocketCommand>,
-    ) {
-        // Attempt to connect to WebSocket server.
-        // Race the connection against `msg_tx.closed()` so that a subscription
-        // cancelled during connection setup terminates promptly instead of
-        // leaking the in-flight connection attempt.
-        let ws_stream = tokio::select! {
-            // The message receiver was dropped (subscription cancelled) before
-            // the connection completed: abort the connection attempt.
-            () = msg_tx.closed() => return,
-            result = connect_async(&url) => match result {
-                Ok((stream, _)) => stream,
-                Err(e) => {
-                    let _ = msg_tx.send(WebSocketMessage::Error {
-                        error: format!("Connection failed: {e}"),
-                    });
-                    return;
-                }
-            },
-        };
-
-        // Notify that connection was successful and provide command sender
-        if msg_tx
-            .send(WebSocketMessage::Connected { sender: cmd_tx })
-            .is_err()
-        {
-            // Receiver dropped, exit early
-            return;
-        }
-
-        let (mut write, mut read) = ws_stream.split();
-
-        loop {
-            tokio::select! {
-                // The message receiver was dropped (subscription cancelled).
-                // Stop reading and close the connection cleanly so the task
-                // does not leak the connection while parked on `read.next()`.
-                () = msg_tx.closed() => {
-                    break;
-                }
-                // Handle incoming messages from WebSocket server
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Close(_))) => {
-                            // Server sent close frame - normal disconnection
-                            let _ = msg_tx.send(WebSocketMessage::Disconnected);
-                            break;
-                        }
-                        Some(Ok(message)) => {
-                            // Regular message (Text, Binary, Ping, Pong)
-                            if msg_tx.send(WebSocketMessage::Received(message)).is_err() {
-                                // Receiver dropped, exit loop
-                                break;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            // Communication error
-                            let _ = msg_tx.send(WebSocketMessage::Error {
-                                error: e.to_string(),
-                            });
-                            break;
-                        }
-                        None => {
-                            // Connection closed unexpectedly
-                            let _ = msg_tx.send(WebSocketMessage::Disconnected);
-                            break;
-                        }
-                    }
-                }
-                // Handle outgoing commands
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(WebSocketCommand::Close(frame)) => {
-                            // User requested close - send close frame and notify
-                            let _ = write.send(Message::Close(frame)).await;
-                            let _ = msg_tx.send(WebSocketMessage::Disconnected);
-                            break;
-                        }
-                        Some(cmd) => {
-                            Self::handle_command(cmd, &mut write, &msg_tx).await;
-                        }
-                        None => {
-                            // Command channel closed, treat as disconnection
-                            let _ = msg_tx.send(WebSocketMessage::Disconnected);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Clean shutdown: close the write half
-        let _ = write.close().await;
-    }
+        cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    },
+    Running {
+        write: WsSink,
+        read: WsRead,
+        cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    },
+    Done,
 }
 
 impl SubscriptionSource for WebSocket {
     type Output = WebSocketMessage;
 
     fn stream(&self) -> BoxStream<'static, WebSocketMessage> {
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
-        let url = self.url.clone();
-
-        tokio::spawn(async move {
-            // Run the main subscription loop (will send Connected on success)
-            Self::run_subscription_loop(url, msg_tx, cmd_rx, cmd_tx).await;
-        });
-
-        stream::unfold(msg_rx, |mut rx| async move {
-            let msg = rx.recv().await?;
-            Some((msg, rx))
-        })
+        stream::unfold(
+            WsStreamState::Connecting {
+                url: self.url.clone(),
+                cmd_tx,
+                cmd_rx,
+            },
+            |state| async move {
+                match state {
+                    WsStreamState::Connecting { url, cmd_tx, cmd_rx } => {
+                        match connect_async(&url).await {
+                            Ok((ws, _)) => {
+                                let (write, read) = ws.split();
+                                Some((
+                                    WebSocketMessage::Connected { sender: cmd_tx },
+                                    WsStreamState::Running { write, read, cmd_rx },
+                                ))
+                            }
+                            Err(e) => Some((
+                                WebSocketMessage::Error {
+                                    error: format!("Connection failed: {e}"),
+                                },
+                                WsStreamState::Done,
+                            )),
+                        }
+                    }
+                    // FIXME: when the outer task is aborted (e.g. via
+                    // SubscriptionManager::shutdown() calling handle.abort()),
+                    // this future is dropped at the select! await point and
+                    // WsStreamState::Running is dropped synchronously.  The TCP
+                    // connection closes via the OS on TcpStream drop, but no
+                    // WebSocket-level Message::Close frame is sent.  Rust has no
+                    // async Drop, so close-frame delivery on abort requires an
+                    // explicit cooperative shutdown signal (e.g. a
+                    // CancellationToken checked in the select! below) combined
+                    // with SubscriptionManager::shutdown() providing a grace
+                    // period before calling handle.abort().
+                    WsStreamState::Running {
+                        mut write,
+                        mut read,
+                        mut cmd_rx,
+                    } => loop {
+                        tokio::select! {
+                            msg = read.next() => {
+                                match msg {
+                                    Some(Ok(Message::Close(_))) => {
+                                        let _ = write.close().await;
+                                        break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
+                                    }
+                                    Some(Ok(message)) => {
+                                        break Some((
+                                            WebSocketMessage::Received(message),
+                                            WsStreamState::Running { write, read, cmd_rx },
+                                        ));
+                                    }
+                                    Some(Err(e)) => {
+                                        let _ = write.close().await;
+                                        break Some((
+                                            WebSocketMessage::Error { error: e.to_string() },
+                                            WsStreamState::Done,
+                                        ));
+                                    }
+                                    None => {
+                                        break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
+                                    }
+                                }
+                            }
+                            cmd = cmd_rx.recv() => {
+                                match cmd {
+                                    Some(WebSocketCommand::Close(frame)) => {
+                                        let _ = write.send(Message::Close(frame)).await;
+                                        let _ = write.close().await;
+                                        break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
+                                    }
+                                    Some(WebSocketCommand::SendText(text)) => {
+                                        if let Err(e) = write.send(Message::Text(text.into())).await {
+                                            // Report the error but stay Running: the read half may
+                                            // still deliver buffered frames (e.g. a server Close).
+                                            break Some((
+                                                WebSocketMessage::Error { error: e.to_string() },
+                                                WsStreamState::Running { write, read, cmd_rx },
+                                            ));
+                                        }
+                                    }
+                                    Some(WebSocketCommand::SendBinary(data)) => {
+                                        if let Err(e) = write.send(Message::Binary(data.into())).await {
+                                            break Some((
+                                                WebSocketMessage::Error { error: e.to_string() },
+                                                WsStreamState::Running { write, read, cmd_rx },
+                                            ));
+                                        }
+                                    }
+                                    None => {
+                                        // Application dropped the command sender.
+                                        let _ = write.close().await;
+                                        break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    WsStreamState::Done => None,
+                }
+            },
+        )
         .boxed()
     }
 
