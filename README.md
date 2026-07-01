@@ -225,6 +225,7 @@ Check out the [`examples/`](examples/) directory for more examples:
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
+- [`dashboard.rs`](examples/dashboard.rs) - Structured state management with nested state and child messages
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
 - [`websocket.rs`](examples/websocket.rs) - WebSocket echo chat demonstrating real-time communication (requires `ws` feature)
 - [`http_todo.rs`](examples/http_todo.rs) - HTTP Todo list with Query subscription, Mutation, and cache management (requires `http` feature)
@@ -234,6 +235,7 @@ Run an example:
 ```bash
 cargo run --example counter
 cargo run --example views
+cargo run --example dashboard
 cargo run --example signals
 cargo run --example websocket --features ws,rustls
 cargo run --example http_todo --features http
