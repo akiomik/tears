@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed subscriptions not being restarted after their task completes naturally
+  - If a subscription's underlying task finished on its own (e.g., a WebSocket connection
+    dropped, or a finite stream reached its end), `SubscriptionManager::update()` still
+    found its ID in the running map and skipped restarting it — the subscription was
+    silently dead until the app explicitly toggled it off and on again
+  - Finished tasks are now detected on every `update()` call and removed from the map so
+    that the subscription is restarted if still requested, or cleaned up if not
+
 - Fixed `Query` subscriptions missing invalidations broadcast while a fetch is in-flight
   (requires `http` feature)
   - Previously, `perform_fetch` subscribed to the invalidation channel *after*
