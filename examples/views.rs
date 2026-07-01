@@ -1,10 +1,13 @@
-//! Multiple view states example demonstrating state management and navigation.
+//! Multiple view states example demonstrating navigation between screens.
 //!
 //! This example shows:
-//! - State machine pattern for managing different views
+//! - State machine pattern for switching between views
 //! - Navigation between views using messages
 //! - Conditional subscriptions based on current view
 //! - Different UI rendering for each view
+//!
+//! For a larger state-management example with nested state structs and child
+//! messages, see `examples/dashboard.rs`.
 //!
 //! Views:
 //! - Menu: Select which view to navigate to
@@ -86,120 +89,23 @@ impl Application for App {
         (app, Command::none())
     }
 
-    /// Handle incoming messages and update state
-    #[allow(clippy::too_many_lines)]
+    /// Route incoming messages to the view-specific update logic.
     fn update(&mut self, msg: Message) -> Command<Self::Message> {
         match msg {
-            // Navigation
-            Message::GoToMenu => {
-                self.view = View::Menu { selected: 0 };
-                Command::none()
-            }
-            Message::GoToCounter => {
-                self.view = View::Counter { count: 0 };
-                Command::none()
-            }
-            Message::GoToInput => {
-                self.view = View::Input {
-                    text: String::new(),
-                    history: vec![],
-                };
-                Command::none()
-            }
-            Message::GoToList => {
-                self.view = View::List {
-                    items: vec![
-                        "Item 1".to_string(),
-                        "Item 2".to_string(),
-                        "Item 3".to_string(),
-                        "Item 4".to_string(),
-                        "Item 5".to_string(),
-                    ],
-                    selected: 0,
-                };
-                Command::none()
-            }
-            Message::Quit => Command::effect(Action::Quit),
-
-            // Menu view
-            Message::MenuUp => {
-                if let View::Menu { selected } = &mut self.view {
-                    *selected = selected.saturating_sub(1);
-                }
-                Command::none()
-            }
-            Message::MenuDown => {
-                if let View::Menu { selected } = &mut self.view {
-                    *selected = (*selected + 1).min(3);
-                }
-                Command::none()
-            }
-            Message::MenuSelect => {
-                if let View::Menu { selected } = self.view {
-                    match selected {
-                        0 => Command::message(Message::GoToCounter),
-                        1 => Command::message(Message::GoToInput),
-                        2 => Command::message(Message::GoToList),
-                        3 => Command::message(Message::Quit),
-                        _ => Command::none(),
-                    }
-                } else {
-                    Command::none()
-                }
-            }
-
-            // Counter view
-            Message::Tick => {
-                if let View::Counter { count } = &mut self.view {
-                    *count += 1;
-                }
-                Command::none()
-            }
-
-            // Input view
-            Message::InputChar(c) => {
-                if let View::Input { text, .. } = &mut self.view {
-                    text.push(c);
-                }
-                Command::none()
-            }
-            Message::InputBackspace => {
-                if let View::Input { text, .. } = &mut self.view {
-                    text.pop();
-                }
-                Command::none()
-            }
-            Message::InputSubmit => {
-                if let View::Input { text, history } = &mut self.view {
-                    if !text.is_empty() {
-                        history.push(text.clone());
-                        text.clear();
-                    }
-                }
-                Command::none()
-            }
-
-            // List view
-            Message::ListUp => {
-                if let View::List { selected, .. } = &mut self.view {
-                    *selected = selected.saturating_sub(1);
-                }
-                Command::none()
-            }
-            Message::ListDown => {
-                if let View::List { items, selected } = &mut self.view {
-                    *selected = (*selected + 1).min(items.len().saturating_sub(1));
-                }
-                Command::none()
-            }
-
-            // Terminal events
+            Message::GoToMenu
+            | Message::GoToCounter
+            | Message::GoToInput
+            | Message::GoToList
+            | Message::Quit => self.update_navigation(&msg),
+            Message::MenuUp | Message::MenuDown | Message::MenuSelect => self.update_menu(&msg),
+            Message::Tick => self.update_counter(),
+            Message::InputChar(c) => self.update_input_char(c),
+            Message::InputSubmit => self.update_input_submit(),
+            Message::InputBackspace => self.update_input_backspace(),
+            Message::ListUp | Message::ListDown => self.update_list(&msg),
             Message::Terminal(Event::Key(key)) => handle_key_event(&self.view, key),
             Message::Terminal(_) => Command::none(),
-            Message::TerminalError(e) => {
-                eprintln!("Terminal error: {e}");
-                Command::effect(Action::Quit)
-            }
+            Message::TerminalError(e) => handle_terminal_error(&e),
         }
     }
 
@@ -236,6 +142,109 @@ impl Application for App {
     }
 }
 
+impl App {
+    fn update_navigation(&mut self, msg: &Message) -> Command<Message> {
+        match msg {
+            Message::GoToMenu => self.view = View::Menu { selected: 0 },
+            Message::GoToCounter => self.view = View::Counter { count: 0 },
+            Message::GoToInput => {
+                self.view = View::Input {
+                    text: String::new(),
+                    history: vec![],
+                };
+            }
+            Message::GoToList => {
+                self.view = View::List {
+                    items: vec![
+                        "Item 1".to_string(),
+                        "Item 2".to_string(),
+                        "Item 3".to_string(),
+                        "Item 4".to_string(),
+                        "Item 5".to_string(),
+                    ],
+                    selected: 0,
+                };
+            }
+            Message::Quit => return Command::effect(Action::Quit),
+            _ => {}
+        }
+
+        Command::none()
+    }
+
+    fn update_menu(&mut self, msg: &Message) -> Command<Message> {
+        let View::Menu { selected } = &mut self.view else {
+            return Command::none();
+        };
+
+        match msg {
+            Message::MenuUp => *selected = selected.saturating_sub(1),
+            Message::MenuDown => *selected = (*selected + 1).min(3),
+            Message::MenuSelect => {
+                return match *selected {
+                    0 => Command::message(Message::GoToCounter),
+                    1 => Command::message(Message::GoToInput),
+                    2 => Command::message(Message::GoToList),
+                    3 => Command::message(Message::Quit),
+                    _ => Command::none(),
+                };
+            }
+            _ => {}
+        }
+
+        Command::none()
+    }
+
+    const fn update_counter(&mut self) -> Command<Message> {
+        if let View::Counter { count } = &mut self.view {
+            *count += 1;
+        }
+
+        Command::none()
+    }
+
+    fn update_input_char(&mut self, c: char) -> Command<Message> {
+        if let View::Input { text, .. } = &mut self.view {
+            text.push(c);
+        }
+
+        Command::none()
+    }
+
+    fn update_input_backspace(&mut self) -> Command<Message> {
+        if let View::Input { text, .. } = &mut self.view {
+            text.pop();
+        }
+
+        Command::none()
+    }
+
+    fn update_input_submit(&mut self) -> Command<Message> {
+        if let View::Input { text, history } = &mut self.view
+            && !text.is_empty()
+        {
+            history.push(text.clone());
+            text.clear();
+        }
+
+        Command::none()
+    }
+
+    fn update_list(&mut self, msg: &Message) -> Command<Message> {
+        let View::List { items, selected } = &mut self.view else {
+            return Command::none();
+        };
+
+        match msg {
+            Message::ListUp => *selected = selected.saturating_sub(1),
+            Message::ListDown => *selected = (*selected + 1).min(items.len().saturating_sub(1)),
+            _ => {}
+        }
+
+        Command::none()
+    }
+}
+
 /// Handle keyboard events based on current view
 #[allow(clippy::use_self)]
 fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
@@ -267,6 +276,11 @@ fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
             _ => Command::none(),
         },
     }
+}
+
+fn handle_terminal_error(error: &str) -> Command<Message> {
+    eprintln!("Terminal error: {error}");
+    Command::effect(Action::Quit)
 }
 
 /// Render the menu view
