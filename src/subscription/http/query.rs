@@ -381,6 +381,14 @@ where
             async move {
                 match state {
                     State::Initial => {
+                        // Subscribe to invalidation notifications BEFORE checking the
+                        // cache so that any invalidation that arrives between the cache
+                        // read and when we first enter `State::Watching` is captured.
+                        // The same receiver is threaded through `State::Fetching` so
+                        // that invalidations sent while a fetch is in-flight are also
+                        // buffered and visible as soon as the fetch completes.
+                        let rx = client.subscribe_invalidation();
+
                         // Check cache first
                         if let Some(mut cached) = client.get_cache::<V>(&key) {
                             let is_stale = cached.check_staleness(client.config().stale_time);
@@ -393,27 +401,27 @@ where
                             };
 
                             if is_stale {
-                                // Stale data: emit it, then refetch
-                                Some((result, State::Refetching))
+                                // Stale data: emit it, then refetch.
+                                // Pass rx so that invalidations during the refetch are captured.
+                                Some((result, State::Fetching { rx }))
                             } else {
-                                // Fresh data: emit it, then wait for invalidation
-                                let rx = client.subscribe_invalidation();
+                                // Fresh data: emit it, then wait for invalidation.
                                 Some((result, State::Watching { rx }))
                             }
                         } else {
-                            // No cache: emit Loading, then fetch
+                            // No cache: emit Loading, then fetch.
                             let result = QueryResult {
                                 state: QueryState::Loading,
                             };
-                            Some((result, State::Fetching))
+                            Some((result, State::Fetching { rx }))
                         }
                     }
 
-                    // Both states fetch and then watch for invalidation. They
-                    // are distinguished only by what was emitted beforehand
-                    // (Loading for a cold fetch vs. stale data for a refetch).
-                    State::Fetching | State::Refetching => {
-                        Some(perform_fetch(&fetcher, &client, &key).await)
+                    // Fetch (cold start or after stale/invalidation). `rx` was
+                    // subscribed before the fetch started so any invalidation that
+                    // arrives during the fetch is already buffered in `rx`.
+                    State::Fetching { rx } => {
+                        Some(perform_fetch(&fetcher, &client, &key, rx).await)
                     }
 
                     State::Watching { rx } => watch_for_invalidation::<V>(rx, &key).await,
@@ -442,17 +450,27 @@ impl<V> Hash for Query<V> {
 /// Internal state machine for the Query subscription.
 enum State {
     Initial,
-    Fetching,
-    Refetching,
-    Watching { rx: broadcast::Receiver<String> },
+    /// Fetching data; `rx` was subscribed *before* the fetch started so that
+    /// invalidations arriving during the fetch are captured and not missed.
+    Fetching {
+        rx: broadcast::Receiver<String>,
+    },
+    Watching {
+        rx: broadcast::Receiver<String>,
+    },
 }
 
 /// Runs the fetcher, caches a successful result, and transitions to watching
-/// for invalidations.
+/// for invalidations using the pre-subscribed receiver.
+///
+/// `rx` **must** have been subscribed before the fetch was initiated so that
+/// invalidations broadcast during the fetch are buffered in `rx` and visible
+/// immediately when the subscription enters `State::Watching`.
 async fn perform_fetch<V>(
     fetcher: &Fetcher<V>,
     client: &QueryClient,
     key: &str,
+    rx: broadcast::Receiver<String>,
 ) -> (QueryResult<V>, State)
 where
     V: Clone + Send + Sync + 'static,
@@ -473,38 +491,47 @@ where
         },
     };
 
-    let rx = client.subscribe_invalidation();
+    // Re-use the pre-subscribed receiver rather than creating a new one so
+    // that invalidations that arrived during the fetch are already buffered
+    // and will be seen immediately upon entering State::Watching.
     (result, State::Watching { rx })
 }
 
 /// Waits for an invalidation notification and decides the next step.
 ///
-/// Returns `Some(Loading, Fetching)` when this key should refetch (either it
-/// was explicitly invalidated, or the receiver lagged and may have missed its
-/// invalidation), and `None` only when the channel is closed.
+/// Returns `Some((Loading, Fetching { rx }))` when this key should refetch
+/// (either it was explicitly invalidated, or the receiver lagged and may have
+/// missed its invalidation).  The receiver is threaded into `State::Fetching`
+/// so that invalidations arriving during the subsequent fetch are not missed.
+/// Returns `None` only when the channel is closed.
 async fn watch_for_invalidation<V>(
     mut rx: broadcast::Receiver<String>,
     key: &str,
 ) -> Option<(QueryResult<V>, State)> {
-    let refetch = || {
-        Some((
-            QueryResult {
-                state: QueryState::Loading,
-            },
-            State::Fetching,
-        ))
-    };
-
     loop {
         match rx.recv().await {
             // Our key was invalidated: refetch.
-            Ok(invalidated_key) if invalidated_key == key => return refetch(),
+            Ok(invalidated_key) if invalidated_key == key => {
+                return Some((
+                    QueryResult {
+                        state: QueryState::Loading,
+                    },
+                    State::Fetching { rx },
+                ));
+            }
             // A different key was invalidated: keep waiting.
             Ok(_) => {}
             // The receiver fell behind and some invalidations were dropped.
             // One of them may have been for our key, so refetch to be safe
             // instead of risking stale data.
-            Err(RecvError::Lagged(_)) => return refetch(),
+            Err(RecvError::Lagged(_)) => {
+                return Some((
+                    QueryResult {
+                        state: QueryState::Loading,
+                    },
+                    State::Fetching { rx },
+                ));
+            }
             // Channel closed (QueryClient dropped): the subscription ends.
             Err(RecvError::Closed) => return None,
         }
@@ -834,6 +861,148 @@ mod tests {
         assert_eq!(
             client.get_cache::<String>("str").map(|e| e.data),
             Some("hello".to_string())
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Regression tests for the "missed invalidation during fetch" race.
+    //
+    // Before the fix, `perform_fetch` subscribed to the invalidation channel
+    // *after* `fetcher().await` returned, creating a window where any
+    // invalidation broadcast while the fetch was in-flight was silently
+    // dropped.  The fix subscribes a single receiver in `State::Initial` and
+    // threads it through the entire state machine so that no invalidation is
+    // ever missed.
+    // ---------------------------------------------------------------------------
+
+    /// An invalidation broadcast while a fetch is in progress must trigger
+    /// another refetch once the fetch completes.
+    ///
+    /// With the old code the invalidation was lost (the receiver was created
+    /// *after* the fetch returned), so the subscription would stall in
+    /// `State::Watching` until the next explicit invalidation.
+    #[tokio::test]
+    async fn test_invalidation_during_fetch_triggers_refetch() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::time::Duration;
+
+        let client = Arc::new(QueryClient::new());
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+
+        let fetch_count_clone = fetch_count.clone();
+        let query = Query::new(
+            &"key",
+            move || {
+                let count = fetch_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Simulate a slow network request so the test has a window
+                    // to inject an invalidation while the fetch is running.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok::<i32, QueryError>(1)
+                })
+            },
+            client.clone(),
+        );
+
+        let mut stream = query.stream();
+
+        // Cold start: Loading
+        let first = stream.next().await;
+        assert!(matches!(first, Some(ref r) if r.is_loading()));
+
+        // Inject an invalidation while the first fetch is still sleeping.
+        // The fetch takes 50 ms; we fire the invalidation at 25 ms.
+        let client_for_invalidate = client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = client_for_invalidate
+                .invalidation_tx
+                .send("key".to_string());
+        });
+
+        // First fetch completes.
+        let second = stream.next().await;
+        assert!(
+            matches!(second, Some(ref r) if r.is_success()),
+            "first fetch should succeed"
+        );
+
+        // The invalidation that arrived during the first fetch must trigger a
+        // second Loading → Success cycle.
+        let third = stream.next().await;
+        assert!(
+            matches!(third, Some(ref r) if r.is_loading()),
+            "invalidation during fetch must trigger a subsequent refetch"
+        );
+
+        let fourth = stream.next().await;
+        assert!(
+            matches!(fourth, Some(ref r) if r.is_success()),
+            "second fetch should succeed"
+        );
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "exactly two fetches should have been performed"
+        );
+    }
+
+    /// An invalidation broadcast immediately after the Initial state emits
+    /// fresh cached data must trigger a refetch, not be silently dropped.
+    ///
+    /// With the old code the receiver was subscribed *after* the cache check,
+    /// leaving a small window where the invalidation could be missed; with the
+    /// fix the receiver is subscribed before the cache check.
+    #[tokio::test]
+    async fn test_invalidation_after_initial_fresh_cache_emission_triggers_refetch() {
+        use std::time::Duration;
+
+        // Long stale_time so the cached entry is treated as fresh.
+        let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
+        let client = Arc::new(QueryClient::with_config(config));
+
+        // Pre-populate the cache with a fresh entry.
+        client.set_cache("key".to_string(), CacheEntry::new(42));
+
+        let query = Query::new(
+            &"key",
+            || Box::pin(async { Ok::<i32, QueryError>(99) }),
+            client.clone(),
+        );
+
+        let mut stream = query.stream();
+
+        // Initial state emits the fresh cached value.
+        let first = stream.next().await;
+        assert!(
+            matches!(first, Some(ref r) if r.is_success() && !r.is_stale()),
+            "should emit fresh cached data"
+        );
+
+        // Send an invalidation now.  Because the receiver was subscribed
+        // before the cache check, this is guaranteed to be captured even if
+        // it fires before the stream is polled again.
+        let _ = client.invalidation_tx.send("key".to_string());
+
+        // The invalidation must surface as a Loading state followed by Success.
+        let second = stream.next().await;
+        assert!(
+            matches!(second, Some(ref r) if r.is_loading()),
+            "invalidation after initial fresh-cache emission must trigger a refetch"
+        );
+
+        let third = stream.next().await;
+        assert!(
+            matches!(third, Some(ref r) if r.is_success()),
+            "refetch after invalidation should yield fresh data"
+        );
+        assert_eq!(
+            third.expect("third result should be Some").data(),
+            Some(&99),
+            "should return the fetched value, not the stale cached value"
         );
     }
 
