@@ -395,12 +395,12 @@ where
                         let rx = client.subscribe_invalidation();
 
                         // Check cache first
-                        if let Some(mut cached) = client.get_cache::<V>(&key) {
+                        if let Some(cached) = client.get_cache::<V>(&key) {
                             let is_stale = cached.check_staleness(client.config().stale_time);
 
                             let result = QueryResult {
                                 state: QueryState::Success {
-                                    data: cached.data.clone(),
+                                    data: cached.data,
                                     is_stale,
                                 },
                             };

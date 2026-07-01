@@ -46,11 +46,12 @@ impl<T> CacheEntry<T> {
     }
 
     /// Checks if this entry is stale based on the given stale time.
-    pub fn check_staleness(&mut self, stale_time: Duration) -> bool {
-        if self.timestamp.elapsed() > stale_time {
-            self.is_stale = true;
-        }
-        self.is_stale
+    ///
+    /// Returns `true` if the entry was explicitly marked stale via
+    /// [`mark_stale`](Self::mark_stale) or if `stale_time` has elapsed
+    /// since the entry was created.  Does **not** mutate the entry.
+    pub fn check_staleness(&self, stale_time: Duration) -> bool {
+        self.is_stale || self.timestamp.elapsed() > stale_time
     }
 
     /// Marks this entry as stale.
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_check_staleness_fresh() {
-        let mut entry = CacheEntry::new(42);
+        let entry = CacheEntry::new(42);
         let is_stale = entry.check_staleness(Duration::from_secs(1));
         assert!(!is_stale);
         assert!(!entry.is_stale);
@@ -95,11 +96,29 @@ mod tests {
 
     #[test]
     fn test_check_staleness_stale() {
-        let mut entry = CacheEntry::new(42);
+        let entry = CacheEntry::new(42);
         sleep(Duration::from_millis(10));
         let is_stale = entry.check_staleness(Duration::from_millis(5));
         assert!(is_stale);
-        assert!(entry.is_stale);
+        // check_staleness must NOT mutate the entry — previously this
+        // was called on a clone from the cache so the mutation was silently
+        // discarded anyway; now the signature enforces immutability.
+        assert!(
+            !entry.is_stale,
+            "check_staleness must not mutate is_stale on the entry"
+        );
+    }
+
+    #[test]
+    fn test_check_staleness_respects_mark_stale() {
+        // An entry that was explicitly marked stale via mark_stale should
+        // be reported as stale by check_staleness even within the stale_time.
+        let mut entry = CacheEntry::new(42);
+        entry.mark_stale();
+        assert!(
+            entry.check_staleness(Duration::from_secs(3600)),
+            "entry marked stale should be reported stale regardless of elapsed time"
+        );
     }
 
     #[test]
