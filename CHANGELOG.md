@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed new subscriptions being started in hash iteration order instead of the
+  order returned by `Application::subscriptions`
+  - `SubscriptionManager::update()` previously diffed subscription IDs with
+    `HashSet::difference`, so stream creation could happen in a nondeterministic
+    order for newly added subscriptions
+  - New subscriptions now start in input order while existing subscriptions
+    continue running unchanged
+
 - Fixed WebSocket TCP connections not being released during runtime shutdown
   when `SubscriptionManager::shutdown()` aborts the subscription task via
   `handle.abort()` (requires `ws` feature)

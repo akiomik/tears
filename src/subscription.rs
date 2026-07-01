@@ -353,29 +353,32 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         // NOTE: Store stream spawners instead of streams to avoid creating
         // streams unnecessarily. This is important for subscriptions like
         // TerminalEvents where creating the stream has side effects.
-        let mut new_subs: HashMap<_, _> = subscriptions
-            .into_iter()
-            .map(|sub| (sub.id, sub.spawn))
-            .collect();
-        let new_ids: HashSet<_> = new_subs.keys().copied().collect();
+        let mut new_subs = Vec::new();
+        let mut new_ids = HashSet::new();
+
+        for sub in subscriptions {
+            // Keep the first subscription for a given ID. Subscriptions with
+            // the same ID are considered identical, and preserving the first
+            // one avoids making duplicate IDs silently "last one wins".
+            if new_ids.insert(sub.id) {
+                new_subs.push((sub.id, sub.spawn));
+            }
+        }
 
         // Discard entries whose tasks have already finished so they are treated
         // as absent: restarted if still requested, silently dropped otherwise.
         self.running.retain(|_, rs| !rs.handle.is_finished());
 
-        let current_ids: HashSet<_> = self.running.keys().copied().collect();
-
-        let to_remove: Vec<_> = current_ids.difference(&new_ids).copied().collect();
-        let to_add: Vec<_> = new_ids.difference(&current_ids).copied().collect();
-
-        for id in to_remove {
-            if let Some(running) = self.running.remove(&id) {
+        self.running.retain(|id, running| {
+            let keep = new_ids.contains(id);
+            if !keep {
                 running.handle.abort();
             }
-        }
+            keep
+        });
 
-        for id in to_add {
-            if let Some(spawn) = new_subs.remove(&id) {
+        for (id, spawn) in new_subs {
+            if !self.running.contains_key(&id) {
                 // Only call the spawner when we actually need to start the subscription
                 let stream = spawn();
                 let handle = self.spawn_subscription(stream);
@@ -607,6 +610,45 @@ mod tests {
         results.sort_unstable();
         assert_eq!(results, vec![1, 2]);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_starts_new_subscriptions_in_input_order() {
+        use futures::stream;
+        use std::sync::{Arc, Mutex};
+
+        struct OrderedStart;
+
+        fn recording_subscription(id_hash: u64, started: Arc<Mutex<Vec<u64>>>) -> Subscription<()> {
+            Subscription {
+                id: SubscriptionId::of::<OrderedStart>(id_hash),
+                spawn: Box::new(move || {
+                    started
+                        .lock()
+                        .expect("started order mutex should not be poisoned")
+                        .push(id_hash);
+                    stream::empty().boxed()
+                }),
+            }
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let started = Arc::new(Mutex::new(Vec::new()));
+
+        manager.update(vec![
+            recording_subscription(1, started.clone()),
+            recording_subscription(2, started.clone()),
+            recording_subscription(3, started.clone()),
+            recording_subscription(4, started.clone()),
+        ]);
+
+        assert_eq!(
+            *started
+                .lock()
+                .expect("started order mutex should not be poisoned"),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[tokio::test]
