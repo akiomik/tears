@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `CacheEntry::check_staleness` having a misleading `&mut self` signature
+  (requires `http` feature)
+  - The method set `self.is_stale = true` on the receiver, but `QueryClient::get_cache`
+    returns a clone of the entry, so the mutation was silently discarded and the
+    actual cached entry's `is_stale` field remained `false` forever
+  - The method now takes `&self`; staleness is evaluated as
+    `self.is_stale || stale_time_elapsed`, preserving the existing return-value
+    semantics while making the immutability explicit
+
 - Fixed `Query` subscriptions with the same string key but different value types
   overwriting each other's cache entries (requires `http` feature)
   - The cache was keyed by the plain string key, so `Query<i32>` and `Query<String>`
