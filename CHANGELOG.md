@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     terminal is initialized
   - See the new `panic_hook` example for a demonstration
 
+### Fixed
+
+- Subscription tasks are now aborted when the `SubscriptionManager` is dropped
+  - Previously, dropping the manager without calling `shutdown()` (for example
+    while unwinding from a panic) detached the running tasks instead of
+    cancelling them, leaking any parked subscription tasks
+
 ## [0.9.0] - 2026-07-03
 
 ### Changed
