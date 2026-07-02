@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "tears"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "color-eyre",
  "crossterm 0.29.0",
