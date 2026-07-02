@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-02
+
 ### Fixed
 
 - Fixed new subscriptions being started in hash iteration order instead of the
@@ -380,7 +382,8 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.8.1...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/akiomik/tears/releases/tag/v0.8.2
 [0.8.1]: https://github.com/akiomik/tears/releases/tag/v0.8.1
 [0.8.0]: https://github.com/akiomik/tears/releases/tag/v0.8.0
 [0.7.0]: https://github.com/akiomik/tears/releases/tag/v0.7.0
