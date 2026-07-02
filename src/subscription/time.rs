@@ -114,6 +114,11 @@ impl SubscriptionSource for Timer {
         // This is appropriate for UI applications where we want
         // to maintain a consistent tick rate rather than processing old ticks.
         let duration = Duration::from_millis(self.interval_ms.get());
+        tracing::trace!(
+            target: "tears::subscription::time",
+            interval_ms = self.interval_ms.get(),
+            "timer stream created"
+        );
         let mut interval = interval(duration);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 

@@ -114,7 +114,25 @@ impl SubscriptionSource for TerminalEvents {
             // NOTE: EventStream::next() returns Result<Event, io::Error>
             // We pass the Result directly to the application, allowing users to
             // decide how to handle errors (log, retry, show error UI, etc.)
-            stream.next().await.map(|result| (result, stream))
+            stream.next().await.map(|result| {
+                match &result {
+                    Ok(event) => {
+                        tracing::trace!(
+                            target: "tears::subscription::terminal",
+                            event_type = trace_event_type(event),
+                            "terminal event received"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "tears::subscription::terminal",
+                            error_kind = ?error.kind(),
+                            "terminal event read failed"
+                        );
+                    }
+                }
+                (result, stream)
+            })
         })
         .boxed()
     }
@@ -124,6 +142,17 @@ impl SubscriptionSource for TerminalEvents {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         SubscriptionId::of::<Self>(hasher.finish())
+    }
+}
+
+const fn trace_event_type(event: &Event) -> &'static str {
+    match event {
+        Event::FocusGained => "focus_gained",
+        Event::FocusLost => "focus_lost",
+        Event::Key(_) => "key",
+        Event::Mouse(_) => "mouse",
+        Event::Paste(_) => "paste",
+        Event::Resize(_, _) => "resize",
     }
 }
 

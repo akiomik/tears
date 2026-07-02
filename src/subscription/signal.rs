@@ -125,15 +125,44 @@ mod unix_signal {
                 let mut sig = match state {
                     None => {
                         // First call: initialize the signal handler
-                        signal(kind)?
+                        match signal(kind) {
+                            Ok(sig) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = ?kind,
+                                    "signal handler installed"
+                                );
+                                sig
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = ?kind,
+                                    error_kind = ?error.kind(),
+                                    "signal handler installation failed"
+                                );
+                                return Err(error);
+                            }
+                        }
                     }
                     Some(sig) => sig,
                 };
 
                 // Wait for signals
-                match sig.recv().await {
-                    Some(()) => Ok(Some(((), Some(sig)))),
-                    None => Ok(None), // End the stream
+                if sig.recv().await == Some(()) {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = ?kind,
+                        "signal received"
+                    );
+                    Ok(Some(((), Some(sig))))
+                } else {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = ?kind,
+                        "signal stream ended"
+                    );
+                    Ok(None)
                 }
             })
             .boxed()
@@ -263,15 +292,44 @@ mod windows_signal {
                 let mut sig = match state {
                     None => {
                         // First call: initialize the signal handler
-                        ctrl_c()?
+                        match ctrl_c() {
+                            Ok(sig) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = "ctrl_c",
+                                    "signal handler installed"
+                                );
+                                sig
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = "ctrl_c",
+                                    error_kind = ?error.kind(),
+                                    "signal handler installation failed"
+                                );
+                                return Err(error);
+                            }
+                        }
                     }
                     Some(sig) => sig,
                 };
 
                 // Wait for signals
-                match sig.recv().await {
-                    Some(()) => Ok(Some(((), Some(sig)))),
-                    None => Ok(None), // End the stream
+                if sig.recv().await == Some(()) {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = "ctrl_c",
+                        "signal received"
+                    );
+                    Ok(Some(((), Some(sig))))
+                } else {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = "ctrl_c",
+                        "signal stream ended"
+                    );
+                    Ok(None)
                 }
             })
             .boxed()
@@ -353,15 +411,44 @@ mod windows_signal {
                 let mut sig = match state {
                     None => {
                         // First call: initialize the signal handler
-                        ctrl_break()?
+                        match ctrl_break() {
+                            Ok(sig) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = "ctrl_break",
+                                    "signal handler installed"
+                                );
+                                sig
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::signal",
+                                    signal_kind = "ctrl_break",
+                                    error_kind = ?error.kind(),
+                                    "signal handler installation failed"
+                                );
+                                return Err(error);
+                            }
+                        }
                     }
                     Some(sig) => sig,
                 };
 
                 // Wait for signals
-                match sig.recv().await {
-                    Some(()) => Ok(Some(((), Some(sig)))),
-                    None => Ok(None), // End the stream
+                if sig.recv().await == Some(()) {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = "ctrl_break",
+                        "signal received"
+                    );
+                    Ok(Some(((), Some(sig))))
+                } else {
+                    tracing::debug!(
+                        target: "tears::subscription::signal",
+                        signal_kind = "ctrl_break",
+                        "signal stream ended"
+                    );
+                    Ok(None)
                 }
             })
             .boxed()

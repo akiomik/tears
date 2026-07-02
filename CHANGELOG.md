@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The runtime emits events for message batches, subscription updates, command
     spawns, renders, and shutdown under the `tears::runtime` and
     `tears::subscription` targets
+  - WebSocket subscriptions now emit connection, disconnection, read/write
+    error, and message-type/size events under
+    `tears::subscription::websocket`
+  - HTTP query subscriptions now emit invalidation, cell reuse, fetch
+    lifecycle, and cache GC events under `tears::subscription::http`
+  - Terminal, timer, and signal subscriptions now emit source-specific events
+    under `tears::subscription::terminal`, `tears::subscription::time`, and
+    `tears::subscription::signal`
+  - Subscription instrumentation avoids logging payloads, query key values,
+    pasted text, key presses, and error strings that may contain sensitive data
   - Events are inert unless a `tracing` subscriber is installed
   - Panics inside command and subscription tasks are now caught and logged at
     the `error` level instead of being silently lost
