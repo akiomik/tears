@@ -44,6 +44,10 @@ test-doc:
 test-loom:
     RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test --features loom-core --lib -- cell_core
 
+# Run criterion benchmarks
+bench:
+    cargo bench
+
 # Build the library
 build:
     cargo build
