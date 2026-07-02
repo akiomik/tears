@@ -21,6 +21,7 @@
 //! - [`runtime::Runtime`]: Manages the application lifecycle and event loop
 //! - [`command::Command`]: Represents asynchronous side effects
 //! - [`subscription::Subscription`]: Represents ongoing event sources
+//! - [`install_panic_hook`]: Restores the terminal if the application panics
 //!
 //! ## Example
 //!
@@ -84,6 +85,7 @@
 pub mod application;
 pub mod command;
 mod frame_rate;
+pub mod panic;
 pub mod prelude;
 pub mod runtime;
 pub mod subscription;
@@ -93,5 +95,6 @@ pub use application::Application;
 pub use command::{Action, Command};
 pub use frame_rate::{FrameRate, FrameRateError};
 pub use futures::stream::BoxStream;
+pub use panic::install_panic_hook;
 pub use runtime::Runtime;
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
