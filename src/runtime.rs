@@ -1059,6 +1059,12 @@ mod tests {
     fn test_command_task_panic_is_logged() {
         use std::sync::atomic::Ordering;
 
+        // Serialize against other tests that observe the global panic hook, so
+        // this test's caught panic cannot pollute their recorded hook activity.
+        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let counter = EventCounter::default();
         let errors = counter.errors.clone();
 

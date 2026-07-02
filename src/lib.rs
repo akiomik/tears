@@ -107,3 +107,18 @@ pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
 pub use runtime::Runtime;
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
+
+#[cfg(test)]
+mod test_support {
+    //! Test-only helpers shared across modules.
+
+    use std::sync::Mutex;
+
+    /// Serializes tests that install a process-global panic hook or deliberately
+    /// trigger panics.
+    ///
+    /// The panic hook is process-global and shared across threads, so a test that
+    /// records hook activity and a test that panics must not run concurrently, or
+    /// the panicking test's hook invocation would pollute the recording one.
+    pub static PANIC_HOOK_GUARD: Mutex<()> = Mutex::new(());
+}
