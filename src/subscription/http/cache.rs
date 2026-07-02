@@ -12,6 +12,9 @@ pub trait AnyCacheEntry: Send + Sync {
     /// concrete `CacheEntry<T>`.
     fn as_any(&self) -> &dyn Any;
 
+    /// Marks the entry as stale without knowing its concrete value type.
+    fn mark_stale(&mut self);
+
     /// Returns `true` if the entry has outlived `cache_time` and should be
     /// garbage collected.
     fn is_expired(&self, cache_time: Duration) -> bool;
@@ -20,6 +23,14 @@ pub trait AnyCacheEntry: Send + Sync {
 impl<T: Send + Sync + 'static> AnyCacheEntry for CacheEntry<T> {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn mark_stale(&mut self) {
+        // Call the inherent method explicitly. `self.mark_stale()` would also
+        // resolve to it today (inherent methods take priority over trait
+        // methods), but being explicit avoids silently turning into infinite
+        // recursion if the inherent method is ever renamed or removed.
+        Self::mark_stale(self);
     }
 
     fn is_expired(&self, cache_time: Duration) -> bool {
@@ -55,7 +66,6 @@ impl<T> CacheEntry<T> {
     }
 
     /// Marks this entry as stale.
-    #[allow(dead_code)]
     pub const fn mark_stale(&mut self) {
         self.is_stale = true;
     }
