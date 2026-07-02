@@ -246,7 +246,7 @@ impl SubscriptionSource for WebSocket {
                             )),
                         }
                     }
-                    // FIXME: when the outer task is aborted (e.g. via
+                    // FIXME(#103): when the outer task is aborted (e.g. via
                     // SubscriptionManager::shutdown() calling handle.abort()),
                     // this future is dropped at the select! await point and
                     // WsStreamState::Running is dropped synchronously.  The TCP
@@ -257,6 +257,12 @@ impl SubscriptionSource for WebSocket {
                     // CancellationToken checked in the select! below) combined
                     // with SubscriptionManager::shutdown() providing a grace
                     // period before calling handle.abort().
+                    //
+                    // This is a limitation, not a bug: the OS still closes the
+                    // TCP connection, so the server detects the disconnect.  A
+                    // clean close is achievable today by having the app send
+                    // WebSocketCommand::Close before quitting; a framework-level
+                    // guarantee would need the cooperative shutdown above.
                     WsStreamState::Running {
                         mut write,
                         mut read,
@@ -270,6 +276,17 @@ impl SubscriptionSource for WebSocket {
                                         break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
                                     }
                                     Some(Ok(message)) => {
+                                        // NOTE: on a Ping, tungstenite auto-queues
+                                        // a Pong but does not flush it within this
+                                        // read(); the queued Pong is written on the
+                                        // next read()/flush().  Because this task
+                                        // re-polls immediately after yielding, the
+                                        // Pong is normally prompt.  It can lag only
+                                        // if the task is aborted or the executor
+                                        // stalls before the next poll.  Flushing
+                                        // here would close that narrow window but
+                                        // would couple read progress to write
+                                        // backpressure on every Ping, so we don't.
                                         break Some((
                                             WebSocketMessage::Received(message),
                                             WsStreamState::Running { write, read, cmd_rx },
