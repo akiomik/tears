@@ -1064,14 +1064,16 @@ mod tests {
 
         // Drive the panicking command task to completion on the current thread,
         // inside the subscriber scope, so its `catch_unwind` error event is seen.
+        //
+        // The panic is caught by `catch_unwind`, so the default hook only prints
+        // the panic message to stderr — harmless test noise. We deliberately do
+        // not swap the panic hook here: it is process-global, so a no-op hook
+        // would suppress panics in other tests running in parallel and could
+        // leak if this test panicked before restoring it.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime should build");
-
-        // Suppress the default panic hook's stderr output for the caught panic.
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
 
         tracing::subscriber::with_default(counter, || {
             rt.block_on(async {
@@ -1085,8 +1087,6 @@ mod tests {
                 state.command_tasks.join_next().await;
             });
         });
-
-        std::panic::set_hook(previous_hook);
 
         assert!(
             errors.load(Ordering::SeqCst) >= 1,
