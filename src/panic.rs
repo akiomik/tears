@@ -74,6 +74,12 @@ mod tests {
     #[test]
     #[allow(clippy::panic, reason = "driving the panic hook requires a real panic")]
     fn test_compose_hook_restores_then_delegates_once() {
+        // Serialize against other tests that touch the global panic hook or
+        // panic, so a concurrent panic cannot invoke our recording hook.
+        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         // Records the order (and therefore the count) of the two stages.
         // `restore` must run first so the terminal is usable before the
         // delegated reporter prints.
