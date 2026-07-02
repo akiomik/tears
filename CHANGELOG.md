@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a `stale_time`/`cache_time` of `Duration::ZERO` not being treated as
+  immediately stale/expired at the exact boundary (requires `http` feature)
+  - Cache staleness and garbage collection used a strict `>` comparison against
+    the elapsed time, so an entry was only stale/expired once elapsed time
+    *exceeded* the configured duration; this contradicted the documented
+    "immediately stale" semantics of the default `stale_time` of 0
+  - Both comparisons now use `>=`, so a duration of `Duration::ZERO` marks the
+    entry stale/expired immediately. In practice this only affects the exact
+    boundary; wall-clock elapsed time is virtually never exactly equal to the
+    configured duration, and these cache internals are not part of the public API
+
 - Fixed `Query` subscriptions with the same key on different `QueryClient`
   instances being treated as identical, so switching the client did not restart
   the subscription (requires `http` feature)
