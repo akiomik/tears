@@ -14,7 +14,7 @@ async fn test_quit_responsiveness_low_framerate() -> Result<()> {
     // This test uses InitQuitApp which sends quit from init command
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<InitQuitApp>::new((), 16);
+    let runtime = Runtime::<InitQuitApp>::try_new((), 16).expect("frame rate must be valid");
 
     let start = Instant::now();
     // Use low frame rate (16 FPS = 62.5ms per frame)
@@ -60,7 +60,7 @@ async fn test_quit_from_init_command() -> Result<()> {
     // Test that quit from init command is processed quickly
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<InitQuitApp>::new((), 60);
+    let runtime = Runtime::<InitQuitApp>::try_new((), 60).expect("frame rate must be valid");
 
     let start = Instant::now();
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
@@ -109,7 +109,7 @@ async fn test_quit_during_frame_wait() -> Result<()> {
     // Test that quit signal during frame wait is processed immediately
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<DelayedQuitApp>::new((), 10);
+    let runtime = Runtime::<DelayedQuitApp>::try_new((), 10).expect("frame rate must be valid");
 
     let start = Instant::now();
     // Use very low frame rate (10 FPS = 100ms per frame)
@@ -177,7 +177,8 @@ async fn test_quit_after_multiple_messages() -> Result<()> {
     // Test that quit is processed quickly even after multiple messages
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<MultiMessageQuitApp>::new((), 60);
+    let runtime =
+        Runtime::<MultiMessageQuitApp>::try_new((), 60).expect("frame rate must be valid");
 
     let start = Instant::now();
     let result = timeout(Duration::from_millis(500), runtime.run(&mut terminal)).await?;

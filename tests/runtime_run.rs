@@ -101,7 +101,7 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<CounterApp>::new(0, 60); // Quit immediately
+    let runtime = Runtime::<CounterApp>::try_new(0, 60).expect("frame rate must be valid"); // Quit immediately
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -148,7 +148,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
 
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<MessageApp>::new((), 60);
+    let runtime = Runtime::<MessageApp>::try_new((), 60).expect("frame rate must be valid");
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -162,7 +162,7 @@ async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     // End-to-end: Subscription message processing
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<SubApp>::new((), 60);
+    let runtime = Runtime::<SubApp>::try_new((), 60).expect("frame rate must be valid");
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 

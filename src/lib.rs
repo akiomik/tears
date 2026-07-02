@@ -83,6 +83,7 @@
 
 pub mod application;
 pub mod command;
+mod frame_rate;
 pub mod prelude;
 pub mod runtime;
 pub mod subscription;
@@ -90,6 +91,7 @@ pub mod subscription;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::{Action, Command};
+pub use frame_rate::{FrameRate, FrameRateError};
 pub use futures::stream::BoxStream;
 pub use runtime::Runtime;
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};

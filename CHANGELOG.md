@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `Timer::try_new(u64) -> Option<Timer>` as a convenient constructor for
     millisecond values that may be zero
 
+- **BREAKING**: `Runtime::new` now takes a validated `FrameRate` instead of a
+  raw `u32`
+  - This prevents `frame_rate == 0` from panicking due to division by zero
+  - Extremely high frame rates that would round down to a zero-duration Tokio
+    interval are rejected
+  - Added `FrameRate::try_new(u32) -> Result<FrameRate, FrameRateError>` and
+    `Runtime::try_new(flags, u32) -> Result<Runtime<_>, FrameRateError>` as
+    convenient constructors for raw FPS values
+
 ## [0.8.3] - 2026-07-02
 
 ### Fixed

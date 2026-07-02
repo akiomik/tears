@@ -1,0 +1,121 @@
+//! Frame rate value object for runtime scheduling.
+
+use std::fmt;
+use std::num::NonZeroU32;
+use std::time::Duration;
+
+/// Target frames per second for [`Runtime`](crate::runtime::Runtime).
+///
+/// The value must be non-zero and small enough to produce a non-zero frame
+/// duration. This prevents divide-by-zero panics and invalid zero-duration
+/// Tokio intervals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameRate {
+    frames_per_second: NonZeroU32,
+}
+
+impl FrameRate {
+    /// Highest supported frame rate.
+    ///
+    /// `Duration::from_secs(1) / MAX` is exactly one nanosecond. Larger values
+    /// round down to a zero duration and cannot be used with Tokio intervals.
+    pub const MAX: u32 = 1_000_000_000;
+
+    /// Creates a frame rate from a non-zero FPS value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameRateError::TooHigh`] when the value is greater than
+    /// [`FrameRate::MAX`].
+    pub const fn new(frames_per_second: NonZeroU32) -> std::result::Result<Self, FrameRateError> {
+        let value = frames_per_second.get();
+        if value <= Self::MAX {
+            Ok(Self { frames_per_second })
+        } else {
+            Err(FrameRateError::TooHigh {
+                value,
+                max: Self::MAX,
+            })
+        }
+    }
+
+    /// Tries to create a frame rate from an FPS value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameRateError::Zero`] when `frames_per_second` is zero, or
+    /// [`FrameRateError::TooHigh`] when it is greater than [`FrameRate::MAX`].
+    pub const fn try_new(frames_per_second: u32) -> std::result::Result<Self, FrameRateError> {
+        match NonZeroU32::new(frames_per_second) {
+            Some(frames_per_second) => Self::new(frames_per_second),
+            None => Err(FrameRateError::Zero),
+        }
+    }
+
+    /// Returns the frame rate in frames per second.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.frames_per_second.get()
+    }
+
+    pub(crate) fn frame_duration(self) -> Duration {
+        Duration::from_secs(1) / self.get()
+    }
+}
+
+/// Error returned when constructing an invalid [`FrameRate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRateError {
+    /// Frame rate must be non-zero.
+    Zero,
+    /// Frame rate is too high to produce a non-zero frame duration.
+    TooHigh {
+        /// Provided frame rate.
+        value: u32,
+        /// Maximum supported frame rate.
+        max: u32,
+    },
+}
+
+impl fmt::Display for FrameRateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => f.write_str("frame rate must be non-zero"),
+            Self::TooHigh { value, max } => {
+                write!(f, "frame rate must be at most {max}, got {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameRateError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_rate(value: u32) -> FrameRate {
+        FrameRate::try_new(value).expect("frame rate must be valid")
+    }
+
+    #[test]
+    fn test_frame_rate_try_new() {
+        assert_eq!(FrameRate::try_new(0), Err(FrameRateError::Zero));
+        assert_eq!(FrameRate::try_new(60).map(FrameRate::get), Ok(60));
+        assert_eq!(
+            FrameRate::try_new(FrameRate::MAX + 1),
+            Err(FrameRateError::TooHigh {
+                value: FrameRate::MAX + 1,
+                max: FrameRate::MAX,
+            }),
+        );
+    }
+
+    #[test]
+    fn test_frame_rate_frame_duration_bounds() {
+        assert_eq!(
+            frame_rate(FrameRate::MAX).frame_duration(),
+            Duration::from_nanos(1)
+        );
+    }
+}
