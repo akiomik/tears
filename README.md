@@ -98,7 +98,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Frame, text::Text};
 use tears::prelude::*;
-use tears::subscription::{terminal::TerminalEvents, time::{Message as TimerMessage, Timer}};
+use tears::subscription::{terminal::TerminalEvents, time::{Timer, TimerEvent}};
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -143,9 +143,9 @@ impl Application for Counter {
 
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![
-            Subscription::new(Timer::new(1000)).map(|timer_msg| {
+            Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero")).map(|timer_msg| {
                 match timer_msg {
-                    TimerMessage::Tick => Message::Tick,
+                    TimerEvent::Tick => Message::Tick,
                 }
             }),
             Subscription::new(TerminalEvents::new()).map(|result| match result {

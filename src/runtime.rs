@@ -772,7 +772,12 @@ mod tests {
             fn view(&self, _frame: &mut Frame<'_>) {}
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
-                vec![Subscription::new(Timer::new(100)).map(|_| ())]
+                vec![
+                    Subscription::new(
+                        Timer::try_new(100).expect("timer interval must be non-zero"),
+                    )
+                    .map(|_| ()),
+                ]
             }
         }
 
@@ -844,7 +849,12 @@ mod tests {
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
                 use crate::subscription::time::Timer;
-                vec![Subscription::new(Timer::new(100)).map(|_| ())]
+                vec![
+                    Subscription::new(
+                        Timer::try_new(100).expect("timer interval must be non-zero"),
+                    )
+                    .map(|_| ()),
+                ]
             }
         }
 
@@ -1017,7 +1027,12 @@ mod tests {
 
             fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
                 if self.enabled {
-                    vec![Subscription::new(Timer::new(100)).map(|_| ())]
+                    vec![
+                        Subscription::new(
+                            Timer::try_new(100).expect("timer interval must be non-zero"),
+                        )
+                        .map(|_| ()),
+                    ]
                 } else {
                     vec![]
                 }

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Renamed `subscription::time::Message` to
+  `subscription::time::TimerEvent`
+  - This avoids colliding with the application-level `Message` type commonly
+    used in TEA applications
+  - `Timer` subscriptions now emit `TimerEvent::Tick`
+
+- **BREAKING**: `Timer::new` now takes `NonZeroU64` for the interval in
+  milliseconds
+  - This prevents zero-duration timers from being constructed and later
+    panicking when the stream is started
+  - Added `Timer::try_new(u64) -> Option<Timer>` as a convenient constructor for
+    millisecond values that may be zero
+
 ## [0.8.3] - 2026-07-02
 
 ### Fixed

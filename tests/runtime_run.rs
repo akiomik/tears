@@ -89,7 +89,10 @@ impl Application for SubApp {
 
     fn subscriptions(&self) -> Vec<Subscription<()>> {
         use tears::subscription::time::Timer;
-        vec![Subscription::new(Timer::new(10)).map(|_| ())]
+        vec![
+            Subscription::new(Timer::try_new(10).expect("timer interval must be non-zero"))
+                .map(|_| ()),
+        ]
     }
 }
 

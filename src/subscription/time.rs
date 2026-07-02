@@ -4,6 +4,7 @@
 //! time-based events in your application.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -14,9 +15,9 @@ use tokio_stream::wrappers::IntervalStream;
 
 use super::{SubscriptionId, SubscriptionSource};
 
-/// Messages produced by the [`Timer`] subscription.
+/// Events produced by the [`Timer`] subscription.
 #[derive(Debug, Clone)]
-pub enum Message {
+pub enum TimerEvent {
     /// A timer tick has occurred.
     Tick,
 }
@@ -41,23 +42,23 @@ pub enum Message {
 /// # Example
 ///
 /// ```rust
-/// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
+/// use tears::subscription::{Subscription, time::Timer};
 ///
 /// enum AppMessage {
 ///     Tick,
 /// }
 ///
 /// // Create a timer that ticks every second (1000ms)
-/// let sub = Subscription::new(Timer::new(1000))
+/// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
 ///     .map(|_| AppMessage::Tick);
 ///
 /// // For 60 FPS animations (approximately 16.67ms per frame)
-/// let animation_timer = Subscription::new(Timer::new(16))
+/// let animation_timer = Subscription::new(Timer::try_new(16).expect("timer interval must be non-zero"))
 ///     .map(|_| AppMessage::Tick);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timer {
-    interval_ms: u64,
+    interval_ms: NonZeroU64,
 }
 
 impl Timer {
@@ -65,39 +66,60 @@ impl Timer {
     ///
     /// # Arguments
     ///
-    /// * `interval_ms` - The interval between ticks in milliseconds
+    /// * `interval_ms` - The non-zero interval between ticks in milliseconds
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tears::subscription::time::Timer;
+    /// use std::num::NonZeroU64;
+    ///
+    /// // Tick every second
+    /// let timer = Timer::new(NonZeroU64::new(1000).expect("timer interval must be non-zero"));
+    ///
+    /// // Tick every 16ms (approximately 60 FPS)
+    /// let fast_timer = Timer::new(NonZeroU64::new(16).expect("timer interval must be non-zero"));
+    /// ```
+    #[must_use]
+    pub const fn new(interval_ms: NonZeroU64) -> Self {
+        Self { interval_ms }
+    }
+
+    /// Try to create a new timer with the specified interval in milliseconds.
+    ///
+    /// Returns [`None`] when `interval_ms` is zero.
     ///
     /// # Example
     ///
     /// ```
     /// use tears::subscription::time::Timer;
     ///
-    /// // Tick every second
-    /// let timer = Timer::new(1000);
-    ///
-    /// // Tick every 16ms (approximately 60 FPS)
-    /// let fast_timer = Timer::new(16);
+    /// let timer = Timer::try_new(1000).expect("timer interval must be non-zero");
+    /// assert!(Timer::try_new(0).is_none());
     /// ```
     #[must_use]
-    pub const fn new(interval_ms: u64) -> Self {
-        Self { interval_ms }
+    pub const fn try_new(interval_ms: u64) -> Option<Self> {
+        match NonZeroU64::new(interval_ms) {
+            Some(interval_ms) => Some(Self::new(interval_ms)),
+            None => None,
+        }
     }
 }
 
 impl SubscriptionSource for Timer {
-    type Output = Message;
+    type Output = TimerEvent;
 
-    fn stream(&self) -> BoxStream<'static, Message> {
+    fn stream(&self) -> BoxStream<'static, TimerEvent> {
         // NOTE: Using Skip behavior to drop missed ticks rather than trying to catch up.
         // This is appropriate for UI applications where we want
         // to maintain a consistent tick rate rather than processing old ticks.
-        let duration = Duration::from_millis(self.interval_ms);
+        let duration = Duration::from_millis(self.interval_ms.get());
         let mut interval = interval(duration);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         IntervalStream::new(interval)
             .skip(1) // Skip the first immediate tick
-            .map(|_| Message::Tick)
+            .map(|_| TimerEvent::Tick)
             .boxed()
     }
 
@@ -120,16 +142,27 @@ mod tests {
     use futures::StreamExt;
     use tokio::time::{Duration, timeout};
 
+    fn timer(interval_ms: u64) -> Timer {
+        Timer::try_new(interval_ms).expect("timer interval must be non-zero")
+    }
+
     #[test]
     fn test_timer_new() {
-        let timer = Timer::new(1000);
-        assert_eq!(timer.interval_ms, 1000);
+        let interval_ms = NonZeroU64::new(1000).expect("timer interval must be non-zero");
+        let timer = Timer::new(interval_ms);
+        assert_eq!(timer.interval_ms, interval_ms);
+    }
+
+    #[test]
+    fn test_timer_try_new() {
+        assert_eq!(Timer::try_new(1000), Some(timer(1000)));
+        assert_eq!(Timer::try_new(0), None);
     }
 
     #[test]
     fn test_timer_id_consistency() {
-        let timer1 = Timer::new(1000);
-        let timer2 = Timer::new(1000);
+        let timer1 = timer(1000);
+        let timer2 = timer(1000);
 
         // Same configuration should produce the same ID
         assert_eq!(timer1.id(), timer2.id());
@@ -137,8 +170,8 @@ mod tests {
 
     #[test]
     fn test_timer_id_different_intervals() {
-        let timer1 = Timer::new(1000);
-        let timer2 = Timer::new(2000);
+        let timer1 = timer(1000);
+        let timer2 = timer(2000);
 
         // Different intervals should produce different IDs
         assert_ne!(timer1.id(), timer2.id());
@@ -146,8 +179,8 @@ mod tests {
 
     #[test]
     fn test_timer_hash_consistency() {
-        let timer1 = Timer::new(1000);
-        let timer2 = Timer::new(1000);
+        let timer1 = timer(1000);
+        let timer2 = timer(1000);
 
         let mut hasher1 = DefaultHasher::new();
         timer1.hash(&mut hasher1);
@@ -162,8 +195,8 @@ mod tests {
 
     #[test]
     fn test_timer_hash_different_intervals() {
-        let timer1 = Timer::new(1000);
-        let timer2 = Timer::new(2000);
+        let timer1 = timer(1000);
+        let timer2 = timer(2000);
 
         let mut hasher1 = DefaultHasher::new();
         timer1.hash(&mut hasher1);
@@ -178,24 +211,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_stream_produces_ticks() {
-        let timer = Timer::new(10); // 10ms interval for fast test
+        let timer = timer(10); // 10ms interval for fast test
         let mut stream = timer.stream();
 
         // Should receive first tick after interval
         let result = timeout(Duration::from_millis(100), stream.next()).await;
-        assert!(matches!(result, Ok(Some(Message::Tick))));
+        assert!(matches!(result, Ok(Some(TimerEvent::Tick))));
     }
 
     #[tokio::test]
     async fn test_timer_stream_multiple_ticks() {
-        let timer = Timer::new(10); // 10ms interval
+        let timer = timer(10); // 10ms interval
         let mut stream = timer.stream();
 
         // Collect first 3 ticks
         let mut count = 0;
         for _ in 0..3 {
             let result = timeout(Duration::from_millis(100), stream.next()).await;
-            if matches!(result, Ok(Some(Message::Tick))) {
+            if matches!(result, Ok(Some(TimerEvent::Tick))) {
                 count += 1;
             }
         }
@@ -207,20 +240,20 @@ mod tests {
     async fn test_timer_interval_accuracy() {
         use tokio::time::Instant;
 
-        let timer = Timer::new(50); // 50ms interval
+        let timer = timer(50); // 50ms interval
         let mut stream = timer.stream();
 
         let start = Instant::now();
 
         // Wait for first tick
         let result = timeout(Duration::from_millis(300), stream.next()).await;
-        assert!(matches!(result, Ok(Some(Message::Tick))));
+        assert!(matches!(result, Ok(Some(TimerEvent::Tick))));
 
         let first_tick = start.elapsed();
 
         // Wait for second tick
         let result = timeout(Duration::from_millis(300), stream.next()).await;
-        assert!(matches!(result, Ok(Some(Message::Tick))));
+        assert!(matches!(result, Ok(Some(TimerEvent::Tick))));
 
         let second_tick = start.elapsed();
 
@@ -242,7 +275,7 @@ mod tests {
     async fn test_timer_no_immediate_tick() {
         use tokio::time::Instant;
 
-        let timer = Timer::new(100); // 100ms interval
+        let timer = timer(100); // 100ms interval
         let mut stream = timer.stream();
 
         let start = Instant::now();
@@ -258,7 +291,7 @@ mod tests {
         // But should arrive after the interval (with generous timeout for CI)
         let result = timeout(Duration::from_millis(200), stream.next()).await;
         assert!(
-            matches!(result, Ok(Some(Message::Tick))),
+            matches!(result, Ok(Some(TimerEvent::Tick))),
             "Timer should tick after interval"
         );
 
@@ -272,8 +305,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_different_intervals() {
-        let fast_timer = Timer::new(20);
-        let slow_timer = Timer::new(200);
+        let fast_timer = timer(20);
+        let slow_timer = timer(200);
 
         let mut fast_stream = fast_timer.stream();
         let mut slow_stream = slow_timer.stream();
