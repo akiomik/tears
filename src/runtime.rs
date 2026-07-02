@@ -8,7 +8,7 @@
 //!
 //! The runtime follows The Elm Architecture pattern:
 //!
-//! 1. **Initialization**: Create a [`Runtime`] with initial flags and frame rate
+//! 1. **Initialization**: Create a [`Runtime`] with initial flags and [`FrameRate`]
 //! 2. **Event Loop**: Process messages via [`Application::update`], render via [`Application::view`]
 //! 3. **Commands**: Execute asynchronous operations that produce messages
 //! 4. **Subscriptions**: Receive external events (timers, signals, etc.)
@@ -71,7 +71,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
-//!     let runtime = Runtime::<CounterApp>::new((), 60);
+//!     let runtime = Runtime::<CounterApp>::try_new((), 60)?;
 //!     let mut terminal = ratatui::init();
 //!     runtime.run(&mut terminal).await?;
 //!     ratatui::restore();
@@ -92,6 +92,7 @@ use tokio::time::{Interval, MissedTickBehavior, interval};
 use crate::{
     application::Application,
     command::{Action, Command},
+    frame_rate::{FrameRate, FrameRateError},
     subscription::SubscriptionManager,
 };
 
@@ -170,7 +171,7 @@ impl<App: Application> Runtime<App> {
     /// # Arguments
     ///
     /// * `flags` - Configuration data passed to [`Application::new`]
-    /// * `frame_rate` - Target frames per second (typical values: 30, 60, 120, 144)
+    /// * `frame_rate` - Validated target frames per second
     ///
     /// # Notes
     ///
@@ -195,21 +196,17 @@ impl<App: Application> Runtime<App> {
     /// # }
     ///
     /// // Create runtime with 60 FPS target
-    /// let runtime = Runtime::<MyApp>::new((), 60);
+    /// let frame_rate = FrameRate::try_new(60).expect("frame rate must be valid");
+    /// let runtime = Runtime::<MyApp>::new((), frame_rate);
     /// ```
-    pub fn new(flags: App::Flags, frame_rate: u32) -> Self {
+    #[must_use]
+    pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self {
         let state = ApplicationState::new(flags);
 
         // Divide a one-second `Duration` directly so the period is exact (e.g.
         // 60 FPS -> 16.667ms) instead of truncating to whole milliseconds (the
         // old `1000 / frame_rate` gave 16ms, an effective ~62.5 FPS).
-        //
-        // FIXME(v0.9.0): `frame_rate` is not validated. `frame_rate == 0`
-        // panics (divide by zero) and extremely large values round the period
-        // down to zero, which panics `interval`. Resolve by validating the
-        // range, likely by making this constructor return a `Result` (a
-        // breaking API change).
-        let frame_duration = Duration::from_secs(1) / frame_rate;
+        let frame_duration = frame_rate.frame_duration();
         let mut frame_interval = interval(frame_duration);
         // Skip missed frames rather than trying to catch up
         frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -223,6 +220,41 @@ impl<App: Application> Runtime<App> {
             subscriptions_dirty: false,
             subscription_ids_hash: None, // No subscriptions cached yet
         }
+    }
+
+    /// Tries to create a new runtime with the given initialization flags and FPS value.
+    ///
+    /// This is a convenience wrapper around [`FrameRate::try_new`] and
+    /// [`Runtime::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameRateError`] when `frame_rate` is zero or too high to
+    /// produce a non-zero frame duration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use tears::prelude::*;
+    /// # use ratatui::Frame;
+    /// #
+    /// # struct MyApp;
+    /// # enum Message {}
+    /// # impl Application for MyApp {
+    /// #     type Message = Message;
+    /// #     type Flags = ();
+    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn update(&mut self, _: Message) -> Command<Message> { Command::none() }
+    /// #     fn view(&self, _: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// # }
+    /// let runtime = Runtime::<MyApp>::try_new((), 60).expect("frame rate must be valid");
+    /// ```
+    pub fn try_new(
+        flags: App::Flags,
+        frame_rate: u32,
+    ) -> std::result::Result<Self, FrameRateError> {
+        Ok(Self::new(flags, FrameRate::try_new(frame_rate)?))
     }
 
     /// Processes a batch of messages that arrive in quick succession (micro-batching).
@@ -364,7 +396,7 @@ impl<App: Application> Runtime<App> {
     /// async fn main() -> Result<()> {
     ///     let mut terminal = ratatui::init();
     ///
-    ///     let runtime = Runtime::<MyApp>::new((), 60);
+    ///     let runtime = Runtime::<MyApp>::try_new((), 60)?;
     ///     runtime.run(&mut terminal).await?;
     ///
     ///     ratatui::restore();
@@ -526,6 +558,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
     use tokio::time::{Duration, sleep};
+
+    fn frame_rate(value: u32) -> FrameRate {
+        FrameRate::try_new(value).expect("frame rate must be valid")
+    }
 
     // Simple test application
     #[derive(Debug)]
@@ -869,7 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_new() {
-        let runtime = Runtime::<TestApp>::new(0, 60);
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Runtime should be created successfully
         assert_eq!(runtime.state.app.counter, 0);
@@ -877,8 +913,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_new_with_different_frame_rates() {
-        let _runtime1 = Runtime::<TestApp>::new(0, 30);
-        let _runtime2 = Runtime::<TestApp>::new(0, 144);
+        let _runtime1 = Runtime::<TestApp>::new(0, frame_rate(30));
+        let _runtime2 = Runtime::<TestApp>::new(0, frame_rate(144));
 
         // Should handle different frame rates without panic
     }
@@ -888,7 +924,7 @@ mod tests {
         // 60 FPS should yield a ~16.667ms period. The previous integer
         // millisecond division (1000 / 60 = 16ms) truncated this, producing
         // an effective ~62.5 FPS.
-        let runtime = Runtime::<TestApp>::new(0, 60);
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
         let period = runtime.frame_interval.period();
         assert!(
             period >= Duration::from_micros(16_600) && period <= Duration::from_micros(16_700),
@@ -896,7 +932,7 @@ mod tests {
         );
 
         // 144 FPS should yield a ~6.944ms period (not the truncated 6ms).
-        let runtime = Runtime::<TestApp>::new(0, 144);
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(144));
         let period = runtime.frame_interval.period();
         assert!(
             period >= Duration::from_micros(6_900) && period <= Duration::from_micros(6_950),
@@ -906,7 +942,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_message_batch_single_message() {
-        let mut runtime = Runtime::<TestApp>::new(0, 60);
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Initially no redraw needed (well, actually true for initial state)
         // Process a message
@@ -921,7 +957,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_message_batch_with_batching() {
-        let mut runtime = Runtime::<TestApp>::new(0, 60);
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Send multiple messages to the queue
         let _ = runtime.state.msg_tx.send(TestMessage::Increment);
@@ -940,7 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_frame_tick_renders_when_needed() -> Result<()> {
-        let mut runtime = Runtime::<TestApp>::new(0, 60);
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -962,7 +998,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_frame_tick_skips_render_when_not_needed() -> Result<()> {
-        let mut runtime = Runtime::<TestApp>::new(0, 60);
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -984,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_frame_tick_detects_quit() -> Result<()> {
-        let mut runtime = Runtime::<TestApp>::new(0, 60);
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Send quit signal
         let _ = runtime.state.quit_tx.send(());
@@ -1039,7 +1075,7 @@ mod tests {
             }
         }
 
-        let mut runtime = Runtime::<DynamicApp>::new(true, 60);
+        let mut runtime = Runtime::<DynamicApp>::new(true, frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -1097,7 +1133,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), 60);
+        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -1123,7 +1159,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), 60);
+        let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;

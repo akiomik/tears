@@ -79,7 +79,7 @@ To run your application, create an `Runtime` and call `run()`:
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
-    let runtime = Runtime::<App>::new((), 60);
+    let runtime = Runtime::<App>::try_new((), 60)?;
 
     // Setup terminal (see complete example below)
     // ...
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let runtime = Runtime::<Counter>::new((), 60);
+    let runtime = Runtime::<Counter>::try_new((), 60)?;
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
