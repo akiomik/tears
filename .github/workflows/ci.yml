@@ -50,6 +50,22 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
+      # loom model checks are scoped to the `--lib` unit tests for the isolated
+      # `cell_core` primitives rather than the whole suite.
+      - name: Run loom tests
+        run: cargo test --features loom-core --lib -- cell_core
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 3
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
