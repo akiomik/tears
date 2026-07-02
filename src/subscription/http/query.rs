@@ -12,6 +12,11 @@
 //! 2. If data is stale or missing, a fetch is automatically triggered
 //! 3. When the cache is invalidated, refetching happens automatically
 //!
+//! Failed fetches are emitted as [`QueryState::Error`] and are not retried
+//! automatically. To retry after an error, invalidate the query key with
+//! [`QueryClient::invalidate`], or include your own retry/backoff behavior in
+//! the fetcher.
+//!
 //! This design keeps your UI in sync with the data state without manual management.
 //!
 //! # Example
@@ -319,6 +324,11 @@ impl Default for QueryClient {
 /// 1. If cached data exists, it's immediately emitted as `Success`
 /// 2. If data is missing or stale, a fetch is triggered and `Loading` is emitted
 /// 3. When invalidated, the query automatically refetches
+///
+/// If a fetch fails, the query emits [`QueryState::Error`] and waits for the
+/// next invalidation. It does not retry automatically; call
+/// [`QueryClient::invalidate`] to request another fetch, or implement retry
+/// behavior inside the fetcher.
 ///
 /// # Query keys
 ///
