@@ -218,6 +218,7 @@ enum WsStreamState {
 impl SubscriptionSource for WebSocket {
     type Output = WebSocketMessage;
 
+    #[allow(clippy::too_many_lines)]
     fn stream(&self) -> BoxStream<'static, WebSocketMessage> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -230,20 +231,39 @@ impl SubscriptionSource for WebSocket {
             |state| async move {
                 match state {
                     WsStreamState::Connecting { url, cmd_tx, cmd_rx } => {
+                        let trace_url = trace_url(&url);
+                        tracing::debug!(
+                            target: "tears::subscription::websocket",
+                            url = %trace_url,
+                            "websocket connecting"
+                        );
                         match connect_async(&url).await {
                             Ok((ws, _)) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::websocket",
+                                    url = %trace_url,
+                                    "websocket connected"
+                                );
                                 let (write, read) = ws.split();
                                 Some((
                                     WebSocketMessage::Connected { sender: cmd_tx },
                                     WsStreamState::Running { write, read, cmd_rx },
                                 ))
                             }
-                            Err(e) => Some((
-                                WebSocketMessage::Error {
-                                    error: format!("Connection failed: {e}"),
-                                },
-                                WsStreamState::Done,
-                            )),
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "tears::subscription::websocket",
+                                    url = %trace_url,
+                                    error = %e,
+                                    "websocket connection failed"
+                                );
+                                Some((
+                                    WebSocketMessage::Error {
+                                        error: format!("Connection failed: {e}"),
+                                    },
+                                    WsStreamState::Done,
+                                ))
+                            }
                         }
                     }
                     // FIXME(#103): when the outer task is aborted (e.g. via
@@ -272,6 +292,7 @@ impl SubscriptionSource for WebSocket {
                             msg = read.next() => {
                                 match msg {
                                     Some(Ok(Message::Close(_))) => {
+                                        tracing::debug!(target: "tears::subscription::websocket", reason = "server_close", "websocket disconnected");
                                         let _ = write.close().await;
                                         break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
                                     }
@@ -287,12 +308,23 @@ impl SubscriptionSource for WebSocket {
                                         // here would close that narrow window but
                                         // would couple read progress to write
                                         // backpressure on every Ping, so we don't.
+                                        tracing::trace!(
+                                            target: "tears::subscription::websocket",
+                                            message_type = trace_message_type(&message),
+                                            message_size = trace_message_size(&message),
+                                            "websocket message received"
+                                        );
                                         break Some((
                                             WebSocketMessage::Received(message),
                                             WsStreamState::Running { write, read, cmd_rx },
                                         ));
                                     }
                                     Some(Err(e)) => {
+                                        tracing::debug!(
+                                            target: "tears::subscription::websocket",
+                                            error = %e,
+                                            "websocket read failed"
+                                        );
                                         let _ = write.close().await;
                                         break Some((
                                             WebSocketMessage::Error { error: e.to_string() },
@@ -300,6 +332,7 @@ impl SubscriptionSource for WebSocket {
                                         ));
                                     }
                                     None => {
+                                        tracing::debug!(target: "tears::subscription::websocket", reason = "read_stream_ended", "websocket disconnected");
                                         break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
                                     }
                                 }
@@ -307,12 +340,25 @@ impl SubscriptionSource for WebSocket {
                             cmd = cmd_rx.recv() => {
                                 match cmd {
                                     Some(WebSocketCommand::Close(frame)) => {
+                                        tracing::debug!(target: "tears::subscription::websocket", reason = "close_command", "websocket disconnecting");
                                         let _ = write.send(Message::Close(frame)).await;
                                         let _ = write.close().await;
                                         break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
                                     }
                                     Some(WebSocketCommand::SendText(text)) => {
+                                        tracing::trace!(
+                                            target: "tears::subscription::websocket",
+                                            message_type = "text",
+                                            message_size = text.len(),
+                                            "websocket message sending"
+                                        );
                                         if let Err(e) = write.send(Message::Text(text.into())).await {
+                                            tracing::debug!(
+                                                target: "tears::subscription::websocket",
+                                                error = %e,
+                                                message_type = "text",
+                                                "websocket write failed"
+                                            );
                                             // Report the error but stay Running: the read half may
                                             // still deliver buffered frames (e.g. a server Close).
                                             break Some((
@@ -322,7 +368,19 @@ impl SubscriptionSource for WebSocket {
                                         }
                                     }
                                     Some(WebSocketCommand::SendBinary(data)) => {
+                                        tracing::trace!(
+                                            target: "tears::subscription::websocket",
+                                            message_type = "binary",
+                                            message_size = data.len(),
+                                            "websocket message sending"
+                                        );
                                         if let Err(e) = write.send(Message::Binary(data.into())).await {
+                                            tracing::debug!(
+                                                target: "tears::subscription::websocket",
+                                                error = %e,
+                                                message_type = "binary",
+                                                "websocket write failed"
+                                            );
                                             break Some((
                                                 WebSocketMessage::Error { error: e.to_string() },
                                                 WsStreamState::Running { write, read, cmd_rx },
@@ -331,6 +389,7 @@ impl SubscriptionSource for WebSocket {
                                     }
                                     None => {
                                         // Application dropped the command sender.
+                                        tracing::debug!(target: "tears::subscription::websocket", reason = "command_sender_dropped", "websocket disconnected");
                                         let _ = write.close().await;
                                         break Some((WebSocketMessage::Disconnected, WsStreamState::Done));
                                     }
@@ -349,6 +408,48 @@ impl SubscriptionSource for WebSocket {
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
         SubscriptionId::of::<Self>(hasher.finish())
+    }
+}
+
+const fn trace_message_type(message: &Message) -> &'static str {
+    match message {
+        Message::Text(_) => "text",
+        Message::Binary(_) => "binary",
+        Message::Ping(_) => "ping",
+        Message::Pong(_) => "pong",
+        Message::Close(_) => "close",
+        Message::Frame(_) => "frame",
+    }
+}
+
+fn trace_message_size(message: &Message) -> usize {
+    match message {
+        Message::Text(text) => text.len(),
+        Message::Binary(data) | Message::Ping(data) | Message::Pong(data) => data.len(),
+        Message::Close(_) => 0,
+        Message::Frame(frame) => frame.payload().len(),
+    }
+}
+
+fn trace_url(url: &str) -> String {
+    let base = url.split_once(['?', '#']).map_or(url, |(base, _)| base);
+
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return base.to_string();
+    };
+
+    let (authority, path) = rest
+        .split_once('/')
+        .map_or((rest, ""), |(authority, path)| (authority, path));
+
+    let Some((_, host)) = authority.split_once('@') else {
+        return base.to_string();
+    };
+
+    if path.is_empty() {
+        format!("{scheme}://<redacted>@{host}")
+    } else {
+        format!("{scheme}://<redacted>@{host}/{path}")
     }
 }
 
@@ -379,6 +480,18 @@ mod tests {
 
         // Different urls should produce different IDs
         assert_ne!(ws1.id(), ws2.id());
+    }
+
+    #[test]
+    fn test_trace_url_redacts_userinfo_only_in_authority() {
+        assert_eq!(
+            trace_url("wss://user:password@example.com/socket?token=secret#fragment"),
+            "wss://<redacted>@example.com/socket"
+        );
+        assert_eq!(
+            trace_url("wss://example.com/@user/feed?token=secret"),
+            "wss://example.com/@user/feed"
+        );
     }
 
     #[tokio::test]

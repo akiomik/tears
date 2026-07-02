@@ -58,13 +58,14 @@
 //! }
 //! ```
 
-use std::any::TypeId;
+use std::any::{TypeId, type_name};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -171,12 +172,23 @@ impl QueryClient {
         K: Into<QueryKey>,
     {
         let query_key = key.into();
+        let key_hash = trace_key_hash(&query_key);
+        let mut matched_cells = 0usize;
 
         for entry in self.cells.iter() {
             if entry.key().1 == query_key {
+                matched_cells += 1;
                 entry.value().invalidate(&self.config);
             }
         }
+
+        tracing::debug!(
+            target: "tears::subscription::http",
+            client_id = self.client_id,
+            key_hash,
+            matched_cells,
+            "query invalidated"
+        );
     }
 
     /// Removes retained data that has outlived `cache_time`.
@@ -185,8 +197,18 @@ impl QueryClient {
     /// (for example when no further fetches are expected for a while).
     fn gc_expired(&self) {
         let cache_time = self.config.cache_time;
+        let cells_before = self.cells.len();
         self.cells
             .retain(|_, cell| !cell.gc_inactive_data_and_should_evict(cache_time));
+        let evicted_cells = cells_before.saturating_sub(self.cells.len());
+        if evicted_cells > 0 {
+            tracing::trace!(
+                target: "tears::subscription::http",
+                client_id = self.client_id,
+                evicted_cells,
+                "query cache gc evicted cells"
+            );
+        }
     }
 
     /// Removes retained query data that has outlived the configured `cache_time`.
@@ -220,15 +242,33 @@ impl QueryClient {
     where
         T: Clone + Send + Sync + 'static,
     {
-        let cell_key = (TypeId::of::<T>(), key.into());
+        let query_key = key.into();
+        let key_hash = trace_key_hash(&query_key);
+        let cell_key = (TypeId::of::<T>(), query_key);
 
         match self.cells.entry(cell_key) {
             Entry::Occupied(entry) => {
+                tracing::trace!(
+                    target: "tears::subscription::http",
+                    client_id = self.client_id,
+                    key_hash,
+                    value_type = type_name::<T>(),
+                    reused = true,
+                    "query cell subscribed"
+                );
                 let cell = downcast_cell(entry.get().clone());
                 let subscription = cell.subscribe();
                 (cell, subscription)
             }
             Entry::Vacant(entry) => {
+                tracing::trace!(
+                    target: "tears::subscription::http",
+                    client_id = self.client_id,
+                    key_hash,
+                    value_type = type_name::<T>(),
+                    reused = false,
+                    "query cell subscribed"
+                );
                 let (cell, subscription) = Cell::<T>::new_subscribed();
                 let new_cell: Arc<dyn AnyCell> = cell.clone();
                 entry.insert(new_cell);
@@ -360,11 +400,17 @@ where
         let key = self.key.clone();
         let fetcher = self.fetcher.clone();
         let client = self.client.clone();
+        let trace = QueryTrace {
+            client_id: self.client.client_id,
+            key_hash: trace_key_hash(&self.key),
+            value_type: type_name::<V>(),
+        };
 
         stream::unfold(State::Initial, move |state| {
             let key = key.clone();
             let fetcher = fetcher.clone();
             let client = client.clone();
+            let trace = trace;
 
             async move {
                 match state {
@@ -377,6 +423,15 @@ where
                             subscription.mark_seen_version(version);
                         }
                         let next = if let Some(generation) = generation {
+                            tracing::trace!(
+                                target: "tears::subscription::http",
+                                client_id = trace.client_id,
+                                key_hash = trace.key_hash,
+                                value_type = trace.value_type,
+                                generation,
+                                reason = "initial_observe",
+                                "query fetch scheduled"
+                            );
                             State::Fetching {
                                 subscription,
                                 cell,
@@ -399,6 +454,7 @@ where
                             client.config(),
                             generation,
                             subscription,
+                            trace,
                         )
                         .await;
                         client.gc_expired();
@@ -406,7 +462,7 @@ where
                     }
 
                     State::Watching { subscription, cell } => {
-                        watch_cell(subscription, cell, client.config()).await
+                        watch_cell(subscription, cell, client.config(), trace).await
                     }
                 }
             }
@@ -429,6 +485,13 @@ impl<V> Hash for Query<V> {
         self.client.client_id.hash(hasher);
         self.key.hash(hasher);
     }
+}
+
+#[derive(Clone, Copy)]
+struct QueryTrace {
+    client_id: u64,
+    key_hash: u64,
+    value_type: &'static str,
 }
 
 /// Internal state machine for the Query subscription.
@@ -454,13 +517,33 @@ async fn perform_fetch<V>(
     config: &QueryConfig,
     generation: u64,
     mut subscription: CellSubscription<V>,
+    trace: QueryTrace,
 ) -> (QueryResult<V>, State<V>)
 where
     V: Clone + Send + Sync + 'static,
 {
+    tracing::debug!(
+        target: "tears::subscription::http",
+        client_id = trace.client_id,
+        key_hash = trace.key_hash,
+        value_type = trace.value_type,
+        generation,
+        "query fetch started"
+    );
+    let started_at = Instant::now();
     let (result, generation) = match fetcher().await {
         Ok(data) => {
             let (result, committed, sent_version) = cell.complete_success(generation, data, config);
+            tracing::debug!(
+                target: "tears::subscription::http",
+                client_id = trace.client_id,
+                key_hash = trace.key_hash,
+                value_type = trace.value_type,
+                generation,
+                committed,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "query fetch succeeded"
+            );
             if committed {
                 subscription.mark_seen_version(sent_version);
                 (result, None)
@@ -470,11 +553,34 @@ where
                 if let Some(version) = sent_version {
                     subscription.mark_seen_version(version);
                 }
+                if let Some(next_generation) = generation {
+                    tracing::trace!(
+                        target: "tears::subscription::http",
+                        client_id = trace.client_id,
+                        key_hash = trace.key_hash,
+                        value_type = trace.value_type,
+                        generation = next_generation,
+                        reason = "stale_success_completion",
+                        "query fetch scheduled"
+                    );
+                }
                 (result, generation)
             }
         }
         Err(error) => {
+            let error_kind = trace_query_error_kind(&error);
             let (result, committed, sent_version) = cell.complete_error(generation, error, config);
+            tracing::debug!(
+                target: "tears::subscription::http",
+                client_id = trace.client_id,
+                key_hash = trace.key_hash,
+                value_type = trace.value_type,
+                generation,
+                committed,
+                error_kind,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "query fetch failed"
+            );
             if committed {
                 subscription.mark_seen_version(sent_version);
                 (result, None)
@@ -483,6 +589,17 @@ where
                     cell.reconcile(ReconcileReason::WatchChanged, config);
                 if let Some(version) = sent_version {
                     subscription.mark_seen_version(version);
+                }
+                if let Some(next_generation) = generation {
+                    tracing::trace!(
+                        target: "tears::subscription::http",
+                        client_id = trace.client_id,
+                        key_hash = trace.key_hash,
+                        value_type = trace.value_type,
+                        generation = next_generation,
+                        reason = "stale_error_completion",
+                        "query fetch scheduled"
+                    );
                 }
                 (result, generation)
             }
@@ -505,6 +622,7 @@ async fn watch_cell<V>(
     mut subscription: CellSubscription<V>,
     cell: Arc<Cell<V>>,
     config: &QueryConfig,
+    trace: QueryTrace,
 ) -> Option<(QueryResult<V>, State<V>)>
 where
     V: Clone + Send + Sync + 'static,
@@ -523,6 +641,15 @@ where
             cell.reconcile(ReconcileReason::WatchChanged, config);
         subscription.mark_seen_version(sent_version.unwrap_or(changed_version));
         let next = if let Some(generation) = generation {
+            tracing::trace!(
+                target: "tears::subscription::http",
+                client_id = trace.client_id,
+                key_hash = trace.key_hash,
+                value_type = trace.value_type,
+                generation,
+                reason = "watch_changed",
+                "query fetch scheduled"
+            );
             State::Fetching {
                 subscription,
                 cell,
@@ -532,6 +659,19 @@ where
             State::Watching { subscription, cell }
         };
         return Some((result, next));
+    }
+}
+
+fn trace_key_hash(key: &QueryKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+const fn trace_query_error_kind(error: &QueryError) -> &'static str {
+    match error {
+        QueryError::FetchError(_) => "fetch",
+        QueryError::NetworkError(_) => "network",
     }
 }
 
