@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Call it once during startup, after the reporter is installed and the
     terminal is initialized
   - See the new `panic_hook` example for a demonstration
+- `tracing` instrumentation for the runtime hot paths
+  - The runtime emits events for message batches, subscription updates, command
+    spawns, renders, and shutdown under the `tears::runtime` and
+    `tears::subscription` targets
+  - Events are inert unless a `tracing` subscriber is installed
 
 ### Fixed
 

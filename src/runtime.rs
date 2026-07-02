@@ -270,6 +270,7 @@ impl<App: Application> Runtime<App> {
         // Process the first message
         let cmd = self.state.app.update(first_msg);
         self.state.enqueue_command(cmd);
+        let mut processed = 1usize;
 
         // Micro-batching: process additional messages that arrived during a short window
         let batch_deadline = Instant::now() + Duration::from_micros(100);
@@ -278,10 +279,13 @@ impl<App: Application> Runtime<App> {
                 Ok(msg) => {
                     let cmd = self.state.app.update(msg);
                     self.state.enqueue_command(cmd);
+                    processed += 1;
                 }
                 Err(_) => break, // No more messages available
             }
         }
+
+        tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
 
         // Mark that a redraw is needed and that subscriptions may have changed
         self.needs_redraw = true;
@@ -305,6 +309,7 @@ impl<App: Application> Runtime<App> {
         if self.needs_redraw {
             self.state.render(terminal)?;
             self.needs_redraw = false;
+            tracing::trace!(target: "tears::runtime", "frame rendered");
         }
 
         // Re-evaluate subscriptions only when the state may have changed.
@@ -319,7 +324,11 @@ impl<App: Application> Runtime<App> {
         }
 
         // Check for quit signal (non-blocking)
-        Ok(self.state.check_quit())
+        let quit = self.state.check_quit();
+        if quit {
+            tracing::debug!(target: "tears::runtime", "quit signal received");
+        }
+        Ok(quit)
     }
 
     /// Updates subscriptions if they have changed (uses hash-based caching).
@@ -339,8 +348,10 @@ impl<App: Application> Runtime<App> {
 
         // Only update if subscriptions have changed
         if self.subscription_ids_hash != Some(current_hash) {
+            let count = subscriptions.len();
             self.state.subscription_manager.update(subscriptions);
             self.subscription_ids_hash = Some(current_hash);
+            tracing::debug!(target: "tears::runtime", count, "subscriptions updated");
         }
     }
 
@@ -412,6 +423,7 @@ impl<App: Application> Runtime<App> {
         terminal: &mut ratatui::Terminal<B>,
     ) -> Result<(), <B as Backend>::Error> {
         self.state.initialize_subscriptions();
+        tracing::debug!(target: "tears::runtime", "runtime started");
 
         loop {
             tokio::select! {
@@ -429,11 +441,13 @@ impl<App: Application> Runtime<App> {
 
                 // Quit signal received
                 _ = self.state.quit_rx.recv() => {
+                    tracing::debug!(target: "tears::runtime", "quit signal received");
                     break;
                 }
             }
         }
 
+        tracing::debug!(target: "tears::runtime", "runtime shutting down");
         self.state.shutdown();
 
         Ok(())
@@ -484,6 +498,8 @@ impl<App: Application> ApplicationState<App> {
         if let Some(stream) = cmd.stream {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
+
+            tracing::trace!(target: "tears::runtime", "command spawned");
 
             tokio::spawn(async move {
                 futures::pin_mut!(stream);
@@ -957,6 +973,50 @@ mod tests {
 
         // Redraw should be needed
         assert!(runtime.needs_redraw);
+    }
+
+    // A minimal `tracing::Subscriber` that only counts emitted events, used to
+    // assert that instrumentation actually fires.
+    struct EventCounter {
+        events: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl tracing::Subscriber for EventCounter {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {
+            self.events
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn test_process_message_batch_emits_tracing_event() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = EventCounter {
+            events: events.clone(),
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+            runtime.process_message_batch(TestMessage::Increment);
+        });
+
+        assert!(
+            events.load(Ordering::SeqCst) >= 1,
+            "processing a message batch should emit a tracing event"
+        );
     }
 
     #[tokio::test]
