@@ -40,6 +40,10 @@ test-integration:
 test-doc:
     cargo test --doc
 
+# Run loom concurrency model tests (scoped to the isolated cell_core primitives)
+test-loom:
+    RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test --features loom-core --lib -- cell_core
+
 # Build the library
 build:
     cargo build
