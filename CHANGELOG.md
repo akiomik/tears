@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     spawns, renders, and shutdown under the `tears::runtime` and
     `tears::subscription` targets
   - Events are inert unless a `tracing` subscriber is installed
+  - Panics inside command and subscription tasks are now caught and logged at
+    the `error` level instead of being silently lost
 
 ### Fixed
 
@@ -28,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Previously, dropping the manager without calling `shutdown()` (for example
     while unwinding from a panic) detached the running tasks instead of
     cancelling them, leaking any parked subscription tasks
+- Command tasks are now tracked and aborted on shutdown, and when the runtime is
+  dropped (for example while unwinding from a panic)
+  - Previously, `enqueue_command` discarded the task handle, so command tasks
+    could not be cancelled and were detached
 
 ## [0.9.0] - 2026-07-03
 

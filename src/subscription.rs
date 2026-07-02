@@ -142,7 +142,7 @@ use std::{
     hash::Hash,
 };
 
-use futures::{StreamExt, stream::BoxStream};
+use futures::{FutureExt, StreamExt, stream::BoxStream};
 use tokio::{
     sync::mpsc::{self},
     task::JoinHandle,
@@ -396,10 +396,20 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         let sender = self.msg_sender.clone();
 
         tokio::spawn(async move {
-            while let Some(msg) = stream.next().await {
-                if sender.send(msg).is_err() {
-                    break;
+            // Catch panics in the subscription's stream so a bug in a source is
+            // logged instead of vanishing into a detached task.
+            let result = std::panic::AssertUnwindSafe(async move {
+                while let Some(msg) = stream.next().await {
+                    if sender.send(msg).is_err() {
+                        break;
+                    }
                 }
+            })
+            .catch_unwind()
+            .await;
+
+            if result.is_err() {
+                tracing::error!(target: "tears::subscription", "subscription task panicked");
             }
         })
     }

@@ -83,12 +83,15 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
+use futures::FutureExt;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
@@ -122,6 +125,13 @@ struct ApplicationState<App: Application> {
     quit_rx: mpsc::UnboundedReceiver<()>,
     /// Manages subscription lifecycle
     subscription_manager: SubscriptionManager<App::Message>,
+    /// Running command tasks.
+    ///
+    /// Kept so command tasks can be aborted on shutdown, and — because a
+    /// [`JoinSet`] aborts its tasks when dropped — also when the runtime is
+    /// dropped while unwinding from a panic. Finished tasks are reaped on each
+    /// enqueue so the set does not grow without bound.
+    command_tasks: JoinSet<()>,
 }
 
 /// Runtime that schedules and executes TUI application operations.
@@ -472,13 +482,14 @@ impl<App: Application> ApplicationState<App> {
         // Initialize the application with flags
         let (app, init_cmd) = App::new(flags);
 
-        let runtime = Self {
+        let mut runtime = Self {
             app,
             msg_tx,
             msg_rx,
             quit_tx,
             quit_rx,
             subscription_manager,
+            command_tasks: JoinSet::new(),
         };
 
         // Enqueue the initial command
@@ -493,32 +504,50 @@ impl<App: Application> ApplicationState<App> {
     /// to the message channel, and quit signals are sent to the quit channel. The task
     /// terminates when the stream completes or a quit action is received.
     ///
+    /// The task is tracked in [`command_tasks`](Self::command_tasks) so it can be aborted
+    /// on shutdown (or when the runtime is dropped). If the command's stream panics, the
+    /// panic is caught and logged rather than silently lost.
+    ///
     /// Send failures are silently ignored as they only occur during application shutdown.
-    fn enqueue_command(&self, cmd: Command<App::Message>) {
+    fn enqueue_command(&mut self, cmd: Command<App::Message>) {
         if let Some(stream) = cmd.stream {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
 
+            // Reap finished command tasks so the set stays bounded to the
+            // commands that are actually still running.
+            while self.command_tasks.try_join_next().is_some() {}
+
             tracing::trace!(target: "tears::runtime", "command spawned");
 
-            tokio::spawn(async move {
-                futures::pin_mut!(stream);
-                while let Some(action) = stream.next().await {
-                    match action {
-                        Action::Message(msg) => {
-                            // NOTE: Send errors are silently ignored. The channel is closed only
-                            // when the ApplicationState is dropped, which means the application is shutting
-                            // down. In this case, dropping messages is the expected behavior.
-                            // This follows the same approach as iced and other Elm-like frameworks.
-                            let _ = msg_tx.send(msg);
-                        }
-                        Action::Quit => {
-                            // NOTE: Same reasoning as above. If the quit channel is closed,
-                            // the application is already shutting down.
-                            let _ = quit_tx.send(());
-                            break;
+            self.command_tasks.spawn(async move {
+                // Catch panics in the command's stream so a bug in a fetcher or
+                // effect is logged instead of vanishing into a detached task.
+                let result = AssertUnwindSafe(async move {
+                    futures::pin_mut!(stream);
+                    while let Some(action) = stream.next().await {
+                        match action {
+                            Action::Message(msg) => {
+                                // NOTE: Send errors are silently ignored. The channel is closed only
+                                // when the ApplicationState is dropped, which means the application is shutting
+                                // down. In this case, dropping messages is the expected behavior.
+                                // This follows the same approach as iced and other Elm-like frameworks.
+                                let _ = msg_tx.send(msg);
+                            }
+                            Action::Quit => {
+                                // NOTE: Same reasoning as above. If the quit channel is closed,
+                                // the application is already shutting down.
+                                let _ = quit_tx.send(());
+                                break;
+                            }
                         }
                     }
+                })
+                .catch_unwind()
+                .await;
+
+                if result.is_err() {
+                    tracing::error!(target: "tears::runtime", "command task panicked");
                 }
             });
         }
@@ -561,10 +590,11 @@ impl<App: Application> ApplicationState<App> {
 
     /// Cleans up resources on shutdown.
     ///
-    /// Shuts down the subscription manager, which cancels all active subscriptions
-    /// and cleans up their resources.
+    /// Shuts down the subscription manager, which cancels all active subscriptions,
+    /// and aborts any still-running command tasks.
     fn shutdown(&mut self) {
         self.subscription_manager.shutdown();
+        self.command_tasks.abort_all();
     }
 }
 
@@ -695,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_runtime_enqueue_command_none() {
-        let runtime = ApplicationState::<TestApp>::new(0);
+        let mut runtime = ApplicationState::<TestApp>::new(0);
 
         // Enqueue a none command (should not panic)
         runtime.enqueue_command(Command::none());
@@ -703,7 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_enqueue_command_with_message() {
-        let runtime = ApplicationState::<TestApp>::new(0);
+        let mut runtime = ApplicationState::<TestApp>::new(0);
 
         // Enqueue a command that sends a message
         let cmd = Command::future(async { TestMessage::Increment });
@@ -717,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_enqueue_command_with_quit() {
-        let runtime = ApplicationState::<TestApp>::new(0);
+        let mut runtime = ApplicationState::<TestApp>::new(0);
 
         // Enqueue a quit command
         let cmd = Command::effect(Action::Quit);
@@ -975,10 +1005,12 @@ mod tests {
         assert!(runtime.needs_redraw);
     }
 
-    // A minimal `tracing::Subscriber` that only counts emitted events, used to
-    // assert that instrumentation actually fires.
+    // A minimal `tracing::Subscriber` that counts emitted events (total, and
+    // those at ERROR level), used to assert that instrumentation actually fires.
+    #[derive(Clone, Default)]
     struct EventCounter {
         events: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        errors: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl tracing::Subscriber for EventCounter {
@@ -990,9 +1022,12 @@ mod tests {
         }
         fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {
-            self.events
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        fn event(&self, event: &tracing::Event<'_>) {
+            use std::sync::atomic::Ordering;
+            self.events.fetch_add(1, Ordering::SeqCst);
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+            }
         }
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
@@ -1000,15 +1035,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_message_batch_emits_tracing_event() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::Ordering;
 
-        let events = Arc::new(AtomicUsize::new(0));
-        let subscriber = EventCounter {
-            events: events.clone(),
-        };
+        let counter = EventCounter::default();
+        let events = counter.events.clone();
 
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::subscriber::with_default(counter, || {
             let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
             runtime.process_message_batch(TestMessage::Increment);
         });
@@ -1016,6 +1048,93 @@ mod tests {
         assert!(
             events.load(Ordering::SeqCst) >= 1,
             "processing a message batch should emit a tracing event"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "the test intentionally panics inside a command"
+    )]
+    fn test_command_task_panic_is_logged() {
+        use std::sync::atomic::Ordering;
+
+        let counter = EventCounter::default();
+        let errors = counter.errors.clone();
+
+        // Drive the panicking command task to completion on the current thread,
+        // inside the subscriber scope, so its `catch_unwind` error event is seen.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        // Suppress the default panic hook's stderr output for the caught panic.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        tracing::subscriber::with_default(counter, || {
+            rt.block_on(async {
+                let mut state = ApplicationState::<TestApp>::new(0);
+                state.enqueue_command(Command::future(async {
+                    panic!("boom");
+                    #[allow(unreachable_code)]
+                    TestMessage::Increment
+                }));
+                // Run the command task to completion (it panics and is caught).
+                state.command_tasks.join_next().await;
+            });
+        });
+
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            errors.load(Ordering::SeqCst) >= 1,
+            "a panicking command task should log an error event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dropping_state_aborts_command_tasks() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A guard that records, via its `Drop`, that the command task's future
+        // was dropped — which only happens if the task is aborted rather than
+        // detached.
+        struct AbortGuard(Arc<AtomicBool>);
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let aborted = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut state = ApplicationState::<TestApp>::new(0);
+            let guard = AbortGuard(aborted.clone());
+            // A command that owns the guard and never completes, so its task
+            // stays parked until aborted.
+            state.enqueue_command(Command::future(async move {
+                let _guard = guard;
+                std::future::pending::<TestMessage>().await
+            }));
+
+            // Let the task start and park.
+            sleep(Duration::from_millis(10)).await;
+            assert!(
+                !aborted.load(Ordering::SeqCst),
+                "command task should still be running before the state is dropped"
+            );
+            // `state` (and its `command_tasks` JoinSet) is dropped here.
+        }
+
+        // Give the runtime a chance to process the abort and drop the future.
+        sleep(Duration::from_millis(10)).await;
+        assert!(
+            aborted.load(Ordering::SeqCst),
+            "dropping the state should abort running command tasks"
         );
     }
 
