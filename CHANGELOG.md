@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `Query` subscriptions with the same key on different `QueryClient`
+  instances being treated as identical, so switching the client did not restart
+  the subscription (requires `http` feature)
+  - `Query::id()` hashed only the string key, so the runtime's subscription diff
+    deduplicated queries that shared a key even when they used a different
+    `QueryClient`; the old client's cache and invalidation channel kept being
+    used after the app switched clients
+  - `QueryClient` now carries a process-unique `client_id` that is included in
+    the query's hash. `#[derive(Clone)]` preserves the id, so cloned clients
+    (which share the same cache and broadcast channel) still compare equal and
+    are not needlessly restarted
+  - Note: a fetcher that captures request parameters (user ID, page, base URL,
+    ...) without reflecting them in the key still cannot be distinguished by the
+    hash. The `Query` docs now state that every request parameter must be
+    included in the key
+
 - Fixed `QueryClient::invalidate` not marking cached entries stale, so
   invalidations were lost when no query subscription was active (requires
   `http` feature)

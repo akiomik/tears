@@ -55,7 +55,10 @@
 use std::any::TypeId;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -70,6 +73,8 @@ use crate::subscription::{SubscriptionId, SubscriptionSource};
 
 use super::cache::{AnyCacheEntry, CacheEntry};
 use super::config::QueryConfig;
+
+static NEXT_QUERY_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Error type for query operations.
 #[derive(Error, Debug, Clone)]
@@ -157,6 +162,7 @@ impl<T> QueryResult<T> {
 /// ```
 #[derive(Clone)]
 pub struct QueryClient {
+    client_id: u64,
     // Keyed by (TypeId, user-provided key) so that Query<i32> and Query<String>
     // sharing the same string key occupy independent cache slots and do not
     // overwrite each other.
@@ -170,6 +176,7 @@ impl fmt::Debug for QueryClient {
         // The cached values are type-erased and may not be `Debug`, so only
         // expose the number of cached keys rather than their contents.
         f.debug_struct("QueryClient")
+            .field("client_id", &self.client_id)
             .field("cached_keys", &self.cache.len())
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -188,6 +195,7 @@ impl QueryClient {
     pub fn with_config(config: QueryConfig) -> Self {
         let (invalidation_tx, _) = broadcast::channel(100);
         Self {
+            client_id: NEXT_QUERY_CLIENT_ID.fetch_add(1, Ordering::Relaxed),
             cache: Arc::new(DashMap::new()),
             invalidation_tx,
             config,
@@ -312,6 +320,14 @@ impl Default for QueryClient {
 /// 2. If data is missing or stale, a fetch is triggered and `Loading` is emitted
 /// 3. When invalidated, the query automatically refetches
 ///
+/// # Query keys
+///
+/// The query key identifies both the cache entry and the running subscription.
+/// Include every request parameter used by the fetcher in the key. If the
+/// fetcher captures values such as a user ID, search term, page number, or base
+/// URL but the key does not change, the runtime may keep the existing
+/// subscription and continue using the old fetcher.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -347,6 +363,11 @@ where
     /// * `key` - A unique identifier for this query (used for caching)
     /// * `fetcher` - An async function that fetches the data
     /// * `client` - The query client for cache management
+    ///
+    /// The key must include every value that changes the request made by the
+    /// fetcher. For example, prefer keys like `format!("user-{user_id}")` or
+    /// `format!("todos-page-{page}")` over a constant key when the fetcher
+    /// captures `user_id` or `page`.
     ///
     /// # Example
     ///
@@ -452,6 +473,7 @@ impl<V> Hash for Query<V> {
     where
         H: std::hash::Hasher,
     {
+        self.client.client_id.hash(hasher);
         self.key.hash(hasher);
     }
 }
@@ -870,6 +892,52 @@ mod tests {
 
         // Different keys should produce different IDs
         assert_ne!(query1.id(), query2.id());
+    }
+
+    #[test]
+    fn test_query_id_different_clients() {
+        let client1 = Arc::new(QueryClient::new());
+        let client2 = Arc::new(QueryClient::new());
+
+        let query1 = Query::new(
+            &"user-123",
+            || Box::pin(async { Ok::<i32, QueryError>(42) }),
+            client1,
+        );
+        let query2 = Query::new(
+            &"user-123",
+            || Box::pin(async { Ok::<i32, QueryError>(42) }),
+            client2,
+        );
+
+        assert_ne!(
+            query1.id(),
+            query2.id(),
+            "same-key queries on different QueryClient instances should be distinct subscriptions"
+        );
+    }
+
+    #[test]
+    fn test_query_id_cloned_client_consistency() {
+        let client = Arc::new(QueryClient::new());
+        let cloned_client = Arc::new((*client).clone());
+
+        let query1 = Query::new(
+            &"user-123",
+            || Box::pin(async { Ok::<i32, QueryError>(42) }),
+            client,
+        );
+        let query2 = Query::new(
+            &"user-123",
+            || Box::pin(async { Ok::<i32, QueryError>(42) }),
+            cloned_client,
+        );
+
+        assert_eq!(
+            query1.id(),
+            query2.id(),
+            "QueryClient::clone should preserve the client identity"
+        );
     }
 
     #[test]
