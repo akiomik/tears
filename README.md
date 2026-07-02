@@ -163,11 +163,15 @@ async fn main() -> Result<()> {
     // Setup terminal
     let mut terminal = ratatui::init();
 
+    // Restore the terminal on panic before the color_eyre report runs.
+    // Installed after `color_eyre::install()` so it wraps that hook.
+    tears::install_panic_hook();
+
     // Run application at 60 FPS
     let runtime = Runtime::<Counter>::try_new((), 60)?;
     let result = runtime.run(&mut terminal).await;
 
-    // Restore terminal
+    // Restore terminal (normal exit path)
     ratatui::restore();
 
     result
@@ -224,6 +228,7 @@ Create custom subscriptions by implementing the `SubscriptionSource` trait.
 Check out the [`examples/`](examples/) directory for more examples:
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
+- [`panic_hook.rs`](examples/panic_hook.rs) - Restoring the terminal on panic with `install_panic_hook`
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
 - [`dashboard.rs`](examples/dashboard.rs) - Structured state management with nested state and child messages
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
@@ -234,6 +239,7 @@ Run an example:
 
 ```bash
 cargo run --example counter
+cargo run --example panic_hook
 cargo run --example views
 cargo run --example dashboard
 cargo run --example signals

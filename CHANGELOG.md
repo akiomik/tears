@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `install_panic_hook()` for restoring the terminal on panic
+  - Wraps the current panic hook so the terminal leaves raw mode and the
+    alternate screen *before* the previously installed hook (e.g. `color_eyre`)
+    prints its report
+  - Call it once during startup, after the reporter is installed and the
+    terminal is initialized
+  - See the new `panic_hook` example for a demonstration
+
 ## [0.9.0] - 2026-07-03
 
 ### Changed

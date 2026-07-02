@@ -73,6 +73,8 @@
 //! async fn main() -> Result<()> {
 //!     let runtime = Runtime::<CounterApp>::try_new((), 60)?;
 //!     let mut terminal = ratatui::init();
+//!     // Restore the terminal if the application panics.
+//!     tears::install_panic_hook();
 //!     runtime.run(&mut terminal).await?;
 //!     ratatui::restore();
 //!     Ok(())
@@ -395,6 +397,8 @@ impl<App: Application> Runtime<App> {
     /// #[tokio::main]
     /// async fn main() -> Result<()> {
     ///     let mut terminal = ratatui::init();
+    ///     // Restore the terminal if the application panics.
+    ///     tears::install_panic_hook();
     ///
     ///     let runtime = Runtime::<MyApp>::try_new((), 60)?;
     ///     runtime.run(&mut terminal).await?;
