@@ -14,6 +14,11 @@
 //! return a Command. After a successful mutation, you typically want to invalidate
 //! related queries to trigger refetching.
 //!
+//! [`Mutation::mutate`] returns a `Command<Result<_, QueryError>>` and does not
+//! emit [`MutationState`] values by itself. [`MutationState`] and
+//! [`MutationResult`] are helper types for applications that want to store
+//! mutation status in their own model.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -61,6 +66,10 @@ use crate::Command;
 use super::query::QueryError;
 
 /// The state of a mutation result.
+///
+/// This is a helper type for application models. [`Mutation::mutate`] returns a
+/// `Command<Result<_, QueryError>>`; it does not automatically emit
+/// `MutationState` values.
 #[derive(Debug, Clone)]
 pub enum MutationState<T> {
     /// Mutation is idle (not yet started).
@@ -74,6 +83,9 @@ pub enum MutationState<T> {
 }
 
 /// A mutation result containing the current state.
+///
+/// This is a helper type for applications that choose to track mutation state
+/// explicitly in their model.
 #[derive(Debug, Clone)]
 pub struct MutationResult<T> {
     /// The current state of the mutation.
