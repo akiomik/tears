@@ -407,9 +407,30 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// This cancels all running subscription tasks. Called automatically
     /// when the runtime shuts down.
     pub fn shutdown(&mut self) {
-        for (_, running) in self.running.drain() {
+        self.abort_running();
+        self.running.clear();
+    }
+}
+
+impl<Msg> SubscriptionManager<Msg> {
+    /// Abort every running subscription task without removing the map entries.
+    ///
+    /// Shared by [`shutdown`](SubscriptionManager::shutdown) and [`Drop`], so a
+    /// manager that is dropped without a clean shutdown (e.g. during a panic
+    /// unwind) still cancels its tasks instead of detaching them.
+    fn abort_running(&self) {
+        for running in self.running.values() {
             running.handle.abort();
         }
+    }
+}
+
+impl<Msg> Drop for SubscriptionManager<Msg> {
+    fn drop(&mut self) {
+        // `JoinHandle` does not abort on drop (it detaches), so a manager that
+        // is dropped without `shutdown()` — for instance while unwinding from a
+        // panic — would otherwise leak its subscription tasks.
+        self.abort_running();
     }
 }
 
@@ -580,6 +601,72 @@ mod tests {
 
         // Should not receive more messages after shutdown
         // The channel might have some buffered messages, but stream should stop
+    }
+
+    #[tokio::test]
+    async fn test_drop_aborts_running_subscriptions() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Poll;
+
+        use futures::stream;
+
+        // A guard that records, via its `Drop`, that the task's future was
+        // dropped. The runtime only drops an aborted task's future, so the flag
+        // flipping to `true` proves the task was cancelled rather than detached.
+        struct AbortGuard(Arc<AtomicBool>);
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // A subscription whose stream owns the guard and never yields, so its
+        // task stays parked until it is aborted.
+        struct ParkedSource {
+            aborted: Arc<AtomicBool>,
+        }
+        impl SubscriptionSource for ParkedSource {
+            type Output = i32;
+
+            fn stream(&self) -> BoxStream<'static, i32> {
+                let guard = AbortGuard(self.aborted.clone());
+                stream::poll_fn(move |_cx| {
+                    let _keep_alive = &guard;
+                    Poll::Pending
+                })
+                .boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                SubscriptionId::of::<Self>(0)
+            }
+        }
+
+        let aborted = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        {
+            let mut manager = SubscriptionManager::new(tx);
+            manager.update(vec![Subscription::new(ParkedSource {
+                aborted: aborted.clone(),
+            })]);
+
+            // Let the task start and park on the pending stream.
+            sleep(Duration::from_millis(10)).await;
+            assert!(
+                !aborted.load(Ordering::SeqCst),
+                "task should still be running before the manager is dropped"
+            );
+            // `manager` is dropped here.
+        }
+
+        // Give the runtime a chance to process the abort and drop the future.
+        sleep(Duration::from_millis(10)).await;
+        assert!(
+            aborted.load(Ordering::SeqCst),
+            "dropping the manager should abort running subscription tasks"
+        );
     }
 
     #[tokio::test]
