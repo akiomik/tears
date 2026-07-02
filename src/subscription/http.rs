@@ -1,13 +1,13 @@
-//! HTTP query and mutation support with caching.
+//! HTTP query and mutation support with retained data.
 //!
 //! This module provides subscription-based HTTP queries and command-based mutations,
 //! similar to SWR or TanStack Query.
 //!
 //! # Features
 //!
-//! - **Queries**: Subscription-based data fetching with automatic caching and refetching
+//! - **Queries**: Subscription-based data fetching with automatic retention and refetching
 //! - **Mutations**: Command-based data modifications (POST, PUT, DELETE, etc.)
-//! - **Cache management**: Automatic cache invalidation and updates
+//! - **Retention management**: Automatic retained-data invalidation and updates
 //!
 //! # Example
 //!
@@ -18,7 +18,7 @@
 //!
 //! struct App {
 //!     query_client: Arc<QueryClient>,
-//!     user_state: QueryState<User>,
+//!     user_result: Option<QueryResult<User>>,
 //! }
 //!
 //! impl Application for App {
@@ -36,7 +36,7 @@
 //!     fn update(&mut self, msg: Message) -> Command<Message> {
 //!         match msg {
 //!             Message::UserQuery(result) => {
-//!                 self.user_state = result.state;
+//!                 self.user_result = Some(result);
 //!                 Command::none()
 //!             }
 //!             Message::UpdateUser(data) => {
@@ -47,19 +47,39 @@
 //!                     })
 //!             }
 //!             Message::UserUpdated(_) => {
-//!                 self.query_client.invalidate("user-123")
+//!                 self.query_client.invalidate("user-123");
+//!                 Command::none()
 //!             }
 //!         }
 //!     }
 //! }
 //! ```
 
-mod cache;
+#[cfg(feature = "http")]
+mod cell;
+#[cfg(feature = "loom-core")]
+mod cell_core;
+#[cfg(feature = "http")]
 mod config;
+#[cfg(feature = "http")]
+mod key;
+#[cfg(feature = "http")]
 pub mod mutation;
+#[cfg(feature = "http")]
 pub mod query;
+#[cfg(feature = "http")]
+mod reconcile;
+#[cfg(feature = "http")]
+mod result;
 
 // Re-export main types
+#[cfg(feature = "http")]
 pub use config::QueryConfig;
+#[cfg(feature = "http")]
+pub use key::{QueryKey, QueryKeyPart};
+#[cfg(feature = "http")]
 pub use mutation::{Mutation, MutationResult, MutationState};
-pub use query::{Query, QueryClient, QueryError, QueryResult, QueryState};
+#[cfg(feature = "http")]
+pub use query::{Query, QueryClient, QueryError};
+#[cfg(feature = "http")]
+pub use result::{FetchStatus, QueryResult, QueryStatus};

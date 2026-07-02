@@ -269,6 +269,7 @@ tears = { version = "0.8", features = ["http"] }
   - `Query` subscription for automatic data fetching with caching
   - `Mutation` for data modifications (POST, PUT, PATCH, DELETE)
   - `QueryClient` for cache management and invalidation
+  - Design rationale and invariants: [RFC 0001: `http` Module Redesign](docs/rfcs/0001-http-module-redesign.md)
 
 ## Inspiration & Design Philosophy
 

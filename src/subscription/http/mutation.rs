@@ -47,7 +47,8 @@
 //!         }
 //!         Message::UserUpdated(_) => {
 //!             // Invalidate user query to refetch
-//!             self.query_client.invalidate("user-123")
+//!             self.query_client.invalidate("user-123");
+//!             Command::none()
 //!         }
 //!         Message::UpdateFailed(_) => {
 //!             // Handle error
