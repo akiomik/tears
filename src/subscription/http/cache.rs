@@ -15,7 +15,7 @@ pub trait AnyCacheEntry: Send + Sync {
     /// Marks the entry as stale without knowing its concrete value type.
     fn mark_stale(&mut self);
 
-    /// Returns `true` if the entry has outlived `cache_time` and should be
+    /// Returns `true` if the entry has reached `cache_time` and should be
     /// garbage collected.
     fn is_expired(&self, cache_time: Duration) -> bool;
 }
@@ -59,10 +59,10 @@ impl<T> CacheEntry<T> {
     /// Checks if this entry is stale based on the given stale time.
     ///
     /// Returns `true` if the entry was explicitly marked stale via
-    /// [`mark_stale`](Self::mark_stale) or if `stale_time` has elapsed
+    /// [`mark_stale`](Self::mark_stale) or if at least `stale_time` has elapsed
     /// since the entry was created.  Does **not** mutate the entry.
     pub fn check_staleness(&self, stale_time: Duration) -> bool {
-        self.is_stale || self.timestamp.elapsed() > stale_time
+        self.is_stale || self.timestamp.elapsed() >= stale_time
     }
 
     /// Marks this entry as stale.
@@ -80,7 +80,7 @@ impl<T> CacheEntry<T> {
 
     /// Checks if this entry should be garbage collected based on cache time.
     pub fn should_gc(&self, cache_time: Duration) -> bool {
-        self.timestamp.elapsed() > cache_time
+        self.timestamp.elapsed() >= cache_time
     }
 }
 
@@ -120,6 +120,15 @@ mod tests {
     }
 
     #[test]
+    fn test_check_staleness_zero_is_immediately_stale() {
+        let entry = CacheEntry::new(42);
+        assert!(
+            entry.check_staleness(Duration::ZERO),
+            "zero stale_time should mark an entry stale immediately"
+        );
+    }
+
+    #[test]
     fn test_check_staleness_respects_mark_stale() {
         // An entry that was explicitly marked stale via mark_stale should
         // be reported as stale by check_staleness even within the stale_time.
@@ -148,5 +157,14 @@ mod tests {
         entry.update(100);
         assert_eq!(entry.data, 100);
         assert!(!entry.is_stale);
+    }
+
+    #[test]
+    fn test_should_gc_zero_is_immediately_expired() {
+        let entry = CacheEntry::new(42);
+        assert!(
+            entry.should_gc(Duration::ZERO),
+            "zero cache_time should expire an entry immediately"
+        );
     }
 }
