@@ -126,9 +126,10 @@
 //!
 //! See the [`mock`] module documentation for complete testing examples.
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "loom-core"))]
 pub mod http;
 pub mod mock;
+#[cfg(not(all(feature = "loom-core", test)))]
 pub mod signal;
 pub mod terminal;
 pub mod time;

@@ -20,9 +20,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tears::prelude::*;
-use tears::subscription::http::{
-    Mutation, Query, QueryClient, QueryError, QueryResult, QueryState,
-};
+use tears::subscription::http::{Mutation, Query, QueryClient, QueryError, QueryResult};
 use tears::subscription::terminal::TerminalEvents;
 
 /// A todo item from the API
@@ -61,7 +59,7 @@ struct App {
     /// Query client for cache management
     query_client: Arc<QueryClient>,
     /// Current todos state
-    todos_state: QueryState<Vec<Todo>>,
+    todos_state: Option<QueryResult<Vec<Todo>>>,
     /// Input field for new todo
     input: String,
     /// Status message
@@ -72,7 +70,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             query_client: Arc::new(QueryClient::new()),
-            todos_state: QueryState::Loading,
+            todos_state: None,
             input: String::new(),
             status: String::new(),
         }
@@ -104,7 +102,7 @@ impl Application for App {
                 Command::none()
             }
             Message::TodosQuery(result) => {
-                self.todos_state = result.state;
+                self.todos_state = Some(result);
                 Command::none()
             }
             Message::InputChanged(c) => {
@@ -154,7 +152,8 @@ impl Application for App {
             Message::TodoCreated(Ok(todo)) => {
                 self.status = format!("Created: {}", todo.title);
                 // Invalidate cache to refetch todos
-                self.query_client.invalidate(&"todos")
+                self.query_client.invalidate("todos");
+                Command::none()
             }
             Message::TodoCreated(Err(e)) => {
                 self.status = format!("Failed to create todo: {e}");
@@ -203,7 +202,7 @@ impl Application for App {
             }),
             // Todos query - automatically fetches and caches
             Subscription::new(Query::new(
-                &"todos",
+                "todos",
                 || {
                     Box::pin(async {
                         let client = Client::new();
@@ -230,40 +229,48 @@ impl Application for App {
 impl App {
     fn render_todos(&self, frame: &mut Frame, area: Rect) {
         match &self.todos_state {
-            QueryState::Loading => {
+            None => {
                 let loading = Paragraph::new("Loading todos...")
                     .block(Block::default().borders(Borders::ALL).title("Todos"));
                 frame.render_widget(loading, area);
             }
-            QueryState::Success { data, is_stale } => {
-                let title = if *is_stale {
-                    "Todos (stale, refetching...)"
+            Some(result) => {
+                if result.is_error() {
+                    let message = result
+                        .error()
+                        .map_or_else(|| "unknown error".to_string(), ToString::to_string);
+                    let error = Paragraph::new(format!("Error loading todos: {message}"))
+                        .style(Style::default().fg(Color::Red))
+                        .block(Block::default().borders(Borders::ALL).title("Todos"));
+                    frame.render_widget(error, area);
+                } else if let Some(data) = result.data() {
+                    let title = if result.is_stale() {
+                        "Todos (stale, refetching...)"
+                    } else {
+                        "Todos"
+                    };
+
+                    let items: Vec<ListItem> = data
+                        .iter()
+                        .map(|todo| {
+                            let status = if todo.completed { "✓" } else { " " };
+                            let style = if todo.completed {
+                                Style::default().fg(Color::Green)
+                            } else {
+                                Style::default()
+                            };
+                            ListItem::new(format!("[{}] {}", status, todo.title)).style(style)
+                        })
+                        .collect();
+
+                    let list =
+                        List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+                    frame.render_widget(list, area);
                 } else {
-                    "Todos"
-                };
-
-                let items: Vec<ListItem> = data
-                    .iter()
-                    .map(|todo| {
-                        let status = if todo.completed { "✓" } else { " " };
-                        let style = if todo.completed {
-                            Style::default().fg(Color::Green)
-                        } else {
-                            Style::default()
-                        };
-                        ListItem::new(format!("[{}] {}", status, todo.title)).style(style)
-                    })
-                    .collect();
-
-                let list =
-                    List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-                frame.render_widget(list, area);
-            }
-            QueryState::Error(e) => {
-                let error = Paragraph::new(format!("Error loading todos: {e}"))
-                    .style(Style::default().fg(Color::Red))
-                    .block(Block::default().borders(Borders::ALL).title("Todos"));
-                frame.render_widget(error, area);
+                    let loading = Paragraph::new("Loading todos...")
+                        .block(Block::default().borders(Borders::ALL).title("Todos"));
+                    frame.render_widget(loading, area);
+                }
             }
         }
     }

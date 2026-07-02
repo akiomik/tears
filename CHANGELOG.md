@@ -31,6 +31,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Runtime::try_new(flags, u32) -> Result<Runtime<_>, FrameRateError>` as
     convenient constructors for raw FPS values
 
+- **BREAKING**: `QueryState` is removed in favor of the richer `QueryResult`
+  (requires `http` feature)
+  - `QueryResult` no longer exposes a `state` field; read the query state via
+    accessors (`is_loading()`, `is_success()`, `is_error()`, `data()`,
+    `error()`, `status()`, `fetch_status()`, `is_stale()`)
+  - Added `QueryStatus` and `FetchStatus`, exposed via `status()` and
+    `fetch_status()`
+
+- **BREAKING**: `QueryClient::invalidate` no longer returns a `Command` and is
+  applied synchronously (requires `http` feature)
+  - Call it as a statement and return `Command::none()` instead of
+    `return self.client.invalidate(key);`
+  - The key argument is now `impl Into<QueryKey>`; string literals still work,
+    but `&"key"` and non-string keys need updating
+
+- **BREAKING**: A failed fetch now retains the previously successful data
+  (requires `http` feature)
+  - The cell becomes `data = Some(previous), status = Error`; read `data()` and
+    `is_error()` independently. Previously the error state dropped the data
+
+- **BREAKING**: HTTP query retention now uses inactive cells instead of legacy
+  cache entries
+  - `cache_time` is measured from when the last subscription becomes inactive,
+    not from the original fetch timestamp
+  - This keeps active query data available regardless of age while still
+    collecting inactive query data after the configured retention window
+
+- Replacing a `Query` fetcher while keeping the same key is not supported
+  (requires `http` feature)
+  - The runtime keys the running subscription by its identity (`QueryClient`,
+    key, and value type), so a new `Query::new(key, new_fetcher, client)` with
+    an unchanged key keeps the existing subscription and the old fetcher; the
+    new fetcher never takes effect
+  - To change the request, change the key (for example by including the varying
+    parameter in it)
+
+- Added a structured `QueryKey` (with `QueryKey` and `QueryKeyPart`) providing
+  `From<&str>`, `From<String>`, and tuple conversions; `Query::new` and
+  `QueryClient::invalidate` now accept `impl Into<QueryKey>` (requires `http`
+  feature)
+
 ## [0.8.3] - 2026-07-02
 
 ### Fixed

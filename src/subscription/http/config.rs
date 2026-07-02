@@ -2,20 +2,21 @@ use std::time::Duration;
 
 /// Configuration for query behavior.
 ///
-/// This controls how queries cache data and when they consider it stale.
+/// This controls how queries retain data and when they consider it stale.
 #[derive(Debug, Clone)]
 pub struct QueryConfig {
     /// How long data is considered fresh before becoming stale.
     ///
-    /// When data is fresh, queries will use cached data without refetching.
-    /// Once stale, queries will refetch in the background while still showing cached data.
+    /// When data is fresh, queries will use retained data without refetching.
+    /// Once stale, queries will refetch in the background while still showing retained data.
     pub stale_time: Duration,
 
-    /// How long cached data is retained before being garbage collected.
+    /// How long inactive query data is retained before being garbage collected.
     ///
-    /// Cached data is removed once this much time has elapsed since it was
-    /// last fetched or updated. Garbage collection happens automatically when
-    /// new entries are inserted, and can be triggered manually via
+    /// Active cells keep their data regardless of age. Inactive cell data is
+    /// removed once this much time has elapsed since the last subscriber
+    /// dropped. Garbage collection runs automatically after each fetch and can
+    /// also be triggered manually via
     /// [`QueryClient::gc`](crate::subscription::http::QueryClient::gc).
     pub cache_time: Duration,
 }
