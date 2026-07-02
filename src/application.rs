@@ -158,7 +158,10 @@ pub trait Application: Sized {
     /// fn subscriptions(&self) -> Vec<Subscription<Message>> {
     ///     if self.enabled {
     ///         use tears::subscription::time::Timer;
-    ///         vec![Subscription::new(Timer::new(1000)).map(|_| Message::Tick)]
+    ///         vec![
+    ///             Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+    ///                 .map(|_| Message::Tick),
+    ///         ]
     ///     } else {
     ///         vec![]
     ///     }

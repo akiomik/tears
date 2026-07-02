@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, List as ListWidget, ListItem, Paragraph};
 use tears::prelude::*;
 use tears::subscription::{
     terminal::TerminalEvents,
-    time::{Message as TimerMessage, Timer},
+    time::{Timer, TimerEvent},
 };
 
 /// Application views (screens)
@@ -132,9 +132,10 @@ impl Application for App {
         // Add timer subscription only in Counter view
         if matches!(self.view, View::Counter { .. }) {
             subs.push(
-                Subscription::new(Timer::new(1000)).map(|timer_msg| match timer_msg {
-                    TimerMessage::Tick => Message::Tick,
-                }),
+                Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+                    .map(|timer_msg| match timer_msg {
+                        TimerEvent::Tick => Message::Tick,
+                    }),
             );
         }
 

@@ -18,7 +18,8 @@
 //! use tears::subscription::{Subscription, time::Timer};
 //!
 //! # enum Message { Tick }
-//! let timer = Subscription::new(Timer::new(1000)).map(|_| Message::Tick);
+//! let timer = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+//!     .map(|_| Message::Tick);
 //! ```
 //!
 //! ## Stream-based (WebSocket)
@@ -161,14 +162,15 @@ use tokio::{
 /// # Example
 ///
 /// ```
-/// use tears::subscription::{Subscription, time::{Timer, Message as TimeMsg}};
+/// use tears::subscription::{Subscription, time::Timer};
 ///
 /// enum Message {
 ///     Tick,
 /// }
 ///
 /// // Create a subscription that sends a message every second
-/// let sub = Subscription::new(Timer::new(1000)).map(|_| Message::Tick);
+/// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+///     .map(|_| Message::Tick);
 /// ```
 pub struct Subscription<Msg: 'static> {
     pub(super) id: SubscriptionId,
@@ -183,7 +185,7 @@ impl<Msg: 'static> Subscription<Msg> {
     /// ```
     /// use tears::subscription::{Subscription, time::Timer};
     ///
-    /// let sub = Subscription::new(Timer::new(1000));
+    /// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"));
     /// ```
     #[must_use]
     pub fn new(source: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
@@ -204,7 +206,7 @@ impl<Msg: 'static> Subscription<Msg> {
     ///
     /// enum AppMessage { TimerTick }
     ///
-    /// let sub = Subscription::new(Timer::new(1000))
+    /// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
     ///     .map(|_| AppMessage::TimerTick);
     /// ```
     #[must_use]

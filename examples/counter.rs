@@ -17,14 +17,14 @@ use ratatui::text::Text;
 use tears::prelude::*;
 use tears::subscription::{
     terminal::TerminalEvents,
-    time::{Message as TimerMessage, Timer},
+    time::{Timer, TimerEvent},
 };
 
 /// Messages that the application can receive
 #[derive(Debug)]
 enum Message {
     /// Timer tick message (sent every second)
-    Timer(TimerMessage),
+    Timer(TimerEvent),
     /// Terminal input event (keyboard, mouse, resize)
     Terminal(crossterm::event::Event),
     /// Terminal event stream error
@@ -49,7 +49,7 @@ impl Application for Counter {
     /// Handle incoming messages and update state
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
         match msg {
-            Message::Timer(TimerMessage::Tick) => {
+            Message::Timer(TimerEvent::Tick) => {
                 // Increment counter on each timer tick
                 self.count += 1;
                 Command::none()
@@ -83,7 +83,8 @@ impl Application for Counter {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![
             // Timer that ticks every 1000ms (1 second)
-            Subscription::new(Timer::new(1000)).map(Message::Timer),
+            Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+                .map(Message::Timer),
             // Terminal events (keyboard, mouse, resize)
             // Note: Returns Result to handle potential I/O errors
             Subscription::new(TerminalEvents::new()).map(|result| match result {
