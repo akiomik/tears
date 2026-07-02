@@ -376,6 +376,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             let keep = new_ids.contains(id);
             if !keep {
                 running.handle.abort();
+                tracing::debug!(target: "tears::subscription", "subscription stopped");
             }
             keep
         });
@@ -386,6 +387,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
                 let stream = spawn();
                 let handle = self.spawn_subscription(stream);
                 self.running.insert(id, RunningSubscription { handle });
+                tracing::debug!(target: "tears::subscription", "subscription started");
             }
         }
     }

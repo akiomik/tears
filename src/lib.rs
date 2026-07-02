@@ -61,6 +61,15 @@
 //! }
 //! ```
 //!
+//! ## Observability
+//!
+//! The runtime emits [`tracing`](https://docs.rs/tracing) events for its hot
+//! paths — message batches, subscription updates, command spawns, renders, and
+//! shutdown — under the `tears::runtime` and `tears::subscription` targets.
+//! Events are inert unless a `tracing` subscriber is installed, so there is no
+//! setup required to ignore them. To see them, install any subscriber (e.g.
+//! `tracing_subscriber::fmt()`) before running the app.
+//!
 //! ## Optional Features
 //!
 //! ### WebSocket Support
