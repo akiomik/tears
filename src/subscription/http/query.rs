@@ -213,6 +213,7 @@ impl QueryClient {
     where
         Msg: Send + 'static,
     {
+        let cache = self.cache.clone();
         let tx = self.invalidation_tx.clone();
         let key_string = key.to_string();
 
@@ -220,10 +221,13 @@ impl QueryClient {
         Command {
             stream: Some(
                 futures::stream::once(async move {
-                    // Note: We cannot directly mark cache entries as stale because
-                    // the cache stores `Box<dyn Any>` and we don't know the concrete type.
-                    // Instead, we just broadcast the invalidation notification,
-                    // which will trigger Query subscriptions to refetch.
+                    // Mark all typed cache entries for this user key as stale so
+                    // invalidations are preserved even when no query is active.
+                    for mut entry in cache.iter_mut() {
+                        if entry.key().1.as_str() == key_string.as_str() {
+                            entry.value_mut().mark_stale();
+                        }
+                    }
 
                     // Broadcast invalidation notification
                     let _ = tx.send(key_string);
@@ -727,6 +731,105 @@ mod tests {
             .expect("Should receive notification within timeout")
             .expect("Channel should not be closed");
         assert_eq!(key, "nonexistent");
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_marks_matching_cache_entries_stale() {
+        use futures::StreamExt;
+
+        let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
+        let client = QueryClient::with_config(config);
+
+        client.set_cache("data".to_string(), CacheEntry::new(42i32));
+        client.set_cache("data".to_string(), CacheEntry::new("hello".to_string()));
+        client.set_cache("other".to_string(), CacheEntry::new(7i32));
+
+        let cmd: Command<()> = client.invalidate(&"data");
+        if let Some(stream) = cmd.stream {
+            let _: Vec<_> = stream.collect().await;
+        }
+
+        assert!(
+            client
+                .get_cache::<i32>("data")
+                .expect("i32 data cache should exist")
+                .is_stale,
+            "invalidate should mark matching i32 cache entries stale"
+        );
+        assert!(
+            client
+                .get_cache::<String>("data")
+                .expect("String data cache should exist")
+                .is_stale,
+            "invalidate should mark matching String cache entries stale"
+        );
+        assert!(
+            !client
+                .get_cache::<i32>("other")
+                .expect("other cache should exist")
+                .is_stale,
+            "invalidate should not mark unrelated keys stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_without_active_subscription_refetches_on_next_subscribe() {
+        use futures::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
+        let client = Arc::new(QueryClient::with_config(config));
+        client.set_cache("key".to_string(), CacheEntry::new(42));
+
+        let cmd: Command<()> = client.invalidate(&"key");
+        if let Some(stream) = cmd.stream {
+            let _: Vec<_> = stream.collect().await;
+        }
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = fetch_count.clone();
+        let query = Query::new(
+            &"key",
+            move || {
+                let count = fetch_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<i32, QueryError>(99)
+                })
+            },
+            client,
+        );
+
+        let mut stream = query.stream();
+
+        let cached = stream.next().await;
+        assert!(
+            matches!(
+                cached,
+                Some(QueryResult {
+                    state: QueryState::Success {
+                        data: 42,
+                        is_stale: true
+                    }
+                })
+            ),
+            "invalidated cache should be emitted as stale even with long stale_time"
+        );
+
+        let fetched = stream.next().await;
+        assert!(
+            matches!(
+                fetched,
+                Some(QueryResult {
+                    state: QueryState::Success {
+                        data: 99,
+                        is_stale: false
+                    }
+                })
+            ),
+            "stale invalidated cache should trigger a refetch"
+        );
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]

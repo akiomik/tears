@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `QueryClient::invalidate` not marking cached entries stale, so
+  invalidations were lost when no query subscription was active (requires
+  `http` feature)
+  - Previously `invalidate` only broadcast a notification; a `broadcast` channel
+    only reaches current subscribers, so if no query was subscribed at that
+    moment the cache stayed fresh and a later subscription within `stale_time`
+    would serve the outdated data as fresh (mutation results appearing to "revert")
+  - This was masked by the default `stale_time` of 0 (entries are treated as
+    stale on next access anyway) and only surfaced with a configured
+    `stale_time > 0`
+  - `invalidate` now marks every typed cache entry sharing the invalidated key
+    as stale via a new type-erased `AnyCacheEntry::mark_stale`, so a query that
+    subscribes afterwards sees the entry as stale and refetches, in addition to
+    the existing broadcast that refetches already-active queries
+
 ## [0.8.2] - 2026-07-02
 
 ### Fixed
