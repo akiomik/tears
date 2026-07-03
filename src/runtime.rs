@@ -1206,6 +1206,48 @@ mod tests {
         Ok(())
     }
 
+    // Quit must terminate the loop even while idle, i.e. after the initial frame
+    // has rendered and the frame branch is gated off by `should_process_frame()`.
+    // This is the exact safety property the frame-branch gating relies on: the
+    // `quit_rx.recv()` branch is always armed, so a quit arriving with no pending
+    // redraw or subscription work is still received.
+    //
+    // The quit is sent directly to `quit_tx` (bypassing the update/command
+    // pipeline, so this isolates the quit branch) and, crucially, is *delayed*
+    // until after startup. If it were sent before `run()`, the initial
+    // `needs_redraw == true` would let the first frame tick run and consume it,
+    // so the loop would never reach the idle state under test — and a regression
+    // that moved quit handling back onto the frame branch would slip through.
+    //
+    // With paused virtual time on a current-thread runtime: the loop renders the
+    // initial frame (clearing `needs_redraw`), goes idle with the frame branch
+    // gated off, and the clock auto-advances to the spawned task's timer — the
+    // only armed timer — which delivers the quit. If quit handling regressed onto
+    // the (now gated-off) frame branch, nothing would receive it while idle and
+    // the outer timeout would fire.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_event_loop_run_quits_while_idle() -> Result<()> {
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        // Deliver the quit only after the loop has rendered its first frame and
+        // gone idle. A clone keeps `quit_tx` alive after `run()` takes ownership
+        // of the runtime.
+        let quit_tx = runtime.state.quit_tx.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            let _ = quit_tx.send(());
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend)?;
+
+        tokio::time::timeout(Duration::from_secs(5), runtime.run(&mut terminal))
+            .await
+            .expect("run() should quit while idle before the timeout")?;
+
+        Ok(())
+    }
+
     // --- Idle frame wake-up elision -----------------------------------------
     //
     // The event loop gates its frame branch on `should_process_frame()` so an
