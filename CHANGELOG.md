@@ -548,7 +548,8 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.9.0...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/akiomik/tears/releases/tag/v0.9.1
 [0.9.0]: https://github.com/akiomik/tears/releases/tag/v0.9.0
 [0.8.3]: https://github.com/akiomik/tears/releases/tag/v0.8.3
 [0.8.2]: https://github.com/akiomik/tears/releases/tag/v0.8.2
