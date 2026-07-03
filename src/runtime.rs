@@ -145,6 +145,8 @@ struct ApplicationState<App: Application> {
 /// - **Frame Rate Control**: Regulates rendering at the specified FPS (e.g., 60 FPS)
 /// - **Micro-batching**: Processes messages arriving within 100μs together, reducing overhead
 /// - **Conditional Rendering**: Only renders when state changes, saving CPU cycles
+/// - **Idle Wake-up Elision**: Skips frame ticks entirely while idle, so the loop is
+///   event-driven and does not consume CPU at the frame rate with nothing to render
 /// - **Subscription Caching**: Re-evaluates subscriptions only after a message is processed,
 ///   and updates the subscription manager only when their IDs change
 ///
@@ -302,6 +304,21 @@ impl<App: Application> Runtime<App> {
         self.subscriptions_dirty = true;
     }
 
+    /// Whether the frame tick has pending work (a redraw or a subscription
+    /// re-evaluation) to do.
+    ///
+    /// Used to gate the frame branch of the event loop's `select!`: when the
+    /// application is idle (no message has been processed since the last frame),
+    /// both flags are false and there is nothing for a frame tick to do. Skipping
+    /// the tick entirely means the loop no longer wakes up at the frame rate while
+    /// idle, turning the loop event-driven and saving CPU/battery.
+    ///
+    /// Must use `||` (not `&&`): the initial state has `needs_redraw == true` and
+    /// `subscriptions_dirty == false`, and the first frame must still render.
+    const fn should_process_frame(&self) -> bool {
+        self.needs_redraw || self.subscriptions_dirty
+    }
+
     /// Processes a frame tick: renders if needed and updates subscriptions.
     ///
     /// Only renders when `needs_redraw` is true (conditional rendering optimization).
@@ -315,6 +332,11 @@ impl<App: Application> Runtime<App> {
         &mut self,
         terminal: &mut ratatui::Terminal<B>,
     ) -> Result<bool, <B as Backend>::Error> {
+        // Emitted on every frame branch wake-up (before the redraw check), so the
+        // event loop's idle behavior is observable via `tracing`. A dedicated
+        // target lets subscribers count wake-ups without matching the message.
+        tracing::trace!(target: "tears::runtime::frame", "frame tick");
+
         // Render only if state has changed
         if self.needs_redraw {
             self.state.render(terminal)?;
@@ -378,7 +400,9 @@ impl<App: Application> Runtime<App> {
     /// 1. **Message Channel**: Processes messages through [`Application::update`]. Messages
     ///    arriving within 100μs are batched together for efficiency.
     /// 2. **Frame Timer**: Renders UI via [`Application::view`] (only when state changed)
-    ///    and updates subscriptions at the specified frame rate.
+    ///    and updates subscriptions at the specified frame rate. The frame branch is
+    ///    skipped while the application is idle (no pending redraw or subscription
+    ///    update), so the loop does not wake at the frame rate with nothing to do.
     /// 3. **Quit Channel**: Terminates the loop when quit signal is received.
     ///
     /// Commands returned from [`Application::update`] are executed asynchronously as
@@ -442,8 +466,14 @@ impl<App: Application> Runtime<App> {
                     self.process_message_batch(msg);
                 }
 
-                // Frame tick: render if needed and update subscriptions
-                _ = self.frame_interval.tick() => {
+                // Frame tick: render if needed and update subscriptions.
+                //
+                // Gated on pending work so an idle loop does not wake at the frame
+                // rate just to do nothing. When a message re-enables the branch, the
+                // timer deadline has already elapsed, so `tick()` is ready on the
+                // next poll and adds no render latency. `MissedTickBehavior::Skip`
+                // only controls where the following tick lands (no catch-up burst).
+                _ = self.frame_interval.tick(), if self.should_process_frame() => {
                     if self.process_frame_tick(terminal)? {
                         break;
                     }
@@ -1225,6 +1255,48 @@ mod tests {
 
         // Should detect quit
         assert!(should_quit);
+
+        Ok(())
+    }
+
+    // --- Idle frame wake-up elision -----------------------------------------
+    //
+    // The event loop gates its frame branch on `should_process_frame()` so an
+    // idle loop stops waking at the frame rate. These unit tests cover the gate
+    // predicate in isolation; the end-to-end behavior (zero idle wake-ups, and
+    // an immediate render once a message re-enables the branch) is covered by
+    // `tests/idle_wakeup.rs`.
+
+    #[tokio::test]
+    async fn test_should_process_frame_initial_state_allows_first_frame() {
+        // Fresh runtime: `needs_redraw == true`, so the first frame must render.
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        assert!(runtime.should_process_frame());
+    }
+
+    #[tokio::test]
+    async fn test_should_process_frame_is_gated_off_when_idle() -> Result<()> {
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        // Draining the initial pending work leaves both flags false: idle.
+        runtime.process_frame_tick(&mut terminal)?;
+        assert!(!runtime.should_process_frame());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_process_frame_reenabled_after_message() -> Result<()> {
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        runtime.process_frame_tick(&mut terminal)?;
+        assert!(!runtime.should_process_frame());
+
+        // A processed message re-enables the frame branch.
+        runtime.process_message_batch(TestMessage::Increment);
+        assert!(runtime.should_process_frame());
 
         Ok(())
     }
