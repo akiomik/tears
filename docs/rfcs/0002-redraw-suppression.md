@@ -342,7 +342,7 @@ pub fn map<T>(self, f: …) -> Command<T> {
 `is_none()` / `is_some()` **stay stream-based** and are *not* changed to consider
 `redraw`. This is deliberate: the two fields are read by different consumers —
 `enqueue_command` inspects `stream` to decide whether to spawn a task
-(`command.rs:536`), and `process_message_batch` inspects `redraw` to decide
+(`runtime.rs:536`), and `process_message_batch` inspects `redraw` to decide
 whether to draw. They are independent by design.
 
 The consequence is a new, valid state: a command with **`stream == None` and
