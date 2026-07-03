@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Consolidated quit detection into the event loop's dedicated quit branch
+  - `process_frame_tick` no longer polls the quit channel; the loop's
+    `select!` already handles `Action::Quit` in a single always-on branch
+  - Internal cleanup with no change in observable behavior
+
 ## [0.9.1] - 2026-07-03
 
 ### Added
