@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Panics inside command and subscription tasks are now caught and logged at
     the `error` level instead of being silently lost
 
+### Changed
+
+- The runtime no longer wakes at the frame rate while idle
+  - The event loop skips its frame tick when there is no pending redraw or
+    subscription update, so an idle application consumes no CPU at the frame
+    rate instead of waking (e.g. 60 times per second) only to do nothing
+  - Rendering latency is unaffected: when a message re-enables the frame tick,
+    the timer deadline has already elapsed, so the tick is ready on the next poll
+    (`MissedTickBehavior::Skip` only controls where the following tick lands,
+    avoiding a catch-up burst)
+  - Each frame tick now emits a `tracing` event under the new
+    `tears::runtime::frame` target
+
 ### Fixed
 
 - Subscription tasks are now aborted when the `SubscriptionManager` is dropped

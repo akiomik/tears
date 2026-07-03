@@ -53,6 +53,12 @@ tracing = "0.1"
 criterion = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `test-util` (not part of `full`) provides paused virtual time for the idle
+# frame wake-up tests.
+tokio = { version = "1", features = ["test-util"] }
+# Used by `tests/idle_wakeup.rs` to count frame-tick tracing events; `tracing`
+# is a normal dependency, but integration tests need it as a direct dev-dep.
+tracing = "0.1"
 
 [target.'cfg(not(loom))'.dev-dependencies]
 reqwest = { version = "0.13", features = ["json", "query"] }
