@@ -325,13 +325,13 @@ impl<App: Application> Runtime<App> {
     /// Only re-evaluates subscriptions when `subscriptions_dirty` is true, i.e. when
     /// a message has been processed since the last evaluation.
     ///
-    /// # Returns
-    ///
-    /// `true` if a quit signal was received, `false` otherwise.
+    /// Quit is not detected here: the event loop's `select!` has a dedicated
+    /// `quit_rx.recv()` branch that handles it, so this method only renders and
+    /// re-evaluates subscriptions.
     fn process_frame_tick<B: Backend>(
         &mut self,
         terminal: &mut ratatui::Terminal<B>,
-    ) -> Result<bool, <B as Backend>::Error> {
+    ) -> Result<(), <B as Backend>::Error> {
         // Emitted on every frame branch wake-up (before the redraw check), so the
         // event loop's idle behavior is observable via `tracing`. A dedicated
         // target lets subscribers count wake-ups without matching the message.
@@ -355,12 +355,7 @@ impl<App: Application> Runtime<App> {
             self.subscriptions_dirty = false;
         }
 
-        // Check for quit signal (non-blocking)
-        let quit = self.state.check_quit();
-        if quit {
-            tracing::debug!(target: "tears::runtime", "quit signal received");
-        }
-        Ok(quit)
+        Ok(())
     }
 
     /// Updates subscriptions if they have changed (uses hash-based caching).
@@ -474,9 +469,7 @@ impl<App: Application> Runtime<App> {
                 // next poll and adds no render latency. `MissedTickBehavior::Skip`
                 // only controls where the following tick lands (no catch-up burst).
                 _ = self.frame_interval.tick(), if self.should_process_frame() => {
-                    if self.process_frame_tick(terminal)? {
-                        break;
-                    }
+                    self.process_frame_tick(terminal)?;
                 }
 
                 // Quit signal received
@@ -581,15 +574,6 @@ impl<App: Application> ApplicationState<App> {
                 }
             });
         }
-    }
-
-    /// Checks if a quit signal has been received (non-blocking).
-    ///
-    /// # Returns
-    ///
-    /// `true` if a quit signal is available, `false` otherwise.
-    fn check_quit(&mut self) -> bool {
-        self.quit_rx.try_recv().is_ok()
     }
 
     /// Initializes subscriptions from the application.
@@ -836,38 +820,6 @@ mod tests {
     }
 
     // Unit tests for extracted methods
-
-    #[test]
-    fn test_check_quit_no_signal() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-        assert!(!runtime.check_quit());
-    }
-
-    #[test]
-    fn test_check_quit_with_signal() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Send quit signal
-        let _ = runtime.quit_tx.send(());
-
-        assert!(runtime.check_quit());
-    }
-
-    #[test]
-    fn test_check_quit_multiple_signals() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Send multiple quit signals
-        let _ = runtime.quit_tx.send(());
-        let _ = runtime.quit_tx.send(());
-
-        // First check should return true
-        assert!(runtime.check_quit());
-        // Second check should also return true (signal still in queue)
-        assert!(runtime.check_quit());
-        // Third check should return false (no more signals)
-        assert!(!runtime.check_quit());
-    }
 
     #[tokio::test]
     async fn test_initialize_subscriptions() {
@@ -1204,10 +1156,7 @@ mod tests {
         assert!(runtime.needs_redraw);
 
         // Process frame tick
-        let should_quit = runtime.process_frame_tick(&mut terminal)?;
-
-        // Should not quit
-        assert!(!should_quit);
+        runtime.process_frame_tick(&mut terminal)?;
 
         // Redraw flag should be cleared
         assert!(!runtime.needs_redraw);
@@ -1226,10 +1175,7 @@ mod tests {
         runtime.needs_redraw = false;
 
         // Process frame tick
-        let should_quit = runtime.process_frame_tick(&mut terminal)?;
-
-        // Should not quit
-        assert!(!should_quit);
+        runtime.process_frame_tick(&mut terminal)?;
 
         // Redraw flag should still be false
         assert!(!runtime.needs_redraw);
@@ -1237,24 +1183,25 @@ mod tests {
         Ok(())
     }
 
+    // Quit detection lives solely in the event loop's `quit_rx.recv()` branch
+    // (`process_frame_tick` no longer polls the quit channel), so it is covered
+    // at the `run()` level: an `Action::Quit` must terminate the loop.
     #[tokio::test]
-    async fn test_event_loop_process_frame_tick_detects_quit() -> Result<()> {
-        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+    async fn test_event_loop_run_quits_on_quit_action() -> Result<()> {
+        let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
-        // Send quit signal
-        let _ = runtime.state.quit_tx.send(());
+        // A `Quit` message routes to `Action::Quit`, which the loop's dedicated
+        // quit branch receives.
+        let _ = runtime.state.msg_tx.send(TestMessage::Quit);
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
 
-        // Clear needs_redraw to test quit detection
-        runtime.needs_redraw = false;
-
-        // Process frame tick
-        let should_quit = runtime.process_frame_tick(&mut terminal)?;
-
-        // Should detect quit
-        assert!(should_quit);
+        // `run()` must return promptly; the timeout guards against a hang if the
+        // quit path regresses.
+        tokio::time::timeout(Duration::from_secs(5), runtime.run(&mut terminal))
+            .await
+            .expect("run() should quit before the timeout")?;
 
         Ok(())
     }
