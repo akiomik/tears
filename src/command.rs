@@ -38,6 +38,54 @@ pub enum Action<Msg> {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RedrawPolicy {
+    Redraw,
+    Skip,
+}
+
+impl RedrawPolicy {
+    const fn requests_redraw(self) -> bool {
+        matches!(self, Self::Redraw)
+    }
+
+    const fn combine(self, other: Self) -> Self {
+        if self.requests_redraw() || other.requests_redraw() {
+            Self::Redraw
+        } else {
+            Self::Skip
+        }
+    }
+}
+
+// Runtime directives are owned and composed by `Command`; the runtime only
+// reads the folded result after update processing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeDirectives {
+    redraw: RedrawPolicy,
+}
+
+impl RuntimeDirectives {
+    const DEFAULT: Self = Self {
+        redraw: RedrawPolicy::Redraw,
+    };
+
+    const fn requests_redraw(self) -> bool {
+        self.redraw.requests_redraw()
+    }
+
+    const fn without_redraw(mut self) -> Self {
+        self.redraw = RedrawPolicy::Skip;
+        self
+    }
+
+    const fn combine(self, other: Self) -> Self {
+        Self {
+            redraw: self.redraw.combine(other.redraw),
+        }
+    }
+}
+
 /// A command that can be executed to perform side effects and carry runtime
 /// directives.
 ///
@@ -58,16 +106,14 @@ pub enum Action<Msg> {
 #[must_use = "Commands represent side effects and runtime directives in the Elm Architecture and must be handled by the runtime."]
 pub struct Command<Msg: Send + 'static> {
     pub(super) stream: Option<BoxStream<'static, Action<Msg>>>,
-    pub(super) redraw: bool,
+    directives: RuntimeDirectives,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
-    const DEFAULT_REDRAW: bool = true;
-
     fn with_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
         Self {
             stream: Some(stream),
-            redraw: Self::DEFAULT_REDRAW,
+            directives: RuntimeDirectives::DEFAULT,
         }
     }
 
@@ -87,7 +133,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub const fn none() -> Self {
         Self {
             stream: None,
-            redraw: Self::DEFAULT_REDRAW,
+            directives: RuntimeDirectives::DEFAULT,
         }
     }
 
@@ -134,6 +180,10 @@ impl<Msg: Send + 'static> Command<Msg> {
         self.stream.is_some()
     }
 
+    pub(super) const fn requests_redraw(&self) -> bool {
+        self.directives.requests_redraw()
+    }
+
     /// Declare that the update returning this command did not change the
     /// visible view, so the runtime may skip the redraw it would otherwise
     /// perform.
@@ -143,7 +193,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// initial frame or another message in the same batch.
     #[must_use = "without_redraw returns a modified command and does not mutate in place"]
     pub const fn without_redraw(mut self) -> Self {
-        self.redraw = false;
+        self.directives = self.directives.without_redraw();
         self
     }
 
@@ -235,13 +285,13 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// ]);
     /// ```
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
-        let mut redraw = false;
+        let mut directives = RuntimeDirectives::DEFAULT.without_redraw();
         let mut any_child = false;
         let mut streams = Vec::new();
 
         for cmd in commands {
             any_child = true;
-            redraw |= cmd.redraw;
+            directives = directives.combine(cmd.directives);
             if let Some(stream) = cmd.stream {
                 streams.push(stream);
             }
@@ -250,7 +300,7 @@ impl<Msg: Send + 'static> Command<Msg> {
         if any_child {
             Self {
                 stream: (!streams.is_empty()).then(|| select_all(streams).boxed()),
-                redraw,
+                directives,
             }
         } else {
             Self::none()
@@ -346,7 +396,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     where
         T: Send + 'static,
     {
-        let redraw = self.redraw;
+        let directives = self.directives;
         let stream = self.stream.map(|stream| {
             stream
                 .map(move |action| match action {
@@ -356,7 +406,7 @@ impl<Msg: Send + 'static> Command<Msg> {
                 .boxed()
         });
 
-        Command { stream, redraw }
+        Command { stream, directives }
     }
 }
 
@@ -368,22 +418,54 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     #[test]
+    fn test_redraw_policy_combine_redraw_wins() {
+        assert_eq!(
+            RedrawPolicy::Skip.combine(RedrawPolicy::Skip),
+            RedrawPolicy::Skip
+        );
+        assert_eq!(
+            RedrawPolicy::Redraw.combine(RedrawPolicy::Skip),
+            RedrawPolicy::Redraw
+        );
+        assert_eq!(
+            RedrawPolicy::Skip.combine(RedrawPolicy::Redraw),
+            RedrawPolicy::Redraw
+        );
+        assert_eq!(
+            RedrawPolicy::Redraw.combine(RedrawPolicy::Redraw),
+            RedrawPolicy::Redraw
+        );
+    }
+
+    #[test]
+    fn test_runtime_directives_combine_folds_redraw_policy() {
+        let redraw = RuntimeDirectives::DEFAULT;
+        let skip = RuntimeDirectives::DEFAULT.without_redraw();
+
+        assert!(redraw.requests_redraw());
+        assert!(!skip.requests_redraw());
+        assert!(redraw.combine(skip).requests_redraw());
+        assert!(skip.combine(redraw).requests_redraw());
+        assert!(!skip.combine(skip).requests_redraw());
+    }
+
+    #[test]
     fn test_redraw_defaults_to_true_for_constructors() {
-        assert!(Command::<i32>::none().redraw);
-        assert!(Command::message(1).redraw);
-        assert!(Command::future(async { 1 }).redraw);
-        assert!(Command::perform(async { 1 }, |value| value).redraw);
-        assert!(Command::<i32>::effect(Action::Quit).redraw);
-        assert!(Command::stream(stream::iter(vec![1])).redraw);
-        assert!(Command::run(stream::iter(vec![1]), |value| value).redraw);
-        assert!(Command::batch(vec![Command::<i32>::none()]).redraw);
-        assert!(Command::<i32>::batch(vec![]).redraw);
+        assert!(Command::<i32>::none().requests_redraw());
+        assert!(Command::message(1).requests_redraw());
+        assert!(Command::future(async { 1 }).requests_redraw());
+        assert!(Command::perform(async { 1 }, |value| value).requests_redraw());
+        assert!(Command::<i32>::effect(Action::Quit).requests_redraw());
+        assert!(Command::stream(stream::iter(vec![1])).requests_redraw());
+        assert!(Command::run(stream::iter(vec![1]), |value| value).requests_redraw());
+        assert!(Command::batch(vec![Command::<i32>::none()]).requests_redraw());
+        assert!(Command::<i32>::batch(vec![]).requests_redraw());
     }
 
     #[test]
     fn test_without_redraw_flips_redraw() {
         let cmd = Command::<i32>::none().without_redraw();
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[test]
@@ -392,13 +474,13 @@ mod tests {
             Command::none().without_redraw(),
             Command::future(async { 1 }),
         ]);
-        assert!(cmd.redraw);
+        assert!(cmd.requests_redraw());
 
         let cmd = Command::batch(vec![
             Command::future(async { 1 }).without_redraw(),
             Command::future(async { 2 }).without_redraw(),
         ]);
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[test]
@@ -406,7 +488,7 @@ mod tests {
         let cmd = Command::batch(vec![Command::<i32>::none().without_redraw()]);
 
         assert!(cmd.is_none());
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[test]
@@ -414,7 +496,7 @@ mod tests {
         let cmd = Command::future(async { 1 })
             .without_redraw()
             .map(|value| value * 2);
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[test]
@@ -424,7 +506,7 @@ mod tests {
             .map(|value| value * 2);
 
         assert!(cmd.is_none());
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[test]
@@ -432,7 +514,7 @@ mod tests {
         let cmd = Command::<i32>::none().without_redraw();
 
         assert!(cmd.is_none());
-        assert!(!cmd.redraw);
+        assert!(!cmd.requests_redraw());
     }
 
     #[tokio::test]
