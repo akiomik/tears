@@ -462,9 +462,9 @@ Breaking (separate scope, motivated but not required by this RFC):
   the public surface closes over `Command` constructors alone. The primary
   motivation is **forward-compatibility, not consistency**: while `Action` is
   public, every new internal directive is a breaking change, so privatizing the
-  stream's item type is what lets the directive set grow (e.g. P3's
-  `cancellable`, flagged in the modifier notes as possibly needing variants
-  beyond `Message | Quit`) without further breaks — so it is best landed
+  stream's item type is what lets the directive set grow (e.g. a future
+  `cancellable` modifier, flagged in the modifier notes as possibly needing
+  variants beyond `Message | Quit`) without further breaks — so it is best landed
   **before** such a directive-adding modifier, not merely "someday." §4's
   framing (`Command` is the directive channel; `Quit` and a redraw policy are
   directives of different shapes) is a secondary argument, and `without_redraw()`
@@ -512,12 +512,12 @@ avoid.
   lifting in with defaults. (iced itself keeps `RedrawRequest` off `Task` for
   exactly this reason.) The `-> Self` call-site uniformity is an ergonomic
   convenience, not a reason to model the two scopes as one type.
-- **`cancellable` stresses the model most (P3).** `.cancellable(id)` is only
+- **`cancellable` stresses the model most.** `.cancellable(id)` is only
   half a modifier: assigning the id is `-> Self`, but *cancelling* a running
   task needs runtime machinery keyed by id (today's `command_tasks` `JoinSet`
   has no id map). It may require **opening the internal directive set beyond
   `Message | Quit`** (a third internal action or a side-channel), which is in
-  tension with the "closed set" claim (§4). P3's RFC should address that
+  tension with the "closed set" claim (§4). Its future RFC should address that
   head-on.
 - **Modifiers are not composition combinators.** `then`/`chain` (iced `Task`)
   sequence effects and are a *separate* category; a future async-composability
@@ -525,7 +525,7 @@ avoid.
   `Task` move concerns async composability, not redraw, so it does not bear on
   this RFC.)
 
-The concrete future modifiers above are **left to their own RFCs (P2/P3/P11);**
+The concrete future modifiers above are **each left to its own RFC;**
 cf. TCA's `.cancellable(id:cancelInFlight:)` and `.animation()` as prior art for
 the two axes. This RFC only records that the modifier form is their agreed home *for now*
 (terminally for Axis B, transitionally for Axis A per the scope note above),
