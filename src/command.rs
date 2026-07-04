@@ -24,10 +24,12 @@
 //! let cmd = Command::perform(load_data(), Message::DataLoaded);
 //! ```
 
-use futures::{
-    FutureExt, Stream, StreamExt,
-    stream::{self, BoxStream, select_all},
-};
+mod effect;
+mod runtime_directives;
+
+use effect::Effect;
+use futures::{FutureExt, Stream, StreamExt, stream::BoxStream};
+use runtime_directives::RuntimeDirectives;
 
 /// An action that can be performed by a command.
 pub enum Action<Msg> {
@@ -36,125 +38,6 @@ pub enum Action<Msg> {
 
     /// Request the application to quit.
     Quit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RedrawPolicy {
-    Redraw,
-    Skip,
-}
-
-impl RedrawPolicy {
-    const fn requests_redraw(self) -> bool {
-        matches!(self, Self::Redraw)
-    }
-
-    const fn combine(self, other: Self) -> Self {
-        if self.requests_redraw() || other.requests_redraw() {
-            Self::Redraw
-        } else {
-            Self::Skip
-        }
-    }
-}
-
-// Runtime directives are owned and composed by `Command`; the runtime only
-// reads the folded result after update processing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RuntimeDirectives {
-    redraw: RedrawPolicy,
-}
-
-impl RuntimeDirectives {
-    const DEFAULT: Self = Self {
-        redraw: RedrawPolicy::Redraw,
-    };
-
-    const fn requests_redraw(self) -> bool {
-        self.redraw.requests_redraw()
-    }
-
-    const fn without_redraw(mut self) -> Self {
-        self.redraw = RedrawPolicy::Skip;
-        self
-    }
-
-    const fn combine(self, other: Self) -> Self {
-        Self {
-            redraw: self.redraw.combine(other.redraw),
-        }
-    }
-}
-
-// Effects own and compose the asynchronous action stream; runtime directives
-// stay separate because they describe how the runtime treats the update result.
-struct Effect<Msg: Send + 'static> {
-    stream: Option<BoxStream<'static, Action<Msg>>>,
-}
-
-impl<Msg: Send + 'static> Effect<Msg> {
-    const fn none() -> Self {
-        Self { stream: None }
-    }
-
-    fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
-        Self {
-            stream: Some(stream),
-        }
-    }
-
-    fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
-        Self::from_stream(future.into_stream().map(Action::Message).boxed())
-    }
-
-    fn action(action: Action<Msg>) -> Self {
-        Self::from_stream(stream::once(async move { action }).boxed())
-    }
-
-    fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
-        Self::from_stream(stream.map(Action::Message).boxed())
-    }
-
-    fn batch(effects: impl IntoIterator<Item = Self>) -> Self {
-        let streams: Vec<_> = effects
-            .into_iter()
-            .filter_map(|effect| effect.stream)
-            .collect();
-
-        if streams.is_empty() {
-            Self::none()
-        } else {
-            Self::from_stream(select_all(streams).boxed())
-        }
-    }
-
-    fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Effect<T>
-    where
-        T: Send + 'static,
-    {
-        let stream = self.stream.map(|stream| {
-            stream
-                .map(move |action| match action {
-                    Action::Message(msg) => Action::Message(f(msg)),
-                    Action::Quit => Action::Quit,
-                })
-                .boxed()
-        });
-
-        Effect { stream }
-    }
-
-    const fn is_none(&self) -> bool {
-        self.stream.is_none()
-    }
-
-    const fn is_some(&self) -> bool {
-        self.stream.is_some()
-    }
-
-    fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
-        self.stream
-    }
 }
 
 /// A command that can be executed to perform side effects and carry runtime
@@ -482,68 +365,6 @@ mod tests {
     use futures::StreamExt;
     use futures::stream;
     use tokio::time::{Duration, sleep};
-
-    #[test]
-    fn test_redraw_policy_combine_redraw_wins() {
-        assert_eq!(
-            RedrawPolicy::Skip.combine(RedrawPolicy::Skip),
-            RedrawPolicy::Skip
-        );
-        assert_eq!(
-            RedrawPolicy::Redraw.combine(RedrawPolicy::Skip),
-            RedrawPolicy::Redraw
-        );
-        assert_eq!(
-            RedrawPolicy::Skip.combine(RedrawPolicy::Redraw),
-            RedrawPolicy::Redraw
-        );
-        assert_eq!(
-            RedrawPolicy::Redraw.combine(RedrawPolicy::Redraw),
-            RedrawPolicy::Redraw
-        );
-    }
-
-    #[test]
-    fn test_runtime_directives_combine_folds_redraw_policy() {
-        let redraw = RuntimeDirectives::DEFAULT;
-        let skip = RuntimeDirectives::DEFAULT.without_redraw();
-
-        assert!(redraw.requests_redraw());
-        assert!(!skip.requests_redraw());
-        assert!(redraw.combine(skip).requests_redraw());
-        assert!(skip.combine(redraw).requests_redraw());
-        assert!(!skip.combine(skip).requests_redraw());
-    }
-
-    #[test]
-    fn test_effect_none_has_no_stream() {
-        let effect = Effect::<i32>::none();
-
-        assert!(effect.is_none());
-        assert!(!effect.is_some());
-        assert!(effect.into_stream().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_effect_batch_combines_streams() {
-        let effect = Effect::batch(vec![Effect::none(), Effect::future(async { 1 })]);
-
-        let mut stream = effect.into_stream().expect("stream should exist");
-        let action = stream.next().await.expect("should have action");
-
-        assert!(matches!(action, Action::Message(1)));
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_effect_map_preserves_quit() {
-        let effect = Effect::<i32>::action(Action::Quit).map(|value| value * 2);
-
-        let mut stream = effect.into_stream().expect("stream should exist");
-        let action = stream.next().await.expect("should have action");
-
-        assert!(matches!(action, Action::Quit));
-    }
 
     #[test]
     fn test_redraw_defaults_to_true_for_constructors() {
