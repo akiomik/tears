@@ -277,11 +277,12 @@ impl<App: Application> Runtime<App> {
     /// that arrived within 100μs. This reduces overhead by batching rapid message sequences
     /// (e.g., keyboard input, rapid timers) while maintaining responsiveness.
     ///
-    /// Always sets `needs_redraw` and `subscriptions_dirty` to true after processing.
+    /// Sets `needs_redraw` if any processed command requests a redraw, and
+    /// always sets `subscriptions_dirty` after processing.
     fn process_message_batch(&mut self, first_msg: App::Message) {
         // Process the first message
         let cmd = self.state.app.update(first_msg);
-        self.state.enqueue_command(cmd);
+        self.dispatch_update_command(cmd);
         let mut processed = 1usize;
 
         // Micro-batching: process additional messages that arrived during a short window
@@ -290,7 +291,7 @@ impl<App: Application> Runtime<App> {
             match self.state.msg_rx.try_recv() {
                 Ok(msg) => {
                     let cmd = self.state.app.update(msg);
-                    self.state.enqueue_command(cmd);
+                    self.dispatch_update_command(cmd);
                     processed += 1;
                 }
                 Err(_) => break, // No more messages available
@@ -299,9 +300,13 @@ impl<App: Application> Runtime<App> {
 
         tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
 
-        // Mark that a redraw is needed and that subscriptions may have changed
-        self.needs_redraw = true;
+        // Mark that subscriptions may have changed even when redraw is suppressed.
         self.subscriptions_dirty = true;
+    }
+
+    fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
+        self.needs_redraw |= cmd.redraw;
+        self.state.enqueue_command(cmd);
     }
 
     /// Whether the frame tick has pending work (a redraw or a subscription
@@ -677,6 +682,36 @@ mod tests {
         }
     }
 
+    struct RedrawControlApp;
+
+    #[derive(Debug, Clone)]
+    enum RedrawControlMessage {
+        Redraw,
+        Suppress,
+    }
+
+    impl Application for RedrawControlApp {
+        type Message = RedrawControlMessage;
+        type Flags = ();
+
+        fn new((): ()) -> (Self, Command<Self::Message>) {
+            (Self, Command::none())
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            match msg {
+                RedrawControlMessage::Redraw => Command::none(),
+                RedrawControlMessage::Suppress => Command::none().without_redraw(),
+            }
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
     #[test]
     fn test_runtime_new() {
         let runtime = ApplicationState::<TestApp>::new(42);
@@ -985,6 +1020,49 @@ mod tests {
 
         // Redraw should be needed
         assert!(runtime.needs_redraw);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_batch_without_redraw_leaves_redraw_unchanged() {
+        let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
+        runtime.needs_redraw = false;
+        runtime.subscriptions_dirty = false;
+
+        runtime.process_message_batch(RedrawControlMessage::Suppress);
+
+        assert!(!runtime.needs_redraw);
+        assert!(
+            runtime.subscriptions_dirty,
+            "redraw suppression must not suppress subscription re-evaluation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_message_batch_mixed_commands_redraws() {
+        let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
+        runtime.needs_redraw = false;
+        runtime.subscriptions_dirty = false;
+
+        let _ = runtime.state.msg_tx.send(RedrawControlMessage::Redraw);
+        runtime.process_message_batch(RedrawControlMessage::Suppress);
+
+        assert!(runtime.needs_redraw);
+        assert!(runtime.subscriptions_dirty);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_batch_redraw_recovers_after_suppression() {
+        let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
+        runtime.needs_redraw = false;
+
+        runtime.process_message_batch(RedrawControlMessage::Suppress);
+        assert!(!runtime.needs_redraw);
+
+        runtime.subscriptions_dirty = false;
+        runtime.process_message_batch(RedrawControlMessage::Redraw);
+
+        assert!(runtime.needs_redraw);
+        assert!(runtime.subscriptions_dirty);
     }
 
     // A minimal `tracing::Subscriber` that counts emitted events (total, and

@@ -7,7 +7,7 @@
 //! # What's included
 //!
 //! - [`Application`] - The main application trait
-//! - [`Command`] - For performing side effects
+//! - [`Command`] - For side effects and runtime directives
 //! - [`Action`] - Actions that commands can perform
 //! - [`Subscription`] - For handling event sources
 //! - [`Runtime`] - The runtime for running applications
