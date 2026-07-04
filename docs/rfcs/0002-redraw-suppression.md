@@ -1,6 +1,6 @@
 # RFC 0002: Redraw Suppression (message / redraw separation)
 
-- Status: Approved
+- Status: Implemented
 - Target: additive, non-breaking (next minor)
 - Scope: an opt-out API for an `update` to declare "this message does not need a redraw"
 - Feature flag: none (core runtime)

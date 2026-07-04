@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Command::without_redraw()` for updates that handled a message without
+  changing the visible view
+  - The default behavior is unchanged: commands still request redraws unless
+    explicitly opted out
+  - Redraw suppression does not suppress subscription re-evaluation
+
 ### Changed
 
 - Consolidated quit detection into the event loop's dedicated quit branch

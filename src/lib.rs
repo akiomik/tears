@@ -13,13 +13,13 @@
 //! 3. **Update**: Function that processes messages and updates the model
 //! 4. **View**: Function that renders the UI based on the current model
 //! 5. **Subscriptions**: External event sources (keyboard, timers, etc.)
-//! 6. **Commands**: Asynchronous operations that produce messages
+//! 6. **Commands**: Asynchronous operations and runtime directives
 //!
 //! ## Core Components
 //!
 //! - [`application::Application`]: The main trait that defines your application
 //! - [`runtime::Runtime`]: Manages the application lifecycle and event loop
-//! - [`command::Command`]: Represents asynchronous side effects
+//! - [`command::Command`]: Represents asynchronous side effects and runtime directives
 //! - [`subscription::Subscription`]: Represents ongoing event sources
 //! - [`install_panic_hook`]: Restores the terminal if the application panics
 //!

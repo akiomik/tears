@@ -1,8 +1,10 @@
-//! Commands for performing asynchronous side effects.
+//! Commands for performing asynchronous side effects and returning runtime
+//! directives.
 //!
-//! Commands represent asynchronous operations that produce messages or actions.
-//! They are the primary way to perform side effects in the Elm Architecture,
-//! such as HTTP requests, file I/O, or any other async operation.
+//! Commands represent asynchronous operations that produce messages or actions,
+//! plus attributes that tell the runtime how to handle the update that returned
+//! them. They are the primary way to perform side effects in the Elm
+//! Architecture, such as HTTP requests, file I/O, or any other async operation.
 //!
 //! # Examples
 //!
@@ -36,10 +38,13 @@ pub enum Action<Msg> {
     Quit,
 }
 
-/// A command that can be executed to perform side effects.
+/// A command that can be executed to perform side effects and carry runtime
+/// directives.
 ///
 /// Commands represent asynchronous operations that produce messages,
-/// such as HTTP requests, file I/O, or background computations.
+/// such as HTTP requests, file I/O, or background computations. They may also
+/// carry runtime attributes, such as [`Command::without_redraw`], independently
+/// of whether they have a side-effect stream.
 ///
 /// # Examples
 ///
@@ -50,13 +55,27 @@ pub enum Action<Msg> {
 ///
 /// let cmd = Command::perform(async { 42 }, Message::GotResult);
 /// ```
-#[must_use = "Commands represent side effects in the Elm Architecture and must be handled by the runtime. Ignoring a command means the intended side effect will not occur."]
+#[must_use = "Commands represent side effects and runtime directives in the Elm Architecture and must be handled by the runtime."]
 pub struct Command<Msg: Send + 'static> {
     pub(super) stream: Option<BoxStream<'static, Action<Msg>>>,
+    pub(super) redraw: bool,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
-    /// Create a command that does nothing.
+    const DEFAULT_REDRAW: bool = true;
+
+    fn with_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
+        Self {
+            stream: Some(stream),
+            redraw: Self::DEFAULT_REDRAW,
+        }
+    }
+
+    /// Create a command with no side-effect stream.
+    ///
+    /// A stream-less command may still carry runtime attributes after applying
+    /// modifiers such as [`Command::without_redraw`], so it should not be
+    /// treated as having no effect on runtime behavior.
     ///
     /// # Examples
     ///
@@ -66,10 +85,17 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd: Command<i32> = Command::none();
     /// ```
     pub const fn none() -> Self {
-        Self { stream: None }
+        Self {
+            stream: None,
+            redraw: Self::DEFAULT_REDRAW,
+        }
     }
 
-    /// Returns `true` if the command does nothing (is `none`).
+    /// Returns `true` if the command has no side-effect stream.
+    ///
+    /// This only reflects whether the runtime has a stream to spawn. A command
+    /// with no stream may still carry runtime attributes such as
+    /// [`Command::without_redraw`].
     ///
     /// # Examples
     ///
@@ -87,7 +113,10 @@ impl<Msg: Send + 'static> Command<Msg> {
         self.stream.is_none()
     }
 
-    /// Returns `true` if the command will perform some action.
+    /// Returns `true` if the command has a side-effect stream.
+    ///
+    /// This is the inverse of [`Command::is_none`] and does not inspect runtime
+    /// attributes such as [`Command::without_redraw`].
     ///
     /// # Examples
     ///
@@ -103,6 +132,19 @@ impl<Msg: Send + 'static> Command<Msg> {
     #[must_use]
     pub fn is_some(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// Declare that the update returning this command did not change the
+    /// visible view, so the runtime may skip the redraw it would otherwise
+    /// perform.
+    ///
+    /// Side effects still run. This is an optimization hint rather than a
+    /// guarantee: the runtime may still redraw for other reasons, such as an
+    /// initial frame or another message in the same batch.
+    #[must_use = "without_redraw returns a modified command and does not mutate in place"]
+    pub const fn without_redraw(mut self) -> Self {
+        self.redraw = false;
+        self
     }
 
     /// Perform an asynchronous operation and convert its result to a message.
@@ -135,9 +177,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::future(async { 42 });
     /// ```
     pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
-        Self {
-            stream: Some(future.into_stream().map(Action::Message).boxed()),
-        }
+        Self::with_stream(future.into_stream().map(Action::Message).boxed())
     }
 
     /// Send a message to the application immediately.
@@ -171,14 +211,16 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
     pub fn effect(action: Action<Msg>) -> Self {
-        Self {
-            stream: Some(stream::once(async move { action }).boxed()),
-        }
+        Self::with_stream(stream::once(async move { action }).boxed())
     }
 
     /// Batch multiple commands into a single command.
     ///
-    /// All commands execute concurrently. `Command::none()` is filtered out.
+    /// All command streams execute concurrently. Commands with no side-effect
+    /// stream do not contribute work to spawn, but their runtime attributes are
+    /// still folded into the combined command. The combined command redraws if
+    /// any child command redraws; only an empty input uses the default redraw
+    /// behavior.
     ///
     /// # Examples
     ///
@@ -193,14 +235,25 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// ]);
     /// ```
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
-        let streams: Vec<_> = commands.into_iter().filter_map(|cmd| cmd.stream).collect();
+        let mut redraw = false;
+        let mut any_child = false;
+        let mut streams = Vec::new();
 
-        if streams.is_empty() {
-            Self::none()
-        } else {
-            Self {
-                stream: Some(select_all(streams).boxed()),
+        for cmd in commands {
+            any_child = true;
+            redraw |= cmd.redraw;
+            if let Some(stream) = cmd.stream {
+                streams.push(stream);
             }
+        }
+
+        if any_child {
+            Self {
+                stream: (!streams.is_empty()).then(|| select_all(streams).boxed()),
+                redraw,
+            }
+        } else {
+            Self::none()
         }
     }
 
@@ -216,9 +269,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::stream(messages);
     /// ```
     pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
-        Self {
-            stream: Some(stream.map(Action::Message).boxed()),
-        }
+        Self::with_stream(stream.map(Action::Message).boxed())
     }
 
     /// Run a stream and convert each item to a message.
@@ -295,15 +346,17 @@ impl<Msg: Send + 'static> Command<Msg> {
     where
         T: Send + 'static,
     {
-        self.stream.map_or_else(Command::none, |stream| {
-            let mapped = stream.map(move |action| match action {
-                Action::Message(msg) => Action::Message(f(msg)),
-                Action::Quit => Action::Quit,
-            });
-            Command {
-                stream: Some(mapped.boxed()),
-            }
-        })
+        let redraw = self.redraw;
+        let stream = self.stream.map(|stream| {
+            stream
+                .map(move |action| match action {
+                    Action::Message(msg) => Action::Message(f(msg)),
+                    Action::Quit => Action::Quit,
+                })
+                .boxed()
+        });
+
+        Command { stream, redraw }
     }
 }
 
@@ -313,6 +366,74 @@ mod tests {
     use futures::StreamExt;
     use futures::stream;
     use tokio::time::{Duration, sleep};
+
+    #[test]
+    fn test_redraw_defaults_to_true_for_constructors() {
+        assert!(Command::<i32>::none().redraw);
+        assert!(Command::message(1).redraw);
+        assert!(Command::future(async { 1 }).redraw);
+        assert!(Command::perform(async { 1 }, |value| value).redraw);
+        assert!(Command::<i32>::effect(Action::Quit).redraw);
+        assert!(Command::stream(stream::iter(vec![1])).redraw);
+        assert!(Command::run(stream::iter(vec![1]), |value| value).redraw);
+        assert!(Command::batch(vec![Command::<i32>::none()]).redraw);
+        assert!(Command::<i32>::batch(vec![]).redraw);
+    }
+
+    #[test]
+    fn test_without_redraw_flips_redraw() {
+        let cmd = Command::<i32>::none().without_redraw();
+        assert!(!cmd.redraw);
+    }
+
+    #[test]
+    fn test_batch_redraw_is_or_over_children() {
+        let cmd = Command::batch(vec![
+            Command::none().without_redraw(),
+            Command::future(async { 1 }),
+        ]);
+        assert!(cmd.redraw);
+
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::future(async { 2 }).without_redraw(),
+        ]);
+        assert!(!cmd.redraw);
+    }
+
+    #[test]
+    fn test_batch_all_opted_out_streamless_children_stays_opted_out() {
+        let cmd = Command::batch(vec![Command::<i32>::none().without_redraw()]);
+
+        assert!(cmd.is_none());
+        assert!(!cmd.redraw);
+    }
+
+    #[test]
+    fn test_map_preserves_redraw_for_stream_command() {
+        let cmd = Command::future(async { 1 })
+            .without_redraw()
+            .map(|value| value * 2);
+        assert!(!cmd.redraw);
+    }
+
+    #[test]
+    fn test_map_preserves_redraw_for_streamless_command() {
+        let cmd = Command::<i32>::none()
+            .without_redraw()
+            .map(|value| value * 2);
+
+        assert!(cmd.is_none());
+        assert!(!cmd.redraw);
+    }
+
+    #[test]
+    fn test_is_none_is_independent_of_redraw() {
+        let cmd = Command::<i32>::none().without_redraw();
+
+        assert!(cmd.is_none());
+        assert!(!cmd.redraw);
+    }
 
     #[tokio::test]
     async fn test_batch_empty() {
