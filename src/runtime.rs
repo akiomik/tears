@@ -538,7 +538,7 @@ impl<App: Application> ApplicationState<App> {
     ///
     /// Send failures are silently ignored as they only occur during application shutdown.
     fn enqueue_command(&mut self, cmd: Command<App::Message>) {
-        if let Some(stream) = cmd.stream {
+        if let Some(stream) = cmd.into_stream() {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
 
