@@ -305,7 +305,7 @@ impl<App: Application> Runtime<App> {
     }
 
     fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
-        self.needs_redraw |= cmd.redraw;
+        self.needs_redraw |= cmd.requests_redraw();
         self.state.enqueue_command(cmd);
     }
 
@@ -687,7 +687,7 @@ mod tests {
     #[derive(Debug, Clone)]
     enum RedrawControlMessage {
         Redraw,
-        Suppress,
+        Skip,
     }
 
     impl Application for RedrawControlApp {
@@ -701,7 +701,7 @@ mod tests {
         fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
             match msg {
                 RedrawControlMessage::Redraw => Command::none(),
-                RedrawControlMessage::Suppress => Command::none().without_redraw(),
+                RedrawControlMessage::Skip => Command::none().without_redraw(),
             }
         }
 
@@ -1028,7 +1028,7 @@ mod tests {
         runtime.needs_redraw = false;
         runtime.subscriptions_dirty = false;
 
-        runtime.process_message_batch(RedrawControlMessage::Suppress);
+        runtime.process_message_batch(RedrawControlMessage::Skip);
 
         assert!(!runtime.needs_redraw);
         assert!(
@@ -1044,7 +1044,7 @@ mod tests {
         runtime.subscriptions_dirty = false;
 
         let _ = runtime.state.msg_tx.send(RedrawControlMessage::Redraw);
-        runtime.process_message_batch(RedrawControlMessage::Suppress);
+        runtime.process_message_batch(RedrawControlMessage::Skip);
 
         assert!(runtime.needs_redraw);
         assert!(runtime.subscriptions_dirty);
@@ -1055,7 +1055,7 @@ mod tests {
         let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
         runtime.needs_redraw = false;
 
-        runtime.process_message_batch(RedrawControlMessage::Suppress);
+        runtime.process_message_batch(RedrawControlMessage::Skip);
         assert!(!runtime.needs_redraw);
 
         runtime.subscriptions_dirty = false;
