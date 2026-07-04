@@ -457,14 +457,20 @@ Breaking (separate scope, motivated but not required by this RFC):
 
 - **Unify the public directive vocabulary on `Command`.** Abolish the public
   `Action` type and replace `Command::effect(Action::Quit)` with
-  `Command::quit()`, keeping the stream's item type private. This RFC's framing
-  (§4 — `Command` is the runtime-directive channel; `Quit` and a redraw policy
-  are directives of different shapes) is the argument *for* that cleanup, but
-  `without_redraw()` is additive on its own and does not depend on it. Because
-  the project is pre-1.0 with few users, the migration (a mechanical
-  `Command::effect(Action::Quit)` → `Command::quit()` rewrite, with no loss of
-  expressiveness — there is no asynchronous `Quit` path today) is cheap and
-  better done as its own change.
+  `Command::quit()`, keeping the stream's item type private. `Action::Message`
+  is already redundant with `Command::message()`, so `effect` goes with it and
+  the public surface closes over `Command` constructors alone. The primary
+  motivation is **forward-compatibility, not consistency**: while `Action` is
+  public, every new internal directive is a breaking change, so privatizing the
+  stream's item type is what lets the directive set grow (e.g. P3's
+  `cancellable`, flagged in the modifier notes as possibly needing variants
+  beyond `Message | Quit`) without further breaks — so it is best landed
+  **before** such a directive-adding modifier, not merely "someday." §4's
+  framing (`Command` is the directive channel; `Quit` and a redraw policy are
+  directives of different shapes) is a secondary argument, and `without_redraw()`
+  is additive and independent of this. Migration is cheap and mechanical:
+  pre-1.0, few users, no loss of expressiveness (there is no asynchronous `Quit`
+  path today).
 
 ### The modifier form as a deliberate extension point
 
@@ -493,6 +499,19 @@ avoid.
   fields which must be threaded explicitly. **Caution:** do not read "attribute
   set" as "make everything a field" — field-ifying Axis B silently breaks
   `batch`.
+- **The A/B split is deeper than representation; it is *scope*.** Axis B is an
+  attribute of a specific async effect — it travels with that effect and
+  composes (`batch`/`chain`/`map`), which is why it lives in the stream. Axis A
+  is a directive about the *whole update's outcome*: a per-child `without_redraw`
+  has no independent meaning (effects do not redraw, updates do), so `batch`
+  *folds* it to one update-level decision rather than composing it. So the
+  modifier form is Axis B's likely **terminal** home but only Axis A's
+  **transitional** one: if `Command` is ever redesigned into an iced-style
+  composable `Task`, Axis A directives belong not on `Task` but on `update`'s
+  return type — a product of `(effect, outcome directives)`, a bare `Task`
+  lifting in with defaults. (iced itself keeps `RedrawRequest` off `Task` for
+  exactly this reason.) The `-> Self` call-site uniformity is an ergonomic
+  convenience, not a reason to model the two scopes as one type.
 - **`cancellable` stresses the model most (P3).** `.cancellable(id)` is only
   half a modifier: assigning the id is `-> Self`, but *cancelling* a running
   task needs runtime machinery keyed by id (today's `command_tasks` `JoinSet`
@@ -508,7 +527,8 @@ avoid.
 
 The concrete future modifiers above are **left to their own RFCs (P2/P3/P11);**
 cf. TCA's `.cancellable(id:cancelInFlight:)` and `.animation()` as prior art for
-the two axes. This RFC only records that the modifier form is their agreed home,
+the two axes. This RFC only records that the modifier form is their agreed home *for now*
+(terminally for Axis B, transitionally for Axis A per the scope note above),
 notes the A/B representation split so a `timeout` implementer does not field-ify
 and break `batch`, and adds `without_redraw()`; it does not design them.
 
