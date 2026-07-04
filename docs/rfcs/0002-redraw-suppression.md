@@ -230,6 +230,26 @@ to keep the API predictable ("Simple & Predictable"):
 - A dedicated no-side-effect constructor (e.g. `Command::quiet()`) was rejected:
   it does not compose with `perform`/`message`, so it would force a second
   mechanism for the "effect + no redraw" case, against the minimal-API goal.
+- A parameterized **`with_redraw(bool)`** was rejected as a *dominated middle
+  option*. Because the default is `true`, `with_redraw(true)` is a no-op, so the
+  argument only ever meaningfully takes `false` — a single-valued bool parameter,
+  which is the signal to make it a niladic method, and `with_redraw(false)` reads
+  as boolean-blind at the call site (`false` carries no clue what is toggled).
+  Its one genuine advantage over `without_redraw()` is the *dynamic* case, where
+  the policy is computed from state (e.g. an off-screen relay event whose
+  redraw depends on whether it targets the active tab): `cmd.with_redraw(cond)`
+  avoids a call-site `if`. But for that case a clearer-polarity `redraw_if(cond)`
+  beats `with_redraw(cond)` (the `if` marks the bool as a *condition*, not a
+  config value), while `redraw_if(false)` is silly for the static case that
+  dominates here (Tick-style unconditional suppression, §1.1). So `with_redraw`
+  loses on both ends: `without_redraw()` is clearer for the static majority and
+  `redraw_if()` would be clearer for the dynamic minority. `without_redraw()` is
+  also the coherent opt-out vocabulary shared with the future
+  `without_subscription_update()` (§9). Should the dynamic case prove common in
+  practice, `redraw_if(bool)` can be **added additively** later (the `redraw`
+  field is private and `without_redraw()` is a consuming builder, so a
+  parameterized sibling is non-breaking) — there is no need to trade the clearer
+  static form for it now.
 
 Once a redraw attribute exists, a `Command` is no longer *only* a side-effect
 stream: `Command::none().without_redraw()` has no stream yet still carries a
