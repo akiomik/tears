@@ -86,6 +86,77 @@ impl RuntimeDirectives {
     }
 }
 
+// Effects own and compose the asynchronous action stream; runtime directives
+// stay separate because they describe how the runtime treats the update result.
+struct Effect<Msg: Send + 'static> {
+    stream: Option<BoxStream<'static, Action<Msg>>>,
+}
+
+impl<Msg: Send + 'static> Effect<Msg> {
+    const fn none() -> Self {
+        Self { stream: None }
+    }
+
+    fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
+        Self {
+            stream: Some(stream),
+        }
+    }
+
+    fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
+        Self::from_stream(future.into_stream().map(Action::Message).boxed())
+    }
+
+    fn action(action: Action<Msg>) -> Self {
+        Self::from_stream(stream::once(async move { action }).boxed())
+    }
+
+    fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
+        Self::from_stream(stream.map(Action::Message).boxed())
+    }
+
+    fn batch(effects: impl IntoIterator<Item = Self>) -> Self {
+        let streams: Vec<_> = effects
+            .into_iter()
+            .filter_map(|effect| effect.stream)
+            .collect();
+
+        if streams.is_empty() {
+            Self::none()
+        } else {
+            Self::from_stream(select_all(streams).boxed())
+        }
+    }
+
+    fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Effect<T>
+    where
+        T: Send + 'static,
+    {
+        let stream = self.stream.map(|stream| {
+            stream
+                .map(move |action| match action {
+                    Action::Message(msg) => Action::Message(f(msg)),
+                    Action::Quit => Action::Quit,
+                })
+                .boxed()
+        });
+
+        Effect { stream }
+    }
+
+    const fn is_none(&self) -> bool {
+        self.stream.is_none()
+    }
+
+    const fn is_some(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
+        self.stream
+    }
+}
+
 /// A command that can be executed to perform side effects and carry runtime
 /// directives.
 ///
@@ -105,14 +176,14 @@ impl RuntimeDirectives {
 /// ```
 #[must_use = "Commands represent side effects and runtime directives in the Elm Architecture and must be handled by the runtime."]
 pub struct Command<Msg: Send + 'static> {
-    pub(super) stream: Option<BoxStream<'static, Action<Msg>>>,
+    effect: Effect<Msg>,
     directives: RuntimeDirectives,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
-    fn with_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
+    const fn with_effect(effect: Effect<Msg>) -> Self {
         Self {
-            stream: Some(stream),
+            effect,
             directives: RuntimeDirectives::DEFAULT,
         }
     }
@@ -132,7 +203,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// ```
     pub const fn none() -> Self {
         Self {
-            stream: None,
+            effect: Effect::none(),
             directives: RuntimeDirectives::DEFAULT,
         }
     }
@@ -155,8 +226,8 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// assert!(!cmd.is_none());
     /// ```
     #[must_use]
-    pub fn is_none(&self) -> bool {
-        self.stream.is_none()
+    pub const fn is_none(&self) -> bool {
+        self.effect.is_none()
     }
 
     /// Returns `true` if the command has a side-effect stream.
@@ -176,12 +247,16 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// assert!(!cmd.is_some());
     /// ```
     #[must_use]
-    pub fn is_some(&self) -> bool {
-        self.stream.is_some()
+    pub const fn is_some(&self) -> bool {
+        self.effect.is_some()
     }
 
     pub(super) const fn requests_redraw(&self) -> bool {
         self.directives.requests_redraw()
+    }
+
+    pub(super) fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
+        self.effect.into_stream()
     }
 
     /// Declare that the update returning this command did not change the
@@ -227,7 +302,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::future(async { 42 });
     /// ```
     pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
-        Self::with_stream(future.into_stream().map(Action::Message).boxed())
+        Self::with_effect(Effect::future(future))
     }
 
     /// Send a message to the application immediately.
@@ -261,7 +336,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::effect(Action::Message(42));
     /// ```
     pub fn effect(action: Action<Msg>) -> Self {
-        Self::with_stream(stream::once(async move { action }).boxed())
+        Self::with_effect(Effect::action(action))
     }
 
     /// Batch multiple commands into a single command.
@@ -287,19 +362,17 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
         let mut directives = RuntimeDirectives::DEFAULT.without_redraw();
         let mut any_child = false;
-        let mut streams = Vec::new();
+        let mut effects = Vec::new();
 
         for cmd in commands {
             any_child = true;
             directives = directives.combine(cmd.directives);
-            if let Some(stream) = cmd.stream {
-                streams.push(stream);
-            }
+            effects.push(cmd.effect);
         }
 
         if any_child {
             Self {
-                stream: (!streams.is_empty()).then(|| select_all(streams).boxed()),
+                effect: Effect::batch(effects),
                 directives,
             }
         } else {
@@ -319,7 +392,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::stream(messages);
     /// ```
     pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
-        Self::with_stream(stream.map(Action::Message).boxed())
+        Self::with_effect(Effect::stream(stream))
     }
 
     /// Run a stream and convert each item to a message.
@@ -397,16 +470,9 @@ impl<Msg: Send + 'static> Command<Msg> {
         T: Send + 'static,
     {
         let directives = self.directives;
-        let stream = self.stream.map(|stream| {
-            stream
-                .map(move |action| match action {
-                    Action::Message(msg) => Action::Message(f(msg)),
-                    Action::Quit => Action::Quit,
-                })
-                .boxed()
-        });
+        let effect = self.effect.map(f);
 
-        Command { stream, directives }
+        Command { effect, directives }
     }
 }
 
@@ -447,6 +513,36 @@ mod tests {
         assert!(redraw.combine(skip).requests_redraw());
         assert!(skip.combine(redraw).requests_redraw());
         assert!(!skip.combine(skip).requests_redraw());
+    }
+
+    #[test]
+    fn test_effect_none_has_no_stream() {
+        let effect = Effect::<i32>::none();
+
+        assert!(effect.is_none());
+        assert!(!effect.is_some());
+        assert!(effect.into_stream().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_effect_batch_combines_streams() {
+        let effect = Effect::batch(vec![Effect::none(), Effect::future(async { 1 })]);
+
+        let mut stream = effect.into_stream().expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(1)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_effect_map_preserves_quit() {
+        let effect = Effect::<i32>::action(Action::Quit).map(|value| value * 2);
+
+        let mut stream = effect.into_stream().expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Quit));
     }
 
     #[test]
@@ -528,7 +624,7 @@ mod tests {
         let cmd1 = Command::future(async { 1 });
         let cmd = Command::batch(vec![cmd1]);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 1));
@@ -542,7 +638,7 @@ mod tests {
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -565,7 +661,7 @@ mod tests {
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -597,7 +693,7 @@ mod tests {
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut has_quit = false;
         let mut messages = vec![];
 
@@ -620,7 +716,7 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::stream(input_stream);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -638,7 +734,7 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::run(input_stream, |x| x * 2);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -661,7 +757,7 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::run(input_stream, |x| Message::Number(x * 10));
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -686,7 +782,7 @@ mod tests {
         let input_stream = stream::iter(Vec::<i32>::new());
         let cmd = Command::run(input_stream, |x| x * 2);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let result = stream.next().await;
 
         assert!(result.is_none(), "empty stream should produce no messages");
@@ -702,7 +798,7 @@ mod tests {
     async fn test_future() {
         let cmd = Command::future(async { 42 });
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -720,7 +816,7 @@ mod tests {
 
         let cmd = Command::perform(fetch_value(), |x| x * 2);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 84));
@@ -738,7 +834,7 @@ mod tests {
             Err(e) => format!("Error: {e}"),
         });
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "Got: success"));
@@ -748,7 +844,7 @@ mod tests {
     async fn test_message() {
         let cmd = Command::message(42);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -761,7 +857,7 @@ mod tests {
     async fn test_message_with_string() {
         let cmd = Command::message("hello".to_string());
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "hello"));
@@ -771,7 +867,7 @@ mod tests {
     async fn test_effect_with_message() {
         let cmd = Command::effect(Action::Message(100));
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 100));
@@ -781,7 +877,7 @@ mod tests {
     async fn test_effect_with_quit() {
         let cmd: Command<i32> = Command::effect(Action::Quit);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Quit));
@@ -792,7 +888,7 @@ mod tests {
         let input_stream = stream::iter(Vec::<i32>::new());
         let cmd = Command::stream(input_stream);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         assert!(stream.next().await.is_none());
     }
 
@@ -809,7 +905,7 @@ mod tests {
 
         let final_batch = Command::batch(vec![batch1, batch2]);
 
-        let mut stream = final_batch.stream.expect("stream should exist");
+        let mut stream = final_batch.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -830,7 +926,7 @@ mod tests {
             "delayed".to_string()
         });
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "delayed"));
@@ -850,7 +946,7 @@ mod tests {
         // Test success case
         let cmd = Command::perform(may_fail(false), |result| result.unwrap_or(-1));
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -858,7 +954,7 @@ mod tests {
         // Test error case
         let cmd = Command::perform(may_fail(true), |result| result.unwrap_or(-1));
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == -1));
@@ -882,7 +978,7 @@ mod tests {
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
-        let mut stream = cmd.stream.expect("stream should exist");
+        let mut stream = cmd.into_stream().expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -903,7 +999,7 @@ mod tests {
         let cmd = Command::future(async { 42 });
         let mapped = cmd.map(|x| x * 2);
 
-        let mut stream = mapped.stream.expect("stream should exist");
+        let mut stream = mapped.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 84));
@@ -919,7 +1015,7 @@ mod tests {
         let cmd: Command<i32> = Command::future(async { 42 });
         let mapped = cmd.map(Message::Number);
 
-        let mut stream = mapped.stream.expect("stream should exist");
+        let mut stream = mapped.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(Message::Number(42))));
@@ -941,7 +1037,7 @@ mod tests {
             Err(e) => Message::Error(e),
         });
 
-        let mut stream = mapped.stream.expect("stream should exist");
+        let mut stream = mapped.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(Message::Success(ref s)) if s == "data"));
@@ -960,7 +1056,7 @@ mod tests {
         let cmd: Command<i32> = Command::effect(Action::Quit);
         let mapped = cmd.map(|x| x * 2);
 
-        let mut stream = mapped.stream.expect("stream should exist");
+        let mut stream = mapped.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Quit));

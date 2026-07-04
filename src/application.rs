@@ -318,7 +318,7 @@ mod tests {
         assert!(cmd.is_some());
 
         // Verify the command produces the expected message
-        if let Some(mut stream) = cmd.stream {
+        if let Some(mut stream) = cmd.into_stream() {
             if let Some(action) = stream.next().await {
                 assert!(matches!(action, Action::Message(msg) if msg == "initialized"));
             }
