@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::{
     FutureExt, Stream, StreamExt,
@@ -114,7 +114,13 @@ impl<Msg: Send + 'static> Effect<Msg> {
                     .map(|leaf| {
                         let f = Arc::clone(&f);
                         map_leaf(leaf, move |msg| {
-                            let guard = f.lock().expect("map closure mutex poisoned");
+                            // The mutex only lends `Sync` to the shared `Fn`; it
+                            // guards no mutable state, so a poisoned lock carries
+                            // no corrupted invariant. Recover the guard rather
+                            // than panicking, which would otherwise turn one
+                            // leaf's panic into a misleading "mutex poisoned"
+                            // cascade across its sibling leaves.
+                            let guard = f.lock().unwrap_or_else(PoisonError::into_inner);
                             (*guard)(msg)
                         })
                     })
