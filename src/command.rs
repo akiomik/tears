@@ -1006,6 +1006,44 @@ mod tests {
         assert_eq!(cmd.effect.leaf_count(), 3);
     }
 
+    // `map` promises to accept any `Fn + Send` mapper without also requiring
+    // `Sync`. On the multi-leaf batch path the mapper is shared across leaves,
+    // and it is `Arc<Mutex<F>>` (not `Arc<F>`, which would demand `F: Sync`)
+    // that upholds that contract. This test pins the contract down: a mapper
+    // that is `Send` but not `Sync` (it captures a `Cell`) must still compile
+    // and run through a batched `map`, so a regression to `Arc<F>` fails to
+    // build.
+    #[tokio::test]
+    async fn test_batch_map_accepts_send_non_sync_mapper() {
+        use std::cell::Cell;
+
+        fn assert_send<F: Send>(_: &F) {}
+
+        // `Cell<i32>` is `Send` but not `Sync`, so this closure is too.
+        let offset = Cell::new(10);
+        let mapper = move |value: i32| value + offset.get();
+        assert_send(&mapper);
+
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+        ])
+        .map(mapper);
+        assert_eq!(cmd.effect.leaf_count(), 2);
+
+        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut results = vec![];
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        results.sort_unstable();
+        assert_eq!(results, vec![11, 12]);
+    }
+
     // Directives (`without_redraw`) travel a path independent of the effect
     // leaves, so exercise the redraw flag across the matrix of effect presence
     // and `map` application to pin the two concerns apart.
