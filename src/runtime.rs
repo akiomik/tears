@@ -96,7 +96,7 @@ use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     application::Application,
-    command::{Action, Command},
+    command::{Action, Command, RuntimeCommandParts},
     frame_rate::{FrameRate, FrameRateError},
     subscription::SubscriptionManager,
 };
@@ -321,8 +321,9 @@ impl<App: Application> Runtime<App> {
     }
 
     fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
-        self.needs_redraw |= cmd.requests_redraw();
-        self.state.enqueue_command(cmd);
+        let parts = cmd.into_runtime_parts();
+        self.needs_redraw |= parts.requests_redraw();
+        self.state.enqueue_command(parts);
     }
 
     /// Whether the frame tick has pending work (a redraw or a subscription
@@ -538,24 +539,25 @@ impl<App: Application> ApplicationState<App> {
         };
 
         // Enqueue the initial command
-        runtime.enqueue_command(init_cmd);
+        runtime.enqueue_command(init_cmd.into_runtime_parts());
 
         runtime
     }
 
-    /// Enqueues a command for asynchronous execution.
+    /// Enqueues decomposed command parts for asynchronous execution.
     ///
-    /// Spawns a tokio task that executes the command's action stream. Messages are sent
-    /// to the message channel, and quit signals are sent to the quit channel. The task
-    /// terminates when the stream completes or a quit action is received.
+    /// Spawns a tokio task that executes the command's action stream, if one exists.
+    /// Messages are sent to the message channel, and quit signals are sent to the quit
+    /// channel. The task terminates when the stream completes or a quit action is
+    /// received.
     ///
     /// The task is tracked in [`command_tasks`](Self::command_tasks) so it can be aborted
     /// on shutdown (or when the runtime is dropped). If the command's stream panics, the
     /// panic is caught and logged rather than silently lost.
     ///
     /// Send failures are silently ignored as they only occur during application shutdown.
-    fn enqueue_command(&mut self, cmd: Command<App::Message>) {
-        if let Some(stream) = cmd.into_stream() {
+    fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
+        if let Some(stream) = parts.into_stream() {
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
 
@@ -794,7 +796,7 @@ mod tests {
         let mut runtime = ApplicationState::<TestApp>::new(0);
 
         // Enqueue a none command (should not panic)
-        runtime.enqueue_command(Command::none());
+        runtime.enqueue_command(Command::none().into_runtime_parts());
     }
 
     #[tokio::test]
@@ -803,7 +805,7 @@ mod tests {
 
         // Enqueue a command that sends a message
         let cmd = Command::future(async { TestMessage::Increment });
-        runtime.enqueue_command(cmd);
+        runtime.enqueue_command(cmd.into_runtime_parts());
 
         // Give time for message to be sent
         sleep(Duration::from_millis(50)).await;
@@ -817,7 +819,7 @@ mod tests {
 
         // Enqueue a quit command
         let cmd = Command::effect(Action::Quit);
-        runtime.enqueue_command(cmd);
+        runtime.enqueue_command(cmd.into_runtime_parts());
 
         // Give time for quit signal to be sent
         sleep(Duration::from_millis(50)).await;
@@ -1161,11 +1163,14 @@ mod tests {
         tracing::subscriber::with_default(counter, || {
             rt.block_on(async {
                 let mut state = ApplicationState::<TestApp>::new(0);
-                state.enqueue_command(Command::future(async {
-                    panic!("boom");
-                    #[allow(unreachable_code)]
-                    TestMessage::Increment
-                }));
+                state.enqueue_command(
+                    Command::future(async {
+                        panic!("boom");
+                        #[allow(unreachable_code)]
+                        TestMessage::Increment
+                    })
+                    .into_runtime_parts(),
+                );
                 // Run the command task to completion (it panics and is caught).
                 state.command_tasks.join_next().await;
             });
@@ -1199,10 +1204,13 @@ mod tests {
             let guard = AbortGuard(aborted.clone());
             // A command that owns the guard and never completes, so its task
             // stays parked until aborted.
-            state.enqueue_command(Command::future(async move {
-                let _guard = guard;
-                std::future::pending::<TestMessage>().await
-            }));
+            state.enqueue_command(
+                Command::future(async move {
+                    let _guard = guard;
+                    std::future::pending::<TestMessage>().await
+                })
+                .into_runtime_parts(),
+            );
 
             // Let the task start and park.
             sleep(Duration::from_millis(10)).await;

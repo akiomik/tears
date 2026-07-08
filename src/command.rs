@@ -26,10 +26,14 @@
 
 mod effect;
 mod runtime_directives;
+mod runtime_parts;
 
 use effect::Effect;
-use futures::{FutureExt, Stream, StreamExt, stream::BoxStream};
+#[cfg(test)]
+use futures::stream::BoxStream;
+use futures::{FutureExt, Stream, StreamExt};
 use runtime_directives::RuntimeDirectives;
+pub(crate) use runtime_parts::RuntimeCommandParts;
 
 /// An action that can be performed by a command.
 pub enum Action<Msg> {
@@ -134,12 +138,20 @@ impl<Msg: Send + 'static> Command<Msg> {
         self.effect.is_some()
     }
 
+    #[cfg(test)]
     pub(super) const fn requests_redraw(&self) -> bool {
         self.directives.requests_redraw()
     }
 
+    #[cfg(test)]
     pub(super) fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
         self.effect.into_stream()
+    }
+
+    /// Decompose this command into the runtime-facing parts that must be
+    /// observed together.
+    pub(super) fn into_runtime_parts(self) -> RuntimeCommandParts<Msg> {
+        RuntimeCommandParts::new(self.directives, self.effect.into_stream())
     }
 
     /// Declare that the update returning this command did not change the
@@ -432,6 +444,88 @@ mod tests {
 
         assert!(cmd.is_none());
         assert!(!cmd.requests_redraw());
+    }
+
+    #[test]
+    fn test_into_runtime_parts_none_requests_redraw_without_stream() {
+        let parts = Command::<i32>::none().into_runtime_parts();
+
+        assert!(parts.requests_redraw());
+        assert!(parts.into_stream().is_none());
+    }
+
+    #[test]
+    fn test_into_runtime_parts_without_redraw_has_no_stream() {
+        let parts = Command::<i32>::none().without_redraw().into_runtime_parts();
+
+        assert!(!parts.requests_redraw());
+        assert!(parts.into_stream().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_into_runtime_parts_message_requests_redraw_and_yields_message() {
+        let parts = Command::message(42).into_runtime_parts();
+
+        assert!(parts.requests_redraw());
+
+        let mut stream = parts.into_stream().expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(msg) if msg == 42));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_into_runtime_parts_effect_quit_yields_quit() {
+        let parts = Command::<i32>::effect(Action::Quit).into_runtime_parts();
+
+        assert!(parts.requests_redraw());
+
+        let mut stream = parts.into_stream().expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Quit));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_into_runtime_parts_batch_preserves_redraw_and_stream() {
+        let cmd = Command::batch(vec![
+            Command::message(2).without_redraw(),
+            Command::none().without_redraw(),
+            Command::message(1).without_redraw(),
+        ]);
+        let parts = cmd.into_runtime_parts();
+
+        assert!(!parts.requests_redraw());
+
+        let mut stream = parts.into_stream().expect("stream should exist");
+        let mut results = vec![];
+
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        results.sort_unstable();
+        assert_eq!(results, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_map_preserves_directives_through_runtime_parts() {
+        let parts = Command::message(21)
+            .without_redraw()
+            .map(|value| value * 2)
+            .into_runtime_parts();
+
+        assert!(!parts.requests_redraw());
+
+        let mut stream = parts.into_stream().expect("stream should exist");
+        let action = stream.next().await.expect("should have action");
+
+        assert!(matches!(action, Action::Message(msg) if msg == 42));
     }
 
     #[tokio::test]
