@@ -22,9 +22,9 @@
 //!   batched together for processing, reducing overhead and improving responsiveness
 //! - **Conditional Rendering**: The UI is only re-rendered when the application state
 //!   changes, skipping unnecessary draw operations
-//! - **Subscription Caching**: Subscriptions are only re-evaluated after a message is
-//!   processed (idle frames are skipped), and the subscription manager is only updated
-//!   when their IDs change, using hash-based comparison for efficiency
+//! - **Subscription Re-evaluation Gating**: Subscriptions are only re-evaluated after a
+//!   message is processed (idle frames are skipped), since `subscriptions()` is a pure
+//!   function of the application state
 //!
 //! # Example
 //!
@@ -81,8 +81,6 @@
 //! }
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
@@ -151,8 +149,8 @@ struct ApplicationState<App: Application> {
 /// - **Conditional Rendering**: Only renders when state changes, saving CPU cycles
 /// - **Idle Wake-up Elision**: Skips frame ticks entirely while idle, so the loop is
 ///   event-driven and does not consume CPU at the frame rate with nothing to render
-/// - **Subscription Caching**: Re-evaluates subscriptions only after a message is processed,
-///   and updates the subscription manager only when their IDs change
+/// - **Subscription Re-evaluation Gating**: Re-evaluates subscriptions only after a message
+///   is processed, since the subscription set is a pure function of application state
 ///
 /// # Type Parameters
 ///
@@ -175,8 +173,6 @@ pub struct Runtime<App: Application> {
     /// batch so that subscriptions are re-evaluated only when the state may have
     /// changed, rather than on every frame.
     subscriptions_dirty: bool,
-    /// Cached hash of subscription IDs from previous frame (subscription caching optimization)
-    subscription_ids_hash: Option<u64>,
 }
 
 impl<App: Application> Runtime<App> {
@@ -236,7 +232,6 @@ impl<App: Application> Runtime<App> {
             // Initial subscriptions are started by `initialize_subscriptions`,
             // so no re-evaluation is needed until a message is processed.
             subscriptions_dirty: false,
-            subscription_ids_hash: None, // No subscriptions cached yet
         }
     }
 
@@ -371,8 +366,6 @@ impl<App: Application> Runtime<App> {
         // an idle frame (no messages processed) cannot change the subscription
         // set, so we skip the (potentially costly) evaluation entirely.
         if self.subscriptions_dirty {
-            // NOTE: Uses hash-based caching to skip the manager update when the
-            // subscription IDs haven't actually changed.
             self.update_subscriptions();
             self.subscriptions_dirty = false;
         }
@@ -380,28 +373,23 @@ impl<App: Application> Runtime<App> {
         Ok(())
     }
 
-    /// Updates subscriptions if they have changed (uses hash-based caching).
+    /// Re-evaluates the application's subscriptions and applies them.
     ///
-    /// Computes a hash of subscription IDs and only calls [`SubscriptionManager::update`]
-    /// if the hash differs from the previous frame. This optimization avoids unnecessary
-    /// subscription updates when the application's subscription set hasn't changed.
+    /// Calls [`Application::subscriptions`] and hands the result to
+    /// [`SubscriptionManager::update`], which diffs against the running set: it
+    /// starts new subscriptions, cancels removed ones, and — crucially —
+    /// restarts subscriptions whose tasks have finished but are still requested.
+    ///
+    /// The manager's diff is already ID-keyed and cheap, so this is called on
+    /// every dirty frame without an additional caching layer. An earlier
+    /// hash-of-IDs cache here skipped the manager update whenever the ID set was
+    /// unchanged, which suppressed the restart of finished subscriptions and
+    /// violated the manager's documented contract.
     fn update_subscriptions(&mut self) {
         let subscriptions = self.state.app.subscriptions();
-
-        // Compute hash of subscription IDs
-        let mut hasher = DefaultHasher::new();
-        for sub in &subscriptions {
-            sub.id.hash(&mut hasher);
-        }
-        let current_hash = hasher.finish();
-
-        // Only update if subscriptions have changed
-        if self.subscription_ids_hash != Some(current_hash) {
-            let count = subscriptions.len();
-            self.state.subscription_manager.update(subscriptions);
-            self.subscription_ids_hash = Some(current_hash);
-            tracing::debug!(target: "tears::runtime", count, "subscriptions updated");
-        }
+        let count = subscriptions.len();
+        self.state.subscription_manager.update(subscriptions);
+        tracing::debug!(target: "tears::runtime", count, "subscriptions updated");
     }
 
     /// Runs the runtime until the application quits.
@@ -1487,18 +1475,15 @@ mod tests {
         // Clear needs_redraw
         runtime.needs_redraw = false;
 
-        // Initially no hash
-        assert_eq!(runtime.subscription_ids_hash, None);
-
         // Subscriptions are only re-evaluated when marked dirty (after a
         // message). Simulate that here.
         runtime.subscriptions_dirty = true;
 
-        // Process frame tick (should update subscriptions)
+        // Process frame tick (should re-evaluate and apply subscriptions).
         runtime.process_frame_tick(&mut terminal)?;
 
-        // Hash should be set
-        assert!(runtime.subscription_ids_hash.is_some());
+        // The dirty flag is cleared once subscriptions have been re-evaluated.
+        assert!(!runtime.subscriptions_dirty);
 
         Ok(())
     }
@@ -1583,6 +1568,117 @@ mod tests {
         runtime.process_frame_tick(&mut terminal)?;
         runtime.process_frame_tick(&mut terminal)?;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        Ok(())
+    }
+
+    // Regression test: a finished subscription must be restarted on every
+    // re-evaluation even when its ID is unchanged.
+    //
+    // `SubscriptionManager::update` documents that "subscriptions whose tasks
+    // have finished will be restarted if still present". An earlier hash-of-IDs
+    // cache in `update_subscriptions` skipped the manager update whenever the ID
+    // set was unchanged. The skip only bit on the *second* re-evaluation: the
+    // first cached the hash (and did restart), but every later re-evaluation
+    // with the same ID set was elided, so a finite subscription that finished
+    // again was never restarted. This test therefore drives two message-gated
+    // re-evaluations and asserts the subscription restarts each time. Removing
+    // the cache means every dirty frame calls `update`, restoring the restart.
+    #[tokio::test]
+    async fn test_finished_subscription_restarted_with_unchanged_id() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use futures::stream::{self, BoxStream};
+
+        use crate::subscription::{SubscriptionId, SubscriptionSource};
+
+        // A subscription with a fixed ID whose stream emits one value and then
+        // ends. It counts how many times its stream is spawned so a restart is
+        // observable.
+        struct OneshotSource {
+            spawns: Arc<AtomicUsize>,
+        }
+
+        impl SubscriptionSource for OneshotSource {
+            type Output = ();
+
+            fn stream(&self) -> BoxStream<'static, ()> {
+                self.spawns.fetch_add(1, Ordering::SeqCst);
+                stream::once(async {}).boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                // A constant ID: the set of IDs never changes across frames,
+                // which is exactly the case the removed hash cache skipped.
+                SubscriptionId::of::<Self>(0)
+            }
+        }
+
+        struct RestartApp {
+            spawns: Arc<AtomicUsize>,
+        }
+
+        impl Application for RestartApp {
+            type Message = ();
+            type Flags = Arc<AtomicUsize>;
+
+            fn new(spawns: Arc<AtomicUsize>) -> (Self, Command<Self::Message>) {
+                (Self { spawns }, Command::none())
+            }
+
+            fn update(&mut self, (): ()) -> Command<Self::Message> {
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                vec![Subscription::new(OneshotSource {
+                    spawns: self.spawns.clone(),
+                })]
+            }
+        }
+
+        // Polls the spawn counter until it reaches `target`, or fails after a
+        // bounded wait so a regression cannot hang the suite.
+        async fn wait_for_spawns(spawns: &AtomicUsize, target: usize) {
+            for _ in 0..100 {
+                if spawns.load(Ordering::SeqCst) >= target {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                spawns.load(Ordering::SeqCst) >= target,
+                "expected at least {target} spawns, saw {}",
+                spawns.load(Ordering::SeqCst)
+            );
+        }
+
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::<RestartApp>::new(spawns.clone(), frame_rate(60));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        // Start subscriptions the way `run()` does: the first spawn happens here.
+        runtime.state.initialize_subscriptions();
+        wait_for_spawns(&spawns, 1).await;
+
+        // Drive two message-gated re-evaluations. The ID never changes, so the
+        // removed hash cache would have skipped the manager update from the
+        // second round onward, leaving the finished subscription dead. Each
+        // round must restart it, so the spawn count must keep climbing.
+        for round in 2..=3 {
+            // Let the current one-shot task finish so the manager sees it as
+            // completed before the next re-evaluation.
+            sleep(Duration::from_millis(10)).await;
+
+            // A message marks subscriptions dirty; the next frame re-evaluates.
+            runtime.process_message_batch(());
+            runtime.process_frame_tick(&mut terminal)?;
+
+            wait_for_spawns(&spawns, round).await;
+        }
 
         Ok(())
     }
