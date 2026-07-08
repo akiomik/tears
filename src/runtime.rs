@@ -389,7 +389,10 @@ impl<App: Application> Runtime<App> {
         let subscriptions = self.state.app.subscriptions();
         let count = subscriptions.len();
         self.state.subscription_manager.update(subscriptions);
-        tracing::debug!(target: "tears::runtime", count, "subscriptions updated");
+        // Fires on every dirty frame regardless of whether the set actually
+        // changed; the accurate change signals are the manager's
+        // "subscription started"/"subscription stopped" events.
+        tracing::debug!(target: "tears::runtime", count, "subscriptions re-evaluated");
     }
 
     /// Runs the runtime until the application quits.
@@ -1434,17 +1437,44 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_frame_tick_updates_subscriptions() -> Result<()> {
-        // App with dynamic subscriptions
-        struct DynamicApp {
-            enabled: bool,
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use futures::stream::{self, BoxStream};
+
+        use crate::subscription::{SubscriptionId, SubscriptionSource};
+
+        // A subscription whose stream stays parked (never yields), so once
+        // started its task stays alive. Counts how many times it is spawned so
+        // that "the frame tick actually applied the subscriptions" is
+        // observable rather than merely inferred from the dirty flag.
+        struct ParkedSource {
+            spawns: Arc<AtomicUsize>,
         }
 
-        impl Application for DynamicApp {
-            type Message = ();
-            type Flags = bool;
+        impl SubscriptionSource for ParkedSource {
+            type Output = ();
 
-            fn new(enabled: bool) -> (Self, Command<Self::Message>) {
-                (Self { enabled }, Command::none())
+            fn stream(&self) -> BoxStream<'static, ()> {
+                self.spawns.fetch_add(1, Ordering::SeqCst);
+                stream::pending().boxed()
+            }
+
+            fn id(&self) -> SubscriptionId {
+                SubscriptionId::of::<Self>(0)
+            }
+        }
+
+        struct App {
+            spawns: Arc<AtomicUsize>,
+        }
+
+        impl Application for App {
+            type Message = ();
+            type Flags = Arc<AtomicUsize>;
+
+            fn new(spawns: Arc<AtomicUsize>) -> (Self, Command<Self::Message>) {
+                (Self { spawns }, Command::none())
             }
 
             fn update(&mut self, (): ()) -> Command<Self::Message> {
@@ -1454,36 +1484,44 @@ mod tests {
             fn view(&self, _frame: &mut Frame<'_>) {}
 
             fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-                if self.enabled {
-                    vec![
-                        Subscription::new(
-                            Timer::try_new(100).expect("timer interval must be non-zero"),
-                        )
-                        .map(|_| ()),
-                    ]
-                } else {
-                    vec![]
-                }
+                vec![Subscription::new(ParkedSource {
+                    spawns: self.spawns.clone(),
+                })]
             }
         }
 
-        let mut runtime = Runtime::<DynamicApp>::new(true, frame_rate(60));
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::<App>::new(spawns.clone(), frame_rate(60));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
 
-        // Clear needs_redraw
+        // Clear needs_redraw so only the subscription path exercises the tick.
         runtime.needs_redraw = false;
+
+        // Not yet applied: no frame tick has run.
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
 
         // Subscriptions are only re-evaluated when marked dirty (after a
         // message). Simulate that here.
         runtime.subscriptions_dirty = true;
 
-        // Process frame tick (should re-evaluate and apply subscriptions).
+        // Process frame tick: it must re-evaluate and actually start the
+        // subscription, and clear the dirty flag.
         runtime.process_frame_tick(&mut terminal)?;
 
-        // The dirty flag is cleared once subscriptions have been re-evaluated.
         assert!(!runtime.subscriptions_dirty);
+        for _ in 0..100 {
+            if spawns.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            1,
+            "a dirty frame tick must actually start the requested subscription"
+        );
 
         Ok(())
     }

@@ -142,6 +142,18 @@ pub trait Application: Sized {
     /// tasks mutating shared state) that affects the returned subscription IDs may
     /// not be detected. Express such changes as messages handled in `update` instead.
     ///
+    /// # Restart of finished subscriptions
+    ///
+    /// A subscription is identified by its ID. While an ID keeps appearing in the
+    /// returned set, the runtime treats it as *requested*: if its stream has ended
+    /// (a finite source completing, or a WebSocket disconnecting), the runtime
+    /// **restarts it** on the next re-evaluation (i.e. after the next message).
+    /// To stop a source permanently once it finishes, drop it from the returned
+    /// set — for example by tracking completion in state updated via `update` and
+    /// returning `vec![]` (or omitting that subscription) thereafter. Keeping a
+    /// finished WebSocket subscription in the set is therefore an implicit
+    /// auto-reconnect.
+    ///
     /// # Examples
     ///
     /// ```
