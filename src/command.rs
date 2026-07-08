@@ -1011,7 +1011,7 @@ mod tests {
     // and `map` application to pin the two concerns apart.
     #[test]
     fn test_redraw_preserved_across_effect_and_map_matrix() {
-        // stream-ful command: redraw survives map, without_redraw survives map.
+        // Command with a stream: redraw survives map, without_redraw survives map.
         assert!(
             Command::future(async { 1 })
                 .map(|v| v * 2)
@@ -1043,7 +1043,7 @@ mod tests {
         assert!(cmd.is_some());
         assert!(cmd.requests_redraw());
 
-        // All opted out, both stream-ful and stream-less: stays opted out.
+        // All opted out, both with and without a stream: stays opted out.
         let cmd = Command::batch(vec![
             Command::future(async { 1 }).without_redraw(),
             Command::none().without_redraw(),
