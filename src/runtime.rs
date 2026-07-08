@@ -101,6 +101,10 @@ use crate::{
     subscription::SubscriptionManager,
 };
 
+mod app_input;
+
+use app_input::{AppInput, AppInputs};
+
 /// Application state that manages the application lifecycle.
 ///
 /// Internal type that orchestrates TUI application execution following The Elm Architecture.
@@ -117,8 +121,8 @@ struct ApplicationState<App: Application> {
     app: App,
     /// Sender for application messages
     msg_tx: mpsc::UnboundedSender<App::Message>,
-    /// Receiver for application messages
-    msg_rx: mpsc::UnboundedReceiver<App::Message>,
+    /// Runtime-owned receiver for application inputs
+    app_inputs: AppInputs<App::Message>,
     /// Sender for quit signals
     quit_tx: mpsc::UnboundedSender<()>,
     /// Receiver for quit signals
@@ -271,30 +275,33 @@ impl<App: Application> Runtime<App> {
         Ok(Self::new(flags, FrameRate::try_new(frame_rate)?))
     }
 
-    /// Processes a batch of messages that arrive in quick succession (micro-batching).
+    #[cfg(test)]
+    fn process_message_batch(&mut self, first_msg: App::Message) {
+        self.process_input_batch(AppInput::Shared(first_msg));
+    }
+
+    /// Processes a batch of application inputs that arrive in quick succession
+    /// (micro-batching).
     ///
-    /// Processes the first message immediately, then attempts to process additional messages
-    /// that arrived within 100μs. This reduces overhead by batching rapid message sequences
-    /// (e.g., keyboard input, rapid timers) while maintaining responsiveness.
+    /// Processes the first input immediately, then attempts to process additional
+    /// inputs that arrived within 100μs. This reduces overhead by batching rapid
+    /// input sequences while maintaining responsiveness.
     ///
     /// Sets `needs_redraw` if any processed command requests a redraw, and
     /// always sets `subscriptions_dirty` after processing.
-    fn process_message_batch(&mut self, first_msg: App::Message) {
-        // Process the first message
-        let cmd = self.state.app.update(first_msg);
-        self.dispatch_update_command(cmd);
+    fn process_input_batch(&mut self, first_input: AppInput<App::Message>) {
+        self.process_app_input(first_input);
         let mut processed = 1usize;
 
         // Micro-batching: process additional messages that arrived during a short window
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
-            match self.state.msg_rx.try_recv() {
-                Ok(msg) => {
-                    let cmd = self.state.app.update(msg);
-                    self.dispatch_update_command(cmd);
+            match self.state.app_inputs.try_next_ready() {
+                Some(input) => {
+                    self.process_app_input(input);
                     processed += 1;
                 }
-                Err(_) => break, // No more messages available
+                None => break, // No more inputs available
             }
         }
 
@@ -302,6 +309,15 @@ impl<App: Application> Runtime<App> {
 
         // Mark that subscriptions may have changed even when redraw is suppressed.
         self.subscriptions_dirty = true;
+    }
+
+    fn process_app_input(&mut self, input: AppInput<App::Message>) {
+        match input {
+            AppInput::Shared(msg) => {
+                let cmd = self.state.app.update(msg);
+                self.dispatch_update_command(cmd);
+            }
+        }
     }
 
     fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
@@ -462,8 +478,8 @@ impl<App: Application> Runtime<App> {
         loop {
             tokio::select! {
                 // Message received: batch process messages that arrive in quick succession
-                Some(msg) = self.state.msg_rx.recv() => {
-                    self.process_message_batch(msg);
+                Some(input) = self.state.app_inputs.next() => {
+                    self.process_input_batch(input);
                 }
 
                 // Frame tick: render if needed and update subscriptions.
@@ -504,6 +520,7 @@ impl<App: Application> ApplicationState<App> {
     #[must_use]
     fn new(flags: App::Flags) -> Self {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let app_inputs = AppInputs::new(msg_rx);
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
         let subscription_manager = SubscriptionManager::new(msg_tx.clone());
 
@@ -513,7 +530,7 @@ impl<App: Application> ApplicationState<App> {
         let mut runtime = Self {
             app,
             msg_tx,
-            msg_rx,
+            app_inputs,
             quit_tx,
             quit_rx,
             subscription_manager,
@@ -1221,6 +1238,57 @@ mod tests {
 
         // All messages should be processed (1 direct + 3 batched = 4 total)
         assert_eq!(runtime.state.app.counter, 4);
+    }
+
+    #[tokio::test]
+    async fn test_process_input_batch_drains_shared_inputs_in_fifo_order() {
+        struct BatchOrderApp {
+            messages: Vec<i32>,
+        }
+
+        impl Application for BatchOrderApp {
+            type Message = i32;
+            type Flags = ();
+
+            fn new((): ()) -> (Self, Command<Self::Message>) {
+                (
+                    Self {
+                        messages: Vec::new(),
+                    },
+                    Command::none(),
+                )
+            }
+
+            fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+                self.messages.push(msg);
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                vec![]
+            }
+        }
+
+        let mut runtime = Runtime::<BatchOrderApp>::new((), frame_rate(60));
+        runtime.subscriptions_dirty = false;
+
+        runtime
+            .state
+            .msg_tx
+            .send(2)
+            .expect("receiver should be open");
+        runtime
+            .state
+            .msg_tx
+            .send(3)
+            .expect("receiver should be open");
+
+        runtime.process_input_batch(AppInput::Shared(1));
+
+        assert_eq!(runtime.state.app.messages, vec![1, 2, 3]);
+        assert!(runtime.subscriptions_dirty);
     }
 
     #[tokio::test]
