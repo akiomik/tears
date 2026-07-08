@@ -962,4 +962,108 @@ mod tests {
         assert!(mapped.is_some());
         assert!(!mapped.is_none());
     }
+
+    #[test]
+    fn test_batch_flattens_nested_batches_into_flat_leaves() {
+        let batch1 = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+        ]);
+        let batch2 = Command::batch(vec![
+            Command::future(async { 3 }),
+            Command::future(async { 4 }),
+        ]);
+        let cmd = Command::batch(vec![batch1, batch2, Command::future(async { 5 })]);
+
+        // batch(batch(a, b), batch(c, d), e) collapses to a single flat leaf
+        // sequence [a, b, c, d, e] rather than a nested structure.
+        assert_eq!(cmd.effect.leaf_count(), 5);
+    }
+
+    #[test]
+    fn test_batch_drops_streamless_children_from_leaves() {
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::none(),
+            Command::none().without_redraw(),
+            Command::future(async { 2 }),
+        ]);
+
+        // Stream-less children contribute no leaves even though their redraw
+        // directives are still folded in.
+        assert_eq!(cmd.effect.leaf_count(), 2);
+    }
+
+    #[test]
+    fn test_map_over_batch_preserves_leaf_count() {
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+            Command::future(async { 3 }),
+        ])
+        .map(|value| value * 10);
+
+        assert_eq!(cmd.effect.leaf_count(), 3);
+    }
+
+    // Directives (`without_redraw`) travel a path independent of the effect
+    // leaves, so exercise the redraw flag across the matrix of effect presence
+    // and `map` application to pin the two concerns apart.
+    #[test]
+    fn test_redraw_preserved_across_effect_and_map_matrix() {
+        // stream-ful command: redraw survives map, without_redraw survives map.
+        assert!(
+            Command::future(async { 1 })
+                .map(|v| v * 2)
+                .requests_redraw()
+        );
+        assert!(
+            !Command::future(async { 1 })
+                .without_redraw()
+                .map(|v| v * 2)
+                .requests_redraw()
+        );
+
+        // stream-less command: same, and it stays stream-less.
+        let cmd = Command::<i32>::none().map(|v| v * 2);
+        assert!(cmd.is_none());
+        assert!(cmd.requests_redraw());
+        let cmd = Command::<i32>::none().without_redraw().map(|v| v * 2);
+        assert!(cmd.is_none());
+        assert!(!cmd.requests_redraw());
+    }
+
+    #[test]
+    fn test_batch_redraw_matrix_over_effect_and_map() {
+        // Mixed children: OR over redraw flags holds regardless of effects.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::none(),
+        ]);
+        assert!(cmd.is_some());
+        assert!(cmd.requests_redraw());
+
+        // All opted out, both stream-ful and stream-less: stays opted out.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::none().without_redraw(),
+        ]);
+        assert!(cmd.is_some());
+        assert!(!cmd.requests_redraw());
+
+        // Mapping the batch does not disturb the folded redraw directive.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::future(async { 2 }).without_redraw(),
+        ])
+        .map(|v| v * 2);
+        assert!(!cmd.requests_redraw());
+
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }).without_redraw(),
+        ])
+        .map(|v| v * 2);
+        assert!(cmd.requests_redraw());
+    }
 }
