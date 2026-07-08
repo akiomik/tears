@@ -15,6 +15,17 @@
 //! sending, see the "Design Philosophy" section in the [`subscription`](crate::subscription)
 //! module documentation.
 //!
+//! # Disconnection and reconnection
+//!
+//! The subscription's stream ends when the connection closes (server close,
+//! transport error, etc.). While the application keeps returning this
+//! subscription from [`Application::subscriptions`](crate::Application::subscriptions),
+//! the runtime restarts the finished stream on the next re-evaluation — i.e. it
+//! reconnects automatically after the next message. To stop reconnecting, drop
+//! the subscription from the returned set once you observe
+//! [`WebSocketMessage::Disconnected`]. See the "Restart of finished
+//! subscriptions" note on [`Application::subscriptions`](crate::Application::subscriptions).
+//!
 //! # Feature Flag
 //!
 //! This module is only available when the `ws` feature is enabled:

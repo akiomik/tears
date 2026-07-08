@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Finished subscriptions are now restarted on every re-evaluation while still
+  requested
+  - The runtime cached a hash of the subscription IDs and skipped
+    `SubscriptionManager::update` whenever the ID set was unchanged, which
+    suppressed the manager's documented restart of subscriptions whose tasks had
+    finished (e.g. a finite source completing, or a WebSocket disconnecting)
+  - **Behavior change:** while a subscription ID keeps appearing in
+    `subscriptions()`, a finished stream is restarted after the next message. To
+    stop a source once it finishes, drop it from the returned set; keeping a
+    finished WebSocket subscription in the set is now an implicit reconnect
+
 ### Added
 
 - `Command::without_redraw()` for updates that handled a message without
