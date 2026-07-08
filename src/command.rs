@@ -962,4 +962,146 @@ mod tests {
         assert!(mapped.is_some());
         assert!(!mapped.is_none());
     }
+
+    #[test]
+    fn test_batch_flattens_nested_batches_into_flat_leaves() {
+        let batch1 = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+        ]);
+        let batch2 = Command::batch(vec![
+            Command::future(async { 3 }),
+            Command::future(async { 4 }),
+        ]);
+        let cmd = Command::batch(vec![batch1, batch2, Command::future(async { 5 })]);
+
+        // batch(batch(a, b), batch(c, d), e) collapses to a single flat leaf
+        // sequence [a, b, c, d, e] rather than a nested structure.
+        assert_eq!(cmd.effect.leaf_count(), 5);
+    }
+
+    #[test]
+    fn test_batch_drops_streamless_children_from_leaves() {
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::none(),
+            Command::none().without_redraw(),
+            Command::future(async { 2 }),
+        ]);
+
+        // Stream-less children contribute no leaves even though their redraw
+        // directives are still folded in.
+        assert_eq!(cmd.effect.leaf_count(), 2);
+    }
+
+    #[test]
+    fn test_map_over_batch_preserves_leaf_count() {
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+            Command::future(async { 3 }),
+        ])
+        .map(|value| value * 10);
+
+        assert_eq!(cmd.effect.leaf_count(), 3);
+    }
+
+    // `map` promises to accept any `Fn + Send` mapper without also requiring
+    // `Sync`. On the multi-leaf batch path the mapper is shared across leaves,
+    // and it is `Arc<Mutex<F>>` (not `Arc<F>`, which would demand `F: Sync`)
+    // that upholds that contract. This test pins the contract down: a mapper
+    // that is `Send` but not `Sync` (it captures a `Cell`) must still compile
+    // and run through a batched `map`, so a regression to `Arc<F>` fails to
+    // build.
+    #[tokio::test]
+    async fn test_batch_map_accepts_send_non_sync_mapper() {
+        use std::cell::Cell;
+
+        fn assert_send<F: Send>(_: &F) {}
+
+        // `Cell<i32>` is `Send` but not `Sync`, so this closure is too.
+        let offset = Cell::new(10);
+        let mapper = move |value: i32| value + offset.get();
+        assert_send(&mapper);
+
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }),
+        ])
+        .map(mapper);
+        assert_eq!(cmd.effect.leaf_count(), 2);
+
+        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut results = vec![];
+        while let Some(action) = stream.next().await {
+            match action {
+                Action::Message(msg) => results.push(msg),
+                Action::Quit => break,
+            }
+        }
+
+        results.sort_unstable();
+        assert_eq!(results, vec![11, 12]);
+    }
+
+    // Directives (`without_redraw`) travel a path independent of the effect
+    // leaves, so exercise the redraw flag across the matrix of effect presence
+    // and `map` application to pin the two concerns apart.
+    #[test]
+    fn test_redraw_preserved_across_effect_and_map_matrix() {
+        // Command with a stream: redraw survives map, without_redraw survives map.
+        assert!(
+            Command::future(async { 1 })
+                .map(|v| v * 2)
+                .requests_redraw()
+        );
+        assert!(
+            !Command::future(async { 1 })
+                .without_redraw()
+                .map(|v| v * 2)
+                .requests_redraw()
+        );
+
+        // stream-less command: same, and it stays stream-less.
+        let cmd = Command::<i32>::none().map(|v| v * 2);
+        assert!(cmd.is_none());
+        assert!(cmd.requests_redraw());
+        let cmd = Command::<i32>::none().without_redraw().map(|v| v * 2);
+        assert!(cmd.is_none());
+        assert!(!cmd.requests_redraw());
+    }
+
+    #[test]
+    fn test_batch_redraw_matrix_over_effect_and_map() {
+        // Mixed children: OR over redraw flags holds regardless of effects.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::none(),
+        ]);
+        assert!(cmd.is_some());
+        assert!(cmd.requests_redraw());
+
+        // All opted out, both with and without a stream: stays opted out.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::none().without_redraw(),
+        ]);
+        assert!(cmd.is_some());
+        assert!(!cmd.requests_redraw());
+
+        // Mapping the batch does not disturb the folded redraw directive.
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }).without_redraw(),
+            Command::future(async { 2 }).without_redraw(),
+        ])
+        .map(|v| v * 2);
+        assert!(!cmd.requests_redraw());
+
+        let cmd = Command::batch(vec![
+            Command::future(async { 1 }),
+            Command::future(async { 2 }).without_redraw(),
+        ])
+        .map(|v| v * 2);
+        assert!(cmd.requests_redraw());
+    }
 }
