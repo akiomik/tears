@@ -1,19 +1,26 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::callsite::rebuild_interest_cache;
 use tracing::field::{Field, Visit};
 use tracing::metadata::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
-use tracing::subscriber::{DefaultGuard, set_default};
-use tracing::{Event, Level, Metadata, Subscriber};
+use tracing::subscriber::{DefaultGuard, Interest, set_default};
+use tracing::{Dispatch, Event, Level, Metadata, Subscriber};
 
 // Intentionally duplicated with `tests/common/trace_recorder.rs`. A shared
 // workspace-only crate made publish/tarball behavior less intuitive for this
 // small helper, and a feature-gated public test API would add test invocation
 // constraints. Unit and integration tests keep local copies for now.
+
+// `tracing`'s dispatcher registry and callsite interest cache are process-wide.
+// Serialize recorder install/drop cache rebuilds, and keep a no-op dispatcher
+// alive so callsites first registered on non-recorder test threads do not cache
+// `Interest::never` while another test has a recorder installed.
+static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+static INTEREST_KEEPER: OnceLock<Dispatch> = OnceLock::new();
 
 /// A cache-safe tracing subscriber for tests that need to count events or
 /// inspect simple event fields.
@@ -69,6 +76,10 @@ impl TraceRecorder {
     /// Installs this recorder as the default subscriber for the current thread.
     #[must_use]
     pub fn set_default(&self) -> TraceRecorderGuard {
+        let _registry = REGISTRY_LOCK
+            .lock()
+            .expect("trace recorder registry mutex should not be poisoned");
+        ensure_interest_keeper();
         let guard = set_default(self.clone());
         rebuild_interest_cache();
         TraceRecorderGuard { guard: Some(guard) }
@@ -93,8 +104,45 @@ impl TraceRecorder {
     }
 }
 
+fn ensure_interest_keeper() {
+    let _ = INTEREST_KEEPER.get_or_init(|| Dispatch::new(InterestKeeper));
+}
+
+struct InterestKeeper;
+
+impl Subscriber for InterestKeeper {
+    fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+        Interest::sometimes()
+    }
+
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        false
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::TRACE)
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, _event: &Event<'_>) {}
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
 impl Drop for TraceRecorderGuard {
     fn drop(&mut self) {
+        let _registry = REGISTRY_LOCK
+            .lock()
+            .expect("trace recorder registry mutex should not be poisoned");
         drop(self.guard.take());
         rebuild_interest_cache();
     }
@@ -165,4 +213,34 @@ impl Visit for BoolFieldVisitor {
     }
 
     fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::*;
+
+    const TARGET: &str = "tears::test_support::trace_recorder";
+
+    fn emit_cross_thread_registration_event() {
+        tracing::trace!(target: TARGET, "cross-thread registration");
+    }
+
+    #[test]
+    fn recorder_observes_callsite_registered_first_on_unrecorded_thread() {
+        let recorder = TraceRecorder::new().with_target(TARGET);
+        let _guard = recorder.set_default();
+
+        thread::spawn(emit_cross_thread_registration_event)
+            .join()
+            .expect("event registration thread should not panic");
+        emit_cross_thread_registration_event();
+
+        assert_eq!(
+            recorder.event_count(),
+            1,
+            "recorder should observe an event even if the callsite was first registered on a non-recorder thread"
+        );
+    }
 }

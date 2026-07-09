@@ -73,6 +73,11 @@ Avoid ad hoc subscribers that filter by returning `false` from `enabled()`:
 make a callsite invisible to another parallel test. `TraceRecorder` keeps
 interest open and filters in `event()` instead.
 
+`TraceRecorder` also keeps a process-local no-op interest keeper alive once a
+tracing assertion is installed. This prevents callsites first reached by other
+parallel test threads from caching `Interest::never` while the asserting test's
+thread-local recorder is active.
+
 The unit-test and integration-test recorders are intentionally duplicated for
 now. Keep their structure aligned when changing shared behavior so fixes are
 easy to compare across the two copies.
