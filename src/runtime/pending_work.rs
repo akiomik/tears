@@ -2,13 +2,13 @@
 //!
 //! The runtime renders conditionally (only when the view may have changed) and
 //! re-evaluates subscriptions only after a message has been processed. This
-//! module owns those two flags and the [`PendingWork::has_pending_work`] query
-//! that the event loop uses to gate its frame branch, keeping that bookkeeping
-//! out of the main loop.
+//! module owns those two flags and the [`PendingWork::has_pending_work`] query,
+//! keeping that bookkeeping out of the scheduler and main loop.
 //!
 //! This type tracks *whether* there is work; it does not own the frame timer or
-//! decide *when* to run — the runtime still owns the `Interval` and the
-//! `take` → render/update ordering.
+//! decide *when* to run. [`super::frame_scheduler::FrameScheduler`] owns the
+//! timer and idle parking, while the runtime owns the `take` → render/update
+//! ordering.
 
 /// Tracks whether the runtime has pending render or subscription work.
 ///
@@ -58,10 +58,10 @@ impl PendingWork {
     /// Whether the frame tick has pending work (a redraw or a subscription
     /// re-evaluation) to do.
     ///
-    /// Gates the frame branch of the event loop's `select!`: when the application
-    /// is idle (no message processed since the last frame), both flags are false
+    /// Used by the frame scheduler to park while the application is idle. When
+    /// no message has been processed since the last frame, both flags are false
     /// and a frame tick would do nothing, so the loop can skip waking at the
-    /// frame rate entirely — making it event-driven and saving CPU/battery.
+    /// frame rate entirely.
     ///
     /// Must use `||` (not `&&`): the initial state has `needs_redraw == true` and
     /// `subscriptions_dirty == false`, and the first frame must still render.
@@ -170,7 +170,7 @@ mod tests {
         pending.mark_subscriptions_dirty();
 
         // Draining both kinds of pending work leaves the tracker idle, so the
-        // event loop's frame branch is gated off.
+        // scheduler's frame branch is gated off.
         pending.take_redraw();
         pending.take_subscriptions_dirty();
         assert!(!pending.has_pending_work());
