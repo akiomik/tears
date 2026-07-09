@@ -26,7 +26,7 @@ enum Message {
     /// Timer tick message (sent every second)
     Timer(TimerEvent),
     /// Terminal input event (keyboard, mouse, resize)
-    Terminal(crossterm::event::Event),
+    Terminal(Event),
     /// Terminal event stream error
     TerminalError(io::Error),
 }

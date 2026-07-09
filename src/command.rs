@@ -374,7 +374,9 @@ impl<Msg: Send + 'static> Command<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+
+    use std::cell::Cell;
+
     use futures::stream;
     use tokio::time::{Duration, sleep};
 
@@ -1109,8 +1111,6 @@ mod tests {
     // build.
     #[tokio::test]
     async fn test_batch_map_accepts_send_non_sync_mapper() {
-        use std::cell::Cell;
-
         fn assert_send<F: Send>(_: &F) {}
 
         // `Cell<i32>` is `Send` but not `Sync`, so this closure is too.

@@ -1,7 +1,9 @@
 //! Frame rate value object for runtime scheduling.
 
-use std::fmt;
+use std::error::Error;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::num::NonZeroU32;
+use std::result::Result as StdResult;
 use std::time::Duration;
 
 /// Target frames per second for [`Runtime`](crate::runtime::Runtime).
@@ -27,7 +29,7 @@ impl FrameRate {
     ///
     /// Returns [`FrameRateError::TooHigh`] when the value is greater than
     /// [`FrameRate::MAX`].
-    pub const fn new(frames_per_second: NonZeroU32) -> std::result::Result<Self, FrameRateError> {
+    pub const fn new(frames_per_second: NonZeroU32) -> StdResult<Self, FrameRateError> {
         let value = frames_per_second.get();
         if value <= Self::MAX {
             Ok(Self { frames_per_second })
@@ -45,7 +47,7 @@ impl FrameRate {
     ///
     /// Returns [`FrameRateError::Zero`] when `frames_per_second` is zero, or
     /// [`FrameRateError::TooHigh`] when it is greater than [`FrameRate::MAX`].
-    pub const fn try_new(frames_per_second: u32) -> std::result::Result<Self, FrameRateError> {
+    pub const fn try_new(frames_per_second: u32) -> StdResult<Self, FrameRateError> {
         match NonZeroU32::new(frames_per_second) {
             Some(frames_per_second) => Self::new(frames_per_second),
             None => Err(FrameRateError::Zero),
@@ -77,8 +79,8 @@ pub enum FrameRateError {
     },
 }
 
-impl fmt::Display for FrameRateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FrameRateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Zero => f.write_str("frame rate must be non-zero"),
             Self::TooHigh { value, max } => {
@@ -88,7 +90,7 @@ impl fmt::Display for FrameRateError {
     }
 }
 
-impl std::error::Error for FrameRateError {}
+impl Error for FrameRateError {}
 
 #[cfg(test)]
 mod tests {

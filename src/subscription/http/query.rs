@@ -480,7 +480,7 @@ where
 impl<V> Hash for Query<V> {
     fn hash<H>(&self, hasher: &mut H)
     where
-        H: std::hash::Hasher,
+        H: Hasher,
     {
         self.client.client_id.hash(hasher);
         self.key.hash(hasher);
@@ -678,7 +678,12 @@ const fn trace_query_error_kind(error: &QueryError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    use std::sync::atomic::AtomicUsize;
+
+    use tokio::time::{Duration, timeout};
+
+    use crate::test_support::{assert_pending_until, gate_fetches};
 
     #[test]
     fn test_query_result_data() {
@@ -901,9 +906,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cell_retains_fresh_data_across_subscriptions_without_refetch() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
@@ -954,8 +956,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cell_retained_data_can_be_invalidated_before_next_subscribe() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
@@ -1005,8 +1005,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cell_invalidate_with_data_emits_stale_then_refetches() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
@@ -1050,10 +1048,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cell_invalidate_without_data_emits_pending_fetching_not_stale() {
-        use crate::test_support::{assert_pending_until, gate_fetches};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
@@ -1232,8 +1226,6 @@ mod tests {
     /// Same-key queries with different output types must use independent cells.
     #[tokio::test]
     async fn test_same_key_different_types_fetch_independently() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let client = Arc::new(QueryClient::new());
         let i32_fetches = Arc::new(AtomicUsize::new(0));
         let str_fetches = Arc::new(AtomicUsize::new(0));
@@ -1290,10 +1282,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_identity_streams_share_single_in_flight_fetch() {
-        use crate::test_support::{assert_pending_until, gate_fetches};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
         let (mut releases, gates) = gate_fetches(1);
@@ -1364,10 +1352,6 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn test_invalidations_during_one_fetch_window_coalesce_to_one_refetch() {
-        use crate::test_support::{assert_pending_until, gate_fetches};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
         let (mut releases, gates) = gate_fetches(2);
@@ -1461,9 +1445,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_error_does_not_retry_until_invalidated() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
 
@@ -1520,9 +1501,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_stale_time_success_does_not_watch_refetch_loop() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let config = QueryConfig::new(Duration::ZERO, Duration::from_secs(300));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
@@ -1558,10 +1536,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_loser_observes_shared_fetch_error_without_retrying() {
-        use crate::test_support::{assert_pending_until, gate_fetches};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
         let (mut releases, gates) = gate_fetches(1);
@@ -1640,11 +1614,6 @@ mod tests {
     /// `State::Watching` until the next explicit invalidation.
     #[tokio::test]
     async fn test_invalidation_during_fetch_triggers_refetch() {
-        use crate::test_support::{assert_pending_until, gate_fetches};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::{Duration, timeout};
-
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
         let (mut releases, gates) = gate_fetches(2);
@@ -1730,8 +1699,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cold_fetch_success_is_not_emitted_twice() {
-        use std::time::Duration;
-
         let client = Arc::new(QueryClient::new());
         let query = Query::new(
             "key",
@@ -1747,7 +1714,7 @@ mod tests {
         let success = stream.next().await;
         assert!(matches!(success, Some(ref result) if result.is_success()));
 
-        let duplicate = tokio::time::timeout(Duration::from_millis(25), stream.next()).await;
+        let duplicate = timeout(Duration::from_millis(25), stream.next()).await;
         assert!(
             duplicate.is_err(),
             "watch receiver must not re-emit the success snapshot already returned by perform_fetch"

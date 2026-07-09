@@ -14,6 +14,8 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::stream::{self, StreamExt};
 use tears::BoxStream;
 use tears::subscription::{Subscription, SubscriptionId, SubscriptionManager, SubscriptionSource};
+use tokio::runtime::Builder;
+use tokio::sync::mpsc;
 
 /// A minimal source with a caller-controlled ID whose stream never yields, so
 /// its spawned task stays parked (alive) until the manager aborts it.
@@ -42,7 +44,7 @@ fn subscriptions(ids: impl IntoIterator<Item = u64>) -> Vec<Subscription<()>> {
 fn bench_reconcile_steady(c: &mut Criterion) {
     // `SubscriptionManager::update` spawns tasks, so it must run inside a Tokio
     // runtime context. The tasks park immediately on the pending stream.
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = Builder::new_multi_thread()
         .worker_threads(1)
         .build()
         .expect("bench runtime should build");
@@ -51,7 +53,7 @@ fn bench_reconcile_steady(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription_reconcile_steady");
     for count in [1u64, 8, 64, 256] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = mpsc::unbounded_channel();
             let mut manager = SubscriptionManager::new(tx);
             // Prime the manager so subsequent updates hit the steady-state path
             // (same IDs, tasks already running -> no spawns, just the diff).
@@ -68,7 +70,7 @@ fn bench_reconcile_steady(c: &mut Criterion) {
 }
 
 fn bench_reconcile_churn(c: &mut Criterion) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = Builder::new_multi_thread()
         .worker_threads(1)
         .build()
         .expect("bench runtime should build");
@@ -77,7 +79,7 @@ fn bench_reconcile_churn(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription_reconcile_churn");
     for count in [1u64, 8, 64, 256] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = mpsc::unbounded_channel();
             let mut manager = SubscriptionManager::new(tx);
 
             // Alternate between two disjoint ID sets so every update aborts the

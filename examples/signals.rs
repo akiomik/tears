@@ -16,7 +16,6 @@
 //! - Press 'q' to quit normally
 
 use std::io;
-#[cfg(unix)]
 use std::process;
 
 use color_eyre::eyre::Result;
@@ -228,7 +227,7 @@ impl Application for App {
 
 impl App {
     fn render_title(frame: &mut Frame, area: Rect) {
-        let title_text = format!("Signal Handling Example (PID: {})", std::process::id());
+        let title_text = format!("Signal Handling Example (PID: {})", process::id());
         let title = Paragraph::new(title_text)
             .style(Style::default().fg(Color::Cyan))
             .block(Block::default().borders(Borders::ALL));

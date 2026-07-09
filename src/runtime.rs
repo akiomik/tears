@@ -81,6 +81,7 @@
 //! }
 //! ```
 
+use std::result::Result as StdResult;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
@@ -209,10 +210,7 @@ impl<App: Application> Runtime<App> {
     /// # }
     /// let runtime = Runtime::<MyApp>::try_new((), 60).expect("frame rate must be valid");
     /// ```
-    pub fn try_new(
-        flags: App::Flags,
-        frame_rate: u32,
-    ) -> std::result::Result<Self, FrameRateError> {
+    pub fn try_new(flags: App::Flags, frame_rate: u32) -> StdResult<Self, FrameRateError> {
         Ok(Self::new(flags, FrameRate::try_new(frame_rate)?))
     }
 
@@ -432,13 +430,19 @@ impl<App: Application> Runtime<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::Application;
-    use crate::command::Command;
-    use crate::subscription::Subscription;
-    use crate::test_support::{TestApp, TestMessage, wait_until};
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::stream::{self, BoxStream};
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{Duration, sleep, timeout};
+
+    use crate::application::Application;
+    use crate::command::Command;
+    use crate::subscription::{Subscription, SubscriptionId, SubscriptionSource};
+    use crate::test_support::{TestApp, TestMessage, TraceRecorder, wait_until};
 
     fn frame_rate(value: u32) -> FrameRate {
         FrameRate::try_new(value).expect("frame rate must be valid")
@@ -573,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_message_batch_emits_tracing_event() {
-        let recorder = crate::test_support::TraceRecorder::new().with_target("tears::runtime");
+        let recorder = TraceRecorder::new().with_target("tears::runtime");
         let _guard = recorder.set_default();
 
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
@@ -706,7 +710,7 @@ mod tests {
 
         // `run()` must return promptly; the timeout guards against a hang if the
         // quit path regresses.
-        tokio::time::timeout(Duration::from_secs(5), runtime.run(&mut terminal))
+        timeout(Duration::from_secs(5), runtime.run(&mut terminal))
             .await
             .expect("run() should quit before the timeout")?;
 
@@ -748,7 +752,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
 
-        tokio::time::timeout(Duration::from_secs(5), runtime.run(&mut terminal))
+        timeout(Duration::from_secs(5), runtime.run(&mut terminal))
             .await
             .expect("run() should quit while idle before the timeout")?;
 
@@ -795,13 +799,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_loop_process_frame_tick_updates_subscriptions() -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        use futures::stream::{self, BoxStream};
-
-        use crate::subscription::{SubscriptionId, SubscriptionSource};
-
         // A subscription whose stream stays parked (never yields), so once
         // started its task stays alive. Counts how many times it is spawned so
         // that "the frame tick actually applied the subscriptions" is
@@ -880,16 +877,14 @@ mod tests {
 
     // App that counts how many times `subscriptions()` is evaluated.
     struct SubCountingApp {
-        sub_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        sub_calls: Arc<AtomicUsize>,
     }
 
     impl Application for SubCountingApp {
         type Message = ();
-        type Flags = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+        type Flags = Arc<AtomicUsize>;
 
-        fn new(
-            sub_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        ) -> (Self, Command<Self::Message>) {
+        fn new(sub_calls: Arc<AtomicUsize>) -> (Self, Command<Self::Message>) {
             (Self { sub_calls }, Command::none())
         }
 
@@ -900,17 +895,13 @@ mod tests {
         fn view(&self, _frame: &mut Frame<'_>) {}
 
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-            self.sub_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.sub_calls.fetch_add(1, Ordering::SeqCst);
             vec![]
         }
     }
 
     #[tokio::test]
     async fn test_subscriptions_not_reevaluated_on_idle_frames() -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let counter = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), frame_rate(60));
 
@@ -934,9 +925,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriptions_reevaluated_after_message() -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let counter = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::<SubCountingApp>::new(counter.clone(), frame_rate(60));
 
@@ -976,13 +964,6 @@ mod tests {
     // the cache means every dirty frame calls `update`, restoring the restart.
     #[tokio::test]
     async fn test_finished_subscription_restarted_with_unchanged_id() -> Result<()> {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        use futures::stream::{self, BoxStream};
-
-        use crate::subscription::{SubscriptionId, SubscriptionSource};
-
         #[derive(Clone)]
         struct RestartCounters {
             spawns: Arc<AtomicUsize>,

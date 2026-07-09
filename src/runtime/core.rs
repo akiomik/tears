@@ -193,15 +193,21 @@ impl<App: Application> RuntimeCore<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{Action, Command};
-    use crate::subscription::Subscription;
-    use crate::subscription::time::Timer;
-    use crate::test_support::{TestApp, TestMessage, wait_until};
-    use futures::stream::StreamExt;
+
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
+
+    use crate::command::Command;
+    use crate::runtime::AppInput;
+    use crate::subscription::Subscription;
+    use crate::subscription::time::Timer;
+    use crate::test_support::{TestApp, TestMessage, wait_until};
 
     #[test]
     fn test_new() {
@@ -258,10 +264,7 @@ mod tests {
             .await
             .expect("init command should send a message before the timeout");
 
-        assert_eq!(
-            input,
-            Some(crate::runtime::app_input::AppInput::Shared(true))
-        );
+        assert_eq!(input, Some(AppInput::Shared(true)));
         assert!(!core.app.initialized);
     }
 
@@ -287,9 +290,7 @@ mod tests {
 
         assert!(matches!(
             input,
-            Some(crate::runtime::app_input::AppInput::Shared(
-                TestMessage::Increment
-            ))
+            Some(AppInput::Shared(TestMessage::Increment))
         ));
     }
 
@@ -466,9 +467,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_dropping_core_aborts_command_tasks() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         // A guard that records, via its `Drop`, that the command task's future
         // was dropped — which only happens if the task is aborted rather than
         // detached.
@@ -491,7 +489,7 @@ mod tests {
                 Command::future(async move {
                     let _guard = guard;
                     let _ = started_tx.send(());
-                    std::future::pending::<TestMessage>().await
+                    pending::<TestMessage>().await
                 })
                 .into_runtime_parts(),
             );

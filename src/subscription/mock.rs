@@ -101,10 +101,17 @@
 //! assert_eq!(app.subscriptions().len(), 0);
 //! ```
 
-use crate::BoxStream;
-use crate::subscription::{SubscriptionId, SubscriptionSource};
+use std::any::type_name;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use futures::StreamExt;
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+
+use crate::BoxStream;
+use crate::subscription::{SubscriptionId, SubscriptionSource};
 
 /// A mock subscription source that emits values on demand.
 ///
@@ -132,17 +139,14 @@ impl<T: Clone + 'static> MockSource<T> {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         // Use a random ID for each instance
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         let mut hasher = DefaultHasher::new();
         // Use current timestamp + type name for uniqueness
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .expect("System time before UNIX_EPOCH")
             .as_nanos()
             .hash(&mut hasher);
-        std::any::type_name::<T>().hash(&mut hasher);
+        type_name::<T>().hash(&mut hasher);
 
         let (tx, _rx) = broadcast::channel(capacity);
         Self {
@@ -184,10 +188,7 @@ impl<T: Clone + Send + 'static> SubscriptionSource for MockSource<T> {
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
         let rx = self.sender.subscribe();
-        Box::pin(
-            tokio_stream::wrappers::BroadcastStream::new(rx)
-                .filter_map(|result| async move { result.ok() }),
-        )
+        Box::pin(BroadcastStream::new(rx).filter_map(|result| async move { result.ok() }))
     }
 
     fn id(&self) -> SubscriptionId {
@@ -198,8 +199,8 @@ impl<T: Clone + Send + 'static> SubscriptionSource for MockSource<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::subscription::Subscription;
-    use futures::StreamExt;
 
     #[test]
     fn test_mock_source_creation() {

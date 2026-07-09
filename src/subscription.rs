@@ -140,6 +140,7 @@ use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
     hash::Hash,
+    panic::AssertUnwindSafe,
 };
 
 use futures::{FutureExt, StreamExt, stream::BoxStream};
@@ -406,7 +407,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         tokio::spawn(async move {
             // Catch panics in the subscription's stream so a bug in a source is
             // logged instead of vanishing into a detached task.
-            let result = std::panic::AssertUnwindSafe(async move {
+            let result = AssertUnwindSafe(async move {
                 while let Some(msg) = stream.next().await {
                     if sender.send(msg).is_err() {
                         break;
@@ -457,10 +458,17 @@ impl<Msg> Drop for SubscriptionManager<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subscription::mock::MockSource;
-    use crate::test_support::wait_until;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
+
     use color_eyre::eyre::Result;
+    use futures::stream;
     use tokio::time::{Duration, sleep, timeout};
+
+    use crate::subscription::mock::MockSource;
+    use crate::test_support::{TraceRecorder, wait_until};
 
     struct OneshotSource {
         value: i32,
@@ -471,7 +479,7 @@ mod tests {
 
         fn stream(&self) -> BoxStream<'static, i32> {
             let v = self.value;
-            futures::stream::once(async move { v }).boxed()
+            stream::once(async move { v }).boxed()
         }
 
         fn id(&self) -> SubscriptionId {
@@ -518,8 +526,6 @@ mod tests {
 
     #[test]
     fn test_subscription_new() {
-        use crate::subscription::mock::MockSource;
-
         let mock = MockSource::<i32>::new();
         let sub = Subscription::new(mock);
 
@@ -529,8 +535,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_map() -> Result<()> {
-        use crate::subscription::mock::MockSource;
-
         let mock = MockSource::new();
         let sub = Subscription::new(mock.clone()).map(|x: i32| x * 2);
 
@@ -555,8 +559,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_map_type_conversion() -> Result<()> {
-        use crate::subscription::mock::MockSource;
-
         #[derive(Debug, PartialEq)]
         enum Message {
             Number(i32),
@@ -611,8 +613,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_manager_basic_update() -> Result<()> {
-        use crate::subscription::mock::MockSource;
-
         // Test basic subscription update functionality
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
@@ -639,8 +639,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_manager_shutdown() {
-        use futures::stream;
-
         // Create a long-running subscription
         struct InfiniteSub;
         impl SubscriptionSource for InfiniteSub {
@@ -676,12 +674,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_aborts_running_subscriptions() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::task::Poll;
-
-        use futures::stream;
-
         // A guard that records, via its `Drop`, that the task's future was
         // dropped. The runtime only drops an aborted task's future, so the flag
         // flipping to `true` proves the task was cancelled rather than detached.
@@ -749,8 +741,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_manager_multiple_subscriptions() -> Result<()> {
-        use crate::subscription::mock::MockSource;
-
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut manager = SubscriptionManager::new(tx);
 
@@ -783,9 +773,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription_manager_starts_new_subscriptions_in_input_order() {
-        use futures::stream;
-        use std::sync::{Arc, Mutex};
-
         struct OrderedStart;
 
         fn recording_subscription(id_hash: u64, started: Arc<Mutex<Vec<u64>>>) -> Subscription<()> {
@@ -912,7 +899,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_subscription_started_tracing_marks_restarts() -> Result<()> {
-        let recorder = crate::test_support::TraceRecorder::new()
+        let recorder = TraceRecorder::new()
             .with_target("tears::subscription")
             .with_level(tracing::Level::DEBUG);
         let _guard = recorder.set_default();
@@ -930,8 +917,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_completed_subscription_cleaned_up_when_not_requested() -> Result<()> {
-        use futures::stream;
-
         struct OneshotSource;
 
         impl SubscriptionSource for OneshotSource {

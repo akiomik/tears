@@ -7,7 +7,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 
 use crossterm::event::{Event, EventStream};
-use futures::{StreamExt, stream::BoxStream};
+use futures::{StreamExt, stream, stream::BoxStream};
 
 use super::{SubscriptionId, SubscriptionSource};
 
@@ -110,7 +110,7 @@ impl SubscriptionSource for TerminalEvents {
         let stream = EventStream::new();
 
         // Create a stream that yields terminal events as Results
-        futures::stream::unfold(stream, |mut stream| async move {
+        stream::unfold(stream, |mut stream| async move {
             // NOTE: EventStream::next() returns Result<Event, io::Error>
             // We pass the Result directly to the application, allowing users to
             // decide how to handle errors (log, retry, show error UI, etc.)
