@@ -197,9 +197,10 @@ mod tests {
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
     use crate::test_support::{TestApp, TestMessage};
+    use futures::stream::StreamExt;
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{Duration, sleep, timeout};
 
     #[test]
     fn test_new() {
@@ -250,14 +251,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_processes_init_command() {
-        let core = RuntimeCore::<AppWithInitCommand>::new(());
+        let mut core = RuntimeCore::<AppWithInitCommand>::new(());
 
-        // Give time for init command to be processed
-        sleep(Duration::from_millis(50)).await;
+        let input = timeout(Duration::from_secs(1), core.app_inputs.next())
+            .await
+            .expect("init command should send a message before the timeout");
 
-        // The core should have enqueued the init command. We can't directly
-        // verify it was processed without running the event loop, but we can
-        // verify the core was created successfully.
+        assert_eq!(
+            input,
+            Some(crate::runtime::app_input::AppInput::Shared(true))
+        );
         assert!(!core.app.initialized);
     }
 
@@ -277,10 +280,16 @@ mod tests {
         let cmd = Command::future(async { TestMessage::Increment });
         core.enqueue_command(cmd.into_runtime_parts());
 
-        // Give time for message to be sent
-        sleep(Duration::from_millis(50)).await;
+        let input = timeout(Duration::from_secs(1), core.app_inputs.next())
+            .await
+            .expect("command should send a message before the timeout");
 
-        // We can't directly verify the message was received without running the full event loop
+        assert!(matches!(
+            input,
+            Some(crate::runtime::app_input::AppInput::Shared(
+                TestMessage::Increment
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -291,10 +300,10 @@ mod tests {
         let cmd = Command::effect(Action::Quit);
         core.enqueue_command(cmd.into_runtime_parts());
 
-        // Give time for quit signal to be sent
-        sleep(Duration::from_millis(50)).await;
-
-        // The quit signal should have been sent to the quit channel
+        timeout(Duration::from_secs(1), core.quit_rx.recv())
+            .await
+            .expect("quit command should send a quit signal before the timeout")
+            .expect("quit channel should remain open");
     }
 
     // Test multiple cores can be created
