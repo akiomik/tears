@@ -594,9 +594,6 @@ mod tests {
         let _ = runtime.core.msg_tx.send(TestMessage::Increment);
         let _ = runtime.core.msg_tx.send(TestMessage::Increment);
 
-        // Give messages time to arrive
-        sleep(Duration::from_millis(10)).await;
-
         // Process first message (should batch the others within the deadline)
         runtime.process_message_batch(TestMessage::Increment);
 
