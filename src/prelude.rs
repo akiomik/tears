@@ -15,6 +15,6 @@
 
 pub use crate::application::Application;
 pub use crate::command::{Action, Command};
-pub use crate::frame_rate::{FrameRate, FrameRateError};
 pub use crate::runtime::Runtime;
+pub use crate::runtime::frame_rate::{FrameRate, FrameRateError};
 pub use crate::subscription::Subscription;

@@ -93,7 +93,6 @@
 
 pub mod application;
 pub mod command;
-mod frame_rate;
 pub mod panic;
 pub mod prelude;
 pub mod runtime;
@@ -102,10 +101,12 @@ pub mod subscription;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::{Action, Command};
-pub use frame_rate::{FrameRate, FrameRateError};
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
 pub use runtime::Runtime;
+// `FrameRate` lives under `runtime` (it is a scheduling input); re-exported here
+// as `tears::FrameRate` so it keeps a single canonical public path.
+pub use runtime::frame_rate::{FrameRate, FrameRateError};
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
 
 #[cfg(test)]

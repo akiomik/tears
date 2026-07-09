@@ -9,8 +9,7 @@ use std::future::pending;
 
 use tokio::time::{Interval, MissedTickBehavior, interval};
 
-use crate::frame_rate::FrameRate;
-
+use super::frame_rate::FrameRate;
 use super::pending_work::PendingWork;
 
 /// Schedules runtime frame work at the configured frame rate.
