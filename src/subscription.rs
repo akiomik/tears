@@ -370,7 +370,14 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
 
         // Discard entries whose tasks have already finished so they are treated
         // as absent: restarted if still requested, silently dropped otherwise.
-        self.running.retain(|_, rs| !rs.handle.is_finished());
+        let mut finished_ids = HashSet::new();
+        self.running.retain(|id, rs| {
+            let finished = rs.handle.is_finished();
+            if finished {
+                finished_ids.insert(*id);
+            }
+            !finished
+        });
 
         self.running.retain(|id, running| {
             let keep = new_ids.contains(id);
@@ -383,11 +390,12 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
 
         for (id, spawn) in new_subs {
             if !self.running.contains_key(&id) {
+                let restarted = finished_ids.contains(&id);
                 // Only call the spawner when we actually need to start the subscription
                 let stream = spawn();
                 let handle = self.spawn_subscription(stream);
                 self.running.insert(id, RunningSubscription { handle });
-                tracing::debug!(target: "tears::subscription", "subscription started");
+                tracing::debug!(target: "tears::subscription", restarted, "subscription started");
             }
         }
     }
@@ -451,7 +459,105 @@ mod tests {
     use super::*;
     use crate::subscription::mock::MockSource;
     use color_eyre::eyre::Result;
+    use std::sync::{Arc, Mutex};
     use tokio::time::{Duration, sleep, timeout};
+
+    #[derive(Clone, Default)]
+    struct SubscriptionStartObserver {
+        restarted: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl tracing::Subscriber for SubscriptionStartObserver {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            // Callsite interest is cached process-wide. Returning false here can
+            // poison unrelated tracing tests that run in parallel, so keep
+            // interest open and filter specific events below.
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() != "tears::subscription"
+                || *event.metadata().level() != tracing::Level::DEBUG
+            {
+                return;
+            }
+
+            let mut visitor = RestartedFieldVisitor::default();
+            event.record(&mut visitor);
+
+            if let Some(restarted) = visitor.restarted {
+                self.restarted
+                    .lock()
+                    .expect("restart event log mutex should not be poisoned")
+                    .push(restarted);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct RestartedFieldVisitor {
+        restarted: Option<bool>,
+    }
+
+    impl tracing::field::Visit for RestartedFieldVisitor {
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            if field.name() == "restarted" {
+                self.restarted = Some(value);
+            }
+        }
+
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
+    }
+
+    struct OneshotSource {
+        value: i32,
+    }
+
+    impl SubscriptionSource for OneshotSource {
+        type Output = i32;
+
+        fn stream(&self) -> BoxStream<'static, i32> {
+            let v = self.value;
+            futures::stream::once(async move { v }).boxed()
+        }
+
+        fn id(&self) -> SubscriptionId {
+            SubscriptionId::of::<Self>(0)
+        }
+    }
+
+    async fn assert_completed_oneshot_subscription_restarts() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        // Start the first one-shot subscription.
+        manager.update(vec![Subscription::new(OneshotSource { value: 1 })]);
+        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(first, Some(1));
+
+        // Give the task time to reach the finished state.
+        sleep(Duration::from_millis(10)).await;
+
+        // Update with the same subscription ID. Because the previous task
+        // finished, it must be restarted rather than silently skipped.
+        manager.update(vec![Subscription::new(OneshotSource { value: 2 })]);
+        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
+        assert_eq!(second, Some(2), "finished subscription should be restarted");
+
+        Ok(())
+    }
 
     #[test]
     fn test_subscription_new() {
@@ -841,42 +947,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_completed_subscription_is_restarted() -> Result<()> {
-        use futures::stream;
+        assert_completed_oneshot_subscription_restarts().await
+    }
 
-        // A subscription that emits one value and then ends.
-        struct OneshotSource {
-            value: i32,
-        }
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_subscription_started_tracing_marks_restarts() -> Result<()> {
+        let observer = SubscriptionStartObserver::default();
+        let restarted = observer.restarted.clone();
+        let _guard = tracing::subscriber::set_default(observer);
 
-        impl SubscriptionSource for OneshotSource {
-            type Output = i32;
+        assert_completed_oneshot_subscription_restarts().await?;
 
-            fn stream(&self) -> BoxStream<'static, i32> {
-                let v = self.value;
-                stream::once(async move { v }).boxed()
-            }
-
-            fn id(&self) -> SubscriptionId {
-                SubscriptionId::of::<Self>(0)
-            }
-        }
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(tx);
-
-        // Start the first one-shot subscription.
-        manager.update(vec![Subscription::new(OneshotSource { value: 1 })]);
-        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
-        assert_eq!(first, Some(1));
-
-        // Give the task time to reach the finished state.
-        sleep(Duration::from_millis(10)).await;
-
-        // Update with the same subscription ID. Because the previous task
-        // finished, it must be restarted rather than silently skipped.
-        manager.update(vec![Subscription::new(OneshotSource { value: 2 })]);
-        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
-        assert_eq!(second, Some(2), "finished subscription should be restarted");
+        assert_eq!(
+            *restarted
+                .lock()
+                .expect("restart event log mutex should not be poisoned"),
+            vec![false, true],
+            "subscription start tracing should distinguish initial starts from restarts"
+        );
 
         Ok(())
     }
