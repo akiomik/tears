@@ -1716,24 +1716,39 @@ mod tests {
     /// `State::Watching` until the next explicit invalidation.
     #[tokio::test]
     async fn test_invalidation_during_fetch_triggers_refetch() {
+        use std::collections::VecDeque;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::time::Duration;
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
 
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
+        let (release_first, wait_first) = oneshot::channel::<()>();
+        let (release_second, wait_second) = oneshot::channel::<()>();
+        let gates = Arc::new(std::sync::Mutex::new(VecDeque::from([
+            wait_first,
+            wait_second,
+        ])));
 
         let fetch_count_clone = fetch_count.clone();
+        let gates_clone = gates.clone();
         let query = Query::new(
             "key",
             move || {
                 let count = fetch_count_clone.clone();
+                let gates = gates_clone.clone();
                 Box::pin(async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    // Simulate a slow network request so the test has a window
-                    // to inject an invalidation while the fetch is running.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    Ok::<i32, QueryError>(1)
+                    let fetch_number = count.fetch_add(1, Ordering::SeqCst) + 1;
+                    let receiver = gates
+                        .lock()
+                        .expect("fetch gate mutex should not be poisoned")
+                        .pop_front()
+                        .expect("test should provide a gate for each expected fetch");
+                    receiver.await.expect("fetch gate should be released");
+                    Ok::<i32, QueryError>(
+                        i32::try_from(fetch_number).expect("test fetch count should fit in i32"),
+                    )
                 })
             },
             client.clone(),
@@ -1745,18 +1760,35 @@ mod tests {
         let first = stream.next().await;
         assert!(matches!(first, Some(ref r) if r.is_loading()));
 
-        // Inject an invalidation while the first fetch is still sleeping.
-        // The fetch takes 50 ms; we fire the invalidation at 25 ms.
-        let client_for_invalidate = client.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            client_for_invalidate.invalidate("key");
-        });
+        // Gate the fetcher instead of sleeping so CI timing cannot miss the in-flight window.
+        let refetching_poll = stream.next();
+        tokio::pin!(refetching_poll);
+        timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                result = &mut refetching_poll => panic!("first fetch completed before its gate was released: {result:?}"),
+                () = async {
+                    while fetch_count.load(Ordering::SeqCst) < 1 {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await
+        .expect("first fetch should start");
+
+        // Inject an invalidation while the first fetch is still gated.
+        client.invalidate("key");
+
+        release_first
+            .send(())
+            .expect("first fetch gate receiver should still be waiting");
 
         // The first fetch completes after it has already been invalidated, so
         // the stale completion is discarded and the stream immediately starts
         // fetching the next generation.
-        let second = stream.next().await;
+        let second = timeout(Duration::from_millis(100), refetching_poll)
+            .await
+            .expect("invalidated in-flight fetch should start a subsequent refetch");
         assert!(
             matches!(second, Some(ref r) if r.is_loading() && r.is_fetching()),
             "invalidated in-flight fetch should start a subsequent refetch"
@@ -1764,9 +1796,29 @@ mod tests {
 
         // The invalidation that arrived during the first fetch must trigger a
         // second fetch that produces the visible success.
-        let third = stream.next().await;
+        let success_poll = stream.next();
+        tokio::pin!(success_poll);
+        timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                () = async {
+                    while fetch_count.load(Ordering::SeqCst) < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+                result = &mut success_poll => panic!("second fetch completed before its gate was released: {result:?}"),
+            }
+        })
+        .await
+        .expect("second fetch should start");
+
+        release_second
+            .send(())
+            .expect("second fetch gate receiver should still be waiting");
+        let third = timeout(Duration::from_millis(100), success_poll)
+            .await
+            .expect("second fetch should complete");
         assert!(
-            matches!(third, Some(ref r) if r.is_success()),
+            matches!(third, Some(ref r) if r.is_success() && r.data() == Some(&2)),
             "second fetch should succeed"
         );
 
