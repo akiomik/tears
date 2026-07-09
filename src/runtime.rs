@@ -90,7 +90,6 @@ use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::{Interval, MissedTickBehavior, interval};
 
 use crate::{
     application::Application,
@@ -100,10 +99,11 @@ use crate::{
 };
 
 mod app_input;
+mod frame_scheduler;
 mod pending_work;
 
 use app_input::{AppInput, AppInputs};
-use pending_work::PendingWork;
+use frame_scheduler::FrameScheduler;
 
 /// Application state that manages the application lifecycle.
 ///
@@ -164,10 +164,8 @@ struct ApplicationState<App: Application> {
 pub struct Runtime<App: Application> {
     /// Application state and message routing
     state: ApplicationState<App>,
-    /// Timer for frame rate regulation
-    frame_interval: Interval,
-    /// Tracks pending render/subscription work and gates the frame branch
-    pending: PendingWork,
+    /// Schedules frame work and gates idle wake-ups
+    scheduler: FrameScheduler,
 }
 
 impl<App: Application> Runtime<App> {
@@ -212,18 +210,9 @@ impl<App: Application> Runtime<App> {
     pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self {
         let state = ApplicationState::new(flags);
 
-        // Divide a one-second `Duration` directly so the period is exact (e.g.
-        // 60 FPS -> 16.667ms) instead of truncating to whole milliseconds (the
-        // old `1000 / frame_rate` gave 16ms, an effective ~62.5 FPS).
-        let frame_duration = frame_rate.frame_duration();
-        let mut frame_interval = interval(frame_duration);
-        // Skip missed frames rather than trying to catch up
-        frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
         Self {
             state,
-            frame_interval,
-            pending: PendingWork::new(),
+            scheduler: FrameScheduler::new(frame_rate),
         }
     }
 
@@ -295,7 +284,7 @@ impl<App: Application> Runtime<App> {
         tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
 
         // Mark that subscriptions may have changed even when redraw is suppressed.
-        self.pending.mark_subscriptions_dirty();
+        self.scheduler.mark_subscriptions_dirty();
     }
 
     fn process_app_input(&mut self, input: AppInput<App::Message>) {
@@ -309,13 +298,13 @@ impl<App: Application> Runtime<App> {
 
     fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
         let parts = cmd.into_runtime_parts();
-        self.pending.record_redraw(parts.requests_redraw());
+        self.scheduler.record_redraw(parts.requests_redraw());
         self.state.enqueue_command(parts);
     }
 
     /// Processes a frame tick: renders if needed and updates subscriptions.
     ///
-    /// Only renders when [`PendingWork`] has a pending redraw (conditional
+    /// Only renders when [`FrameScheduler`] has a pending redraw (conditional
     /// rendering optimization). Only re-evaluates subscriptions when it has marked
     /// them dirty, i.e. when a message has been processed since the last
     /// evaluation.
@@ -333,7 +322,7 @@ impl<App: Application> Runtime<App> {
         tracing::trace!(target: "tears::runtime::frame", "frame tick");
 
         // Render only if state has changed
-        if self.pending.take_redraw() {
+        if self.scheduler.take_redraw() {
             self.state.render(terminal)?;
             tracing::trace!(target: "tears::runtime", "frame rendered");
         }
@@ -342,7 +331,7 @@ impl<App: Application> Runtime<App> {
         // Since `subscriptions()` is a pure function of the application state,
         // an idle frame (no messages processed) cannot change the subscription
         // set, so we skip the (potentially costly) evaluation entirely.
-        if self.pending.take_subscriptions_dirty() {
+        if self.scheduler.take_subscriptions_dirty() {
             self.update_subscriptions();
         }
 
@@ -450,14 +439,13 @@ impl<App: Application> Runtime<App> {
                     self.process_input_batch(input);
                 }
 
-                // Frame tick: render if needed and update subscriptions.
-                //
-                // Gated on pending work so an idle loop does not wake at the frame
-                // rate just to do nothing. When a message re-enables the branch, the
-                // timer deadline has already elapsed, so `tick()` is ready on the
-                // next poll and adds no render latency. `MissedTickBehavior::Skip`
-                // only controls where the following tick lands (no catch-up burst).
-                _ = self.frame_interval.tick(), if self.pending.has_pending_work() => {
+                // Frame tick: render if needed and update subscriptions. The
+                // scheduler parks while idle, so the loop does not wake at the
+                // frame rate just to do nothing. When a message re-enables frame
+                // work, the elapsed timer is ready on the next poll and adds no
+                // render latency; `MissedTickBehavior::Skip` only controls where
+                // the following tick lands (no catch-up burst).
+                () = self.scheduler.next_work_frame() => {
                     self.process_frame_tick(terminal)?;
                 }
 
@@ -973,12 +961,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_frame_interval_period_is_accurate() {
+    async fn test_runtime_frame_scheduler_period_is_accurate() {
         // 60 FPS should yield a ~16.667ms period. The previous integer
         // millisecond division (1000 / 60 = 16ms) truncated this, producing
         // an effective ~62.5 FPS.
         let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
-        let period = runtime.frame_interval.period();
+        let period = runtime.scheduler.frame_period();
         assert!(
             period >= Duration::from_micros(16_600) && period <= Duration::from_micros(16_700),
             "60 FPS period should be ~16.667ms, got {period:?}",
@@ -986,7 +974,7 @@ mod tests {
 
         // 144 FPS should yield a ~6.944ms period (not the truncated 6ms).
         let runtime = Runtime::<TestApp>::new(0, frame_rate(144));
-        let period = runtime.frame_interval.period();
+        let period = runtime.scheduler.frame_period();
         assert!(
             period >= Duration::from_micros(6_900) && period <= Duration::from_micros(6_950),
             "144 FPS period should be ~6.944ms, got {period:?}",
@@ -1005,20 +993,20 @@ mod tests {
         assert_eq!(runtime.state.app.counter, 1);
 
         // Redraw should be needed
-        assert!(runtime.pending.needs_redraw);
+        assert!(runtime.scheduler.pending.needs_redraw);
     }
 
     #[tokio::test]
     async fn test_process_message_batch_without_redraw_leaves_redraw_unchanged() {
         let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
-        runtime.pending.needs_redraw = false;
-        runtime.pending.subscriptions_dirty = false;
+        runtime.scheduler.pending.needs_redraw = false;
+        runtime.scheduler.pending.subscriptions_dirty = false;
 
         runtime.process_message_batch(RedrawControlMessage::Skip);
 
-        assert!(!runtime.pending.needs_redraw);
+        assert!(!runtime.scheduler.pending.needs_redraw);
         assert!(
-            runtime.pending.subscriptions_dirty,
+            runtime.scheduler.pending.subscriptions_dirty,
             "redraw suppression must not suppress subscription re-evaluation"
         );
     }
@@ -1026,29 +1014,29 @@ mod tests {
     #[tokio::test]
     async fn test_process_message_batch_mixed_commands_redraws() {
         let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
-        runtime.pending.needs_redraw = false;
-        runtime.pending.subscriptions_dirty = false;
+        runtime.scheduler.pending.needs_redraw = false;
+        runtime.scheduler.pending.subscriptions_dirty = false;
 
         let _ = runtime.state.msg_tx.send(RedrawControlMessage::Redraw);
         runtime.process_message_batch(RedrawControlMessage::Skip);
 
-        assert!(runtime.pending.needs_redraw);
-        assert!(runtime.pending.subscriptions_dirty);
+        assert!(runtime.scheduler.pending.needs_redraw);
+        assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
     #[tokio::test]
     async fn test_process_message_batch_redraw_recovers_after_suppression() {
         let mut runtime = Runtime::<RedrawControlApp>::new((), frame_rate(60));
-        runtime.pending.needs_redraw = false;
+        runtime.scheduler.pending.needs_redraw = false;
 
         runtime.process_message_batch(RedrawControlMessage::Skip);
-        assert!(!runtime.pending.needs_redraw);
+        assert!(!runtime.scheduler.pending.needs_redraw);
 
-        runtime.pending.subscriptions_dirty = false;
+        runtime.scheduler.pending.subscriptions_dirty = false;
         runtime.process_message_batch(RedrawControlMessage::Redraw);
 
-        assert!(runtime.pending.needs_redraw);
-        assert!(runtime.pending.subscriptions_dirty);
+        assert!(runtime.scheduler.pending.needs_redraw);
+        assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
     // A minimal `tracing::Subscriber` that counts emitted events (total, and
@@ -1247,7 +1235,7 @@ mod tests {
         }
 
         let mut runtime = Runtime::<BatchOrderApp>::new((), frame_rate(60));
-        runtime.pending.subscriptions_dirty = false;
+        runtime.scheduler.pending.subscriptions_dirty = false;
 
         runtime
             .state
@@ -1263,7 +1251,7 @@ mod tests {
         runtime.process_input_batch(AppInput::Shared(1));
 
         assert_eq!(runtime.state.app.messages, vec![1, 2, 3]);
-        assert!(runtime.pending.subscriptions_dirty);
+        assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
     #[tokio::test]
@@ -1274,13 +1262,13 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
 
         // Initially needs_redraw is true
-        assert!(runtime.pending.needs_redraw);
+        assert!(runtime.scheduler.pending.needs_redraw);
 
         // Process frame tick
         runtime.process_frame_tick(&mut terminal)?;
 
         // Redraw flag should be cleared
-        assert!(!runtime.pending.needs_redraw);
+        assert!(!runtime.scheduler.pending.needs_redraw);
 
         Ok(())
     }
@@ -1293,13 +1281,13 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
 
         // Clear the needs_redraw flag
-        runtime.pending.needs_redraw = false;
+        runtime.scheduler.pending.needs_redraw = false;
 
         // Process frame tick
         runtime.process_frame_tick(&mut terminal)?;
 
         // Redraw flag should still be false
-        assert!(!runtime.pending.needs_redraw);
+        assert!(!runtime.scheduler.pending.needs_redraw);
 
         Ok(())
     }
@@ -1371,9 +1359,10 @@ mod tests {
 
     // --- Idle frame wake-up elision -----------------------------------------
     //
-    // The event loop gates its frame branch on `PendingWork::has_pending_work()`
+    // The scheduler gates its frame branch on `PendingWork::has_pending_work()`
     // so an idle loop stops waking at the frame rate. The predicate's pure logic
-    // is unit-tested in `pending_work`; these tests cover the Runtime-level
+    // is unit-tested in `pending_work`; the scheduler's idle parking is unit-
+    // tested in `frame_scheduler`; these tests cover the Runtime-level
     // integration — that a real frame tick drains the pending work and a processed
     // message re-arms the branch. The end-to-end behavior (zero idle wake-ups, and
     // an immediate render once a message re-enables the branch) is covered by
@@ -1386,7 +1375,7 @@ mod tests {
 
         // Draining the initial pending work leaves both flags false: idle.
         runtime.process_frame_tick(&mut terminal)?;
-        assert!(!runtime.pending.has_pending_work());
+        assert!(!runtime.scheduler.pending.has_pending_work());
 
         Ok(())
     }
@@ -1397,11 +1386,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
 
         runtime.process_frame_tick(&mut terminal)?;
-        assert!(!runtime.pending.has_pending_work());
+        assert!(!runtime.scheduler.pending.has_pending_work());
 
         // A processed message re-enables the frame branch.
         runtime.process_message_batch(TestMessage::Increment);
-        assert!(runtime.pending.has_pending_work());
+        assert!(runtime.scheduler.pending.has_pending_work());
 
         Ok(())
     }
@@ -1468,20 +1457,20 @@ mod tests {
         let mut terminal = Terminal::new(backend)?;
 
         // Clear needs_redraw so only the subscription path exercises the tick.
-        runtime.pending.needs_redraw = false;
+        runtime.scheduler.pending.needs_redraw = false;
 
         // Not yet applied: no frame tick has run.
         assert_eq!(spawns.load(Ordering::SeqCst), 0);
 
         // Subscriptions are only re-evaluated when marked dirty (after a
         // message). Simulate that here.
-        runtime.pending.subscriptions_dirty = true;
+        runtime.scheduler.pending.subscriptions_dirty = true;
 
         // Process frame tick: it must re-evaluate and actually start the
         // subscription, and clear the dirty flag.
         runtime.process_frame_tick(&mut terminal)?;
 
-        assert!(!runtime.pending.subscriptions_dirty);
+        assert!(!runtime.scheduler.pending.subscriptions_dirty);
         for _ in 0..100 {
             if spawns.load(Ordering::SeqCst) == 1 {
                 break;
