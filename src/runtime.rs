@@ -435,7 +435,7 @@ mod tests {
     use crate::application::Application;
     use crate::command::Command;
     use crate::subscription::Subscription;
-    use crate::test_support::{TestApp, TestMessage};
+    use crate::test_support::{TestApp, TestMessage, wait_until};
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
     use tokio::time::{Duration, sleep};
@@ -869,17 +869,11 @@ mod tests {
         runtime.process_frame_tick(&mut terminal)?;
 
         assert!(!runtime.scheduler.pending.subscriptions_dirty);
-        for _ in 0..100 {
-            if spawns.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            sleep(Duration::from_millis(5)).await;
-        }
-        assert_eq!(
-            spawns.load(Ordering::SeqCst),
-            1,
-            "a dirty frame tick must actually start the requested subscription"
-        );
+        wait_until(
+            || spawns.load(Ordering::SeqCst) == 1,
+            "a dirty frame tick must actually start the requested subscription",
+        )
+        .await;
 
         Ok(())
     }
@@ -989,19 +983,37 @@ mod tests {
 
         use crate::subscription::{SubscriptionId, SubscriptionSource};
 
-        // A subscription with a fixed ID whose stream emits one value and then
-        // ends. It counts how many times its stream is spawned so a restart is
-        // observable.
-        struct OneshotSource {
+        #[derive(Clone)]
+        struct RestartCounters {
             spawns: Arc<AtomicUsize>,
+            completions: Arc<AtomicUsize>,
+        }
+
+        // A subscription with a fixed ID whose stream emits one value and then
+        // ends. It counts spawns and completions so restarts are observable
+        // without sleeping for the previous task to finish.
+        struct OneshotSource {
+            counters: RestartCounters,
         }
 
         impl SubscriptionSource for OneshotSource {
             type Output = ();
 
             fn stream(&self) -> BoxStream<'static, ()> {
-                self.spawns.fetch_add(1, Ordering::SeqCst);
-                stream::once(async {}).boxed()
+                self.counters.spawns.fetch_add(1, Ordering::SeqCst);
+                let completions = self.counters.completions.clone();
+                stream::unfold(false, move |emitted| {
+                    let completions = completions.clone();
+                    async move {
+                        if emitted {
+                            completions.fetch_add(1, Ordering::SeqCst);
+                            None
+                        } else {
+                            Some(((), true))
+                        }
+                    }
+                })
+                .boxed()
             }
 
             fn id(&self) -> SubscriptionId {
@@ -1012,15 +1024,15 @@ mod tests {
         }
 
         struct RestartApp {
-            spawns: Arc<AtomicUsize>,
+            counters: RestartCounters,
         }
 
         impl Application for RestartApp {
             type Message = ();
-            type Flags = Arc<AtomicUsize>;
+            type Flags = RestartCounters;
 
-            fn new(spawns: Arc<AtomicUsize>) -> (Self, Command<Self::Message>) {
-                (Self { spawns }, Command::none())
+            fn new(counters: RestartCounters) -> (Self, Command<Self::Message>) {
+                (Self { counters }, Command::none())
             }
 
             fn update(&mut self, (): ()) -> Command<Self::Message> {
@@ -1031,49 +1043,46 @@ mod tests {
 
             fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
                 vec![Subscription::new(OneshotSource {
-                    spawns: self.spawns.clone(),
+                    counters: self.counters.clone(),
                 })]
             }
         }
 
-        // Polls the spawn counter until it reaches `target`, or fails after a
-        // bounded wait so a regression cannot hang the suite.
-        async fn wait_for_spawns(spawns: &AtomicUsize, target: usize) {
-            for _ in 0..100 {
-                if spawns.load(Ordering::SeqCst) >= target {
-                    return;
-                }
-                sleep(Duration::from_millis(5)).await;
-            }
-            assert!(
-                spawns.load(Ordering::SeqCst) >= target,
-                "expected at least {target} spawns, saw {}",
-                spawns.load(Ordering::SeqCst)
-            );
-        }
-
-        let spawns = Arc::new(AtomicUsize::new(0));
-        let mut runtime = Runtime::<RestartApp>::new(spawns.clone(), frame_rate(60));
+        let counters = RestartCounters {
+            spawns: Arc::new(AtomicUsize::new(0)),
+            completions: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut runtime = Runtime::<RestartApp>::new(counters.clone(), frame_rate(60));
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
 
         // Start subscriptions the way `run()` does: the first spawn happens here.
         runtime.core.initialize_subscriptions();
-        wait_for_spawns(&spawns, 1).await;
+        wait_until(
+            || counters.spawns.load(Ordering::SeqCst) >= 1,
+            "initial subscription spawn should start before the timeout",
+        )
+        .await;
 
         // Drive two message-gated re-evaluations. The ID never changes, so the
         // removed hash cache would have skipped the manager update from the
         // second round onward, leaving the finished subscription dead. Each
         // round must restart it, so the spawn count must keep climbing.
         for round in 2..=3 {
-            // Let the current one-shot task finish so the manager sees it as
-            // completed before the next re-evaluation.
-            sleep(Duration::from_millis(10)).await;
+            wait_until(
+                || counters.completions.load(Ordering::SeqCst) >= round - 1,
+                "current one-shot subscription should finish before re-evaluation",
+            )
+            .await;
 
             // A message marks subscriptions dirty; the next frame re-evaluates.
             runtime.process_message_batch(());
             runtime.process_frame_tick(&mut terminal)?;
 
-            wait_for_spawns(&spawns, round).await;
+            wait_until(
+                || counters.spawns.load(Ordering::SeqCst) >= round,
+                "finished subscription should restart before the timeout",
+            )
+            .await;
         }
 
         Ok(())
