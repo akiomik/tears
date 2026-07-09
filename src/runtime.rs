@@ -329,7 +329,7 @@ impl<App: Application> Runtime<App> {
     ///
     /// This is the main entry point for executing the application. It starts the event loop
     /// that processes messages, renders the UI, and manages subscriptions. The loop continues
-    /// until the application sends a quit signal via [`Action::Quit`].
+    /// until the application sends a quit signal via [`Action::Quit`](crate::command::Action::Quit).
     ///
     /// # Event Loop
     ///
