@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
+use tokio::task::yield_now;
 use tokio::time::timeout;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -17,7 +18,7 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 pub async fn wait_until(mut condition: impl FnMut() -> bool, timeout_message: &str) {
     timeout(DEFAULT_WAIT_TIMEOUT, async {
         while !condition() {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await
@@ -43,7 +44,7 @@ pub async fn assert_pending_until<Fut, Condition>(
             result = future.as_mut() => panic!("{completed_message}: {result:?}"),
             () = async {
                 while !condition() {
-                    tokio::task::yield_now().await;
+                    yield_now().await;
                 }
             } => {}
         }
@@ -110,13 +111,18 @@ impl FetchGateQueue {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        future::pending,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
+    use tokio::task::yield_now;
     use tokio::time::timeout;
 
+    // Exercise the re-exports so default-feature clippy does not flag them as unused.
     use crate::test_support::{assert_pending_until, gate_fetches, wait_until};
 
     #[tokio::test]
@@ -124,7 +130,7 @@ mod tests {
         let ready = Arc::new(AtomicBool::new(false));
         let ready_clone = ready.clone();
         tokio::spawn(async move {
-            tokio::task::yield_now().await;
+            yield_now().await;
             ready_clone.store(true, Ordering::SeqCst);
         });
 
@@ -140,11 +146,11 @@ mod tests {
         let ready = Arc::new(AtomicBool::new(false));
         let ready_clone = ready.clone();
         tokio::spawn(async move {
-            tokio::task::yield_now().await;
+            yield_now().await;
             ready_clone.store(true, Ordering::SeqCst);
         });
 
-        let pending = std::future::pending::<usize>();
+        let pending = pending::<usize>();
         tokio::pin!(pending);
         assert_pending_until(
             &mut pending,

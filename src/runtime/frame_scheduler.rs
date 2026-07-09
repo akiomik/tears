@@ -6,6 +6,8 @@
 //! rendering, and re-evaluating subscriptions.
 
 use std::future::pending;
+#[cfg(test)]
+use std::time::Duration;
 
 use tokio::time::{Interval, MissedTickBehavior, interval};
 
@@ -40,7 +42,7 @@ impl FrameScheduler {
 
     /// Returns the scheduler's frame period.
     #[cfg(test)]
-    pub(super) fn frame_period(&self) -> std::time::Duration {
+    pub(super) fn frame_period(&self) -> Duration {
         self.interval.period()
     }
 

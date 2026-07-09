@@ -144,8 +144,8 @@ impl Hash for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
-    use tokio::time::{Duration, timeout};
+
+    use tokio::time::{Duration, Instant, timeout};
 
     fn timer(interval_ms: u64) -> Timer {
         Timer::try_new(interval_ms).expect("timer interval must be non-zero")
@@ -243,8 +243,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_interval_accuracy() {
-        use tokio::time::Instant;
-
         let timer = timer(50); // 50ms interval
         let mut stream = timer.stream();
 
@@ -278,8 +276,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_timer_no_immediate_tick() {
-        use tokio::time::Instant;
-
         let timer = timer(100); // 100ms interval
         let mut stream = timer.stream();
 

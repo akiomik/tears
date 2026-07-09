@@ -92,8 +92,14 @@ module_name_repetitions = "allow"
 
 # Enforce important correctness lints
 unwrap_used = "warn"
+exit = "warn"
 expect_used = "allow"
 panic = "warn"
 
 # Allow similar names in tests (e.g., id_i32, id_u64)
 similar_names = "allow"
+
+# Enable some restriction lints
+absolute_paths = "warn"
+cognitive_complexity = "warn"
+mod_module_files = "warn"

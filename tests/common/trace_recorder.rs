@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tracing::callsite::rebuild_interest_cache;
 use tracing::field::{Field, Visit};
 use tracing::metadata::LevelFilter;
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::{DefaultGuard, set_default};
 use tracing::{Event, Level, Metadata, Subscriber};
 
 // Intentionally overlaps with `src/test_support/trace_recorder.rs`. A shared
@@ -37,7 +41,7 @@ struct EventFilter {
 
 /// Resets the thread-local tracing subscriber when dropped.
 pub struct TraceRecorderGuard {
-    guard: Option<tracing::dispatcher::DefaultGuard>,
+    guard: Option<DefaultGuard>,
 }
 
 impl TraceRecorder {
@@ -69,8 +73,8 @@ impl TraceRecorder {
     /// Installs this recorder as the default subscriber for the current thread.
     #[must_use]
     pub fn set_default(&self) -> TraceRecorderGuard {
-        let guard = tracing::subscriber::set_default(self.clone());
-        tracing::callsite::rebuild_interest_cache();
+        let guard = set_default(self.clone());
+        rebuild_interest_cache();
         TraceRecorderGuard { guard: Some(guard) }
     }
 
@@ -97,7 +101,7 @@ impl TraceRecorder {
 impl Drop for TraceRecorderGuard {
     fn drop(&mut self) {
         drop(self.guard.take());
-        tracing::callsite::rebuild_interest_cache();
+        rebuild_interest_cache();
     }
 }
 
@@ -119,13 +123,13 @@ impl Subscriber for TraceRecorder {
         None
     }
 
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
     }
 
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
 
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
         if !self.filter.matches(event.metadata()) {
@@ -150,9 +154,9 @@ impl Subscriber for TraceRecorder {
         }
     }
 
-    fn enter(&self, _span: &tracing::span::Id) {}
+    fn enter(&self, _span: &Id) {}
 
-    fn exit(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &Id) {}
 }
 
 #[derive(Default)]
@@ -165,5 +169,5 @@ impl Visit for BoolFieldVisitor {
         self.values.push((field.name().to_owned(), value));
     }
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
 }

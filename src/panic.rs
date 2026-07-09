@@ -30,8 +30,10 @@
 //! Call it only once. Each call wraps the previous hook, so repeated calls would
 //! restore the terminal multiple times (harmless, but pointless).
 
+use std::panic::{self, PanicHookInfo};
+
 /// The boxed panic hook type used by [`std::panic::set_hook`].
-type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 /// Installs a panic hook that restores the terminal before delegating to the
 /// previously installed hook.
@@ -40,8 +42,8 @@ type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'sta
 /// installing any panic reporter such as `color_eyre`). See the
 /// [module documentation](self) for details and usage.
 pub fn install_panic_hook() {
-    let original = std::panic::take_hook();
-    std::panic::set_hook(compose_hook(
+    let original = panic::take_hook();
+    panic::set_hook(compose_hook(
         || {
             // Restore the terminal to its normal state (leave raw mode and the
             // alternate screen). Errors are ignored: we are already panicking and
@@ -65,8 +67,11 @@ fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook) -> 
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::PANIC_HOOK_GUARD;
+
     use super::*;
-    use std::sync::{Arc, Mutex};
+
+    use std::sync::{Arc, Mutex, PoisonError};
 
     // A single test, because `set_hook`/`take_hook` mutate process-global state.
     // Running multiple hook-swapping tests in parallel would let them clobber
@@ -76,9 +81,9 @@ mod tests {
     fn test_compose_hook_restores_then_delegates_once() {
         // Serialize against other tests that touch the global panic hook or
         // panic, so a concurrent panic cannot invoke our recording hook.
-        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+        let _hook_guard = PANIC_HOOK_GUARD
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(PoisonError::into_inner);
 
         // Records the order (and therefore the count) of the two stages.
         // `restore` must run first so the terminal is usable before the
@@ -105,10 +110,10 @@ mod tests {
 
         // `PanicHookInfo` cannot be constructed directly, so drive the composed
         // hook through the real panic runtime and catch the unwind.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(hook);
-        let _ = std::panic::catch_unwind(|| panic!("trigger"));
-        std::panic::set_hook(previous);
+        let previous = panic::take_hook();
+        panic::set_hook(hook);
+        let _ = panic::catch_unwind(|| panic!("trigger"));
+        panic::set_hook(previous);
 
         let recorded = order
             .lock()
