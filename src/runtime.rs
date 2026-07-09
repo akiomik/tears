@@ -1085,58 +1085,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[allow(
-        clippy::panic,
-        reason = "the test intentionally panics inside a command"
-    )]
-    fn test_command_task_panic_is_logged() {
-        use std::sync::atomic::Ordering;
-
-        // Serialize against other tests that observe the global panic hook, so
-        // this test's caught panic cannot pollute their recorded hook activity.
-        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let counter = EventCounter::default();
-        let errors = counter.errors.clone();
-
-        // Drive the panicking command task to completion on the current thread,
-        // inside the subscriber scope, so its `catch_unwind` error event is seen.
-        //
-        // The panic is caught by `catch_unwind`, so the default hook only prints
-        // the panic message to stderr — harmless test noise. We deliberately do
-        // not swap the panic hook here: it is process-global, so a no-op hook
-        // would suppress panics in other tests running in parallel and could
-        // leak if this test panicked before restoring it.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime should build");
-
-        tracing::subscriber::with_default(counter, || {
-            rt.block_on(async {
-                let mut state = ApplicationState::<TestApp>::new(0);
-                state.enqueue_command(
-                    Command::future(async {
-                        panic!("boom");
-                        #[allow(unreachable_code)]
-                        TestMessage::Increment
-                    })
-                    .into_runtime_parts(),
-                );
-                // Run the command task to completion (it panics and is caught).
-                state.command_tasks.join_next().await;
-            });
-        });
-
-        assert!(
-            errors.load(Ordering::SeqCst) >= 1,
-            "a panicking command task should log an error event"
-        );
-    }
-
     #[tokio::test]
     async fn test_dropping_state_aborts_command_tasks() {
         use std::sync::Arc;

@@ -4,6 +4,9 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use color_eyre::eyre::Result;
 use ratatui::Frame;
 use tears::prelude::*;
@@ -96,6 +99,35 @@ impl Application for SubApp {
     }
 }
 
+// Counts runtime ERROR events so command-task panic handling can be verified
+// through the public run() pipeline.
+#[derive(Clone, Default)]
+struct RuntimeErrorCounter {
+    errors: Arc<AtomicUsize>,
+}
+
+impl tracing::Subscriber for RuntimeErrorCounter {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "tears::runtime" && *metadata.level() == tracing::Level::ERROR
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, _event: &tracing::Event<'_>) {
+        self.errors.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
 #[tokio::test]
 async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
@@ -106,6 +138,66 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
     assert!(result.is_ok(), "Runtime should not error");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::panic,
+    reason = "the test intentionally panics inside a command"
+)]
+async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
+    struct PanicCommandApp;
+
+    #[derive(Clone)]
+    enum Message {
+        Quit,
+    }
+
+    impl Application for PanicCommandApp {
+        type Message = Message;
+        type Flags = ();
+
+        fn new((): ()) -> (Self, Command<Message>) {
+            let cmd = Command::future(async {
+                panic!("boom");
+                #[allow(unreachable_code)]
+                Message::Quit
+            });
+
+            (Self, cmd)
+        }
+
+        fn update(&mut self, _msg: Message) -> Command<Message> {
+            Command::effect(Action::Quit)
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Message>> {
+            use tears::subscription::time::Timer;
+
+            vec![
+                Subscription::new(Timer::try_new(10).expect("timer interval must be non-zero"))
+                    .map(|_| Message::Quit),
+            ]
+        }
+    }
+
+    let counter = RuntimeErrorCounter::default();
+    let errors = counter.errors.clone();
+    let _guard = tracing::subscriber::set_default(counter);
+
+    let mut terminal = common::test_terminal()?;
+    let runtime = Runtime::<PanicCommandApp>::try_new((), 60).expect("frame rate must be valid");
+
+    timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
+
+    assert!(
+        errors.load(Ordering::SeqCst) >= 1,
+        "a panicking command task should log a tears::runtime error event"
+    );
 
     Ok(())
 }
