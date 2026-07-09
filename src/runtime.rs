@@ -571,12 +571,11 @@ mod tests {
         assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
-    // A minimal `tracing::Subscriber` that counts emitted events (total, and
-    // those at ERROR level), used to assert that instrumentation actually fires.
+    // A minimal `tracing::Subscriber` that counts emitted events, used to assert
+    // that instrumentation actually fires.
     #[derive(Clone, Default)]
     struct EventCounter {
         events: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        errors: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl tracing::Subscriber for EventCounter {
@@ -588,12 +587,9 @@ mod tests {
         }
         fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
+        fn event(&self, _event: &tracing::Event<'_>) {
             use std::sync::atomic::Ordering;
             self.events.fetch_add(1, Ordering::SeqCst);
-            if *event.metadata().level() == tracing::Level::ERROR {
-                self.errors.fetch_add(1, Ordering::SeqCst);
-            }
         }
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
