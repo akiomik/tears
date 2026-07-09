@@ -81,62 +81,27 @@
 //! }
 //! ```
 
-use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
-use futures::FutureExt;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 
 use crate::{
     application::Application,
-    command::{Action, Command, RuntimeCommandParts},
+    command::Command,
     frame_rate::{FrameRate, FrameRateError},
-    subscription::SubscriptionManager,
 };
 
 mod app_input;
+mod core;
 mod frame_scheduler;
 mod pending_work;
 
-use app_input::{AppInput, AppInputs};
+use app_input::AppInput;
 use frame_scheduler::FrameScheduler;
-
-/// Application state that manages the application lifecycle.
-///
-/// Internal type that orchestrates TUI application execution following The Elm Architecture.
-/// It manages the application instance, routes messages, executes commands asynchronously,
-/// and coordinates subscriptions through [`SubscriptionManager`].
-///
-/// Applications should use [`Runtime`] directly instead of this type.
-///
-/// # Type Parameters
-///
-/// * `App` - The application type implementing [`Application`]
-struct ApplicationState<App: Application> {
-    /// The application instance
-    app: App,
-    /// Sender for application messages
-    msg_tx: mpsc::UnboundedSender<App::Message>,
-    /// Runtime-owned receiver for application inputs
-    app_inputs: AppInputs<App::Message>,
-    /// Sender for quit signals
-    quit_tx: mpsc::UnboundedSender<()>,
-    /// Receiver for quit signals
-    quit_rx: mpsc::UnboundedReceiver<()>,
-    /// Manages subscription lifecycle
-    subscription_manager: SubscriptionManager<App::Message>,
-    /// Running command tasks.
-    ///
-    /// Kept so command tasks can be aborted on shutdown, and — because a
-    /// [`JoinSet`] aborts its tasks when dropped — also when the runtime is
-    /// dropped while unwinding from a panic. Finished tasks are reaped on each
-    /// enqueue so the set does not grow without bound.
-    command_tasks: JoinSet<()>,
-}
+// `self::` disambiguates the submodule from the built-in `core` crate.
+use self::core::RuntimeCore;
 
 /// Runtime that schedules and executes TUI application operations.
 ///
@@ -162,8 +127,8 @@ struct ApplicationState<App: Application> {
 ///
 /// See the [module-level documentation](self) for a complete example.
 pub struct Runtime<App: Application> {
-    /// Application state and message routing
-    state: ApplicationState<App>,
+    /// The runtime's owned execution resources (app, channels, subscriptions, tasks)
+    core: RuntimeCore<App>,
     /// Schedules frame work and gates idle wake-ups
     scheduler: FrameScheduler,
 }
@@ -208,10 +173,10 @@ impl<App: Application> Runtime<App> {
     /// ```
     #[must_use]
     pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self {
-        let state = ApplicationState::new(flags);
+        let core = RuntimeCore::new(flags);
 
         Self {
-            state,
+            core,
             scheduler: FrameScheduler::new(frame_rate),
         }
     }
@@ -272,7 +237,7 @@ impl<App: Application> Runtime<App> {
         // Micro-batching: process additional messages that arrived during a short window
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
-            match self.state.app_inputs.try_next_ready() {
+            match self.core.app_inputs.try_next_ready() {
                 Some(input) => {
                     self.process_app_input(input);
                     processed += 1;
@@ -290,7 +255,7 @@ impl<App: Application> Runtime<App> {
     fn process_app_input(&mut self, input: AppInput<App::Message>) {
         match input {
             AppInput::Shared(msg) => {
-                let cmd = self.state.app.update(msg);
+                let cmd = self.core.app.update(msg);
                 self.dispatch_update_command(cmd);
             }
         }
@@ -299,7 +264,7 @@ impl<App: Application> Runtime<App> {
     fn dispatch_update_command(&mut self, cmd: Command<App::Message>) {
         let parts = cmd.into_runtime_parts();
         self.scheduler.record_redraw(parts.requests_redraw());
-        self.state.enqueue_command(parts);
+        self.core.enqueue_command(parts);
     }
 
     /// Processes a frame tick: renders if needed and updates subscriptions.
@@ -323,7 +288,7 @@ impl<App: Application> Runtime<App> {
 
         // Render only if state has changed
         if self.scheduler.take_redraw() {
-            self.state.render(terminal)?;
+            self.core.render(terminal)?;
             tracing::trace!(target: "tears::runtime", "frame rendered");
         }
 
@@ -351,9 +316,9 @@ impl<App: Application> Runtime<App> {
     /// unchanged, which suppressed the restart of finished subscriptions and
     /// violated the manager's documented contract.
     fn update_subscriptions(&mut self) {
-        let subscriptions = self.state.app.subscriptions();
+        let subscriptions = self.core.app.subscriptions();
         let count = subscriptions.len();
-        self.state.subscription_manager.update(subscriptions);
+        self.core.subscription_manager.update(subscriptions);
         // Fires on every dirty frame regardless of whether the set actually
         // changed; the accurate change signals are the manager's
         // "subscription started"/"subscription stopped" events.
@@ -429,13 +394,13 @@ impl<App: Application> Runtime<App> {
         mut self,
         terminal: &mut ratatui::Terminal<B>,
     ) -> Result<(), <B as Backend>::Error> {
-        self.state.initialize_subscriptions();
+        self.core.initialize_subscriptions();
         tracing::debug!(target: "tears::runtime", "runtime started");
 
         loop {
             tokio::select! {
                 // Message received: batch process messages that arrive in quick succession
-                Some(input) = self.state.app_inputs.next() => {
+                Some(input) = self.core.app_inputs.next() => {
                     self.process_input_batch(input);
                 }
 
@@ -450,7 +415,7 @@ impl<App: Application> Runtime<App> {
                 }
 
                 // Quit signal received
-                _ = self.state.quit_rx.recv() => {
+                _ = self.core.quit_rx.recv() => {
                     tracing::debug!(target: "tears::runtime", "quit signal received");
                     break;
                 }
@@ -458,136 +423,9 @@ impl<App: Application> Runtime<App> {
         }
 
         tracing::debug!(target: "tears::runtime", "runtime shutting down");
-        self.state.shutdown();
+        self.core.shutdown();
 
         Ok(())
-    }
-}
-
-impl<App: Application> ApplicationState<App> {
-    /// Creates a new application state with the given initialization flags.
-    ///
-    /// Initializes the application by calling [`Application::new`] and automatically
-    /// enqueues any returned initialization commands for execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `flags` - Configuration data passed to [`Application::new`]
-    #[must_use]
-    fn new(flags: App::Flags) -> Self {
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let app_inputs = AppInputs::new(msg_rx);
-        let (quit_tx, quit_rx) = mpsc::unbounded_channel();
-        let subscription_manager = SubscriptionManager::new(msg_tx.clone());
-
-        // Initialize the application with flags
-        let (app, init_cmd) = App::new(flags);
-
-        let mut runtime = Self {
-            app,
-            msg_tx,
-            app_inputs,
-            quit_tx,
-            quit_rx,
-            subscription_manager,
-            command_tasks: JoinSet::new(),
-        };
-
-        // Enqueue the initial command
-        runtime.enqueue_command(init_cmd.into_runtime_parts());
-
-        runtime
-    }
-
-    /// Enqueues decomposed command parts for asynchronous execution.
-    ///
-    /// Spawns a tokio task that executes the command's action stream, if one exists.
-    /// Messages are sent to the message channel, and quit signals are sent to the quit
-    /// channel. The task terminates when the stream completes or a quit action is
-    /// received.
-    ///
-    /// The task is tracked in [`command_tasks`](Self::command_tasks) so it can be aborted
-    /// on shutdown (or when the runtime is dropped). If the command's stream panics, the
-    /// panic is caught and logged rather than silently lost.
-    ///
-    /// Send failures are silently ignored as they only occur during application shutdown.
-    fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
-        if let Some(stream) = parts.into_stream() {
-            let msg_tx = self.msg_tx.clone();
-            let quit_tx = self.quit_tx.clone();
-
-            // Reap finished command tasks so the set stays bounded to the
-            // commands that are actually still running.
-            while self.command_tasks.try_join_next().is_some() {}
-
-            tracing::trace!(target: "tears::runtime", "command spawned");
-
-            self.command_tasks.spawn(async move {
-                // Catch panics in the command's stream so a bug in a fetcher or
-                // effect is logged instead of vanishing into a detached task.
-                let result = AssertUnwindSafe(async move {
-                    futures::pin_mut!(stream);
-                    while let Some(action) = stream.next().await {
-                        match action {
-                            Action::Message(msg) => {
-                                // NOTE: Send errors are silently ignored. The channel is closed only
-                                // when the ApplicationState is dropped, which means the application is shutting
-                                // down. In this case, dropping messages is the expected behavior.
-                                // This follows the same approach as iced and other Elm-like frameworks.
-                                let _ = msg_tx.send(msg);
-                            }
-                            Action::Quit => {
-                                // NOTE: Same reasoning as above. If the quit channel is closed,
-                                // the application is already shutting down.
-                                let _ = quit_tx.send(());
-                                break;
-                            }
-                        }
-                    }
-                })
-                .catch_unwind()
-                .await;
-
-                if result.is_err() {
-                    tracing::error!(target: "tears::runtime", "command task panicked");
-                }
-            });
-        }
-    }
-
-    /// Initializes subscriptions from the application.
-    ///
-    /// Called once before the event loop starts. Gets the initial subscription set
-    /// from [`Application::subscriptions`] and registers them with the subscription manager.
-    fn initialize_subscriptions(&mut self) {
-        let subscriptions = self.app.subscriptions();
-        self.subscription_manager.update(subscriptions);
-    }
-
-    /// Renders the application to the terminal.
-    ///
-    /// Calls [`Application::view`] within a ratatui draw context to render the UI.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the terminal backend fails (e.g., I/O error).
-    fn render<B: Backend>(
-        &self,
-        terminal: &mut ratatui::Terminal<B>,
-    ) -> Result<(), <B as Backend>::Error> {
-        terminal.draw(|frame| {
-            self.app.view(frame);
-        })?;
-        Ok(())
-    }
-
-    /// Cleans up resources on shutdown.
-    ///
-    /// Shuts down the subscription manager, which cancels all active subscriptions,
-    /// and aborts any still-running command tasks.
-    fn shutdown(&mut self) {
-        self.subscription_manager.shutdown();
-        self.command_tasks.abort_all();
     }
 }
 
@@ -595,65 +433,15 @@ impl<App: Application> ApplicationState<App> {
 mod tests {
     use super::*;
     use crate::application::Application;
-    use crate::command::{Action, Command};
+    use crate::command::Command;
     use crate::subscription::Subscription;
-    use crate::subscription::time::Timer;
+    use crate::test_support::{TestApp, TestMessage};
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
     use tokio::time::{Duration, sleep};
 
     fn frame_rate(value: u32) -> FrameRate {
         FrameRate::try_new(value).expect("frame rate must be valid")
-    }
-
-    // Simple test application
-    #[derive(Debug)]
-    struct TestApp {
-        counter: i32,
-        should_quit: bool,
-    }
-
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    enum TestMessage {
-        Increment,
-        Quit,
-    }
-
-    impl Application for TestApp {
-        type Message = TestMessage;
-        type Flags = i32;
-
-        fn new(initial: i32) -> (Self, Command<Self::Message>) {
-            (
-                Self {
-                    counter: initial,
-                    should_quit: false,
-                },
-                Command::none(),
-            )
-        }
-
-        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
-            match msg {
-                TestMessage::Increment => {
-                    self.counter += 1;
-                    Command::none()
-                }
-                TestMessage::Quit => {
-                    self.should_quit = true;
-                    Command::effect(Action::Quit)
-                }
-            }
-        }
-
-        fn view(&self, _frame: &mut Frame<'_>) {
-            // No-op for testing
-        }
-
-        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-            vec![]
-        }
     }
 
     struct RedrawControlApp;
@@ -686,262 +474,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_runtime_new() {
-        let runtime = ApplicationState::<TestApp>::new(42);
-        assert_eq!(runtime.app.counter, 42);
-    }
-
-    #[test]
-    fn test_runtime_new_with_zero() {
-        let runtime = ApplicationState::<TestApp>::new(0);
-        assert_eq!(runtime.app.counter, 0);
-    }
-
-    #[test]
-    fn test_runtime_new_initializes_channels() {
-        let runtime = ApplicationState::<TestApp>::new(0);
-
-        // ApplicationState should have channels set up
-        // We can't directly test private fields, but we can verify the runtime was created
-        assert_eq!(runtime.app.counter, 0);
-    }
-
-    // Test application with init command
-    struct AppWithInitCommand {
-        initialized: bool,
-    }
-
-    impl Application for AppWithInitCommand {
-        type Message = bool;
-        type Flags = ();
-
-        fn new(_flags: ()) -> (Self, Command<Self::Message>) {
-            let cmd = Command::future(async { true });
-            (Self { initialized: false }, cmd)
-        }
-
-        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
-            self.initialized = msg;
-            Command::none()
-        }
-
-        fn view(&self, _frame: &mut Frame<'_>) {}
-
-        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-            vec![]
-        }
-    }
-
-    #[tokio::test]
-    async fn test_runtime_processes_init_command() {
-        let runtime = ApplicationState::<AppWithInitCommand>::new(());
-
-        // Give time for init command to be processed
-        sleep(Duration::from_millis(50)).await;
-
-        // The application state should have enqueued the init command
-        // We can't directly verify it was processed without running the event loop
-        // but we can verify the runtime was created successfully
-        assert!(!runtime.app.initialized);
-    }
-
-    #[test]
-    fn test_runtime_enqueue_command_none() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Enqueue a none command (should not panic)
-        runtime.enqueue_command(Command::none().into_runtime_parts());
-    }
-
-    #[tokio::test]
-    async fn test_runtime_enqueue_command_with_message() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Enqueue a command that sends a message
-        let cmd = Command::future(async { TestMessage::Increment });
-        runtime.enqueue_command(cmd.into_runtime_parts());
-
-        // Give time for message to be sent
-        sleep(Duration::from_millis(50)).await;
-
-        // We can't directly verify the message was received without running the full event loop
-    }
-
-    #[tokio::test]
-    async fn test_runtime_enqueue_command_with_quit() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Enqueue a quit command
-        let cmd = Command::effect(Action::Quit);
-        runtime.enqueue_command(cmd.into_runtime_parts());
-
-        // Give time for quit signal to be sent
-        sleep(Duration::from_millis(50)).await;
-
-        // The quit signal should have been sent to the quit channel
-    }
-
-    // Test multiple application states can be created
-    #[test]
-    fn test_multiple_runtimes() {
-        let runtime1 = ApplicationState::<TestApp>::new(1);
-        let runtime2 = ApplicationState::<TestApp>::new(2);
-
-        assert_eq!(runtime1.app.counter, 1);
-        assert_eq!(runtime2.app.counter, 2);
-    }
-
-    // Test with different flag types
-    struct AppWithStringFlags {
-        name: String,
-    }
-
-    impl Application for AppWithStringFlags {
-        type Message = ();
-        type Flags = String;
-
-        fn new(name: String) -> (Self, Command<Self::Message>) {
-            (Self { name }, Command::none())
-        }
-
-        fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
-            Command::none()
-        }
-
-        fn view(&self, _frame: &mut Frame<'_>) {}
-
-        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-            vec![]
-        }
-    }
-
-    #[test]
-    fn test_runtime_with_string_flags() {
-        let runtime = ApplicationState::<AppWithStringFlags>::new("test".to_string());
-        assert_eq!(runtime.app.name, "test");
-    }
-
-    #[test]
-    fn test_runtime_with_empty_string_flags() {
-        let runtime = ApplicationState::<AppWithStringFlags>::new(String::new());
-        assert_eq!(runtime.app.name, "");
-    }
-
-    // Unit tests for extracted methods
-
-    #[tokio::test]
-    async fn test_initialize_subscriptions() {
-        struct AppWithSubs;
-
-        impl Application for AppWithSubs {
-            type Message = ();
-            type Flags = ();
-
-            fn new((): ()) -> (Self, Command<()>) {
-                (Self, Command::none())
-            }
-
-            fn update(&mut self, (): ()) -> Command<()> {
-                Command::none()
-            }
-
-            fn view(&self, _frame: &mut Frame<'_>) {}
-
-            fn subscriptions(&self) -> Vec<Subscription<()>> {
-                vec![
-                    Subscription::new(
-                        Timer::try_new(100).expect("timer interval must be non-zero"),
-                    )
-                    .map(|_| ()),
-                ]
-            }
-        }
-
-        let mut runtime = ApplicationState::<AppWithSubs>::new(());
-
-        // Should not panic
-        runtime.initialize_subscriptions();
-    }
-
-    #[test]
-    fn test_initialize_subscriptions_empty() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Should not panic with empty subscriptions
-        runtime.initialize_subscriptions();
-    }
-
-    #[test]
-    fn test_render() -> Result<()> {
-        let runtime = ApplicationState::<TestApp>::new(0);
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend)?;
-
-        // Should render without error
-        assert!(runtime.render(&mut terminal).is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_render_multiple_times() -> Result<()> {
-        let runtime = ApplicationState::<TestApp>::new(0);
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend)?;
-
-        // Should be able to render multiple times
-        assert!(runtime.render(&mut terminal).is_ok());
-        assert!(runtime.render(&mut terminal).is_ok());
-        assert!(runtime.render(&mut terminal).is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_shutdown() {
-        let mut runtime = ApplicationState::<TestApp>::new(0);
-
-        // Should not panic
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn test_shutdown_after_initialize_subscriptions() {
-        struct AppWithSubs;
-
-        impl Application for AppWithSubs {
-            type Message = ();
-            type Flags = ();
-
-            fn new((): ()) -> (Self, Command<()>) {
-                (Self, Command::none())
-            }
-
-            fn update(&mut self, (): ()) -> Command<()> {
-                Command::none()
-            }
-
-            fn view(&self, _frame: &mut Frame<'_>) {}
-
-            fn subscriptions(&self) -> Vec<Subscription<()>> {
-                use crate::subscription::time::Timer;
-                vec![
-                    Subscription::new(
-                        Timer::try_new(100).expect("timer interval must be non-zero"),
-                    )
-                    .map(|_| ()),
-                ]
-            }
-        }
-
-        let mut runtime = ApplicationState::<AppWithSubs>::new(());
-        runtime.initialize_subscriptions();
-
-        // Should cancel subscriptions without panic
-        runtime.shutdown();
-    }
-
     // Runtime tests
 
     #[tokio::test]
@@ -949,7 +481,7 @@ mod tests {
         let runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Runtime should be created successfully
-        assert_eq!(runtime.state.app.counter, 0);
+        assert_eq!(runtime.core.app.counter, 0);
     }
 
     #[tokio::test]
@@ -990,7 +522,7 @@ mod tests {
         runtime.process_message_batch(TestMessage::Increment);
 
         // Counter should be incremented
-        assert_eq!(runtime.state.app.counter, 1);
+        assert_eq!(runtime.core.app.counter, 1);
 
         // Redraw should be needed
         assert!(runtime.scheduler.pending.needs_redraw);
@@ -1017,7 +549,7 @@ mod tests {
         runtime.scheduler.pending.needs_redraw = false;
         runtime.scheduler.pending.subscriptions_dirty = false;
 
-        let _ = runtime.state.msg_tx.send(RedrawControlMessage::Redraw);
+        let _ = runtime.core.msg_tx.send(RedrawControlMessage::Redraw);
         runtime.process_message_batch(RedrawControlMessage::Skip);
 
         assert!(runtime.scheduler.pending.needs_redraw);
@@ -1086,60 +618,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dropping_state_aborts_command_tasks() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // A guard that records, via its `Drop`, that the command task's future
-        // was dropped — which only happens if the task is aborted rather than
-        // detached.
-        struct AbortGuard(Arc<AtomicBool>);
-        impl Drop for AbortGuard {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let aborted = Arc::new(AtomicBool::new(false));
-
-        {
-            let mut state = ApplicationState::<TestApp>::new(0);
-            let guard = AbortGuard(aborted.clone());
-            // A command that owns the guard and never completes, so its task
-            // stays parked until aborted.
-            state.enqueue_command(
-                Command::future(async move {
-                    let _guard = guard;
-                    std::future::pending::<TestMessage>().await
-                })
-                .into_runtime_parts(),
-            );
-
-            // Let the task start and park.
-            sleep(Duration::from_millis(10)).await;
-            assert!(
-                !aborted.load(Ordering::SeqCst),
-                "command task should still be running before the state is dropped"
-            );
-            // `state` (and its `command_tasks` JoinSet) is dropped here.
-        }
-
-        // Give the runtime a chance to process the abort and drop the future.
-        sleep(Duration::from_millis(10)).await;
-        assert!(
-            aborted.load(Ordering::SeqCst),
-            "dropping the state should abort running command tasks"
-        );
-    }
-
-    #[tokio::test]
     async fn test_event_loop_process_message_batch_with_batching() {
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Send multiple messages to the queue
-        let _ = runtime.state.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.state.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.state.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
 
         // Give messages time to arrive
         sleep(Duration::from_millis(10)).await;
@@ -1148,7 +633,7 @@ mod tests {
         runtime.process_message_batch(TestMessage::Increment);
 
         // All messages should be processed (1 direct + 3 batched = 4 total)
-        assert_eq!(runtime.state.app.counter, 4);
+        assert_eq!(runtime.core.app.counter, 4);
     }
 
     #[tokio::test]
@@ -1186,19 +671,19 @@ mod tests {
         runtime.scheduler.pending.subscriptions_dirty = false;
 
         runtime
-            .state
+            .core
             .msg_tx
             .send(2)
             .expect("receiver should be open");
         runtime
-            .state
+            .core
             .msg_tx
             .send(3)
             .expect("receiver should be open");
 
         runtime.process_input_batch(AppInput::Shared(1));
 
-        assert_eq!(runtime.state.app.messages, vec![1, 2, 3]);
+        assert_eq!(runtime.core.app.messages, vec![1, 2, 3]);
         assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
@@ -1249,7 +734,7 @@ mod tests {
 
         // A `Quit` message routes to `Action::Quit`, which the loop's dedicated
         // quit branch receives.
-        let _ = runtime.state.msg_tx.send(TestMessage::Quit);
+        let _ = runtime.core.msg_tx.send(TestMessage::Quit);
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -1289,7 +774,7 @@ mod tests {
         // Deliver the quit only after the loop has rendered its first frame and
         // gone idle. A clone keeps `quit_tx` alive after `run()` takes ownership
         // of the runtime.
-        let quit_tx = runtime.state.quit_tx.clone();
+        let quit_tx = runtime.core.quit_tx.clone();
         tokio::spawn(async move {
             sleep(Duration::from_secs(1)).await;
             let _ = quit_tx.send(());
@@ -1607,7 +1092,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
 
         // Start subscriptions the way `run()` does: the first spawn happens here.
-        runtime.state.initialize_subscriptions();
+        runtime.core.initialize_subscriptions();
         wait_for_spawns(&spawns, 1).await;
 
         // Drive two message-gated re-evaluations. The ID never changes, so the
