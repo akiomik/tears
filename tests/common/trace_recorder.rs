@@ -1,0 +1,169 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tracing::field::{Field, Visit};
+use tracing::metadata::LevelFilter;
+use tracing::{Event, Level, Metadata, Subscriber};
+
+// Intentionally overlaps with `src/test_support/trace_recorder.rs`. A shared
+// workspace-only crate made publish/tarball behavior less intuitive for this
+// small helper, and a feature-gated public test API would add test invocation
+// constraints. Integration tests keep a local copy for now.
+
+/// A cache-safe tracing subscriber for tests that need to count events or
+/// inspect simple event fields.
+///
+/// `tracing` caches callsite interest process-wide. This recorder keeps
+/// `enabled()` open and filters in `event()` so one test does not cache
+/// `Interest::never` for another test's callsite.
+#[derive(Clone, Default)]
+pub struct TraceRecorder {
+    state: Arc<TraceRecorderState>,
+    filter: EventFilter,
+}
+
+#[derive(Default)]
+struct TraceRecorderState {
+    events: AtomicUsize,
+    bool_fields: Mutex<HashMap<String, Vec<bool>>>,
+}
+
+#[derive(Clone, Default)]
+struct EventFilter {
+    target: Option<String>,
+    level: Option<Level>,
+}
+
+/// Resets the thread-local tracing subscriber when dropped.
+pub struct TraceRecorderGuard {
+    guard: Option<tracing::dispatcher::DefaultGuard>,
+}
+
+impl TraceRecorder {
+    /// Creates a recorder that observes every tracing event on the current
+    /// thread while installed.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Restricts recorded events to a specific tracing target.
+    #[must_use]
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.filter.target = Some(target.into());
+        self
+    }
+
+    /// Restricts recorded events to a specific tracing level.
+    ///
+    /// `#[path]` compiles this helper per integration-test target, so methods
+    /// used by one test target can be dead code in another.
+    #[allow(dead_code)]
+    #[must_use]
+    pub const fn with_level(mut self, level: Level) -> Self {
+        self.filter.level = Some(level);
+        self
+    }
+
+    /// Installs this recorder as the default subscriber for the current thread.
+    #[must_use]
+    pub fn set_default(&self) -> TraceRecorderGuard {
+        let guard = tracing::subscriber::set_default(self.clone());
+        tracing::callsite::rebuild_interest_cache();
+        TraceRecorderGuard { guard: Some(guard) }
+    }
+
+    /// Returns the number of events that matched this recorder's filter.
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.state.events.load(Ordering::SeqCst)
+    }
+
+    /// Returns all bool values recorded for the named event field.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn bool_values(&self, field: &str) -> Vec<bool> {
+        self.state
+            .bool_fields
+            .lock()
+            .expect("trace recorder bool field log mutex should not be poisoned")
+            .get(field)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for TraceRecorderGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        tracing::callsite::rebuild_interest_cache();
+    }
+}
+
+impl EventFilter {
+    fn matches(&self, metadata: &Metadata<'_>) -> bool {
+        self.target
+            .as_deref()
+            .is_none_or(|target| metadata.target() == target)
+            && self.level.is_none_or(|level| *metadata.level() == level)
+    }
+}
+
+impl Subscriber for TraceRecorder {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        None
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        if !self.filter.matches(event.metadata()) {
+            return;
+        }
+
+        self.state.events.fetch_add(1, Ordering::SeqCst);
+
+        let mut visitor = BoolFieldVisitor::default();
+        event.record(&mut visitor);
+        if visitor.values.is_empty() {
+            return;
+        }
+
+        let mut fields = self
+            .state
+            .bool_fields
+            .lock()
+            .expect("trace recorder bool field log mutex should not be poisoned");
+        for (field, value) in visitor.values {
+            fields.entry(field).or_default().push(value);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+#[derive(Default)]
+struct BoolFieldVisitor {
+    values: Vec<(String, bool)>,
+}
+
+impl Visit for BoolFieldVisitor {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.values.push((field.name().to_owned(), value));
+    }
+
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+}

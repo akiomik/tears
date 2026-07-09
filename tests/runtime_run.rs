@@ -3,14 +3,14 @@
 // Unit tests for individual methods are in src/runtime.rs
 
 mod common;
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[path = "common/trace_recorder.rs"]
+mod trace_recorder;
 
 use color_eyre::eyre::Result;
 use ratatui::Frame;
 use tears::prelude::*;
 use tokio::time::{Duration, timeout};
+use trace_recorder::TraceRecorder;
 
 // Helper: Simple counter app
 #[derive(Debug)]
@@ -99,35 +99,6 @@ impl Application for SubApp {
     }
 }
 
-// Counts runtime ERROR events so command-task panic handling can be verified
-// through the public run() pipeline.
-#[derive(Clone, Default)]
-struct RuntimeErrorCounter {
-    errors: Arc<AtomicUsize>,
-}
-
-impl tracing::Subscriber for RuntimeErrorCounter {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.target() == "tears::runtime" && *metadata.level() == tracing::Level::ERROR
-    }
-
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-    fn event(&self, _event: &tracing::Event<'_>) {
-        self.errors.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn enter(&self, _span: &tracing::span::Id) {}
-
-    fn exit(&self, _span: &tracing::span::Id) {}
-}
-
 #[tokio::test]
 async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
@@ -185,9 +156,10 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
         }
     }
 
-    let counter = RuntimeErrorCounter::default();
-    let errors = counter.errors.clone();
-    let _guard = tracing::subscriber::set_default(counter);
+    let recorder = TraceRecorder::new()
+        .with_target("tears::runtime")
+        .with_level(tracing::Level::ERROR);
+    let _guard = recorder.set_default();
 
     let mut terminal = common::test_terminal()?;
     let runtime = Runtime::<PanicCommandApp>::try_new((), 60).expect("frame rate must be valid");
@@ -195,7 +167,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
 
     assert!(
-        errors.load(Ordering::SeqCst) >= 1,
+        recorder.event_count() >= 1,
         "a panicking command task should log a tears::runtime error event"
     );
 
