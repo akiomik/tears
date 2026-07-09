@@ -3,20 +3,25 @@ use std::task::{Context, Poll};
 
 use tokio::sync::mpsc;
 
+/// Input events consumed by the runtime's application loop.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) enum AppInput<Msg> {
+    /// A message sent through the application's shared message channel.
     Shared(Msg),
 }
 
+/// Stream of application inputs backed by runtime message channels.
 pub(super) struct AppInputs<Msg> {
     shared: mpsc::UnboundedReceiver<Msg>,
 }
 
 impl<Msg> AppInputs<Msg> {
+    /// Creates an input stream from the shared message receiver.
     pub(super) const fn new(shared: mpsc::UnboundedReceiver<Msg>) -> Self {
         Self { shared }
     }
 
+    /// Returns the next queued input without waiting for new messages.
     pub(super) fn try_next_ready(&mut self) -> Option<AppInput<Msg>> {
         self.shared.try_recv().ok().map(AppInput::Shared)
     }
