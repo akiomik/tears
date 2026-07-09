@@ -458,6 +458,7 @@ impl<Msg> Drop for SubscriptionManager<Msg> {
 mod tests {
     use super::*;
     use crate::subscription::mock::MockSource;
+    use crate::test_support::wait_until;
     use color_eyre::eyre::Result;
     use tokio::time::{Duration, sleep, timeout};
 
@@ -487,8 +488,16 @@ mod tests {
         let first = timeout(Duration::from_millis(100), rx.recv()).await?;
         assert_eq!(first, Some(1));
 
-        // Give the task time to reach the finished state.
-        sleep(Duration::from_millis(10)).await;
+        wait_until(
+            || {
+                manager
+                    .running
+                    .values()
+                    .all(|running| running.handle.is_finished())
+            },
+            "one-shot subscription should finish before restart",
+        )
+        .await;
 
         // Update with the same subscription ID. Because the previous task
         // finished, it must be restarted rather than silently skipped.
@@ -497,6 +506,14 @@ mod tests {
         assert_eq!(second, Some(2), "finished subscription should be restarted");
 
         Ok(())
+    }
+
+    async fn wait_for_mock_receivers<T: Clone + 'static>(mock: &MockSource<T>, expected: usize) {
+        wait_until(
+            || mock.receiver_count() == expected,
+            "mock receiver count should reach the expected value",
+        )
+        .await;
     }
 
     #[test]
@@ -604,7 +621,7 @@ mod tests {
         let sub = Subscription::new(mock.clone());
 
         manager.update(vec![sub]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
 
         // Emit values
         mock.emit(10)?;
@@ -654,11 +671,7 @@ mod tests {
         // Shutdown should cancel all subscriptions
         manager.shutdown();
 
-        // Wait a bit
-        sleep(Duration::from_millis(50)).await;
-
-        // Should not receive more messages after shutdown
-        // The channel might have some buffered messages, but stream should stop
+        assert_eq!(manager.running.len(), 0);
     }
 
     #[tokio::test]
@@ -682,14 +695,17 @@ mod tests {
         // A subscription whose stream owns the guard and never yields, so its
         // task stays parked until it is aborted.
         struct ParkedSource {
+            started: Arc<AtomicBool>,
             aborted: Arc<AtomicBool>,
         }
         impl SubscriptionSource for ParkedSource {
             type Output = i32;
 
             fn stream(&self) -> BoxStream<'static, i32> {
+                let started = self.started.clone();
                 let guard = AbortGuard(self.aborted.clone());
                 stream::poll_fn(move |_cx| {
+                    started.store(true, Ordering::SeqCst);
                     let _keep_alive = &guard;
                     Poll::Pending
                 })
@@ -701,17 +717,22 @@ mod tests {
             }
         }
 
+        let started = Arc::new(AtomicBool::new(false));
         let aborted = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = mpsc::unbounded_channel();
 
         {
             let mut manager = SubscriptionManager::new(tx);
             manager.update(vec![Subscription::new(ParkedSource {
+                started: started.clone(),
                 aborted: aborted.clone(),
             })]);
 
-            // Let the task start and park on the pending stream.
-            sleep(Duration::from_millis(10)).await;
+            wait_until(
+                || started.load(Ordering::SeqCst),
+                "subscription task should start before the manager is dropped",
+            )
+            .await;
             assert!(
                 !aborted.load(Ordering::SeqCst),
                 "task should still be running before the manager is dropped"
@@ -719,12 +740,11 @@ mod tests {
             // `manager` is dropped here.
         }
 
-        // Give the runtime a chance to process the abort and drop the future.
-        sleep(Duration::from_millis(10)).await;
-        assert!(
-            aborted.load(Ordering::SeqCst),
-            "dropping the manager should abort running subscription tasks"
-        );
+        wait_until(
+            || aborted.load(Ordering::SeqCst),
+            "dropping the manager should abort running subscription tasks",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -741,7 +761,8 @@ mod tests {
             Subscription::new(mock1.clone()),
             Subscription::new(mock2.clone()),
         ]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock1, 1).await;
+        wait_for_mock_receivers(&mock2, 1).await;
 
         // Emit from both subscriptions
         mock1.emit(1)?;
@@ -808,11 +829,10 @@ mod tests {
 
         // Initially no subscriptions
         manager.update(Vec::<Subscription<i32>>::new());
-        sleep(Duration::from_millis(10)).await;
 
         // Enable subscription
         manager.update(vec![Subscription::new(mock.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
 
         // Emit event
         mock.emit(42)?;
@@ -833,7 +853,7 @@ mod tests {
 
         // Start with subscription enabled
         manager.update(vec![Subscription::new(mock.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
 
         // Emit event - should be received
         mock.emit(1)?;
@@ -842,11 +862,10 @@ mod tests {
 
         // Disable subscription
         manager.update(Vec::<Subscription<i32>>::new());
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 0).await;
 
         // Emit event - should NOT be received
-        let _ = mock.emit(2); // May fail if no receivers
-        sleep(Duration::from_millis(10)).await;
+        assert!(mock.emit(2).is_err());
 
         // Channel should be empty
         assert!(rx.try_recv().is_err());
@@ -864,7 +883,7 @@ mod tests {
 
         // Start with subscription 1
         manager.update(vec![Subscription::new(mock1.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock1, 1).await;
 
         mock1.emit(100)?;
         let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
@@ -872,7 +891,8 @@ mod tests {
 
         // Switch to subscription 2
         manager.update(vec![Subscription::new(mock2.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock1, 0).await;
+        wait_for_mock_receivers(&mock2, 1).await;
 
         // mock1 should no longer work (no receivers)
         let _ = mock1.emit(200);
@@ -932,7 +952,16 @@ mod tests {
         // Start and let the task finish.
         manager.update(vec![Subscription::new(OneshotSource)]);
         let _ = timeout(Duration::from_millis(100), rx.recv()).await?;
-        sleep(Duration::from_millis(10)).await;
+        wait_until(
+            || {
+                manager
+                    .running
+                    .values()
+                    .all(|running| running.handle.is_finished())
+            },
+            "one-shot subscription should finish before cleanup",
+        )
+        .await;
 
         // Update without any subscriptions — the stale map entry must be removed.
         manager.update(Vec::<Subscription<i32>>::new());
@@ -955,7 +984,7 @@ mod tests {
 
         // Enable
         manager.update(vec![Subscription::new(mock.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
         mock.emit(1)?;
         assert_eq!(
             timeout(Duration::from_millis(100), rx.recv()).await?,
@@ -964,11 +993,11 @@ mod tests {
 
         // Disable
         manager.update(Vec::<Subscription<i32>>::new());
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 0).await;
 
         // Re-enable
         manager.update(vec![Subscription::new(mock.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
         mock.emit(2)?;
         assert_eq!(
             timeout(Duration::from_millis(100), rx.recv()).await?,
@@ -977,11 +1006,11 @@ mod tests {
 
         // Disable again
         manager.update(Vec::<Subscription<i32>>::new());
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 0).await;
 
         // Re-enable again
         manager.update(vec![Subscription::new(mock.clone())]);
-        sleep(Duration::from_millis(10)).await;
+        wait_for_mock_receivers(&mock, 1).await;
         mock.emit(3)?;
         assert_eq!(
             timeout(Duration::from_millis(100), rx.recv()).await?,

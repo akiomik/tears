@@ -13,8 +13,10 @@ use crate::application::Application;
 use crate::command::{Action, Command};
 use crate::subscription::Subscription;
 
+pub use async_utils::{assert_pending_until, gate_fetches, wait_until};
 pub use trace_recorder::TraceRecorder;
 
+mod async_utils;
 mod trace_recorder;
 
 /// Serializes tests that install a process-global panic hook or deliberately

@@ -196,11 +196,12 @@ mod tests {
     use crate::command::{Action, Command};
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
-    use crate::test_support::{TestApp, TestMessage};
+    use crate::test_support::{TestApp, TestMessage, wait_until};
     use futures::stream::StreamExt;
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::sync::oneshot;
+    use tokio::time::{Duration, timeout};
 
     #[test]
     fn test_new() {
@@ -483,18 +484,22 @@ mod tests {
         {
             let mut core = RuntimeCore::<TestApp>::new(0);
             let guard = AbortGuard(aborted.clone());
+            let (started_tx, started_rx) = oneshot::channel();
             // A command that owns the guard and never completes, so its task
             // stays parked until aborted.
             core.enqueue_command(
                 Command::future(async move {
                     let _guard = guard;
+                    let _ = started_tx.send(());
                     std::future::pending::<TestMessage>().await
                 })
                 .into_runtime_parts(),
             );
 
-            // Let the task start and park.
-            sleep(Duration::from_millis(10)).await;
+            timeout(Duration::from_secs(1), started_rx)
+                .await
+                .expect("command task should start before the timeout")
+                .expect("command task should signal that it started");
             assert!(
                 !aborted.load(Ordering::SeqCst),
                 "command task should still be running before the core is dropped"
@@ -502,11 +507,10 @@ mod tests {
             // `core` (and its `command_tasks` JoinSet) is dropped here.
         }
 
-        // Give the runtime a chance to process the abort and drop the future.
-        sleep(Duration::from_millis(10)).await;
-        assert!(
-            aborted.load(Ordering::SeqCst),
-            "dropping the core should abort running command tasks"
-        );
+        wait_until(
+            || aborted.load(Ordering::SeqCst),
+            "dropping the core should abort running command tasks",
+        )
+        .await;
     }
 }

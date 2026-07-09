@@ -34,7 +34,12 @@ Prefer explicit synchronization:
 - `oneshot` for a single gate or milestone.
 - `watch` for state that changes over time.
 - `Notify` for repeated readiness events where no value needs to be carried.
-- Atomic wait helpers for counters and drop/abort observations.
+- `crate::test_support::wait_until` for bounded condition waits in
+  crate-internal tests.
+- `crate::test_support::assert_pending_until` for futures that must stay
+  pending until a gated condition is observed.
+- `crate::test_support::gate_fetches` for query tests that need deterministic
+  in-flight fetch windows.
 - `timeout` only as a failure bound around an explicit condition, not as the
   condition itself.
 
@@ -104,5 +109,5 @@ When auditing sleeps, classify each use into one of these buckets:
 - **Keep intentionally** when elapsed time, virtual time, timer ordering, or
   command delay is the behavior under test.
 - **Defer to async helper work** when several tests need the same wait pattern;
-  move those cases to helpers such as `wait_until_atomic`,
-  `assert_pending_until`, or source-specific gates instead of open-coding loops.
+  move those cases to `crate::test_support` helpers instead of open-coding
+  loops.

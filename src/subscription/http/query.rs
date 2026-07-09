@@ -1050,20 +1050,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_cell_invalidate_without_data_emits_pending_fetching_not_stale() {
-        use std::collections::VecDeque;
+        use crate::test_support::{assert_pending_until, gate_fetches};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
         use tokio::time::{Duration, timeout};
 
         let config = QueryConfig::new(Duration::from_secs(3600), Duration::from_secs(3600));
         let client = Arc::new(QueryClient::with_config(config));
         let fetch_count = Arc::new(AtomicUsize::new(0));
-        let (release_first, wait_first) = oneshot::channel::<()>();
-        let (release_second, wait_second) = oneshot::channel::<()>();
-        let gates = Arc::new(std::sync::Mutex::new(VecDeque::from([
-            wait_first,
-            wait_second,
-        ])));
+        let (mut releases, gates) = gate_fetches(2);
 
         let fetch_count_clone = fetch_count.clone();
         let gates_clone = gates.clone();
@@ -1074,12 +1068,7 @@ mod tests {
                 let gates = gates_clone.clone();
                 Box::pin(async move {
                     let fetch_number = count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let receiver = gates
-                        .lock()
-                        .expect("fetch gate mutex should not be poisoned")
-                        .pop_front()
-                        .expect("test should provide a gate for each expected fetch");
-                    receiver.await.expect("fetch gate should be released");
+                    gates.next().await.expect("fetch gate should be released");
                     Ok::<i32, QueryError>(
                         i32::try_from(fetch_number).expect("test fetch count should fit in i32"),
                     )
@@ -1094,23 +1083,16 @@ mod tests {
 
         let invalidated_poll = stream.next();
         tokio::pin!(invalidated_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut invalidated_poll => panic!("first fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 1 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("first fetch should start");
+        assert_pending_until(
+            &mut invalidated_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 1,
+            "first fetch completed before its gate was released",
+            "first fetch should start",
+        )
+        .await;
 
         client.invalidate("key");
-        release_first
-            .send(())
-            .expect("first fetch gate receiver should still be waiting");
+        releases.release(0);
 
         let pending = timeout(Duration::from_millis(100), invalidated_poll)
             .await
@@ -1122,22 +1104,15 @@ mod tests {
 
         let success_poll = stream.next();
         tokio::pin!(success_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut success_poll => panic!("second fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 2 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("second fetch should start");
+        assert_pending_until(
+            &mut success_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 2,
+            "second fetch completed before its gate was released",
+            "second fetch should start",
+        )
+        .await;
 
-        release_second
-            .send(())
-            .expect("second fetch gate receiver should still be waiting");
+        releases.release(1);
         let success = timeout(Duration::from_millis(100), success_poll)
             .await
             .expect("second fetch should complete");
@@ -1315,30 +1290,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_identity_streams_share_single_in_flight_fetch() {
+        use crate::test_support::{assert_pending_until, gate_fetches};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
         use tokio::time::{Duration, timeout};
 
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
-        let (release_fetch, wait_for_release) = oneshot::channel::<()>();
-        let wait_for_release = Arc::new(std::sync::Mutex::new(Some(wait_for_release)));
+        let (mut releases, gates) = gate_fetches(1);
 
         let fetch_count_clone = fetch_count.clone();
-        let wait_for_release_clone = wait_for_release.clone();
+        let gates_clone = gates.clone();
         let query = Query::new(
             "key",
             move || {
                 let count = fetch_count_clone.clone();
-                let wait = wait_for_release_clone.clone();
+                let gates = gates_clone.clone();
                 Box::pin(async move {
                     count.fetch_add(1, Ordering::SeqCst);
-                    let receiver = wait
-                        .lock()
-                        .expect("fetch gate mutex should not be poisoned")
-                        .take()
-                        .expect("single-flight should call the fetcher only once");
-                    receiver.await.expect("fetch gate should be released");
+                    gates.next().await.expect("fetch gate should be released");
                     Ok::<i32, QueryError>(7)
                 })
             },
@@ -1353,18 +1322,13 @@ mod tests {
 
         let first_success_poll = first_stream.next();
         tokio::pin!(first_success_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut first_success_poll => panic!("first fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 1 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("first fetch should start");
+        assert_pending_until(
+            &mut first_success_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 1,
+            "first fetch completed before its gate was released",
+            "first fetch should start",
+        )
+        .await;
 
         let second_loading = second_stream.next().await;
         assert!(matches!(second_loading, Some(ref result) if result.is_loading()));
@@ -1374,9 +1338,7 @@ mod tests {
             "same identity streams must share the cell in-flight fetch"
         );
 
-        release_fetch
-            .send(())
-            .expect("fetch gate receiver should still be waiting");
+        releases.release(0);
 
         let first_success = timeout(Duration::from_millis(100), first_success_poll)
             .await
@@ -1402,19 +1364,13 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn test_invalidations_during_one_fetch_window_coalesce_to_one_refetch() {
-        use std::collections::VecDeque;
+        use crate::test_support::{assert_pending_until, gate_fetches};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
         use tokio::time::{Duration, timeout};
 
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
-        let (release_first, wait_first) = oneshot::channel::<()>();
-        let (release_second, wait_second) = oneshot::channel::<()>();
-        let gates = Arc::new(std::sync::Mutex::new(VecDeque::from([
-            wait_first,
-            wait_second,
-        ])));
+        let (mut releases, gates) = gate_fetches(2);
 
         let fetch_count_clone = fetch_count.clone();
         let gates_clone = gates.clone();
@@ -1425,12 +1381,7 @@ mod tests {
                 let gates = gates_clone.clone();
                 Box::pin(async move {
                     let fetch_number = count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let receiver = gates
-                        .lock()
-                        .expect("fetch gate mutex should not be poisoned")
-                        .pop_front()
-                        .expect("test should provide a gate for each expected fetch");
-                    receiver.await.expect("fetch gate should be released");
+                    gates.next().await.expect("fetch gate should be released");
                     Ok::<i32, QueryError>(
                         i32::try_from(fetch_number).expect("test fetch count should fit in i32"),
                     )
@@ -1446,27 +1397,20 @@ mod tests {
 
         let refetching_poll = stream.next();
         tokio::pin!(refetching_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut refetching_poll => panic!("first fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 1 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("first fetch should start");
+        assert_pending_until(
+            &mut refetching_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 1,
+            "first fetch completed before its gate was released",
+            "first fetch should start",
+        )
+        .await;
         assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
 
         client.invalidate("key");
         client.invalidate("key");
         client.invalidate("key");
 
-        release_first
-            .send(())
-            .expect("first fetch gate receiver should still be waiting");
+        releases.release(0);
 
         let refetching = timeout(Duration::from_millis(100), refetching_poll)
             .await
@@ -1484,27 +1428,20 @@ mod tests {
 
         let second_poll = stream.next();
         tokio::pin!(second_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 2 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-                result = &mut second_poll => panic!("second fetch completed before its gate was released: {result:?}"),
-            }
-        })
-        .await
-        .expect("second fetch should start");
+        assert_pending_until(
+            &mut second_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 2,
+            "second fetch completed before its gate was released",
+            "second fetch should start",
+        )
+        .await;
         assert_eq!(
             fetch_count.load(Ordering::SeqCst),
             2,
             "multiple invalidations in one in-flight window should coalesce to one additional fetch"
         );
 
-        release_second
-            .send(())
-            .expect("second fetch gate receiver should still be waiting");
+        releases.release(1);
         let success = timeout(Duration::from_millis(100), second_poll)
             .await
             .expect("second fetch should complete")
@@ -1621,30 +1558,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_loser_observes_shared_fetch_error_without_retrying() {
+        use crate::test_support::{assert_pending_until, gate_fetches};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
         use tokio::time::{Duration, timeout};
 
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
-        let (release_fetch, wait_for_release) = oneshot::channel::<()>();
-        let wait_for_release = Arc::new(std::sync::Mutex::new(Some(wait_for_release)));
+        let (mut releases, gates) = gate_fetches(1);
 
         let fetch_count_clone = fetch_count.clone();
-        let wait_for_release_clone = wait_for_release.clone();
+        let gates_clone = gates.clone();
         let query = Query::new(
             "key",
             move || {
                 let count = fetch_count_clone.clone();
-                let wait = wait_for_release_clone.clone();
+                let gates = gates_clone.clone();
                 Box::pin(async move {
                     count.fetch_add(1, Ordering::SeqCst);
-                    let receiver = wait
-                        .lock()
-                        .expect("fetch gate mutex should not be poisoned")
-                        .take()
-                        .expect("single-flight should call the fetcher only once");
-                    receiver.await.expect("fetch gate should be released");
+                    gates.next().await.expect("fetch gate should be released");
                     Err::<i32, QueryError>(QueryError::FetchError("boom".to_string()))
                 })
             },
@@ -1659,26 +1590,19 @@ mod tests {
 
         let first_error_poll = first_stream.next();
         tokio::pin!(first_error_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut first_error_poll => panic!("first fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 1 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("first fetch should start");
+        assert_pending_until(
+            &mut first_error_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 1,
+            "first fetch completed before its gate was released",
+            "first fetch should start",
+        )
+        .await;
 
         let second_loading = second_stream.next().await;
         assert!(matches!(second_loading, Some(ref result) if result.is_loading()));
         assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
 
-        release_fetch
-            .send(())
-            .expect("fetch gate receiver should still be waiting");
+        releases.release(0);
 
         let first_error = timeout(Duration::from_millis(100), first_error_poll)
             .await
@@ -1716,20 +1640,14 @@ mod tests {
     /// `State::Watching` until the next explicit invalidation.
     #[tokio::test]
     async fn test_invalidation_during_fetch_triggers_refetch() {
-        use std::collections::VecDeque;
+        use crate::test_support::{assert_pending_until, gate_fetches};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
         use tokio::time::{Duration, timeout};
 
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
-        let (release_first, wait_first) = oneshot::channel::<()>();
-        let (release_second, wait_second) = oneshot::channel::<()>();
-        let gates = Arc::new(std::sync::Mutex::new(VecDeque::from([
-            wait_first,
-            wait_second,
-        ])));
+        let (mut releases, gates) = gate_fetches(2);
 
         let fetch_count_clone = fetch_count.clone();
         let gates_clone = gates.clone();
@@ -1740,12 +1658,7 @@ mod tests {
                 let gates = gates_clone.clone();
                 Box::pin(async move {
                     let fetch_number = count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let receiver = gates
-                        .lock()
-                        .expect("fetch gate mutex should not be poisoned")
-                        .pop_front()
-                        .expect("test should provide a gate for each expected fetch");
-                    receiver.await.expect("fetch gate should be released");
+                    gates.next().await.expect("fetch gate should be released");
                     Ok::<i32, QueryError>(
                         i32::try_from(fetch_number).expect("test fetch count should fit in i32"),
                     )
@@ -1763,25 +1676,18 @@ mod tests {
         // Gate the fetcher instead of sleeping so CI timing cannot miss the in-flight window.
         let refetching_poll = stream.next();
         tokio::pin!(refetching_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                result = &mut refetching_poll => panic!("first fetch completed before its gate was released: {result:?}"),
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 1 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("first fetch should start");
+        assert_pending_until(
+            &mut refetching_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 1,
+            "first fetch completed before its gate was released",
+            "first fetch should start",
+        )
+        .await;
 
         // Inject an invalidation while the first fetch is still gated.
         client.invalidate("key");
 
-        release_first
-            .send(())
-            .expect("first fetch gate receiver should still be waiting");
+        releases.release(0);
 
         // The first fetch completes after it has already been invalidated, so
         // the stale completion is discarded and the stream immediately starts
@@ -1798,22 +1704,15 @@ mod tests {
         // second fetch that produces the visible success.
         let success_poll = stream.next();
         tokio::pin!(success_poll);
-        timeout(Duration::from_millis(100), async {
-            tokio::select! {
-                () = async {
-                    while fetch_count.load(Ordering::SeqCst) < 2 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-                result = &mut success_poll => panic!("second fetch completed before its gate was released: {result:?}"),
-            }
-        })
-        .await
-        .expect("second fetch should start");
+        assert_pending_until(
+            &mut success_poll,
+            || fetch_count.load(Ordering::SeqCst) >= 2,
+            "second fetch completed before its gate was released",
+            "second fetch should start",
+        )
+        .await;
 
-        release_second
-            .send(())
-            .expect("second fetch gate receiver should still be waiting");
+        releases.release(1);
         let third = timeout(Duration::from_millis(100), success_poll)
             .await
             .expect("second fetch should complete");
