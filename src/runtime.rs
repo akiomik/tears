@@ -87,18 +87,18 @@ use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
 
-use crate::{
-    application::Application,
-    command::Command,
-    frame_rate::{FrameRate, FrameRateError},
-};
+use crate::{application::Application, command::Command};
 
 mod app_input;
 mod core;
+// `FrameRate` is a scheduling input, so it lives with the runtime. `pub(crate)`
+// lets `lib.rs`/`prelude` re-export it without exposing a second public path.
+pub(crate) mod frame_rate;
 mod frame_scheduler;
 mod pending_work;
 
 use app_input::AppInput;
+use frame_rate::{FrameRate, FrameRateError};
 use frame_scheduler::FrameScheduler;
 // `self::` disambiguates the submodule from the built-in `core` crate.
 use self::core::RuntimeCore;
