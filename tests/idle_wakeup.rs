@@ -4,14 +4,16 @@
 // added latency. The gate predicate itself is unit-tested in src/runtime.rs.
 
 mod common;
+#[path = "common/trace_recorder.rs"]
+mod trace_recorder;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use color_eyre::eyre::Result;
 use ratatui::Frame;
 use tears::prelude::*;
 use tokio::time::{Duration, Instant, sleep};
+use trace_recorder::TraceRecorder;
 
 // Idle window: one second is ~60 frame periods at 60 FPS, so an ungated loop
 // would wake ~60 times before the message arrives.
@@ -20,30 +22,6 @@ const IDLE_WINDOW: Duration = Duration::from_secs(1);
 // 60 FPS frame period, computed the same way the runtime does (dividing a
 // one-second `Duration`), so the latency assertion stays exact.
 const FRAME_PERIOD: Duration = Duration::from_nanos(1_000_000_000 / 60);
-
-// A `tracing::Subscriber` that counts only frame-tick wake-ups, identified by
-// the dedicated `tears::runtime::frame` target. Filtering in `enabled` means
-// `event` is called for those events only.
-#[derive(Clone, Default)]
-struct FrameTickCounter {
-    ticks: Arc<AtomicUsize>,
-}
-
-impl tracing::Subscriber for FrameTickCounter {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.target() == "tears::runtime::frame"
-    }
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-    fn event(&self, _event: &tracing::Event<'_>) {
-        self.ticks.fetch_add(1, Ordering::SeqCst);
-    }
-    fn enter(&self, _span: &tracing::span::Id) {}
-    fn exit(&self, _span: &tracing::span::Id) {}
-}
 
 // App for both tests: its init command idles for `IDLE_WINDOW`, then emits a
 // message whose `update` quits. `view` records the virtual instant of every
@@ -88,11 +66,8 @@ impl Application for IdleThenQuitApp {
 // frame timer while idle, so time jumps straight to the message.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn idle_loop_does_not_wake_at_frame_rate() -> Result<()> {
-    let counter = FrameTickCounter::default();
-    let ticks = counter.ticks.clone();
-    // `set_default` is thread-local; on a current-thread runtime the spawned
-    // tasks run on this same thread and so observe the subscriber.
-    let _guard = tracing::subscriber::set_default(counter);
+    let recorder = TraceRecorder::new().with_target("tears::runtime::frame");
+    let _guard = recorder.set_default();
 
     let renders = Arc::new(Mutex::new(Vec::new()));
     let mut terminal = common::test_terminal()?;
@@ -101,7 +76,7 @@ async fn idle_loop_does_not_wake_at_frame_rate() -> Result<()> {
 
     // Only the initial render and the single post-message render wake the frame
     // branch. A count near the frame rate means the gate is missing.
-    let count = ticks.load(Ordering::SeqCst);
+    let count = recorder.event_count();
     assert!(
         (1..=2).contains(&count),
         "idle loop should wake at most twice (initial + post-message render), \
@@ -119,10 +94,10 @@ async fn idle_loop_does_not_wake_at_frame_rate() -> Result<()> {
 // `MissedTickBehavior::Skip` only re-aligns the *following* tick.)
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn message_after_idle_renders_without_extra_frame_delay() -> Result<()> {
-    // Install a subscriber here too so no test thread ever emits the
-    // `tears::runtime::frame` callsite under `NoSubscriber`, which would poison
-    // its cached interest for the parallel wake-up test.
-    let _guard = tracing::subscriber::set_default(FrameTickCounter::default());
+    // Install the cache-safe recorder here too so the frame callsite remains
+    // observable for the parallel wake-up test.
+    let recorder = TraceRecorder::new().with_target("tears::runtime::frame");
+    let _guard = recorder.set_default();
 
     let start = Instant::now();
 

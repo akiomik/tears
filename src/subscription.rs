@@ -459,67 +459,7 @@ mod tests {
     use super::*;
     use crate::subscription::mock::MockSource;
     use color_eyre::eyre::Result;
-    use std::sync::{Arc, Mutex};
     use tokio::time::{Duration, sleep, timeout};
-
-    #[derive(Clone, Default)]
-    struct SubscriptionStartObserver {
-        restarted: Arc<Mutex<Vec<bool>>>,
-    }
-
-    impl tracing::Subscriber for SubscriptionStartObserver {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            // Callsite interest is cached process-wide. Returning false here can
-            // poison unrelated tracing tests that run in parallel, so keep
-            // interest open and filter specific events below.
-            true
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            if event.metadata().target() != "tears::subscription"
-                || *event.metadata().level() != tracing::Level::DEBUG
-            {
-                return;
-            }
-
-            let mut visitor = RestartedFieldVisitor::default();
-            event.record(&mut visitor);
-
-            if let Some(restarted) = visitor.restarted {
-                self.restarted
-                    .lock()
-                    .expect("restart event log mutex should not be poisoned")
-                    .push(restarted);
-            }
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    #[derive(Default)]
-    struct RestartedFieldVisitor {
-        restarted: Option<bool>,
-    }
-
-    impl tracing::field::Visit for RestartedFieldVisitor {
-        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-            if field.name() == "restarted" {
-                self.restarted = Some(value);
-            }
-        }
-
-        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
-    }
 
     struct OneshotSource {
         value: i32,
@@ -952,16 +892,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_subscription_started_tracing_marks_restarts() -> Result<()> {
-        let observer = SubscriptionStartObserver::default();
-        let restarted = observer.restarted.clone();
-        let _guard = tracing::subscriber::set_default(observer);
+        let recorder = crate::test_support::TraceRecorder::new()
+            .with_target("tears::subscription")
+            .with_level(tracing::Level::DEBUG);
+        let _guard = recorder.set_default();
 
         assert_completed_oneshot_subscription_restarts().await?;
 
         assert_eq!(
-            *restarted
-                .lock()
-                .expect("restart event log mutex should not be poisoned"),
+            recorder.bool_values("restarted"),
             vec![false, true],
             "subscription start tracing should distinguish initial starts from restarts"
         );

@@ -571,44 +571,16 @@ mod tests {
         assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
-    // A minimal `tracing::Subscriber` that counts emitted events, used to assert
-    // that instrumentation actually fires.
-    #[derive(Clone, Default)]
-    struct EventCounter {
-        events: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl tracing::Subscriber for EventCounter {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {
-            use std::sync::atomic::Ordering;
-            self.events.fetch_add(1, Ordering::SeqCst);
-        }
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
     #[tokio::test]
     async fn test_process_message_batch_emits_tracing_event() {
-        use std::sync::atomic::Ordering;
+        let recorder = crate::test_support::TraceRecorder::new().with_target("tears::runtime");
+        let _guard = recorder.set_default();
 
-        let counter = EventCounter::default();
-        let events = counter.events.clone();
-
-        tracing::subscriber::with_default(counter, || {
-            let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
-            runtime.process_message_batch(TestMessage::Increment);
-        });
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        runtime.process_message_batch(TestMessage::Increment);
 
         assert!(
-            events.load(Ordering::SeqCst) >= 1,
+            recorder.event_count() >= 1,
             "processing a message batch should emit a tracing event"
         );
     }
