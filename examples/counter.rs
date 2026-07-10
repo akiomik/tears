@@ -56,11 +56,11 @@ impl Application for Counter {
             }
             Message::Terminal(event) => {
                 // Handle keyboard events
-                if let Event::Key(key) = event {
-                    if key.code == KeyCode::Char('q') {
-                        // Quit on 'q' key press
-                        return Command::effect(Action::Quit);
-                    }
+                if let Event::Key(key) = event
+                    && key.code == KeyCode::Char('q')
+                {
+                    // Quit on 'q' key press
+                    return Command::effect(Action::Quit);
                 }
                 Command::none()
             }
