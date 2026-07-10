@@ -356,7 +356,7 @@ mod tests {
         let mut core = RuntimeCore::<TestApp>::new(0);
 
         // Enqueue a quit command
-        let cmd = Command::effect(Action::Quit);
+        let cmd = Command::quit();
         core.enqueue_command(cmd.into_runtime_parts());
 
         timeout(Duration::from_secs(1), core.quit_rx.recv())

@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (denial of service via stack exhaustion) in the `time` crate pulled in
     transitively via `ratatui-widgets`
 
+### Removed
+
+- **Breaking:** `Action` is no longer part of the public API
+  - `tears::Action` and `tears::prelude::Action` are gone; `Command::effect`
+    (which took an `Action`) is removed
+  - Replace `Command::effect(Action::Quit)` with the new `Command::quit()`
+  - Replace `Command::effect(Action::Message(msg))` with `Command::message(msg)`
+    (already the preferred form)
+  - `Action` remains as a private runtime-internal stream item, so no runtime
+    behavior changes
+
+### Added
+
+- `Command::quit()` for requesting the application to quit, replacing the
+  public use of `Command::effect(Action::Quit)`
+
 ## [0.9.3] - 2026-07-11
 
 ### Fixed

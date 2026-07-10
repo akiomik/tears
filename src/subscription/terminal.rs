@@ -73,7 +73,7 @@ use super::{SubscriptionId, SubscriptionSource};
 ///         Message::InputError(e) => {
 ///             // Handle the error (log, show UI, exit, etc.)
 ///             eprintln!("Terminal error: {}", e);
-///             Command::effect(Action::Quit)
+///             Command::quit()
 ///         }
 ///     }
 /// }

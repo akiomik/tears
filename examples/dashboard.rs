@@ -132,9 +132,9 @@ impl Application for App {
             Message::Terminal(_) => {}
             Message::TerminalError(e) => {
                 eprintln!("Terminal error: {e}");
-                return Command::effect(Action::Quit);
+                return Command::quit();
             }
-            Message::Quit => return Command::effect(Action::Quit),
+            Message::Quit => return Command::quit(),
         }
 
         Command::none()

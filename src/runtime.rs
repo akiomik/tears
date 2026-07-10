@@ -56,7 +56,7 @@
 //!                 self.count += 1;
 //!                 Command::none()
 //!             }
-//!             Message::Quit => Command::effect(Action::Quit),
+//!             Message::Quit => Command::quit(),
 //!         }
 //!     }
 //!
@@ -327,7 +327,7 @@ impl<App: Application> Runtime<App> {
     ///
     /// This is the main entry point for executing the application. It starts the event loop
     /// that processes messages, renders the UI, and manages subscriptions. The loop continues
-    /// until the application sends a quit signal via [`Action::Quit`](crate::command::Action::Quit).
+    /// until the application sends a quit signal via [`Command::quit`](crate::command::Command::quit).
     ///
     /// # Event Loop
     ///
@@ -368,7 +368,7 @@ impl<App: Application> Runtime<App> {
     /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
     /// #     fn update(&mut self, msg: Message) -> Command<Message> {
     /// #         match msg {
-    /// #             Message::Quit => Command::effect(Action::Quit),
+    /// #             Message::Quit => Command::quit(),
     /// #         }
     /// #     }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}

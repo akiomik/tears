@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use ratatui::Frame;
 
 use crate::application::Application;
-use crate::command::{Action, Command};
+use crate::command::Command;
 use crate::subscription::Subscription;
 
 pub use async_utils::{assert_pending_until, gate_fetches, wait_until};
@@ -65,7 +65,7 @@ impl Application for TestApp {
             }
             TestMessage::Quit => {
                 self.should_quit = true;
-                Command::effect(Action::Quit)
+                Command::quit()
             }
         }
     }

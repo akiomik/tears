@@ -126,11 +126,11 @@ impl Application for Counter {
                 Command::none()
             }
             Message::Input(Event::Key(key)) if key.code == KeyCode::Char('q') => {
-                Command::effect(Action::Quit)
+                Command::quit()
             }
             Message::InputError(e) => {
                 eprintln!("Input error: {e}");
-                Command::effect(Action::Quit)
+                Command::quit()
             }
             _ => Command::none(),
         }
