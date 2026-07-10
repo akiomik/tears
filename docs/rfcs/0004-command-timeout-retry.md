@@ -1,6 +1,6 @@
 # RFC 0004: Command Timeout / Retry
 
-- Status: Draft
+- Status: Accepted
 - Target: 0.9.3 (next non-breaking patch), additive public API only
 - Scope: timeout / retry lifecycle control confined to a single effect's
   execution; no runtime changes
@@ -8,10 +8,9 @@
 - CHANGELOG: `Added` (`Command::timeout`, `Command::retry`, `Command::retry_if`,
   `RetryPolicy`, `RetryBackoff`, `RetryContext`, `RetryError`, `RetryStopReason`)
 
-> Draft note: this RFC holds the observable contracts, invariants, and
-> rationale, plus a minimal implementation sketch (§9) for the mechanisms the
-> contracts depend on. Implementation details not fixed here are left to the
-> implementer.
+> This RFC holds the observable contracts, invariants, and rationale, plus a
+> minimal implementation sketch (§9) for the mechanisms the contracts depend
+> on. Implementation details not fixed here are left to the implementer.
 
 ## Summary
 
@@ -323,6 +322,11 @@ impl<Msg: Send + 'static> Command<Msg> {
 - `should_retry` is `FnMut`. Like `operation`, it is called sequentially, so
   the wider bound costs nothing and lets the predicate keep small local state
   (e.g. a consecutive-failure counter) inside the closure.
+- The public rustdoc for both constructors must warn that `operation` can run
+  up to `policy.max_attempts()` times. Callers are responsible for ensuring
+  that repeating the operation is safe: non-idempotent external side effects
+  may occur more than once, including when an earlier attempt performs the
+  side effect and subsequently returns an error.
 
 Usage:
 
@@ -439,7 +443,8 @@ shipped.
 ### 4.2 retry
 
 - `max_attempts` includes the first execution.
-- The final message is emitted exactly once: `Ok(A)` on success, otherwise
+- If retry processing completes without cancellation or panic, the final
+  message is emitted exactly once: `Ok(A)` on success, otherwise
   `Err(RetryError { attempts, last_error, reason })`, both converted to a
   message by `f`.
 - On `Err(E)` with attempts remaining and `should_retry(&error, ctx)` true,
@@ -455,8 +460,8 @@ shipped.
 - `RetryContext::attempt` is 1-based. If a backoff computation needs a 0-based
   exponent index, that conversion stays inside the helper and the contract is
   pinned by tests.
-- If the task is aborted during backoff (runtime shutdown, or future
-  cancellation), no further output is produced.
+- If the task is aborted before retry processing completes (runtime shutdown,
+  or future cancellation), no final message is produced.
 - For a per-attempt timeout, use `tokio::time::timeout(d, fetch()).await`
   inside `operation` and map the timeout into an `Err`; that makes it subject
   to retry. An outer `.timeout(...)` acts as a deadline over the whole retry.
@@ -496,8 +501,8 @@ Each item is pinned by a test. Timeout (T), retry (R).
   must not panic; for a single-leaf double timeout, only assert that one of
   the messages is emitted). Inner *termination*, by contrast,
   deterministically wins over an elapsed deadline (T4, T9).
-- R1. `max_attempts` includes the first attempt; the final message is emitted
-  exactly once.
+- R1. `max_attempts` includes the first attempt; if retry processing completes
+  without cancellation or panic, the final message is emitted exactly once.
 - R2. Failure on the final attempt yields `Exhausted` and does not call
   `should_retry` on that attempt.
 - R3. `StoppedByPredicate` occurs only while attempts remain.
