@@ -97,7 +97,32 @@ need the guard.
 
 If an integration test ever needs to mutate the panic hook, add a focused local
 guard under `tests/common/` rather than exposing the crate-internal test helper
-as public API.
+as public API. Because integration tests are async, that local guard should use
+`tokio::sync::Mutex` (not `std::sync::Mutex`) so it can be held across
+`.await` — see `tests/common/panic_hook.rs`.
+
+### Panic Hook Cost In Timing-Bound Tests
+
+A test that intentionally panics inside a spawned command (to assert
+`catch_unwind` logging, for example) still pays for the *default* panic hook:
+before `catch_unwind` regains control, the hook runs synchronously on the
+panicking thread and, under `RUST_BACKTRACE=1` (set repo-wide in CI),
+captures and symbolicates a full backtrace. On Windows that symbolication is
+markedly slower than on Linux/macOS and its duration is load-dependent, which
+makes it a source of flakiness rather than a fixed cost.
+
+This matters most when the panic happens on a `current_thread` runtime: the
+same thread that is blocked doing symbolication is also the thread driving
+any timer or subscription the test is relying on to reach its next state, so
+the hook cost eats directly into the test's `timeout` budget. A test that
+otherwise finishes in single-digit milliseconds can intermittently blow
+through a one-second timeout on a loaded Windows runner.
+
+If a test intentionally triggers a command-task panic under a bounded
+`timeout`, install a no-op panic hook for the duration (see
+`tests/common/panic_hook.rs::SilentPanicHook`) rather than only widening the
+timeout. Widening the timeout alone hides the same unbounded cost behind a
+larger number instead of removing it.
 
 ## Sleep Audit Notes
 
