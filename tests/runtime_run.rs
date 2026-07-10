@@ -3,6 +3,8 @@
 //! Unit tests for individual methods are in src/runtime.rs
 
 mod common;
+#[path = "common/panic_hook.rs"]
+mod panic_hook;
 #[path = "common/trace_recorder.rs"]
 mod trace_recorder;
 
@@ -165,6 +167,14 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
         }
     }
 
+    // The default panic hook synchronously symbolicates a backtrace under
+    // `RUST_BACKTRACE=1` (set repo-wide in CI). On Windows that can be slow
+    // enough, on this `current_thread` runtime, to blow through the timeout
+    // below before the Timer subscription gets a chance to send Quit. Silence
+    // the hook for the panic this test triggers; see docs/testing.md.
+    let _hook_guard = panic_hook::PANIC_HOOK_GUARD.lock().await;
+    let _silent_hook = panic_hook::SilentPanicHook::install();
+
     let recorder = TraceRecorder::new()
         .with_target("tears::runtime")
         .with_level(tracing::Level::ERROR);
@@ -173,7 +183,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     let mut terminal = common::test_terminal()?;
     let runtime = Runtime::<PanicCommandApp>::try_new((), 60).expect("frame rate must be valid");
 
-    timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
+    timeout(Duration::from_secs(5), runtime.run(&mut terminal)).await??;
 
     assert!(
         recorder.event_count() >= 1,
