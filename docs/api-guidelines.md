@@ -60,17 +60,40 @@ is the entire point of a prelude.
 The crate root (`tears::*`) is for the vocabulary of a minimal
 `Application` skeleton — items a new app names directly in `update`,
 `view`, or `subscriptions` almost regardless of what the app does.
-`Command`, `Subscription`, `SubscriptionId`, and `SubscriptionSource` all
-pass this bar.
+`Command`, `Subscription`, `Application`, and `Runtime` all pass this bar
+directly.
 
-An item does **not** need root promotion just because it is public. Ask:
-does an app author write this item's name in ordinary application code, or
-only when they opt into one specific feature (HTTP, WebSocket, a retry
-policy, a specific subscription source)? Opt-in feature items stay at their
-domain path (`tears::subscription::http::Query`) even though they are
-fully public — promoting them to root would turn the root namespace into a
-grab bag instead of a skeleton vocabulary, and would put them in front of
-every unrelated app's autocomplete.
+A second, narrower test covers items that don't pass the first one on
+their own but define the single extension contract behind a skeleton
+item. `subscriptions()` returns `Vec<Subscription<Msg>>`, and every
+`Subscription` is built from something implementing `SubscriptionSource`
+(via `From`). Most apps never write that `impl` — they reach for a
+built-in source like `Timer` instead — so `SubscriptionSource` and the
+`SubscriptionId` its `id()` method returns don't pass the "written in
+ordinary code" test literally. They're still root-eligible because they
+are the *only* general mechanism the subscription system is built on, not
+one feature among several, and because a trait and the return type its
+own method requires are used together in every implementation — splitting
+their paths would add friction with no compensating benefit.
+
+The dividing question for this second test: is the item one of several
+interchangeable feature-specific implementations, or is it the single
+contract those implementations all satisfy? `SubscriptionSource` /
+`SubscriptionId` are the contract. `Timer`, `WebSocket`, and
+`http::Query` are implementations of it — each one is still just one
+option among several, however common, so none of them get promoted no
+matter how frequently apps use that particular source. This test has no
+equivalent for `Command`: nothing in this crate implements a trait to
+produce a `Command`, so there is no second contract to promote there.
+
+An item that fails both tests does **not** need root promotion just
+because it is public. Ask: does an app author write this item's name in
+ordinary application code, or only when they opt into one specific feature
+(HTTP, WebSocket, a retry policy, a specific subscription source)? Opt-in
+feature items stay at their domain path (`tears::subscription::http::Query`)
+even though they are fully public — promoting them to root would turn the
+root namespace into a grab bag instead of a skeleton vocabulary, and would
+put them in front of every unrelated app's autocomplete.
 
 When unsure, check what the item's own domain module already decided about
 public vs private submodules above: if the domain module is public because
@@ -120,9 +143,9 @@ When adding a new public item:
    or private (implementation detail) — see "Module Visibility" above.
 2. Give it exactly one reachable public path — see "Single Canonical
    Path."
-3. Only promote it to the crate root if it passes the skeleton-vocabulary
-   test in "Root Promotion Criteria" (or the narrower test in "External
-   Crate Re-exports" for re-exported dependency items).
+3. Only promote it to the crate root if it passes one of the two tests in
+   "Root Promotion Criteria" (or the narrower test in "External Crate
+   Re-exports" for re-exported dependency items).
 4. Only add it to the prelude if it is written out literally in skeleton
    code, per "Prelude Membership."
 
