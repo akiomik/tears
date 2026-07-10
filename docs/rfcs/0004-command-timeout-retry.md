@@ -53,7 +53,7 @@ pub struct Command<Msg: Send + 'static> {
 - `Effect<Msg>` is `None | Leaves(Vec<BoxStream<'static, Action<Msg>>>)`. It
   keeps a flat sequence of leaf streams and only folds them (via `select_all`)
   at the `into_stream()` boundary.
-- As noted in the RFC 0002 addendum and RFC 0003, these concerns live in
+- As noted in RFC 0002 §9 and RFC 0003, these concerns live in
   separate layers:
   - Output treatment (`without_redraw`): a directive over the whole update
     result. Held as a field, folded by `batch`.
@@ -279,7 +279,10 @@ Design decisions:
   never be stored (`f64` is not `Eq`): if a future constructor accepts `f64`,
   it must convert it into an `Eq`-compatible finite representation for
   storage, such as an integer-scaled multiplier or a finite-guaranteeing
-  newtype with a manual `Eq` impl.
+  newtype with a manual `Eq` impl. The same compatibility rule applies to
+  `RetryContext`: because it also derives `Copy`, every future field added
+  under `#[non_exhaustive]` must implement `Copy` as well as the other derived
+  traits.
 - **`RetryStopReason` exists.** A single-variant `RetryError::Exhausted` is
   not enough: when the `retry_if` predicate returns false, attempts have not
   been used up, so that case is represented separately as
