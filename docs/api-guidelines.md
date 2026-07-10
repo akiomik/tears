@@ -41,14 +41,11 @@ produces two working `use` paths for the same item with no signal to users
 about which one is "the" import, and doubles the surface every future
 refactor has to preserve.
 
-If you find a `pub mod` whose contents are also re-exported at the parent
-level (a dual path), treat that as a defect to fix rather than a style
-choice: either close the inner module (`mod`, private, or `pub(crate)`) so
-only the outer path remains, or drop the outer re-export so only the inner
-path remains. Pick whichever one matches the "public vs private submodule"
-call above — don't leave both open "just in case." Closing a path that's
-already shipped is a breaking change, so batch it into a breaking-change
-release rather than fixing it piecemeal.
+A dual path is a defect to fix, not a style choice: close whichever of
+the two paths contradicts the "public vs private submodule" call above —
+don't leave both open "just in case." Closing a path that's already
+shipped is a breaking change, so batch it into a breaking-change release
+rather than fixing it piecemeal.
 
 The prelude is a deliberate, documented exception to this rule, not an
 oversight — see "Prelude Membership" below. Every prelude item is reachable
@@ -63,52 +60,28 @@ The crate root (`tears::*`) is for the vocabulary of a minimal
 `Command`, `Subscription`, `Application`, and `Runtime` all pass this bar
 directly.
 
-A second, narrower test covers items that don't pass the first one on
-their own but define the single extension contract behind a skeleton
-item. `subscriptions()` returns `Vec<Subscription<Msg>>`, and every
-`Subscription` is built from something implementing `SubscriptionSource`
-(via `From`). Most apps never write that `impl` — they reach for a
-built-in source like `Timer` instead — so `SubscriptionSource` and the
-`SubscriptionId` its `id()` method returns don't pass the "written in
-ordinary code" test literally. They're still root-eligible because they
-are the *only* general mechanism the subscription system is built on, not
-one feature among several, and because a trait and the return type its
-own method requires are used together in every implementation — splitting
-their paths would add friction with no compensating benefit.
-
-The dividing question for this second test: is the item one of several
-interchangeable feature-specific implementations, or is it the single
-contract those implementations all satisfy? `SubscriptionSource` /
-`SubscriptionId` are the contract. `Timer`, `WebSocket`, and
-`http::Query` are implementations of it — each one is still just one
-option among several, however common, so none of them get promoted no
-matter how frequently apps use that particular source. This test has no
-equivalent for `Command`: nothing in this crate implements a trait to
-produce a `Command`, so there is no second contract to promote there.
+A second, narrower test covers the extension contract behind a skeleton
+item. Every `Subscription` is built (via `From`) from an implementation of
+`SubscriptionSource`, whose `id()` method returns a `SubscriptionId` —
+together they are the single general mechanism the subscription system is
+built on, not one feature among several. The dividing question: is the
+item the one contract all implementations satisfy (root-eligible), or one
+implementation among several? `Timer`, `WebSocket`, and `http::Query` are
+implementations — each one is still just one option, however common, so
+none of them get promoted.
 
 An item that fails both tests does **not** need root promotion just
-because it is public. Ask: does an app author write this item's name in
-ordinary application code, or only when they opt into one specific feature
-(HTTP, WebSocket, a retry policy, a specific subscription source)? Opt-in
-feature items stay at their domain path (`tears::subscription::http::Query`)
-even though they are fully public — promoting them to root would turn the
-root namespace into a grab bag instead of a skeleton vocabulary, and would
-put them in front of every unrelated app's autocomplete.
+because it is public: it stays at its domain path
+(`tears::subscription::http::Query`), matching the module-visibility call
+above. Promoting opt-in feature items would turn the root namespace into a
+grab bag instead of a skeleton vocabulary.
 
-A third note covers companion types: once an item is root-promoted, a type
-that only exists to appear in its signature — most commonly the error type
-returned by its fallible constructor — shares its home even though it
-individually fails both tests above. `FrameRateError` is at the crate root
-solely because `FrameRate::new` returns `Result<Self, FrameRateError>`;
-splitting the pair across root and a domain path would force every caller
-of `FrameRate::new` to import from two places for one call. "Does skeleton
-code write this out literally" still applies to companion types — it
-decides prelude membership (see "Prelude Membership"), not root placement.
-
-When unsure, check what the item's own domain module already decided about
-public vs private submodules above: if the domain module is public because
-it's a meaningful boundary, its members normally stay behind that boundary
-rather than also being promoted to root.
+Companion types — most commonly the error type returned by a fallible
+constructor — share their owner's home even though they fail both tests
+individually. `FrameRateError` is at the crate root only because
+`FrameRate::new` returns `Result<Self, FrameRateError>`. The "written out
+literally" test still applies to companions, but it decides prelude
+membership (see "Prelude Membership"), not placement.
 
 ## External Crate Re-exports
 
