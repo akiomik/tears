@@ -105,7 +105,9 @@ pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
 pub use runtime::Runtime;
 // `FrameRate` lives under `runtime` (it is a scheduling input); re-exported here
-// as `tears::FrameRate` so it keeps a single canonical public path.
+// as `tears::FrameRate` so it keeps a single canonical public path. See
+// docs/api-guidelines.md for the module visibility / root promotion rules
+// this follows.
 pub use runtime::frame_rate::{FrameRate, FrameRateError};
 pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
 
