@@ -169,7 +169,7 @@ impl Application for EchoChat {
                 }
                 Command::none()
             }
-            Msg::Quit => Command::effect(Action::Quit),
+            Msg::Quit => Command::quit(),
         }
     }
 

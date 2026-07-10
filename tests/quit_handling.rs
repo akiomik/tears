@@ -43,7 +43,7 @@ impl Application for InitQuitApp {
 
     fn new(_flags: ()) -> (Self, Command<Self::Message>) {
         // Quit immediately after initialization
-        (Self, Command::effect(Action::Quit))
+        (Self, Command::quit())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -96,7 +96,7 @@ impl Application for DelayedQuitApp {
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
-        Command::effect(Action::Quit)
+        Command::quit()
     }
 
     fn view(&self, _frame: &mut Frame<'_>) {}
@@ -163,7 +163,7 @@ impl Application for MultiMessageQuitApp {
                 self.counter += 1;
                 Command::none()
             }
-            MultiMessage::Quit => Command::effect(Action::Quit),
+            MultiMessage::Quit => Command::quit(),
         }
     }
 

@@ -46,7 +46,7 @@ impl Application for IdleThenQuitApp {
     }
 
     fn update(&mut self, _msg: Wake) -> Command<Self::Message> {
-        Command::effect(Action::Quit)
+        Command::quit()
     }
 
     fn view(&self, _frame: &mut Frame<'_>) {

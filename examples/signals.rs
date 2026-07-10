@@ -138,7 +138,7 @@ impl Application for App {
         }
 
         if self.should_quit {
-            Command::effect(Action::Quit)
+            Command::quit()
         } else {
             Command::none()
         }

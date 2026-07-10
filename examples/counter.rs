@@ -60,7 +60,7 @@ impl Application for Counter {
                     && key.code == KeyCode::Char('q')
                 {
                     // Quit on 'q' key press
-                    return Command::effect(Action::Quit);
+                    return Command::quit();
                 }
                 Command::none()
             }
@@ -68,7 +68,7 @@ impl Application for Counter {
                 // Handle terminal event stream errors
                 // In this example, we log the error and quit
                 eprintln!("Terminal error: {e}");
-                Command::effect(Action::Quit)
+                Command::quit()
             }
         }
     }

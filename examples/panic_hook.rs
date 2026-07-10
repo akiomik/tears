@@ -56,13 +56,13 @@ impl Application for PanicDemo {
                 #[allow(clippy::panic, reason = "demonstrating panic recovery")]
                 KeyCode::Char('p') => panic!("intentional panic triggered by 'p'"),
                 // Quit normally.
-                KeyCode::Char('q') => Command::effect(Action::Quit),
+                KeyCode::Char('q') => Command::quit(),
                 _ => Command::none(),
             },
             Message::Terminal(_) => Command::none(),
             Message::TerminalError(e) => {
                 eprintln!("Terminal error: {e}");
-                Command::effect(Action::Quit)
+                Command::quit()
             }
         }
     }

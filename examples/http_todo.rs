@@ -159,7 +159,7 @@ impl Application for App {
                 self.status = format!("Failed to create todo: {e}");
                 Command::none()
             }
-            Message::Quit => Command::effect(Action::Quit),
+            Message::Quit => Command::quit(),
         }
     }
 

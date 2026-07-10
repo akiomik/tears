@@ -101,7 +101,7 @@ pub trait Application: Sized {
     /// fn update(&mut self, msg: Message) -> Command<Message> {
     ///     match msg {
     ///         Message::Save => Command::perform(async { /* save */ }, |_| Message::Quit),
-    ///         Message::Quit => Command::effect(Action::Quit),
+    ///         Message::Quit => Command::quit(),
     ///     }
     /// }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}

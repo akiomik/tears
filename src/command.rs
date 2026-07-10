@@ -39,8 +39,11 @@ pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopRe
 use runtime_directives::RuntimeDirectives;
 pub(crate) use runtime_parts::RuntimeCommandParts;
 
-/// An action that can be performed by a command.
-pub enum Action<Msg> {
+/// An internal runtime directive produced by a command's effect stream.
+///
+/// This type is not part of the public API. Use [`Command::message`] and
+/// [`Command::quit`] to construct the corresponding commands.
+pub(crate) enum Action<Msg> {
     /// Send a message to the application's update function.
     Message(Msg),
 
@@ -326,20 +329,20 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self::effect(Action::Message(msg))
     }
 
-    /// Create a command that performs a single action immediately.
+    /// Create a command that requests the application to quit immediately.
     ///
     /// # Examples
     ///
     /// ```
     /// use tears::prelude::*;
     ///
-    /// // Quit the application
-    /// let cmd: Command<i32> = Command::effect(Action::Quit);
-    ///
-    /// // Send a message (prefer Command::message for this)
-    /// let cmd = Command::effect(Action::Message(42));
+    /// let cmd: Command<i32> = Command::quit();
     /// ```
-    pub fn effect(action: Action<Msg>) -> Self {
+    pub fn quit() -> Self {
+        Self::effect(Action::Quit)
+    }
+
+    fn effect(action: Action<Msg>) -> Self {
         Self::with_effect(Effect::action(action))
     }
 
@@ -495,7 +498,7 @@ mod tests {
         assert!(Command::message(1).requests_redraw());
         assert!(Command::future(async { 1 }).requests_redraw());
         assert!(Command::perform(async { 1 }, |value| value).requests_redraw());
-        assert!(Command::<i32>::effect(Action::Quit).requests_redraw());
+        assert!(Command::<i32>::quit().requests_redraw());
         assert!(Command::stream(stream::iter(vec![1])).requests_redraw());
         assert!(Command::run(stream::iter(vec![1]), |value| value).requests_redraw());
         assert!(Command::batch(vec![Command::<i32>::none()]).requests_redraw());
@@ -621,8 +624,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_into_runtime_parts_effect_quit_yields_quit() {
-        let parts = Command::<i32>::effect(Action::Quit).into_runtime_parts();
+    async fn test_into_runtime_parts_quit_yields_quit() {
+        let parts = Command::<i32>::quit().into_runtime_parts();
 
         assert!(parts.requests_redraw());
 
@@ -748,7 +751,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_with_quit_action() {
         let cmd1 = Command::future(async { 1 });
-        let cmd2 = Command::effect(Action::Quit);
+        let cmd2 = Command::quit();
         let cmd3 = Command::future(async { 3 });
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
@@ -1113,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_map_preserves_quit() {
-        let cmd: Command<i32> = Command::effect(Action::Quit);
+        let cmd: Command<i32> = Command::quit();
         let mapped = cmd.map(|x| x * 2);
 
         let mut stream = mapped.into_stream().expect("stream should exist");
@@ -1151,8 +1154,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_some_with_effect() {
-        let cmd: Command<i32> = Command::effect(Action::Quit);
+    fn test_is_some_with_quit() {
+        let cmd: Command<i32> = Command::quit();
         assert!(cmd.is_some());
         assert!(!cmd.is_none());
     }

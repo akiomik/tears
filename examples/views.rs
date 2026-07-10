@@ -166,7 +166,7 @@ impl App {
                     selected: 0,
                 };
             }
-            Message::Quit => return Command::effect(Action::Quit),
+            Message::Quit => return Command::quit(),
             _ => {}
         }
 
@@ -281,7 +281,7 @@ fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
 
 fn handle_terminal_error(error: &str) -> Command<Message> {
     eprintln!("Terminal error: {error}");
-    Command::effect(Action::Quit)
+    Command::quit()
 }
 
 /// Render the menu view

@@ -100,7 +100,7 @@ pub mod subscription;
 
 // Re-export commonly used types
 pub use application::Application;
-pub use command::{Action, Command};
+pub use command::Command;
 // Re-exported because implementing `SubscriptionSource::stream` requires
 // writing this type out in the return position; see docs/api-guidelines.md
 // "External Crate Re-exports".

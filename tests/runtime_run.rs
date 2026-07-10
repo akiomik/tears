@@ -43,7 +43,7 @@ impl Application for CounterApp {
     fn new(max_count: u32) -> (Self, Command<Self::Message>) {
         let cmd = if max_count == 0 {
             // Quit immediately if max_count is 0
-            Command::effect(Action::Quit)
+            Command::quit()
         } else {
             Command::none()
         };
@@ -62,7 +62,7 @@ impl Application for CounterApp {
             CounterMessage::Increment => {
                 self.count += 1;
                 if self.count >= self.max_count {
-                    Command::effect(Action::Quit)
+                    Command::quit()
                 } else {
                     Command::none()
                 }
@@ -93,7 +93,7 @@ impl Application for SubApp {
     fn update(&mut self, (): ()) -> Command<()> {
         self.tick_count += 1;
         if self.tick_count >= 3 {
-            Command::effect(Action::Quit)
+            Command::quit()
         } else {
             Command::none()
         }
@@ -152,7 +152,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
         }
 
         fn update(&mut self, _msg: Message) -> Command<Message> {
-            Command::effect(Action::Quit)
+            Command::quit()
         }
 
         fn view(&self, _frame: &mut Frame<'_>) {}
@@ -216,7 +216,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
         fn update(&mut self, msg: String) -> Command<String> {
             self.received.push(msg);
             if self.received.len() >= 3 {
-                Command::effect(Action::Quit)
+                Command::quit()
             } else {
                 Command::none()
             }
@@ -297,7 +297,7 @@ async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Res
             let observed = self.observed.fetch_or(bit, Ordering::SeqCst) | bit;
 
             if observed == (TIMED_OUT | RETRIED) {
-                Command::effect(Action::Quit)
+                Command::quit()
             } else {
                 Command::none()
             }
