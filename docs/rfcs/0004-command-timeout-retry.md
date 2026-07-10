@@ -117,8 +117,12 @@ retry must accept a repeatable operation factory.
    independently.
 4. **Non-panicking constructors.** Invalid public input uses `Option` or
    builders, following the crate's `panic = "warn"` policy.
-5. **Minimal prelude.** Retry support types are exported from the crate root,
-   not from `src/prelude.rs`.
+5. **Minimal prelude and root.** Retry support types are exported from
+   `tears::command`, not the crate root and not from `src/prelude.rs`. Per
+   `docs/api-guidelines.md`'s root promotion criteria, retry is opt-in
+   vocabulary: it is not named in an `Application` skeleton that doesn't use
+   it, and it is not the extension contract behind a skeleton item the way
+   `SubscriptionSource` is for `Subscription`.
 6. **No new dependencies.** The implementation uses the existing `tokio`,
    `futures`, and `tokio-stream` dependencies.
 7. **Deterministic contract verification.** Every T/R contract must be pinned
@@ -280,7 +284,8 @@ allows the caller to stop based on the error and current attempt.
 ```rust
 use std::num::NonZeroUsize;
 use std::time::Duration;
-use tears::{Command, RetryError, RetryPolicy};
+use tears::Command;
+use tears::command::{RetryError, RetryPolicy};
 
 struct Todo;
 struct FetchError;
@@ -381,11 +386,15 @@ repeatable operation second, and the message mapper remains last. Public
 rustdoc must state that reading order explicitly: configuration → operation →
 message conversion.
 
-Retry support types are imported explicitly from the crate root and are not
-added to the prelude. The prelude is deliberately small—it does not include
-`Timer`—and `RetryPolicy` / `RetryError` are common, collision-prone ecosystem
-names. Adding them later is non-breaking; removing them after inclusion would
-be breaking.
+Retry support types are imported explicitly from `tears::command` and are not
+added to the prelude or the crate root. The prelude is deliberately
+small—it does not include `Timer`—and `RetryPolicy` / `RetryError` are
+common, collision-prone ecosystem names, which is also why they stay off
+the crate root: retry is opt-in vocabulary a `Command`-using app may never
+touch, not skeleton vocabulary or a `Subscription`-style extension
+contract (see `docs/api-guidelines.md`). Adding them to the prelude or
+promoting them to the crate root later is non-breaking; removing them
+after inclusion would be breaking.
 
 ## 4. Composition and Runtime Cancellation
 
@@ -630,8 +639,11 @@ dependencies.
 ### C.1 Suggested order
 
 1. Add `Effect::timeout` and `Command::timeout` with unit tests and rustdoc.
-2. Add retry support types in `src/command/retry.rs` and re-export them from
-   `src/command.rs` and `src/lib.rs`, but not the prelude.
+2. Add retry support types in `src/command/retry.rs` (private `mod retry;`)
+   and re-export them from `src/command.rs` only (`tears::command::RetryPolicy`
+   etc.), not from `src/lib.rs` or the prelude. Re-exporting from both
+   `command.rs` and `lib.rs` would give every type two public paths, which
+   `docs/api-guidelines.md`'s single-canonical-path rule treats as a defect.
 3. Add `Command::retry`, `retry_if`, and a `run_retry` helper.
 4. Add runtime integration smoke tests.
 5. Update CHANGELOG, README, and rustdoc.
