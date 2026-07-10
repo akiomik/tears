@@ -294,7 +294,7 @@ impl SubscriptionId {
     /// # Examples
     ///
     /// ```
-    /// use tears::subscription::SubscriptionId;
+    /// use tears::SubscriptionId;
     /// use std::hash::{Hash, Hasher};
     /// use std::collections::hash_map::DefaultHasher;
     ///
