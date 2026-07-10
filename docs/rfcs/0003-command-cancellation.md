@@ -140,6 +140,15 @@ This RFC accepts a keyed command-output lifecycle with these decisions:
 
 ## 3. Public API Details
 
+`CommandId` and `CancelPolicy` are re-exported from `tears::command`
+(`tears::command::CommandId`, `tears::command::CancelPolicy`), not the crate
+root. Per `docs/api-guidelines.md`'s root promotion criteria, cancellation is
+opt-in vocabulary: it is not named in an `Application` skeleton that doesn't
+use it, and it is not the extension contract behind a skeleton item the way
+`SubscriptionSource` is for `Subscription`. `Command::cancellable`,
+`Command::cancellable_with`, and `Command::cancel` stay on `Command` itself
+and need no separate import.
+
 ### 3.1 `CommandId`
 
 `CommandId` is structural, not a pre-hashed surrogate. It stores an erased
@@ -243,6 +252,8 @@ impl<Msg: Send + 'static> Command<Msg> {
 Examples:
 
 ```rust
+use tears::command::{CancelPolicy, CommandId};
+
 Command::perform(fetch(query.clone()), Msg::Loaded)
     .cancellable(CommandId::new(RequestId::Search));
 
