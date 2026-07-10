@@ -95,5 +95,5 @@ When adding a new public type:
    code, per "Prelude Membership."
 
 These are default rules, not absolutes. If a type needs an exception,
-document the reason next to its `pub use` (see the `FrameRate` comment in
-`src/lib.rs` for the pattern) instead of leaving the deviation silent.
+document the reason next to its `pub use` instead of leaving the deviation
+silent.
