@@ -4,8 +4,11 @@ use super::query::QueryError;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryStatus {
+    /// No successful data has been observed yet.
     Pending,
+    /// The query currently has successful data.
     Success,
+    /// The latest fetch failed.
     Error,
 }
 
@@ -13,7 +16,9 @@ pub enum QueryStatus {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FetchStatus {
+    /// No fetch is currently in progress.
     Idle,
+    /// A fetch is currently in progress.
     Fetching,
 }
 

@@ -1,7 +1,7 @@
-// Integration tests for the idle frame wake-up elision.
-// These verify end-to-end that the event loop stops waking at the frame rate
-// while idle, and that re-enabling the frame branch after idle renders without
-// added latency. The gate predicate itself is unit-tested in src/runtime.rs.
+//! Integration tests for the idle frame wake-up elision.
+//! These verify end-to-end that the event loop stops waking at the frame rate
+//! while idle, and that re-enabling the frame branch after idle renders without
+//! added latency. The gate predicate itself is unit-tested in src/runtime.rs.
 
 mod common;
 #[path = "common/trace_recorder.rs"]

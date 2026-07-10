@@ -78,6 +78,7 @@ pub enum WebSocketCommand {
 pub enum WebSocketMessage {
     /// Successfully connected to the WebSocket server, provides command sender
     Connected {
+        /// Sends commands (text/binary messages, close requests) to the connection.
         sender: mpsc::UnboundedSender<WebSocketCommand>,
     },
     /// Disconnected from the WebSocket server (normal closure)
@@ -85,7 +86,10 @@ pub enum WebSocketMessage {
     /// A message received from the WebSocket server
     Received(Message),
     /// An error occurred (connection failure or communication error)
-    Error { error: String },
+    Error {
+        /// A description of the connection failure or communication error.
+        error: String,
+    },
 }
 
 /// A WebSocket subscription that connects to a WebSocket server and provides

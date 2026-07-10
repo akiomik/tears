@@ -89,9 +89,11 @@ static NEXT_QUERY_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 /// Error type for query operations.
 #[derive(Error, Debug, Clone)]
 pub enum QueryError {
+    /// The fetcher returned an application-level failure.
     #[error("Fetch failed: {0}")]
     FetchError(String),
 
+    /// The fetcher failed due to a network-level issue.
     #[error("Network error: {0}")]
     NetworkError(String),
 }
@@ -294,6 +296,9 @@ impl Default for QueryClient {
     }
 }
 
+/// A shared, reusable async fetcher producing a query's value.
+type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Send + Sync>;
+
 /// A query subscription that monitors and fetches retained data.
 ///
 /// `Query` is a subscription that automatically manages data fetching and retention.
@@ -340,9 +345,6 @@ impl Default for QueryClient {
 /// ))
 /// .map(Message::UserQuery);
 /// ```
-/// A shared, reusable async fetcher producing a query's value.
-type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Send + Sync>;
-
 pub struct Query<V> {
     key: QueryKey,
     fetcher: Fetcher<V>,

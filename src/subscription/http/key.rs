@@ -13,9 +13,13 @@ pub struct QueryKey(Arc<[QueryKeyPart]>);
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum QueryKeyPart {
+    /// A string component.
     Str(String),
+    /// A signed 64-bit integer component.
     I64(i64),
+    /// An unsigned 64-bit integer component.
     U64(u64),
+    /// A boolean component.
     Bool(bool),
 }
 
