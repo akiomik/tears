@@ -101,6 +101,9 @@ pub mod subscription;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::{Action, Command};
+// Re-exported because implementing `SubscriptionSource::stream` requires
+// writing this type out in the return position; see docs/api-guidelines.md
+// "External Crate Re-exports".
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
 pub use runtime::Runtime;
