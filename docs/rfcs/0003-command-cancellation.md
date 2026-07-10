@@ -41,7 +41,7 @@ The current command path is:
 2. `Runtime::dispatch_update_command` lowers it once with
    `Command::into_runtime_parts()`.
 3. The runtime reads redraw from `RuntimeCommandParts`, then
-   `ApplicationState::enqueue_command` consumes the optional stream.
+   `RuntimeCore::enqueue_command` consumes the optional stream.
 4. If a stream exists, the runtime spawns one task into
    `command_tasks: JoinSet<()>`.
 5. The task forwards `Action::Message` into `msg_tx` and `Action::Quit` into
@@ -97,7 +97,13 @@ task completion must not be able to mutate a newer same-id run.
 #### Non-Goals
 
 - `timeout` and `retry`. They are effect-local combinators and do not require
-  cross-update runtime state.
+  cross-update runtime state. They shipped separately as
+  [RFC 0004](./0004-command-timeout-retry.md). RFC 0004 §4.2 defines
+  forward-integration contracts against this RFC's keyed metadata (`timeout`
+  preserves `key`/`cancels`; cancelling or superseding a keyed command
+  suppresses a pending timeout or retry final message through private-receiver
+  drop); verifying those contracts is in scope for this RFC's implementation.
+  See §5.1 and §7.3.
 - `debounce` and `throttle`. They need clock injection for deterministic tests
   and can build on the keyed lifecycle later.
 - Rolling back external work that has already started. Aborting a task may stop
@@ -477,19 +483,19 @@ output.
 
 ```rust
 tokio::select! {
-    Some(input) = self.state.app_inputs.next() => {
+    Some(input) = self.core.app_inputs.next() => {
         match self.process_input_batch(input) {
             BatchOutcome::Continue => {}
             BatchOutcome::Quit => break,
         }
     }
 
-    _ = self.frame_interval.tick(), if self.should_process_frame() => {
-        self.state.app_inputs.reconcile_keyed_available();
+    () = self.scheduler.next_work_frame() => {
+        self.core.app_inputs.reconcile_keyed_available();
         self.process_frame_tick(terminal)?;
     }
 
-    _ = self.state.quit_rx.recv() => break,
+    _ = self.core.quit_rx.recv() => break,
 }
 ```
 
@@ -505,10 +511,12 @@ because no shared message was ready, a later shared message does not
 retroactively precede it. A continuous stream of ready shared inputs can delay
 keyed output; that cancellation-safety tradeoff is accepted for this RFC.
 
-`process_message_batch` becomes `process_input_batch`. It keeps the existing
-100 microsecond micro-batch window, but drains both shared messages and keyed
-receiver events. It returns `BatchOutcome::Quit` only for keyed `Quit`; otherwise
-it returns `BatchOutcome::Continue`. The control contract is:
+`process_input_batch` already exists on `main` as the prerequisite rename of
+the former `process_message_batch`; today it only drains shared messages and
+returns `()`. RFC 0003 extends it to also drain keyed receiver events and to
+return `BatchOutcome::Quit` only for keyed `Quit`, otherwise
+`BatchOutcome::Continue`. It keeps the existing 100 microsecond micro-batch
+window. The control contract is:
 
 ```text
 process_input_batch(first_input):
@@ -607,6 +615,11 @@ Construction rules:
 - `cancel(id)` creates a stream-less command with `cancels = vec![id]`.
 - `map` preserves `key`, `policy`, `cancels`, and runtime directives.
 - `batch` folds runtime directives and unions child `cancels`.
+- `timeout` (RFC 0004) preserves `key`, `policy`, `cancels`, and runtime
+  directives; it changes only the wrapped effect. `.timeout(...).cancellable(id)`
+  and `.cancellable(id).timeout(...)` both leave the command keyed under `id`.
+  A `retry` / `retry_if` command carries the default (empty) cancellation
+  metadata supplied by `Command::future`, same as any other fresh command.
 
 The public docs for `cancellable` and `cancellable_with` must state the batch
 boundary explicitly: applying them to a command that later becomes a child of
@@ -671,7 +684,7 @@ with `&mut dyn Hasher`. The public `CommandId` is
 
 ### 5.4 Keyed Command Manager
 
-The keyed command runtime is a lifecycle manager owned by `ApplicationState`.
+The keyed command runtime is a lifecycle manager owned by `RuntimeCore`.
 Its `entries` map is the single source of truth for deliverability: an absent
 key means `Absent`; a present entry owns both the receiver and the run state.
 
@@ -744,7 +757,7 @@ called `abort()` already removed the state and receiver.
 
 ### 5.6 Shutdown and Drop
 
-`ApplicationState::shutdown`:
+`RuntimeCore::shutdown`:
 
 - shuts down subscriptions as today;
 - aborts all unkeyed command tasks as today;
@@ -860,6 +873,13 @@ Required coverage:
   shared-first rule as `poll_next` and never awaits keyed streams; an unkeyed
   message returning `Command::cancel(id)` prevents the next buffered keyed item
   for `id` in the same batch from being delivered.
+- **RFC 0004 forward integration:** cancelling a keyed command before its
+  `.timeout(...)` deadline elapses suppresses the timeout message; superseding
+  a keyed command during a retry's backoff delay suppresses that retry's final
+  message; `KeepInFlight` prevents a second retrying command from spawning
+  under an occupied id. These contracts are defined in
+  [RFC 0004](./0004-command-timeout-retry.md) §4.2 and are pinned here, not
+  there.
 
 ## 8. Alternatives Considered
 
@@ -934,8 +954,8 @@ starts from those seams.
    tests.
 3. Re-export `CommandId` and `CancelPolicy` from `crate::command`, `crate`, and
    `prelude`.
-4. Add a runtime-internal keyed command manager, either in `src/runtime.rs` or a
-   new `src/runtime/command_lifecycle.rs` module.
+4. Add a runtime-internal keyed command manager, either in `src/runtime/core.rs`
+   or a new `src/runtime/command_lifecycle.rs` module.
 5. Implement `CommandReceiver` so receiver closure is surfaced as
    `ReceiverEvent::Closed` instead of letting `StreamMap` silently remove keys.
 6. Extend `AppInputs` with `AppInput::Keyed` and route keyed receiver polling
@@ -960,13 +980,16 @@ starts from those seams.
 
 - `src/command.rs`
 - `src/command/effect.rs`
+- `src/command/retry.rs`
 - `src/command/runtime_directives.rs`
 - `src/command/runtime_parts.rs`
 - `src/runtime.rs`
+- `src/runtime/core.rs`
 - `src/runtime/app_input.rs`
 - `src/subscription.rs`
 - `docs/rfcs/0001-http-module-redesign.md`
 - `docs/rfcs/0002-redraw-suppression.md`
+- `docs/rfcs/0004-command-timeout-retry.md`
 - TCA `Effect.cancellable(id:cancelInFlight:)`
 - TCA `Effect.cancel(id:)`
 - RxJS `switchMap` and `exhaustMap`
