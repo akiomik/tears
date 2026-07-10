@@ -301,8 +301,7 @@ async fn fetch_todo(
     Ok(Todo)
 }
 
-let policy = RetryPolicy::try_new(3)
-    .expect("max attempts must be non-zero")
+let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"))
     .with_fixed_backoff(Duration::from_millis(200));
 
 let todo_id = 42;
@@ -329,10 +328,10 @@ error.
 | `RetryError<E>` | Attempt count, last error, and stop reason |
 | `RetryStopReason` | `Exhausted` or `StoppedByPredicate` |
 
-`RetryPolicy::new` accepts `NonZeroUsize`. The convenience
-`RetryPolicy::try_new(usize)` returns `None` for zero instead of panicking.
-The default backoff is `RetryBackoff::None`. Appendix A contains the complete
-support API and compatibility attributes.
+`RetryPolicy::new` accepts `NonZeroUsize`; the non-zero invariant is enforced
+by the type, so there is no fallible convenience constructor. The default
+backoff is `RetryBackoff::None`. Appendix A contains the complete support API
+and compatibility attributes.
 
 ### 3.4 Core semantics
 
@@ -511,8 +510,6 @@ impl RetryPolicy {
     #[must_use]
     pub const fn new(max_attempts: NonZeroUsize) -> Self;
     #[must_use]
-    pub const fn try_new(max_attempts: usize) -> Option<Self>;
-    #[must_use]
     pub const fn max_attempts(&self) -> NonZeroUsize;
     #[must_use]
     pub const fn backoff(&self) -> &RetryBackoff;
@@ -552,10 +549,13 @@ impl<E: std::error::Error + 'static> std::error::Error for RetryError<E>;
 
 ### A.3 Compatibility consequences
 
-- `RetryPolicy::new(NonZeroUsize)` is infallible, while
-  `try_new(usize) -> Option<Self>` represents the single invalid case. This
-  follows the `Timer::try_new` precedent; `FrameRate::try_new` uses `Result`
-  because it distinguishes multiple invalid cases.
+- `RetryPolicy::new(NonZeroUsize)` is infallible: the non-zero invariant is
+  expressed by the `NonZeroUsize` parameter type itself, so there is no
+  fallible `try_new(usize) -> Option<Self>` convenience constructor. This
+  matches `Timer::new(NonZeroU64)`, which is likewise the sole constructor.
+  `FrameRate::new(NonZeroU32) -> Result<Self, FrameRateError>` stays fallible
+  because it additionally validates an upper bound that `NonZero*` cannot
+  express.
 - `RetryBackoff` and its field-bearing variants are `#[non_exhaustive]`.
   Enum variant fields share the enum's visibility, so variant-level
   `#[non_exhaustive]` permits downstream matching with patterns such as
@@ -604,7 +604,7 @@ exact test locations and representative cases are verification guidance.
 | R3 | `StoppedByPredicate` occurs only while attempts remain. |
 | R4 | `None` adds no delay; `Fixed` waits the same delay before every next attempt. |
 | R5 | `RetryError` retains `last_error` and exposes it through `Display` and `Error::source()`. |
-| R6 | `try_new(0)` is `None`; `new` defaults to no backoff; fixed-backoff builders preserve `max_attempts`. |
+| R6 | `new` defaults to no backoff; fixed-backoff builders preserve `max_attempts`. Zero attempts is unrepresentable: `new` takes `NonZeroUsize`, not a runtime-checked count. |
 | R7 | A retry command behaves under `map`, `without_redraw`, and `batch` like a single-leaf future command. |
 | R8 | `should_retry` may retain local state through its `FnMut` bound. |
 

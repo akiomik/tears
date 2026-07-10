@@ -9,6 +9,7 @@
 //! Run with: cargo run --example counter
 
 use std::io;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
@@ -83,7 +84,7 @@ impl Application for Counter {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![
             // Timer that ticks every 1000ms (1 second)
-            Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+            Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
                 .map(Message::Timer),
             // Terminal events (keyboard, mouse, resize)
             // Note: Returns Result to handle potential I/O errors
@@ -103,7 +104,8 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let runtime = Runtime::<Counter>::try_new((), 60)?;
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    let runtime = Runtime::<Counter>::new((), frame_rate);
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

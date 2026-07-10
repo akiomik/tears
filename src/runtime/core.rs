@@ -195,6 +195,7 @@ mod tests {
     use super::*;
 
     use std::future::pending;
+    use std::num::{NonZeroU64, NonZeroUsize};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -325,7 +326,7 @@ mod tests {
         let mut core = RuntimeCore::<TestApp>::new(0);
         let mut attempts = 0;
         let command = Command::retry(
-            RetryPolicy::try_new(2).expect("valid policy"),
+            RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero")),
             move |_| {
                 attempts += 1;
                 let attempt = attempts;
@@ -431,10 +432,8 @@ mod tests {
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
                 vec![
-                    Subscription::new(
-                        Timer::try_new(100).expect("timer interval must be non-zero"),
-                    )
-                    .map(|_| ()),
+                    Subscription::new(Timer::new(NonZeroU64::new(100).expect("non-zero")))
+                        .map(|_| ()),
                 ]
             }
         }
@@ -507,10 +506,8 @@ mod tests {
 
             fn subscriptions(&self) -> Vec<Subscription<()>> {
                 vec![
-                    Subscription::new(
-                        Timer::try_new(100).expect("timer interval must be non-zero"),
-                    )
-                    .map(|_| ()),
+                    Subscription::new(Timer::new(NonZeroU64::new(100).expect("non-zero")))
+                        .map(|_| ()),
                 ]
             }
         }

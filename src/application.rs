@@ -169,9 +169,10 @@ pub trait Application: Sized {
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// fn subscriptions(&self) -> Vec<Subscription<Message>> {
     ///     if self.enabled {
+    ///         use std::num::NonZeroU64;
     ///         use tears::subscription::time::Timer;
     ///         vec![
-    ///             Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+    ///             Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
     ///                 .map(|_| Message::Tick),
     ///         ]
     ///     } else {

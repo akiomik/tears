@@ -77,9 +77,12 @@ impl Application for App {
 To run your application, create an `Runtime` and call `run()`:
 
 ```rust
+use std::num::NonZeroU32;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let runtime = Runtime::<App>::try_new((), 60)?;
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    let runtime = Runtime::<App>::new((), frame_rate);
 
     // Setup terminal (see complete example below)
     // ...
@@ -94,6 +97,8 @@ async fn main() -> Result<()> {
 Here's a simple counter application that increments every second:
 
 ```rust
+use std::num::{NonZeroU32, NonZeroU64};
+
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Frame, text::Text};
@@ -143,7 +148,7 @@ impl Application for Counter {
 
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![
-            Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero")).map(|timer_msg| {
+            Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero"))).map(|timer_msg| {
                 match timer_msg {
                     TimerEvent::Tick => Message::Tick,
                 }
@@ -168,7 +173,8 @@ async fn main() -> Result<()> {
     tears::install_panic_hook();
 
     // Run application at 60 FPS
-    let runtime = Runtime::<Counter>::try_new((), 60)?;
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    let runtime = Runtime::<Counter>::new((), frame_rate);
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal (normal exit path)
@@ -200,6 +206,7 @@ Retry support types are imported explicitly from `tears::command` rather than
 from the crate root or prelude:
 
 ```rust
+use std::num::NonZeroUsize;
 use std::time::Duration;
 use tears::Command;
 use tears::command::{RetryError, RetryPolicy};
@@ -208,8 +215,7 @@ enum Message {
     Loaded(Result<String, RetryError<&'static str>>),
 }
 
-let policy = RetryPolicy::try_new(3)
-    .expect("attempt count must be non-zero")
+let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"))
     .with_fixed_backoff(Duration::from_millis(200));
 
 let command = Command::retry(

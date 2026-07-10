@@ -11,6 +11,7 @@
 //! Run with: `cargo run --example http_todo --features http`
 
 use std::io;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use color_eyre::eyre::Result;
@@ -284,7 +285,8 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let runtime = Runtime::<App>::try_new((), 60)?;
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    let runtime = Runtime::<App>::new((), frame_rate);
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

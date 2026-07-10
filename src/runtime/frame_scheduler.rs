@@ -95,12 +95,15 @@ impl FrameScheduler {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use tokio::time::{Duration, Instant, timeout};
 
     use super::*;
 
     fn frame_rate(value: u32) -> FrameRate {
-        FrameRate::try_new(value).expect("frame rate must be valid")
+        FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+            .expect("frame rate must be valid")
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

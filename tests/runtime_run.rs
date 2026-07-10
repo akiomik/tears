@@ -10,6 +10,7 @@ mod trace_recorder;
 
 use std::{
     future::pending,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -22,6 +23,11 @@ use tears::command::RetryPolicy;
 use tears::prelude::*;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
+
+fn frame_rate(value: u32) -> FrameRate {
+    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+        .expect("frame rate must be valid")
+}
 
 // Helper: Simple counter app
 #[derive(Debug)]
@@ -103,10 +109,7 @@ impl Application for SubApp {
 
     fn subscriptions(&self) -> Vec<Subscription<()>> {
         use tears::subscription::time::Timer;
-        vec![
-            Subscription::new(Timer::try_new(10).expect("timer interval must be non-zero"))
-                .map(|_| ()),
-        ]
+        vec![Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero"))).map(|_| ())]
     }
 }
 
@@ -115,7 +118,7 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<CounterApp>::try_new(0, 60).expect("frame rate must be valid"); // Quit immediately
+    let runtime = Runtime::<CounterApp>::new(0, frame_rate(60)); // Quit immediately
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -161,7 +164,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
             use tears::subscription::time::Timer;
 
             vec![
-                Subscription::new(Timer::try_new(10).expect("timer interval must be non-zero"))
+                Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero")))
                     .map(|_| Message::Quit),
             ]
         }
@@ -181,7 +184,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     let _guard = recorder.set_default();
 
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<PanicCommandApp>::try_new((), 60).expect("frame rate must be valid");
+    let runtime = Runtime::<PanicCommandApp>::new((), frame_rate(60));
 
     timeout(Duration::from_secs(5), runtime.run(&mut terminal)).await??;
 
@@ -231,7 +234,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
 
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<MessageApp>::try_new((), 60).expect("frame rate must be valid");
+    let runtime = Runtime::<MessageApp>::new((), frame_rate(60));
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -265,7 +268,7 @@ async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Res
 
             let mut attempts = 0;
             let retry_command = Command::retry(
-                RetryPolicy::try_new(2).expect("valid retry policy"),
+                RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero")),
                 move |_| {
                     attempts += 1;
                     let attempt = attempts;
@@ -312,8 +315,7 @@ async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Res
 
     let observed = Arc::new(AtomicUsize::new(0));
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<LifecycleApp>::try_new(Arc::clone(&observed), 60)
-        .expect("frame rate must be valid");
+    let runtime = Runtime::<LifecycleApp>::new(Arc::clone(&observed), frame_rate(60));
 
     timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
 
@@ -327,7 +329,7 @@ async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     // End-to-end: Subscription message processing
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<SubApp>::try_new((), 60).expect("frame rate must be valid");
+    let runtime = Runtime::<SubApp>::new((), frame_rate(60));
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 

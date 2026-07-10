@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (already the preferred form)
   - `Action` remains as a private runtime-internal stream item, so no runtime
     behavior changes
+- **Breaking:** Removed the fallible `try_new` constructors in favor of a
+  single `new` per type
+  - `Timer::try_new(u64) -> Option<Timer>` is gone; use
+    `Timer::new(NonZeroU64::new(ms).expect(...))`
+  - `RetryPolicy::try_new(usize) -> Option<RetryPolicy>` is gone; use
+    `RetryPolicy::new(NonZeroUsize::new(n).expect(...))`
+  - `FrameRate::try_new(u32) -> Result<FrameRate, FrameRateError>` is gone;
+    use `FrameRate::new(NonZeroU32::new(fps).expect(...))`
+  - `Runtime::try_new(flags, u32) -> Result<Runtime<_>, FrameRateError>` is
+    gone; build a `FrameRate` first and pass it to `Runtime::new(flags,
+    frame_rate)`
+  - `FrameRateError::Zero` is removed: the non-zero invariant is now enforced
+    by `NonZeroU32` at the call site instead of at runtime
+  - `FrameRateError` is now `#[non_exhaustive]`
 
 ### Added
 

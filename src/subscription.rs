@@ -15,10 +15,11 @@
 //! ## Unidirectional (Timer)
 //!
 //! ```rust
+//! use std::num::NonZeroU64;
 //! use tears::subscription::{Subscription, time::Timer};
 //!
 //! # enum Message { Tick }
-//! let timer = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+//! let timer = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
 //!     .map(|_| Message::Tick);
 //! ```
 //!
@@ -164,6 +165,7 @@ use tokio::{
 /// # Example
 ///
 /// ```
+/// use std::num::NonZeroU64;
 /// use tears::subscription::{Subscription, time::Timer};
 ///
 /// enum Message {
@@ -171,7 +173,7 @@ use tokio::{
 /// }
 ///
 /// // Create a subscription that sends a message every second
-/// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+/// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
 ///     .map(|_| Message::Tick);
 /// ```
 pub struct Subscription<Msg: 'static> {
@@ -185,9 +187,10 @@ impl<Msg: 'static> Subscription<Msg> {
     /// # Examples
     ///
     /// ```
+    /// use std::num::NonZeroU64;
     /// use tears::subscription::{Subscription, time::Timer};
     ///
-    /// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"));
+    /// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")));
     /// ```
     #[must_use]
     pub fn new(source: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
@@ -204,11 +207,12 @@ impl<Msg: 'static> Subscription<Msg> {
     /// # Examples
     ///
     /// ```
+    /// use std::num::NonZeroU64;
     /// use tears::subscription::{Subscription, time::Timer};
     ///
     /// enum AppMessage { TimerTick }
     ///
-    /// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+    /// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
     ///     .map(|_| AppMessage::TimerTick);
     /// ```
     #[must_use]

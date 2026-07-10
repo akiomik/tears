@@ -7,6 +7,7 @@ mod common;
 #[path = "common/trace_recorder.rs"]
 mod trace_recorder;
 
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use color_eyre::eyre::Result;
@@ -14,6 +15,11 @@ use ratatui::Frame;
 use tears::prelude::*;
 use tokio::time::{Duration, Instant, sleep};
 use trace_recorder::TraceRecorder;
+
+fn frame_rate(value: u32) -> FrameRate {
+    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+        .expect("frame rate must be valid")
+}
 
 // Idle window: one second is ~60 frame periods at 60 FPS, so an ungated loop
 // would wake ~60 times before the message arrives.
@@ -71,7 +77,7 @@ async fn idle_loop_does_not_wake_at_frame_rate() -> Result<()> {
 
     let renders = Arc::new(Mutex::new(Vec::new()));
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<IdleThenQuitApp>::try_new(renders, 60)?;
+    let runtime = Runtime::<IdleThenQuitApp>::new(renders, frame_rate(60));
     runtime.run(&mut terminal).await?;
 
     // Only the initial render and the single post-message render wake the frame
@@ -103,7 +109,7 @@ async fn message_after_idle_renders_without_extra_frame_delay() -> Result<()> {
 
     let renders = Arc::new(Mutex::new(Vec::new()));
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<IdleThenQuitApp>::try_new(renders.clone(), 60)?;
+    let runtime = Runtime::<IdleThenQuitApp>::new(renders.clone(), frame_rate(60));
     runtime.run(&mut terminal).await?;
 
     let times: Vec<Duration> = renders
