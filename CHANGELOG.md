@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Raised MSRV to Rust 1.88.0 (from 1.86.0)
+  - Required to pull in `time >=0.3.47`, which resolves RUSTSEC-2026-0009
+    (denial of service via stack exhaustion) in the `time` crate pulled in
+    transitively via `ratatui-widgets`
+
 ## [0.9.3] - 2026-07-11
 
 ### Fixed

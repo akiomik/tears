@@ -11,7 +11,7 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["tui", "tea", "elm-architecture", "ratatui", "framework"]
 categories = ["command-line-interface", "asynchronous"]
-rust-version = "1.86.0"
+rust-version = "1.88.0"
 include = [
     "src/**/*",
     "examples/**/*",

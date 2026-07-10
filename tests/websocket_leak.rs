@@ -133,10 +133,10 @@ async fn websocket_closes_connection_when_outer_task_is_aborted() {
     let mut stream = ws.stream();
     let task = tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
-            if matches!(msg, WebSocketMessage::Connected { .. }) {
-                if let Some(tx) = connected_tx.take() {
-                    let _ = tx.send(());
-                }
+            if matches!(msg, WebSocketMessage::Connected { .. })
+                && let Some(tx) = connected_tx.take()
+            {
+                let _ = tx.send(());
             }
         }
     });

@@ -148,38 +148,21 @@ where
 // preserves each leaf's identity through `Command` composition, which is what a
 // future per-leaf cancellation id would attach to.
 //
-// The empty case is a distinct `None` variant rather than an empty `Vec` so
-// that `is_none()`/`is_some()` stay `const fn` (these back the public
-// `Command::is_none`/`is_some`); `Vec::is_empty` only became usable in `const`
-// in Rust 1.87, past this crate's MSRV. The invariant is therefore that
-// `Leaves` is always non-empty.
-//
-// TODO(msrv >= 1.87): collapse this back to a plain
-// `Vec<BoxStream<'static, Action<Msg>>>` and implement the `const`
-// `is_none()`/`is_some()` with `Vec::is_empty`, dropping the `None` variant and
-// its non-empty invariant.
-//
-// Future room: to carry per-leaf metadata, `Leaves` could hold
+// Future room: to carry per-leaf metadata, `leaves` could hold
 // `Vec<(LeafMeta, BoxStream<'static, Action<Msg>>)>` without reworking the fold
 // at the `into_stream()` boundary.
-pub(super) enum Effect<Msg: Send + 'static> {
-    None,
-    Leaves(Vec<BoxStream<'static, Action<Msg>>>),
+pub(super) struct Effect<Msg: Send + 'static> {
+    leaves: Vec<BoxStream<'static, Action<Msg>>>,
 }
 
 impl<Msg: Send + 'static> Effect<Msg> {
     pub(super) const fn none() -> Self {
-        Self::None
+        Self { leaves: Vec::new() }
     }
 
     fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
-        Self::Leaves(vec![stream])
-    }
-
-    fn into_leaves(self) -> Vec<BoxStream<'static, Action<Msg>>> {
-        match self {
-            Self::None => Vec::new(),
-            Self::Leaves(leaves) => leaves,
+        Self {
+            leaves: vec![stream],
         }
     }
 
@@ -198,32 +181,26 @@ impl<Msg: Send + 'static> Effect<Msg> {
     pub(super) fn batch(effects: impl IntoIterator<Item = Self>) -> Self {
         // Concatenate the children's leaves. Because every effect already holds
         // a flat leaf sequence, nested batches flatten automatically and
-        // stream-less children contribute nothing. Collapse to `None` when no
-        // child had a leaf so the non-empty `Leaves` invariant holds.
-        let leaves: Vec<_> = effects.into_iter().flat_map(Self::into_leaves).collect();
+        // stream-less children contribute nothing.
+        let leaves: Vec<_> = effects
+            .into_iter()
+            .flat_map(|effect| effect.leaves)
+            .collect();
 
-        if leaves.is_empty() {
-            Self::None
-        } else {
-            Self::Leaves(leaves)
-        }
+        Self { leaves }
     }
 
     pub(super) fn timeout<F>(self, duration: Duration, on_timeout: F) -> Self
     where
         F: FnOnce() -> Msg + Send + 'static,
     {
-        match self {
-            Self::None => Self::None,
-            Self::Leaves(leaves) => {
-                let on_timeout = Arc::new(Mutex::new(Some(on_timeout)));
-                let leaves = leaves
-                    .into_iter()
-                    .map(|leaf| TimeoutLeaf::new(leaf, duration, Arc::clone(&on_timeout)).boxed())
-                    .collect();
-                Self::Leaves(leaves)
-            }
-        }
+        let on_timeout = Arc::new(Mutex::new(Some(on_timeout)));
+        let leaves = self
+            .leaves
+            .into_iter()
+            .map(|leaf| TimeoutLeaf::new(leaf, duration, Arc::clone(&on_timeout)).boxed())
+            .collect();
+        Self { leaves }
     }
 
     pub(super) fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Effect<T>
@@ -250,62 +227,59 @@ impl<Msg: Send + 'static> Effect<Msg> {
         // cost (the pre-refactor path). Several leaves must share `f`: `Arc<F>`
         // alone would require `F: Sync`, but the public `map` bound is only
         // `Fn + Send`, so a `Mutex` supplies the needed `Sync`.
-        match self {
-            Self::None => Effect::None,
-            Self::Leaves(mut leaves) if leaves.len() == 1 => {
-                let leaf = leaves.pop().expect("length checked to be 1");
-                Effect::Leaves(vec![map_leaf(leaf, f)])
-            }
-            Self::Leaves(leaves) => {
-                let f = Arc::new(Mutex::new(f));
-                let mapped = leaves
-                    .into_iter()
-                    .map(|leaf| {
-                        let f = Arc::clone(&f);
-                        map_leaf(leaf, move |msg| {
-                            // The mutex only lends `Sync` to the shared `Fn`; it
-                            // guards no mutable state, so a poisoned lock carries
-                            // no corrupted invariant. Recover the guard rather
-                            // than panicking, which would otherwise turn one
-                            // leaf's panic into a misleading "mutex poisoned"
-                            // cascade across its sibling leaves.
-                            let guard = f.lock().unwrap_or_else(PoisonError::into_inner);
-                            (*guard)(msg)
-                        })
-                    })
-                    .collect();
-                Effect::Leaves(mapped)
-            }
+        let mut leaves = self.leaves;
+        if leaves.len() == 1 {
+            let leaf = leaves.pop().expect("length checked to be 1");
+            return Effect {
+                leaves: vec![map_leaf(leaf, f)],
+            };
         }
+
+        let f = Arc::new(Mutex::new(f));
+        let mapped = leaves
+            .into_iter()
+            .map(|leaf| {
+                let f = Arc::clone(&f);
+                map_leaf(leaf, move |msg| {
+                    // The mutex only lends `Sync` to the shared `Fn`; it
+                    // guards no mutable state, so a poisoned lock carries
+                    // no corrupted invariant. Recover the guard rather
+                    // than panicking, which would otherwise turn one
+                    // leaf's panic into a misleading "mutex poisoned"
+                    // cascade across its sibling leaves.
+                    let guard = f.lock().unwrap_or_else(PoisonError::into_inner);
+                    (*guard)(msg)
+                })
+            })
+            .collect();
+        Effect { leaves: mapped }
     }
 
     pub(super) const fn is_none(&self) -> bool {
-        matches!(self, Self::None)
+        self.leaves.is_empty()
     }
 
     pub(super) const fn is_some(&self) -> bool {
-        matches!(self, Self::Leaves(_))
+        !self.leaves.is_empty()
     }
 
     // Observe the leaf count so tests in `command.rs` can pin down nested-batch
     // flattening. Not needed by non-test builds.
     #[cfg(test)]
     pub(super) fn leaf_count(&self) -> usize {
-        match self {
-            Self::None => 0,
-            Self::Leaves(leaves) => leaves.len(),
-        }
+        self.leaves.len()
     }
 
     pub(super) fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
         // Fold the leaves back into one stream here, at the boundary. A single
         // leaf is returned as-is (a `select_all` over one stream is observably
-        // identical); `None` yields no stream, which the runtime treats as no
-        // work to spawn. `Leaves` is always non-empty by invariant.
-        match self {
-            Self::None => None,
-            Self::Leaves(mut leaves) if leaves.len() == 1 => leaves.pop(),
-            Self::Leaves(leaves) => Some(select_all(leaves).boxed()),
+        // identical); no leaves yields no stream, which the runtime treats as
+        // no work to spawn.
+        let mut leaves = self.leaves;
+        match leaves.len() {
+            0 => None,
+            1 => leaves.pop(),
+            _ => Some(select_all(leaves).boxed()),
         }
     }
 }
