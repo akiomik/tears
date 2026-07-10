@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Command::timeout()` for applying an overall deadline to each effect leaf,
+  with at most one timeout message emitted per modifier call
+- `Command::retry()` and `Command::retry_if()` for repeatable fallible
+  operations, with non-zero attempt policies, optional fixed backoff, retry
+  context, and structured terminal errors
 - Subscription start tracing events now include a `restarted` field so initial
   starts and restarts can be distinguished.
 

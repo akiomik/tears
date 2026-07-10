@@ -201,9 +201,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
     use tokio::sync::oneshot;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{Duration, advance, timeout};
 
-    use crate::command::Command;
+    use crate::command::{Command, RetryPolicy};
     use crate::runtime::AppInput;
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
@@ -287,6 +287,63 @@ mod tests {
         let input = timeout(Duration::from_secs(1), core.app_inputs.next())
             .await
             .expect("command should send a message before the timeout");
+
+        assert!(matches!(
+            input,
+            Some(AppInput::Shared(TestMessage::Increment))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_enqueue_command_delivers_timeout_message() {
+        let mut core = RuntimeCore::<TestApp>::new(0);
+        let (started_tx, started_rx) = oneshot::channel();
+        let command = Command::future(async move {
+            let _ = started_tx.send(());
+            pending::<TestMessage>().await
+        })
+        .timeout(Duration::from_secs(1), || TestMessage::Increment);
+        core.enqueue_command(command.into_runtime_parts());
+
+        timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("command should start before the timeout")
+            .expect("command should signal its first poll");
+        advance(Duration::from_secs(1)).await;
+
+        let input = timeout(Duration::from_secs(1), core.app_inputs.next())
+            .await
+            .expect("command should send its timeout message");
+        assert!(matches!(
+            input,
+            Some(AppInput::Shared(TestMessage::Increment))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_enqueue_command_delivers_retry_final_message() {
+        let mut core = RuntimeCore::<TestApp>::new(0);
+        let mut attempts = 0;
+        let command = Command::retry(
+            RetryPolicy::try_new(2).expect("valid policy"),
+            move |_| {
+                attempts += 1;
+                let attempt = attempts;
+                async move {
+                    if attempt == 2 {
+                        Ok(TestMessage::Increment)
+                    } else {
+                        Err("transient")
+                    }
+                }
+            },
+            |result| result.expect("second attempt should succeed"),
+        );
+        core.enqueue_command(command.into_runtime_parts());
+
+        let input = timeout(Duration::from_secs(1), core.app_inputs.next())
+            .await
+            .expect("retry should send its final message before the timeout");
 
         assert!(matches!(
             input,

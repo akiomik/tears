@@ -178,6 +178,47 @@ async fn main() -> Result<()> {
 }
 ```
 
+### Command timeouts and retries
+
+Commands can enforce an overall deadline without changing their message type:
+
+```rust
+use std::time::Duration;
+use tears::prelude::*;
+
+enum Message {
+    Loaded(String),
+    TimedOut,
+}
+
+let command = Command::perform(async { "data".to_string() }, Message::Loaded)
+    .timeout(Duration::from_secs(5), || Message::TimedOut);
+```
+
+Retrying commands take a factory so every attempt receives a fresh future.
+Retry support types are imported explicitly from `tears::command` rather than
+from the crate root or prelude:
+
+```rust
+use std::time::Duration;
+use tears::Command;
+use tears::command::{RetryError, RetryPolicy};
+
+enum Message {
+    Loaded(Result<String, RetryError<&'static str>>),
+}
+
+let policy = RetryPolicy::try_new(3)
+    .expect("attempt count must be non-zero")
+    .with_fixed_backoff(Duration::from_millis(200));
+
+let command = Command::retry(
+    policy,
+    |_| async { Ok::<_, &'static str>("data".to_string()) },
+    Message::Loaded,
+);
+```
+
 ## Architecture
 
 Tears follows **The Elm Architecture (TEA)** pattern:

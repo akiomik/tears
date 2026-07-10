@@ -24,7 +24,10 @@
 //! let cmd = Command::perform(load_data(), Message::DataLoaded);
 //! ```
 
+use std::time::Duration;
+
 mod effect;
+mod retry;
 mod runtime_directives;
 mod runtime_parts;
 
@@ -32,6 +35,7 @@ use effect::Effect;
 #[cfg(test)]
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
+pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};
 use runtime_directives::RuntimeDirectives;
 pub(crate) use runtime_parts::RuntimeCommandParts;
 
@@ -165,6 +169,111 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub const fn without_redraw(mut self) -> Self {
         self.directives = self.directives.without_redraw();
         self
+    }
+
+    /// Add an overall deadline to every effect leaf in this command.
+    ///
+    /// The deadline for each leaf starts when that leaf is first polled. A
+    /// single call emits at most one timeout message across all of the
+    /// command's leaves, while messages produced before the deadline continue
+    /// to flow normally. Applying a timeout to [`Command::none`] is inert.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tears::prelude::*;
+    ///
+    /// enum Message {
+    ///     Loaded(String),
+    ///     TimedOut,
+    /// }
+    ///
+    /// let cmd = Command::perform(async { "data".to_string() }, Message::Loaded)
+    ///     .timeout(Duration::from_secs(5), || Message::TimedOut);
+    /// ```
+    #[must_use = "timeout returns a modified command and does not mutate in place"]
+    pub fn timeout(
+        mut self,
+        duration: Duration,
+        on_timeout: impl FnOnce() -> Msg + Send + 'static,
+    ) -> Self {
+        self.effect = self.effect.timeout(duration, on_timeout);
+        self
+    }
+
+    /// Retry an operation after every error while attempts remain.
+    ///
+    /// Arguments read as configuration → repeatable operation → message
+    /// conversion. `policy.max_attempts()` includes the first execution, and
+    /// the operation receives a 1-based [`RetryContext`] for every attempt.
+    /// Processing emits one final message containing either the successful
+    /// value or a [`RetryError`].
+    ///
+    /// # Repetition safety
+    ///
+    /// The operation may run up to `policy.max_attempts()` times. Callers must
+    /// ensure repetition is safe: a non-idempotent external side effect can
+    /// occur more than once, including when an attempt performs the side
+    /// effect and later returns an error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::Command;
+    /// use tears::command::{RetryError, RetryPolicy};
+    ///
+    /// enum Message {
+    ///     Loaded(Result<String, RetryError<&'static str>>),
+    /// }
+    ///
+    /// let policy = RetryPolicy::try_new(3).expect("attempt count is non-zero");
+    /// let command = Command::retry(
+    ///     policy,
+    ///     |_| async { Ok::<_, &'static str>("data".to_string()) },
+    ///     Message::Loaded,
+    /// );
+    /// ```
+    pub fn retry<A, E, Fut, Op, F>(policy: RetryPolicy, operation: Op, f: F) -> Self
+    where
+        A: Send + 'static,
+        E: Send + 'static,
+        Fut: Future<Output = Result<A, E>> + Send + 'static,
+        Op: FnMut(RetryContext) -> Fut + Send + 'static,
+        F: FnOnce(Result<A, RetryError<E>>) -> Msg + Send + 'static,
+    {
+        Self::retry_if(policy, operation, |_, _| true, f)
+    }
+
+    /// Retry an operation when its error is accepted by a predicate.
+    ///
+    /// Arguments read as configuration → repeatable operation → retry
+    /// predicate → message conversion. The predicate is called only when an
+    /// error occurs while another attempt remains. Rejecting that error
+    /// produces [`RetryStopReason::StoppedByPredicate`]; an error on the final
+    /// attempt produces [`RetryStopReason::Exhausted`] without invoking the
+    /// predicate.
+    ///
+    /// The operation may run up to `policy.max_attempts()` times, so callers
+    /// are responsible for ensuring that repetition is safe.
+    pub fn retry_if<A, E, Fut, Op, P, F>(
+        policy: RetryPolicy,
+        operation: Op,
+        should_retry: P,
+        f: F,
+    ) -> Self
+    where
+        A: Send + 'static,
+        E: Send + 'static,
+        Fut: Future<Output = Result<A, E>> + Send + 'static,
+        Op: FnMut(RetryContext) -> Fut + Send + 'static,
+        P: FnMut(&E, RetryContext) -> bool + Send + 'static,
+        F: FnOnce(Result<A, RetryError<E>>) -> Msg + Send + 'static,
+    {
+        Self::future(async move {
+            let result = retry::run_retry(policy, operation, should_retry).await;
+            f(result)
+        })
     }
 
     /// Perform an asynchronous operation and convert its result to a message.
@@ -375,10 +484,10 @@ impl<Msg: Send + 'static> Command<Msg> {
 mod tests {
     use super::*;
 
-    use std::cell::Cell;
+    use std::{cell::Cell, future::pending};
 
     use futures::stream;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{advance, sleep};
 
     #[test]
     fn test_redraw_defaults_to_true_for_constructors() {
@@ -446,6 +555,40 @@ mod tests {
 
         assert!(cmd.is_none());
         assert!(!cmd.requests_redraw());
+    }
+
+    #[test]
+    fn test_timeout_preserves_runtime_directives_and_streamless_shape() {
+        let cmd = Command::<i32>::none()
+            .without_redraw()
+            .timeout(Duration::from_secs(1), || 99);
+
+        assert!(cmd.is_none());
+        assert!(!cmd.requests_redraw());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_composes_with_map_on_either_side() {
+        let before = Command::future(pending::<i32>())
+            .map(|value| value.to_string())
+            .timeout(Duration::from_secs(1), || "before".to_string());
+        let after = Command::future(pending::<i32>())
+            .timeout(Duration::from_secs(1), || 99)
+            .map(|value| value.to_string());
+        let command = Command::batch([before, after]);
+        let mut stream = command.into_stream().expect("stream should exist");
+
+        assert!(futures::poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+
+        let mut messages = Vec::new();
+        while let Some(action) = stream.next().await {
+            if let Action::Message(message) = action {
+                messages.push(message);
+            }
+        }
+        messages.sort();
+        assert_eq!(messages, vec!["99", "before"]);
     }
 
     #[test]
