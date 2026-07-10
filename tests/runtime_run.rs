@@ -1,6 +1,6 @@
-// Integration tests for Runtime::run
-// These tests verify end-to-end scenarios.
-// Unit tests for individual methods are in src/runtime.rs
+//! Integration tests for `Runtime::run`
+//! These tests verify end-to-end scenarios.
+//! Unit tests for individual methods are in src/runtime.rs
 
 mod common;
 #[path = "common/trace_recorder.rs"]

@@ -1,3 +1,5 @@
+//! Integration tests for quit handling.
+
 mod common;
 
 use color_eyre::eyre::Result;
