@@ -54,14 +54,20 @@ pub struct Command<Msg: Send + 'static> {
 - `Effect<Msg>` is `None | Leaves(Vec<BoxStream<'static, Action<Msg>>>)`. It
   keeps a flat sequence of leaf streams and only folds them (via `select_all`)
   at the `into_stream()` boundary.
-- As noted in the RFC 0002 addendum, modifiers fall on two axes:
+- As noted in the RFC 0002 addendum and RFC 0003, these concerns live in
+  separate layers:
   - Output treatment (`without_redraw`): a directive over the whole update
     result. Held as a field, folded by `batch`.
-  - Execution lifecycle (`timeout` / `retry` / `cancellable`): a property of
-    the effect itself. Not a field; expressed on the leaf streams.
-- RFC 0003 treats only `cancellable` as a runtime lifecycle, because
-  cancellation needs keyed state spanning multiple updates plus stale-output
-  suppression. `timeout` and `retry` close over a single effect.
+  - Effect-local lifecycle (`timeout` / `retry`): `timeout` wraps effect leaf
+    streams, while `retry` is a constructor that closes over a repeatable
+    operation factory.
+  - Runtime lifecycle (`cancellable`): RFC 0003 represents cancellation as
+    runtime metadata (`cancels` / `key`) on `RuntimeCommandParts`, not as a
+    leaf-stream wrapper. Child keys inside `Command::batch` are intentionally
+    not preserved by RFC 0003.
+- `timeout` and `retry` close over a single effect. RFC 0003's cancellation
+  metadata is separate because cancellation needs keyed state spanning
+  multiple updates plus stale-output suppression.
 - Once an `Effect` has become a `BoxStream`, the information needed to
   re-create the original async operation is gone. This constraint dictates the
   shape of the retry API (constructor, not modifier).
@@ -116,8 +122,8 @@ pub struct Command<Msg: Send + 'static> {
   most once per `.timeout()` call.
 - `retry` is a **constructor** that takes a repeatable future factory and
   rides on `Command::future`. `Effect` needs no changes, and `map` / `batch` /
-  `without_redraw` / a future `cancellable` apply naturally through the
-  existing constructor path.
+  `without_redraw` compose as they do for any existing command. After RFC 0003,
+  the constructor carries the default cancellation metadata.
 - Implementation order is `timeout` first (it touches `effect.rs`), `retry`
   second (`Command::future(async move { ... })` suffices). The asymmetry is
   deliberate.
@@ -545,7 +551,8 @@ are fixed now.
 - `Command::cancel(id).timeout(...)` is stream-less, so the timeout is inert;
   the explicit cancel remains.
 
-Items to add to RFC 0003's runtime contract tests (as capacity allows):
+Required RFC 0003 runtime coverage, outside the 0.9.3 implementation scope of
+this RFC:
 
 - Cancelling a keyed command before the timeout deadline suppresses the
   timeout message.
