@@ -1,11 +1,143 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex, PoisonError},
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use futures::{
     FutureExt, Stream, StreamExt,
     stream::{self, BoxStream, select_all},
 };
+use tokio::time::{Sleep, sleep};
 
 use super::Action;
+
+/// Wraps one effect leaf with a lazily started overall deadline and terminal
+/// timeout handling.
+struct TimeoutLeaf<Msg, F>
+where
+    Msg: Send + 'static,
+{
+    inner: Option<BoxStream<'static, Action<Msg>>>,
+    sleep: Option<Pin<Box<Sleep>>>,
+    duration: Duration,
+    on_timeout: Arc<Mutex<Option<F>>>,
+    deadline_observed: bool,
+}
+
+impl<Msg, F> TimeoutLeaf<Msg, F>
+where
+    Msg: Send + 'static,
+    F: FnOnce() -> Msg,
+{
+    fn new(
+        inner: BoxStream<'static, Action<Msg>>,
+        duration: Duration,
+        on_timeout: Arc<Mutex<Option<F>>>,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            sleep: None,
+            duration,
+            on_timeout,
+            deadline_observed: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.inner = None;
+        self.sleep = None;
+    }
+
+    fn take_deadline_path(&mut self) -> Poll<Option<Action<Msg>>> {
+        self.finish();
+        let on_timeout = self
+            .on_timeout
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+
+        Poll::Ready(on_timeout.map(|on_timeout| Action::Message(on_timeout())))
+    }
+}
+
+impl<Msg, F> Stream for TimeoutLeaf<Msg, F>
+where
+    Msg: Send + 'static,
+    F: FnOnce() -> Msg + Send + 'static,
+{
+    type Item = Action<Msg>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let state = &mut *self;
+
+        if state.inner.is_none() {
+            return Poll::Ready(None);
+        }
+
+        // Constructing the sleep on the first poll makes the timeout an
+        // execution deadline rather than a construction deadline.
+        if state.sleep.is_none() {
+            state.sleep = Some(Box::pin(sleep(state.duration)));
+        }
+
+        // If a deadline/item tie previously passed through a message, inspect
+        // the inner stream once more only so termination can retain priority.
+        // Any other result takes the already-observed deadline path.
+        if state.deadline_observed {
+            let inner_poll = state
+                .inner
+                .as_mut()
+                .expect("checked above")
+                .as_mut()
+                .poll_next(cx);
+
+            if matches!(inner_poll, Poll::Ready(None)) {
+                state.finish();
+                return Poll::Ready(None);
+            }
+
+            return state.take_deadline_path();
+        }
+
+        // Poll both sides before choosing an outcome. This lets inner
+        // termination deterministically win while bounding a continuously
+        // ready inner stream to one item after the deadline becomes ready.
+        let inner_poll = state
+            .inner
+            .as_mut()
+            .expect("checked above")
+            .as_mut()
+            .poll_next(cx);
+        let deadline_ready = state
+            .sleep
+            .as_mut()
+            .expect("initialized above")
+            .as_mut()
+            .poll(cx)
+            .is_ready();
+
+        match inner_poll {
+            Poll::Ready(None) => {
+                state.finish();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Action::Quit)) => {
+                state.finish();
+                Poll::Ready(Some(Action::Quit))
+            }
+            Poll::Ready(Some(action @ Action::Message(_))) => {
+                if deadline_ready {
+                    state.deadline_observed = true;
+                }
+                Poll::Ready(Some(action))
+            }
+            Poll::Pending if deadline_ready => state.take_deadline_path(),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 // Effects own and compose the asynchronous action stream; runtime directives
 // stay separate because they describe how the runtime treats the update result.
@@ -74,6 +206,23 @@ impl<Msg: Send + 'static> Effect<Msg> {
             Self::None
         } else {
             Self::Leaves(leaves)
+        }
+    }
+
+    pub(super) fn timeout<F>(self, duration: Duration, on_timeout: F) -> Self
+    where
+        F: FnOnce() -> Msg + Send + 'static,
+    {
+        match self {
+            Self::None => Self::None,
+            Self::Leaves(leaves) => {
+                let on_timeout = Arc::new(Mutex::new(Some(on_timeout)));
+                let leaves = leaves
+                    .into_iter()
+                    .map(|leaf| TimeoutLeaf::new(leaf, duration, Arc::clone(&on_timeout)).boxed())
+                    .collect();
+                Self::Leaves(leaves)
+            }
         }
     }
 
@@ -164,7 +313,13 @@ impl<Msg: Send + 'static> Effect<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use std::{
+        future::pending,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use futures::{StreamExt, poll};
+    use tokio::time::advance;
 
     async fn drain<Msg>(stream: BoxStream<'static, Action<Msg>>) -> (Vec<Msg>, bool) {
         let mut messages = Vec::new();
@@ -326,5 +481,263 @@ mod tests {
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Quit));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_deadline_starts_on_first_poll() {
+        let effect = Effect::future(pending::<i32>()).timeout(Duration::from_secs(1), || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        advance(Duration::from_secs(10)).await;
+        assert!(poll!(stream.next()).is_pending());
+
+        advance(Duration::from_millis(999)).await;
+        assert!(poll!(stream.next()).is_pending());
+
+        advance(Duration::from_millis(1)).await;
+        assert!(matches!(stream.next().await, Some(Action::Message(99))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_factory_is_shared_across_batch_and_accepts_move_only_state() {
+        let effect = Effect::batch(vec![
+            Effect::future(pending::<String>()),
+            Effect::future(pending::<String>()),
+        ])
+        .timeout(Duration::from_secs(1), {
+            let timeout = String::from("timed out");
+            move || timeout
+        });
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Action::Message(message)) if message == "timed out"
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_completion_does_not_consume_factory() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_timeout = Arc::clone(&called);
+        let effect = Effect::future(async { 42 }).timeout(Duration::ZERO, move || {
+            called_by_timeout.store(true, Ordering::SeqCst);
+            99
+        });
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(matches!(stream.next().await, Some(Action::Message(42))));
+        assert!(stream.next().await.is_none());
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_completed_batch_leaf_leaves_timeout_factory_for_pending_sibling() {
+        let effect = Effect::batch([
+            Effect::future(async { 42 }),
+            Effect::future(pending::<i32>()),
+        ])
+        .timeout(Duration::from_secs(1), || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(matches!(stream.next().await, Some(Action::Message(42))));
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(stream.next().await, Some(Action::Message(99))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_passes_through_messages_before_deadline() {
+        let effect = Effect::stream(stream::iter([1, 2, 3])).timeout(Duration::from_secs(1), || 99);
+        let stream = effect.into_stream().expect("stream should exist");
+        let (messages, quit) = drain(stream).await;
+
+        assert_eq!(messages, vec![1, 2, 3]);
+        assert!(!quit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_quit_is_terminal_and_does_not_consume_factory() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_timeout = Arc::clone(&called);
+        let effect =
+            Effect::<i32>::action(Action::Quit).timeout(Duration::from_secs(1), move || {
+                called_by_timeout.store(true, Ordering::SeqCst);
+                99
+            });
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(matches!(stream.next().await, Some(Action::Quit)));
+        assert!(stream.next().await.is_none());
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_quit_batch_leaf_leaves_timeout_factory_for_pending_sibling() {
+        let effect = Effect::batch([
+            Effect::<i32>::action(Action::Quit),
+            Effect::future(pending::<i32>()),
+        ])
+        .timeout(Duration::from_secs(1), || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(matches!(stream.next().await, Some(Action::Quit)));
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(stream.next().await, Some(Action::Message(99))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_drops_inner_stream_and_never_polls_it_again() {
+        struct DropMarker(Arc<AtomicBool>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let marker = DropMarker(Arc::clone(&dropped));
+        let polls_by_stream = Arc::clone(&polls);
+        let pending = stream::poll_fn(move |_| {
+            let _marker = &marker;
+            polls_by_stream.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending::<Option<i32>>
+        });
+        let effect = Effect::stream(pending).timeout(Duration::from_secs(1), || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+        assert!(matches!(stream.next().await, Some(Action::Message(99))));
+
+        let polls_at_timeout = polls.load(Ordering::SeqCst);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), polls_at_timeout);
+    }
+
+    #[test]
+    fn test_timeout_over_none_is_inert_and_preserves_leaf_shape() {
+        let effect = Effect::<i32>::none().timeout(Duration::ZERO, || 99);
+
+        assert!(effect.is_none());
+        assert_eq!(effect.leaf_count(), 0);
+        assert!(effect.into_stream().is_none());
+    }
+
+    #[test]
+    fn test_timeout_and_map_preserve_leaf_count() {
+        let effect = Effect::batch(vec![
+            Effect::future(async { 1 }),
+            Effect::future(async { 2 }),
+        ])
+        .timeout(Duration::from_secs(1), || 99)
+        .map(|message| message.to_string());
+
+        assert_eq!(effect.leaf_count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_child_timeouts_in_a_batch_are_independent() {
+        let first = Effect::future(pending::<i32>()).timeout(Duration::from_secs(1), || 10);
+        let second = Effect::future(pending::<i32>()).timeout(Duration::from_secs(2), || 20);
+        let effect = Effect::batch([first, second]);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+        assert!(matches!(stream.next().await, Some(Action::Message(10))));
+        advance(Duration::from_secs(1)).await;
+        assert!(matches!(stream.next().await, Some(Action::Message(20))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_nested_timeout_emits_only_the_earlier_message() {
+        let effect = Effect::future(pending::<i32>())
+            .timeout(Duration::from_secs(1), || 10)
+            .timeout(Duration::from_secs(2), || 20);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+        assert!(matches!(stream.next().await, Some(Action::Message(10))));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_nested_simultaneous_timeouts_emit_exactly_one_message() {
+        let effect = Effect::future(pending::<i32>())
+            .timeout(Duration::from_secs(1), || 10)
+            .timeout(Duration::from_secs(1), || 20);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(poll!(stream.next()).is_pending());
+        advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(
+            stream.next().await,
+            Some(Action::Message(10 | 20))
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_elapsed_deadline_bounds_continuously_ready_stream_progress() {
+        let effect = Effect::stream(stream::repeat(1)).timeout(Duration::from_secs(1), || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(matches!(stream.next().await, Some(Action::Message(1))));
+        advance(Duration::from_secs(1)).await;
+
+        let tied_output = stream.next().await;
+        let item_won = matches!(tied_output.as_ref(), Some(Action::Message(1)));
+        let deadline_won = matches!(tied_output.as_ref(), Some(Action::Message(99)));
+        assert!(item_won || deadline_won);
+
+        if item_won {
+            // Passing through the tied item requires the deadline transition
+            // on the very next poll, before another inner item can escape.
+            assert!(matches!(stream.next().await, Some(Action::Message(99))));
+        }
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_deadline_quit_tie_allows_either_terminal_outcome() {
+        let timeout_called = Arc::new(AtomicBool::new(false));
+        let called_by_timeout = Arc::clone(&timeout_called);
+        let effect = Effect::<i32>::action(Action::Quit).timeout(Duration::ZERO, move || {
+            called_by_timeout.store(true, Ordering::SeqCst);
+            99
+        });
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        let output = stream.next().await;
+        let quit_won = matches!(output.as_ref(), Some(Action::Quit));
+        let deadline_won = matches!(output.as_ref(), Some(Action::Message(99)));
+        assert!(quit_won || deadline_won);
+        assert_eq!(timeout_called.load(Ordering::SeqCst), deadline_won);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_zero_timeout_is_non_panicking_and_termination_wins() {
+        let effect = Effect::stream(stream::empty::<i32>()).timeout(Duration::ZERO, || 99);
+        let mut stream = effect.into_stream().expect("stream should exist");
+
+        assert!(stream.next().await.is_none());
     }
 }

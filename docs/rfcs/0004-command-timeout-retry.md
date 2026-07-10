@@ -1,6 +1,6 @@
 # RFC 0004: Command Timeout / Retry
 
-- Status: Accepted
+- Status: Implemented
 - Target: 0.9.3 (the next non-breaking patch at acceptance), additive public
   API only
 - Scope: timeout / retry lifecycle control confined to a single effect's

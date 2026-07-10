@@ -6,8 +6,17 @@ mod common;
 #[path = "common/trace_recorder.rs"]
 mod trace_recorder;
 
+use std::{
+    future::pending,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
 use color_eyre::eyre::Result;
 use ratatui::Frame;
+use tears::command::RetryPolicy;
 use tears::prelude::*;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
@@ -217,6 +226,88 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
     assert!(result.is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Result<()> {
+    const TIMED_OUT: usize = 1;
+    const RETRIED: usize = 2;
+
+    struct LifecycleApp {
+        observed: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    enum Message {
+        TimedOut,
+        Retried,
+    }
+
+    impl Application for LifecycleApp {
+        type Message = Message;
+        type Flags = Arc<AtomicUsize>;
+
+        fn new(observed: Self::Flags) -> (Self, Command<Self::Message>) {
+            let timeout_command =
+                Command::future(pending::<Message>()).timeout(Duration::ZERO, || Message::TimedOut);
+
+            let mut attempts = 0;
+            let retry_command = Command::retry(
+                RetryPolicy::try_new(2).expect("valid retry policy"),
+                move |_| {
+                    attempts += 1;
+                    let attempt = attempts;
+                    async move {
+                        if attempt == 2 {
+                            Ok(())
+                        } else {
+                            Err("transient")
+                        }
+                    }
+                },
+                |result| {
+                    result.expect("second retry attempt should succeed");
+                    Message::Retried
+                },
+            );
+
+            (
+                Self { observed },
+                Command::batch([timeout_command, retry_command]),
+            )
+        }
+
+        fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+            let bit = match message {
+                Message::TimedOut => TIMED_OUT,
+                Message::Retried => RETRIED,
+            };
+            let observed = self.observed.fetch_or(bit, Ordering::SeqCst) | bit;
+
+            if observed == (TIMED_OUT | RETRIED) {
+                Command::effect(Action::Quit)
+            } else {
+                Command::none()
+            }
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    let observed = Arc::new(AtomicUsize::new(0));
+    let mut terminal = common::test_terminal()?;
+    let runtime = Runtime::<LifecycleApp>::try_new(Arc::clone(&observed), 60)
+        .expect("frame rate must be valid");
+
+    timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
+
+    assert_eq!(observed.load(Ordering::SeqCst), TIMED_OUT | RETRIED);
 
     Ok(())
 }
