@@ -397,9 +397,10 @@ be breaking.
 | `batch` | Preserves leaf count, order, and placement semantics | Batches like any other command |
 | `without_redraw` | Directive is preserved | Directive is preserved |
 
-Retry is implemented through `Command::future` and therefore inherits its
-existing composition behavior. Timeout wraps only the effect and never removes
-directives.
+A retry command is observably a single-leaf future command, so existing
+composition behavior applies unchanged; building it on `Command::future`
+(Appendix C) is one way to satisfy that contract. Timeout wraps only the
+effect and never removes directives.
 
 ### 4.2 RFC 0003 integration
 
@@ -595,7 +596,7 @@ exact test locations and representative cases are verification guidance.
 | R4 | `None` adds no delay; `Fixed` waits the same delay before every next attempt. |
 | R5 | `RetryError` retains `last_error` and exposes it through `Display` and `Error::source()`. |
 | R6 | `try_new(0)` is `None`; `new` defaults to no backoff; fixed-backoff builders preserve `max_attempts`. |
-| R7 | Retry uses `Command::future`, so `map`, `without_redraw`, and `batch` keep existing behavior. |
+| R7 | A retry command behaves under `map`, `without_redraw`, and `batch` like a single-leaf future command. |
 | R8 | `should_retry` may retain local state through its `FnMut` bound. |
 
 ### B.3 Test strategy
