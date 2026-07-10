@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated locked transitive dependencies to address RustSec advisories for
+  `aws-lc-sys` and `crossbeam-epoch`, plus audit warnings for `anyhow` and
+  `rand`.
+
 ### Added
 
 - Subscription start tracing events now include a `restarted` field so initial
