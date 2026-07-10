@@ -95,6 +95,16 @@ even though they are fully public — promoting them to root would turn the
 root namespace into a grab bag instead of a skeleton vocabulary, and would
 put them in front of every unrelated app's autocomplete.
 
+A third note covers companion types: once an item is root-promoted, a type
+that only exists to appear in its signature — most commonly the error type
+returned by its fallible constructor — shares its home even though it
+individually fails both tests above. `FrameRateError` is at the crate root
+solely because `FrameRate::new` returns `Result<Self, FrameRateError>`;
+splitting the pair across root and a domain path would force every caller
+of `FrameRate::new` to import from two places for one call. "Does skeleton
+code write this out literally" still applies to companion types — it
+decides prelude membership (see "Prelude Membership"), not root placement.
+
 When unsure, check what the item's own domain module already decided about
 public vs private submodules above: if the domain module is public because
 it's a meaningful boundary, its members normally stay behind that boundary
