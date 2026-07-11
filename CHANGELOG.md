@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     crate-internal tests
   - No behavior change for applications; the runtime continues to manage
     subscriptions the same way
+- **Breaking:** `FrameRateError` is no longer re-exported from
+  `tears::prelude`
+  - `use tears::prelude::*;` no longer brings `FrameRateError` into scope;
+    import it explicitly with `use tears::FrameRateError;` if needed
+  - `tears::FrameRateError` (the crate-root path) is unaffected
 
 ### Added
 
