@@ -327,8 +327,8 @@ struct RunningSubscription {
 
 /// Manages the lifecycle of active subscriptions.
 ///
-/// Used internally by the runtime. You typically don't interact with this directly.
-pub struct SubscriptionManager<Msg> {
+/// Internal to the runtime; not part of the public API.
+pub(crate) struct SubscriptionManager<Msg> {
     running: HashMap<SubscriptionId, RunningSubscription>,
     msg_sender: mpsc::UnboundedSender<Msg>,
 }
@@ -336,7 +336,7 @@ pub struct SubscriptionManager<Msg> {
 impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// Create a new subscription manager.
     #[must_use]
-    pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
+    pub(crate) fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
             running: HashMap::new(),
             msg_sender,
@@ -354,7 +354,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// # Arguments
     ///
     /// * `subscriptions` - The new set of subscriptions to run
-    pub fn update<I>(&mut self, subscriptions: I)
+    pub(crate) fn update<I>(&mut self, subscriptions: I)
     where
         I: IntoIterator<Item = Subscription<Msg>>,
     {
@@ -431,7 +431,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     ///
     /// This cancels all running subscription tasks. Called automatically
     /// when the runtime shuts down.
-    pub fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         self.abort_running();
         self.running.clear();
     }
@@ -456,6 +456,40 @@ impl<Msg> Drop for SubscriptionManager<Msg> {
         // is dropped without `shutdown()` — for instance while unwinding from a
         // panic — would otherwise leak its subscription tasks.
         self.abort_running();
+    }
+}
+
+/// Bench-only wrapper exposing [`SubscriptionManager`]'s reconciliation hot
+/// path to `benches/subscription.rs`.
+///
+/// `benches/subscription.rs` compiles as a separate crate that only sees the
+/// public API, so it cannot name `SubscriptionManager` directly once that
+/// type is crate-private. This wrapper delegates to the real implementation
+/// and exists solely to keep that benchmark isolating
+/// `SubscriptionManager::update`'s cost from the rest of the runtime. Gated
+/// behind the `bench-internals` feature, which is not part of the public API
+/// and carries no semver guarantees; do not enable it for normal builds.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub struct BenchSubscriptionManager<Msg>(SubscriptionManager<Msg>);
+
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+impl<Msg: Send + 'static> BenchSubscriptionManager<Msg> {
+    #[must_use]
+    pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
+        Self(SubscriptionManager::new(msg_sender))
+    }
+
+    pub fn update<I>(&mut self, subscriptions: I)
+    where
+        I: IntoIterator<Item = Subscription<Msg>>,
+    {
+        self.0.update(subscriptions);
+    }
+
+    pub fn shutdown(&mut self) {
+        self.0.shutdown();
     }
 }
 

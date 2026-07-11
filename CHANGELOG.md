@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `FrameRateError::Zero` is removed: the non-zero invariant is now enforced
     by `NonZeroU32` at the call site instead of at runtime
   - `FrameRateError` is now `#[non_exhaustive]`
+- **Breaking:** `SubscriptionManager` is no longer part of the public API
+  - `tears::subscription::SubscriptionManager` is gone; it was already
+    documented as runtime-internal and used only by `Runtime` and
+    crate-internal tests
+  - No behavior change for applications; the runtime continues to manage
+    subscriptions the same way
 
 ### Added
 

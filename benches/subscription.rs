@@ -2,18 +2,24 @@
 //!
 //! These establish a regression baseline for the runtime's subscription work:
 //!
-//! - **reconcile (steady)**: [`SubscriptionManager::update`] when the requested
+//! - **reconcile (steady)**: [`BenchSubscriptionManager::update`] when the requested
 //!   set is unchanged — the common per-message case, which must diff cheaply and
 //!   keep the existing tasks running.
 //! - **reconcile (churn)**: `update` when the whole set is replaced — measures
 //!   the abort + spawn bookkeeping.
 //!
-//! Run with `cargo bench --bench subscription`.
+//! `SubscriptionManager` is crate-private, so this benchmark goes through
+//! [`BenchSubscriptionManager`], a thin bench-only wrapper gated behind the
+//! `bench-internals` feature.
+//!
+//! Run with `cargo bench --bench subscription --features bench-internals`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::stream::{self, StreamExt};
 use tears::BoxStream;
-use tears::subscription::{Subscription, SubscriptionId, SubscriptionManager, SubscriptionSource};
+use tears::subscription::{
+    BenchSubscriptionManager, Subscription, SubscriptionId, SubscriptionSource,
+};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 
@@ -42,7 +48,7 @@ fn subscriptions(ids: impl IntoIterator<Item = u64>) -> Vec<Subscription<()>> {
 }
 
 fn bench_reconcile_steady(c: &mut Criterion) {
-    // `SubscriptionManager::update` spawns tasks, so it must run inside a Tokio
+    // `BenchSubscriptionManager::update` spawns tasks, so it must run inside a Tokio
     // runtime context. The tasks park immediately on the pending stream.
     let rt = Builder::new_multi_thread()
         .worker_threads(1)
@@ -54,7 +60,7 @@ fn bench_reconcile_steady(c: &mut Criterion) {
     for count in [1u64, 8, 64, 256] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             let (tx, _rx) = mpsc::unbounded_channel();
-            let mut manager = SubscriptionManager::new(tx);
+            let mut manager = BenchSubscriptionManager::new(tx);
             // Prime the manager so subsequent updates hit the steady-state path
             // (same IDs, tasks already running -> no spawns, just the diff).
             manager.update(subscriptions(0..count));
@@ -80,7 +86,7 @@ fn bench_reconcile_churn(c: &mut Criterion) {
     for count in [1u64, 8, 64, 256] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             let (tx, _rx) = mpsc::unbounded_channel();
-            let mut manager = SubscriptionManager::new(tx);
+            let mut manager = BenchSubscriptionManager::new(tx);
 
             // Alternate between two disjoint ID sets so every update aborts the
             // previous set and spawns a whole new one.
