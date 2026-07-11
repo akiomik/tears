@@ -29,6 +29,8 @@
 //! # Example
 //!
 //! ```rust,no_run
+//! use std::num::NonZeroU32;
+//!
 //! use color_eyre::eyre::Result;
 //! use ratatui::Frame;
 //! use tears::prelude::*;
@@ -71,7 +73,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
-//!     let runtime = Runtime::<CounterApp>::try_new((), 60)?;
+//!     let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+//!     let runtime = Runtime::<CounterApp>::new((), frame_rate);
 //!     let mut terminal = ratatui::init();
 //!     // Restore the terminal if the application panics.
 //!     tears::install_panic_hook();
@@ -81,7 +84,6 @@
 //! }
 //! ```
 
-use std::result::Result as StdResult;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::Result;
@@ -99,7 +101,7 @@ mod frame_scheduler;
 mod pending_work;
 
 use app_input::AppInput;
-use frame_rate::{FrameRate, FrameRateError};
+use frame_rate::FrameRate;
 use frame_scheduler::FrameScheduler;
 // `self::` disambiguates the submodule from the built-in `core` crate.
 use self::core::RuntimeCore;
@@ -154,6 +156,7 @@ impl<App: Application> Runtime<App> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// # use std::num::NonZeroU32;
     /// # use tears::prelude::*;
     /// # use ratatui::Frame;
     /// #
@@ -169,7 +172,8 @@ impl<App: Application> Runtime<App> {
     /// # }
     ///
     /// // Create runtime with 60 FPS target
-    /// let frame_rate = FrameRate::try_new(60).expect("frame rate must be valid");
+    /// let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))
+    ///     .expect("frame rate must be valid");
     /// let runtime = Runtime::<MyApp>::new((), frame_rate);
     /// ```
     #[must_use]
@@ -180,38 +184,6 @@ impl<App: Application> Runtime<App> {
             core,
             scheduler: FrameScheduler::new(frame_rate),
         }
-    }
-
-    /// Tries to create a new runtime with the given initialization flags and FPS value.
-    ///
-    /// This is a convenience wrapper around [`FrameRate::try_new`] and
-    /// [`Runtime::new`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FrameRateError`] when `frame_rate` is zero or too high to
-    /// produce a non-zero frame duration.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # use tears::prelude::*;
-    /// # use ratatui::Frame;
-    /// #
-    /// # struct MyApp;
-    /// # enum Message {}
-    /// # impl Application for MyApp {
-    /// #     type Message = Message;
-    /// #     type Flags = ();
-    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
-    /// #     fn update(&mut self, _: Message) -> Command<Message> { Command::none() }
-    /// #     fn view(&self, _: &mut Frame<'_>) {}
-    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
-    /// # }
-    /// let runtime = Runtime::<MyApp>::try_new((), 60).expect("frame rate must be valid");
-    /// ```
-    pub fn try_new(flags: App::Flags, frame_rate: u32) -> StdResult<Self, FrameRateError> {
-        Ok(Self::new(flags, FrameRate::try_new(frame_rate)?))
     }
 
     #[cfg(test)]
@@ -356,6 +328,8 @@ impl<App: Application> Runtime<App> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// # use std::num::NonZeroU32;
+    /// #
     /// # use color_eyre::eyre::Result;
     /// # use ratatui::Frame;
     /// # use tears::prelude::*;
@@ -381,7 +355,8 @@ impl<App: Application> Runtime<App> {
     ///     // Restore the terminal if the application panics.
     ///     tears::install_panic_hook();
     ///
-    ///     let runtime = Runtime::<MyApp>::try_new((), 60)?;
+    ///     let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    ///     let runtime = Runtime::<MyApp>::new((), frame_rate);
     ///     runtime.run(&mut terminal).await?;
     ///
     ///     ratatui::restore();
@@ -431,6 +406,7 @@ impl<App: Application> Runtime<App> {
 mod tests {
     use super::*;
 
+    use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -445,7 +421,8 @@ mod tests {
     use crate::test_support::{TestApp, TestMessage, TraceRecorder, wait_until};
 
     fn frame_rate(value: u32) -> FrameRate {
-        FrameRate::try_new(value).expect("frame rate must be valid")
+        FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+            .expect("frame rate must be valid")
     }
 
     struct RedrawControlApp;

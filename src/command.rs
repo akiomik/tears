@@ -223,6 +223,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Examples
     ///
     /// ```
+    /// use std::num::NonZeroUsize;
     /// use tears::Command;
     /// use tears::command::{RetryError, RetryPolicy};
     ///
@@ -230,7 +231,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Loaded(Result<String, RetryError<&'static str>>),
     /// }
     ///
-    /// let policy = RetryPolicy::try_new(3).expect("attempt count is non-zero");
+    /// let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"));
     /// let command = Command::retry(
     ///     policy,
     ///     |_| async { Ok::<_, &'static str>("data".to_string()) },

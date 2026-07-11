@@ -27,17 +27,6 @@ impl RetryPolicy {
         }
     }
 
-    /// Create a retry policy from a raw attempt count.
-    ///
-    /// Returns `None` when `max_attempts` is zero.
-    #[must_use]
-    pub const fn try_new(max_attempts: usize) -> Option<Self> {
-        match NonZeroUsize::new(max_attempts) {
-            Some(max_attempts) => Some(Self::new(max_attempts)),
-            None => None,
-        }
-    }
-
     /// Return the maximum number of executions, including the first attempt.
     #[must_use]
     pub const fn max_attempts(&self) -> NonZeroUsize {
@@ -242,6 +231,10 @@ mod tests {
 
     use crate::command::{Action, Command};
 
+    fn policy(max_attempts: usize) -> RetryPolicy {
+        RetryPolicy::new(NonZeroUsize::new(max_attempts).expect("max_attempts must be non-zero"))
+    }
+
     async fn final_result<A, E>(
         command: Command<Result<A, RetryError<E>>>,
     ) -> Result<A, RetryError<E>>
@@ -264,7 +257,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_by_operation = Arc::clone(&attempts);
         let command = Command::retry(
-            RetryPolicy::try_new(3).expect("valid policy"),
+            policy(3),
             move |context| {
                 let attempts = Arc::clone(&attempts_by_operation);
                 async move {
@@ -285,7 +278,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_by_operation = Arc::clone(&attempts);
         let command = Command::retry(
-            RetryPolicy::try_new(3).expect("valid policy"),
+            policy(3),
             move |context| {
                 let attempt = attempts_by_operation.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
@@ -309,7 +302,7 @@ mod tests {
         let predicate_calls = Arc::new(AtomicUsize::new(0));
         let calls_by_predicate = Arc::clone(&predicate_calls);
         let command = Command::retry_if(
-            RetryPolicy::try_new(1).expect("valid policy"),
+            policy(1),
             |_| async { Err::<i32, _>("failed") },
             move |_, _| {
                 calls_by_predicate.fetch_add(1, Ordering::SeqCst);
@@ -329,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn predicate_stop_occurs_only_while_attempts_remain() {
         let command = Command::retry_if(
-            RetryPolicy::try_new(3).expect("valid policy"),
+            policy(3),
             |_| async { Err::<i32, _>("permanent") },
             |_, context| {
                 assert_eq!(context.attempt().get(), 1);
@@ -350,7 +343,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_by_operation = Arc::clone(&attempts);
         let command = Command::retry(
-            RetryPolicy::try_new(2).expect("valid policy"),
+            policy(2),
             move |_| {
                 let attempt = attempts_by_operation.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
@@ -373,9 +366,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_by_operation = Arc::clone(&attempts);
         let command = Command::retry(
-            RetryPolicy::try_new(3)
-                .expect("valid policy")
-                .with_fixed_backoff(Duration::from_secs(2)),
+            policy(3).with_fixed_backoff(Duration::from_secs(2)),
             move |_| {
                 let attempt = attempts_by_operation.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
@@ -404,9 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_policy_validates_attempts_and_preserves_them_in_builders() {
-        assert_eq!(RetryPolicy::try_new(0), None);
-
+    fn retry_policy_preserves_max_attempts_in_builders() {
         let max_attempts = NonZeroUsize::new(3).expect("non-zero");
         let policy = RetryPolicy::new(max_attempts);
         assert_eq!(policy.max_attempts(), max_attempts);
@@ -462,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn retry_composes_as_a_single_leaf_command() {
         let retry = Command::retry(
-            RetryPolicy::try_new(1).expect("valid policy"),
+            policy(1),
             |_| async { Ok::<_, &'static str>(20) },
             |result| result.expect("operation should succeed"),
         )
@@ -494,7 +483,7 @@ mod tests {
     async fn retry_predicate_may_retain_mutable_local_state() {
         let mut predicate_calls = 0;
         let command = Command::retry_if(
-            RetryPolicy::try_new(4).expect("valid policy"),
+            policy(4),
             |_| async { Err::<i32, _>("failed") },
             move |_, _| {
                 predicate_calls += 1;

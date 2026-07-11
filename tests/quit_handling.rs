@@ -2,11 +2,18 @@
 
 mod common;
 
+use std::num::NonZeroU32;
+
 use color_eyre::eyre::Result;
 use ratatui::Frame;
 use tears::prelude::*;
 
 use tokio::time::{Duration, Instant, sleep, timeout};
+
+fn frame_rate(value: u32) -> FrameRate {
+    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+        .expect("frame rate must be valid")
+}
 
 // Test application that sends quit from init command
 
@@ -16,7 +23,7 @@ async fn test_quit_responsiveness_low_framerate() -> Result<()> {
     // This test uses InitQuitApp which sends quit from init command
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<InitQuitApp>::try_new((), 16).expect("frame rate must be valid");
+    let runtime = Runtime::<InitQuitApp>::new((), frame_rate(16));
 
     let start = Instant::now();
     // Use low frame rate (16 FPS = 62.5ms per frame)
@@ -62,7 +69,7 @@ async fn test_quit_from_init_command() -> Result<()> {
     // Test that quit from init command is processed quickly
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<InitQuitApp>::try_new((), 60).expect("frame rate must be valid");
+    let runtime = Runtime::<InitQuitApp>::new((), frame_rate(60));
 
     let start = Instant::now();
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
@@ -111,7 +118,7 @@ async fn test_quit_during_frame_wait() -> Result<()> {
     // Test that quit signal during frame wait is processed immediately
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<DelayedQuitApp>::try_new((), 10).expect("frame rate must be valid");
+    let runtime = Runtime::<DelayedQuitApp>::new((), frame_rate(10));
 
     let start = Instant::now();
     // Use very low frame rate (10 FPS = 100ms per frame)
@@ -179,8 +186,7 @@ async fn test_quit_after_multiple_messages() -> Result<()> {
     // Test that quit is processed quickly even after multiple messages
     let mut terminal = common::test_terminal()?;
 
-    let runtime =
-        Runtime::<MultiMessageQuitApp>::try_new((), 60).expect("frame rate must be valid");
+    let runtime = Runtime::<MultiMessageQuitApp>::new((), frame_rate(60));
 
     let start = Instant::now();
     let result = timeout(Duration::from_millis(500), runtime.run(&mut terminal)).await?;

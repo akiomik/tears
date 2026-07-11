@@ -41,19 +41,6 @@ impl FrameRate {
         }
     }
 
-    /// Tries to create a frame rate from an FPS value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FrameRateError::Zero`] when `frames_per_second` is zero, or
-    /// [`FrameRateError::TooHigh`] when it is greater than [`FrameRate::MAX`].
-    pub const fn try_new(frames_per_second: u32) -> StdResult<Self, FrameRateError> {
-        match NonZeroU32::new(frames_per_second) {
-            Some(frames_per_second) => Self::new(frames_per_second),
-            None => Err(FrameRateError::Zero),
-        }
-    }
-
     /// Returns the frame rate in frames per second.
     #[must_use]
     pub const fn get(self) -> u32 {
@@ -67,9 +54,8 @@ impl FrameRate {
 
 /// Error returned when constructing an invalid [`FrameRate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameRateError {
-    /// Frame rate must be non-zero.
-    Zero,
     /// Frame rate is too high to produce a non-zero frame duration.
     TooHigh {
         /// Provided frame rate.
@@ -82,7 +68,6 @@ pub enum FrameRateError {
 impl Display for FrameRateError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::Zero => f.write_str("frame rate must be non-zero"),
             Self::TooHigh { value, max } => {
                 write!(f, "frame rate must be at most {max}, got {value}")
             }
@@ -97,15 +82,15 @@ mod tests {
     use super::*;
 
     fn frame_rate(value: u32) -> FrameRate {
-        FrameRate::try_new(value).expect("frame rate must be valid")
+        FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+            .expect("frame rate must be valid")
     }
 
     #[test]
-    fn test_frame_rate_try_new() {
-        assert_eq!(FrameRate::try_new(0), Err(FrameRateError::Zero));
-        assert_eq!(FrameRate::try_new(60).map(FrameRate::get), Ok(60));
+    fn test_frame_rate_new() {
+        assert_eq!(frame_rate(60).get(), 60);
         assert_eq!(
-            FrameRate::try_new(FrameRate::MAX + 1),
+            FrameRate::new(NonZeroU32::new(FrameRate::MAX + 1).expect("non-zero")),
             Err(FrameRateError::TooHigh {
                 value: FrameRate::MAX + 1,
                 max: FrameRate::MAX,

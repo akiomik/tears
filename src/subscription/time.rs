@@ -42,6 +42,7 @@ pub enum TimerEvent {
 /// # Example
 ///
 /// ```rust
+/// use std::num::NonZeroU64;
 /// use tears::subscription::{Subscription, time::Timer};
 ///
 /// enum AppMessage {
@@ -49,11 +50,11 @@ pub enum TimerEvent {
 /// }
 ///
 /// // Create a timer that ticks every second (1000ms)
-/// let sub = Subscription::new(Timer::try_new(1000).expect("timer interval must be non-zero"))
+/// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
 ///     .map(|_| AppMessage::Tick);
 ///
 /// // For 60 FPS animations (approximately 16.67ms per frame)
-/// let animation_timer = Subscription::new(Timer::try_new(16).expect("timer interval must be non-zero"))
+/// let animation_timer = Subscription::new(Timer::new(NonZeroU64::new(16).expect("non-zero")))
 ///     .map(|_| AppMessage::Tick);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,26 +84,6 @@ impl Timer {
     #[must_use]
     pub const fn new(interval_ms: NonZeroU64) -> Self {
         Self { interval_ms }
-    }
-
-    /// Try to create a new timer with the specified interval in milliseconds.
-    ///
-    /// Returns [`None`] when `interval_ms` is zero.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use tears::subscription::time::Timer;
-    ///
-    /// let timer = Timer::try_new(1000).expect("timer interval must be non-zero");
-    /// assert!(Timer::try_new(0).is_none());
-    /// ```
-    #[must_use]
-    pub const fn try_new(interval_ms: u64) -> Option<Self> {
-        match NonZeroU64::new(interval_ms) {
-            Some(interval_ms) => Some(Self::new(interval_ms)),
-            None => None,
-        }
     }
 }
 
@@ -148,7 +129,7 @@ mod tests {
     use tokio::time::{Duration, Instant, timeout};
 
     fn timer(interval_ms: u64) -> Timer {
-        Timer::try_new(interval_ms).expect("timer interval must be non-zero")
+        Timer::new(NonZeroU64::new(interval_ms).expect("timer interval must be non-zero"))
     }
 
     #[test]
@@ -156,12 +137,6 @@ mod tests {
         let interval_ms = NonZeroU64::new(1000).expect("timer interval must be non-zero");
         let timer = Timer::new(interval_ms);
         assert_eq!(timer.interval_ms, interval_ms);
-    }
-
-    #[test]
-    fn test_timer_try_new() {
-        assert_eq!(Timer::try_new(1000), Some(timer(1000)));
-        assert_eq!(Timer::try_new(0), None);
     }
 
     #[test]

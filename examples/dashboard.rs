@@ -9,6 +9,8 @@
 //!
 //! Run with: cargo run --example dashboard
 
+use std::num::NonZeroU32;
+
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::prelude::*;
@@ -609,7 +611,8 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let runtime = Runtime::<App>::try_new((), 60)?;
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+    let runtime = Runtime::<App>::new((), frame_rate);
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
