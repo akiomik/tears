@@ -52,6 +52,9 @@ oversight — see "Prelude Membership" below. Every prelude item is reachable
 both at its canonical path and at `prelude::*` by design; that duplication
 is the entire point of a prelude.
 
+`tests/api_surface.rs` checks this rule (and that the prelude stays a subset
+of root-level items) mechanically in CI; see `docs/testing.md`.
+
 ## Root Promotion Criteria
 
 The crate root (`tears::*`) is for the vocabulary of a minimal
