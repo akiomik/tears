@@ -22,6 +22,35 @@ the contract:
 - Use integration tests for end-to-end runtime behavior, public API contracts,
   and interactions between runtime components.
 
+## Public API Surface Tests
+
+`tests/api_surface.rs` is a different category from the rest of `tests/`:
+it checks the *shape* of the crate's public API (which paths are reachable)
+per `docs/api-guidelines.md`, not runtime behavior. A downstream user never
+observes this directly — it only matters to whoever is deciding where a new
+item should live.
+
+This means it doesn't fit either bucket in "Test Placement" above (it needs
+no private access, but it isn't exercising behavior either), and it has
+different mechanics from every other test in this repository:
+
+- It parses rustdoc JSON via the `public-api` crate, which is only available
+  on the nightly toolchain — unlike everything else in this repo, which
+  builds under the pinned stable toolchain in `rust-toolchain.toml`.
+- Each test shells out to `cargo +nightly rustdoc`, so it needs a nightly
+  toolchain installed (`rustup toolchain install nightly`) and takes several
+  seconds per run.
+
+Both tests are `#[ignore]`d so `cargo test` stays fast and stable-only by
+default. Run them explicitly with:
+
+```sh
+cargo test --test api_surface -- --ignored
+```
+
+CI runs this as its own step with a nightly toolchain installed, separate
+from the main stable test job.
+
 ## Do Not Use Sleep For Synchronization
 
 Tests should not use `tokio::time::sleep(Duration::from_millis(...))` to wait

@@ -69,6 +69,21 @@ jobs:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 3
 
+  api-surface:
+    name: Public API Surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
+      # (rustdoc JSON output is nightly-only); this just makes that toolchain
+      # available, it doesn't change what builds the test binary.
+      - name: Install nightly toolchain for rustdoc JSON
+        run: rustup toolchain install nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Check public API surface
+        run: cargo test --test api_surface -- --ignored
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
