@@ -58,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `config` / `key` / `result` already followed this single-path pattern;
     `mutation` / `query` were the only `http` submodules with a second,
     deeper public path to the same types
+- **Breaking:** Closed the double public paths for `Application`, `Command`,
+  `Runtime`, `Subscription`, `SubscriptionId`, `SubscriptionSource`, and
+  `install_panic_hook`
+  - `tears::application::Application`, `tears::command::Command`,
+    `tears::runtime::Runtime`, `tears::subscription::Subscription`,
+    `tears::subscription::SubscriptionId`, `tears::subscription::SubscriptionSource`,
+    and `tears::panic::install_panic_hook` are gone
+  - Each item's crate-root path is unaffected and is now the sole public
+    path: `tears::Application`, `tears::Command`, `tears::Runtime`,
+    `tears::Subscription`, `tears::SubscriptionId`, `tears::SubscriptionSource`,
+    `tears::install_panic_hook`
+  - `tears::command::{RetryError, RetryPolicy, ...}` and
+    `tears::subscription::{http, mock, signal, terminal, time, websocket}`
+    are unaffected; only the redundant second path to the skeleton types
+    above is removed
 
 ### Added
 

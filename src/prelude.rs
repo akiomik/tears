@@ -13,7 +13,7 @@
 //! - [`FrameRate`] - Validated runtime frame rate
 
 pub use crate::application::Application;
-pub use crate::command::Command;
+pub use crate::command::core::Command;
 pub use crate::runtime::Runtime;
 pub use crate::runtime::frame_rate::FrameRate;
-pub use crate::subscription::Subscription;
+pub use crate::subscription::core::Subscription;

@@ -1,34 +1,7 @@
 //! Panic handling helpers for restoring the terminal on unwind.
 //!
-//! A TUI application puts the terminal into raw mode and an alternate screen.
-//! If the application panics, the stack unwinds straight out of
-//! [`Runtime::run`](crate::Runtime::run) and the `ratatui::restore()` call that
-//! would normally run afterwards is skipped, leaving the user's terminal in a
-//! broken state (no echo, no line editing, stuck on the alternate screen).
-//!
-//! [`install_panic_hook`] wraps the current panic hook so that the terminal is
-//! restored *before* the original hook runs. Because it chains into the existing
-//! hook rather than replacing it, panic reporters such as `color_eyre` still
-//! print their report — now on a restored, readable terminal.
-//!
-//! # Usage
-//!
-//! Call it once during startup, after any reporter is installed and after the
-//! terminal is initialized:
-//!
-//! ```rust,no_run
-//! # use color_eyre::eyre::Result;
-//! # fn main() -> Result<()> {
-//! color_eyre::install()?;
-//! let mut terminal = ratatui::init();
-//! tears::install_panic_hook();
-//! // ... run the application ...
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! Call it only once. Each call wraps the previous hook, so repeated calls would
-//! restore the terminal multiple times (harmless, but pointless).
+//! This module is crate-internal; see [`install_panic_hook`](crate::install_panic_hook)
+//! (the sole public item re-exported from here) for the full documentation.
 
 use std::panic::{self, PanicHookInfo};
 
@@ -38,9 +11,33 @@ type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 /// Installs a panic hook that restores the terminal before delegating to the
 /// previously installed hook.
 ///
-/// This should be called once, after initializing the terminal (and after
-/// installing any panic reporter such as `color_eyre`). See the
-/// [module documentation](self) for details and usage.
+/// A TUI application puts the terminal into raw mode and an alternate screen.
+/// If the application panics, the stack unwinds straight out of
+/// [`Runtime::run`](crate::Runtime::run) and the `ratatui::restore()` call
+/// that would normally run afterwards is skipped, leaving the user's
+/// terminal in a broken state (no echo, no line editing, stuck on the
+/// alternate screen). This function wraps the current panic hook so the
+/// terminal is restored *before* the original hook runs. Because it chains
+/// into the existing hook rather than replacing it, panic reporters such as
+/// `color_eyre` still print their report — now on a restored, readable
+/// terminal.
+///
+/// Call it once, after initializing the terminal (and after installing any
+/// panic reporter such as `color_eyre`):
+///
+/// ```rust,no_run
+/// # use color_eyre::eyre::Result;
+/// # fn main() -> Result<()> {
+/// color_eyre::install()?;
+/// let mut terminal = ratatui::init();
+/// tears::install_panic_hook();
+/// // ... run the application ...
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Call it only once. Each call wraps the previous hook, so repeated calls
+/// would restore the terminal multiple times (harmless, but pointless).
 pub fn install_panic_hook() {
     let original = panic::take_hook();
     panic::set_hook(compose_hook(

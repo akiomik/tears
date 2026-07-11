@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use tears::subscription::SubscriptionSource;
+use tears::SubscriptionSource;
 use tears::subscription::websocket::{WebSocket, WebSocketMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

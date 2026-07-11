@@ -1,6 +1,7 @@
 use futures::stream::BoxStream;
 
-use super::{Action, RuntimeDirectives};
+use super::Action;
+use super::runtime_directives::RuntimeDirectives;
 
 /// Internal command decomposition consumed by the runtime.
 ///

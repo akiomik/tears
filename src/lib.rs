@@ -17,10 +17,10 @@
 //!
 //! ## Core Components
 //!
-//! - [`application::Application`]: The main trait that defines your application
-//! - [`runtime::Runtime`]: Manages the application lifecycle and event loop
-//! - [`command::Command`]: Represents asynchronous side effects and runtime directives
-//! - [`subscription::Subscription`]: Represents ongoing event sources
+//! - [`Application`]: The main trait that defines your application
+//! - [`Runtime`]: Manages the application lifecycle and event loop
+//! - [`Command`]: Represents asynchronous side effects and runtime directives
+//! - [`Subscription`]: Represents ongoing event sources
 //! - [`install_panic_hook`]: Restores the terminal if the application panics
 //!
 //! ## Example
@@ -91,16 +91,16 @@
 //!
 //! Enables `subscription::http` with Query and Mutation support.
 
-pub mod application;
+pub(crate) mod application;
 pub mod command;
-pub mod panic;
+pub(crate) mod panic;
 pub mod prelude;
-pub mod runtime;
+pub(crate) mod runtime;
 pub mod subscription;
 
 // Re-export commonly used types
 pub use application::Application;
-pub use command::Command;
+pub use command::core::Command;
 // Re-exported because implementing `SubscriptionSource::stream` requires
 // writing this type out in the return position; see docs/api-guidelines.md
 // "External Crate Re-exports".
@@ -112,7 +112,7 @@ pub use runtime::Runtime;
 // docs/api-guidelines.md for the module visibility / root promotion rules
 // this follows.
 pub use runtime::frame_rate::{FrameRate, FrameRateError};
-pub use subscription::{Subscription, SubscriptionId, SubscriptionSource};
+pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 
 #[cfg(test)]
 mod test_support;

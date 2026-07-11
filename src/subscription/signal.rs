@@ -29,7 +29,8 @@ mod unix_signal {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tears::subscription::{Subscription, signal::Signal};
+    /// use tears::Subscription;
+    /// use tears::subscription::signal::Signal;
     /// use tokio::signal::unix::SignalKind;
     ///
     /// enum Message {
@@ -235,7 +236,8 @@ mod windows_signal {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tears::subscription::{Subscription, signal::CtrlC};
+    /// use tears::Subscription;
+    /// use tears::subscription::signal::CtrlC;
     ///
     /// enum Message {
     ///     CtrlC,
@@ -354,7 +356,8 @@ mod windows_signal {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tears::subscription::{Subscription, signal::CtrlBreak};
+    /// use tears::Subscription;
+    /// use tears::subscription::signal::CtrlBreak;
     ///
     /// enum Message {
     ///     CtrlBreak,

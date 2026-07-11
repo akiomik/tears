@@ -124,7 +124,8 @@ pub enum WebSocketMessage {
 /// ## Example
 ///
 /// ```rust,no_run
-/// use tears::subscription::{Subscription, websocket::{WebSocket, WebSocketMessage, WebSocketCommand}};
+/// use tears::Subscription;
+/// use tears::subscription::websocket::{WebSocket, WebSocketMessage, WebSocketCommand};
 /// use tokio_tungstenite::tungstenite::Message;
 /// use tokio::sync::mpsc;
 ///
