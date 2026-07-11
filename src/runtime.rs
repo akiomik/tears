@@ -94,9 +94,11 @@ use crate::{application::Application, command::Command};
 
 mod app_input;
 mod core;
-// `FrameRate` is a scheduling input, so it lives with the runtime. `pub(crate)`
-// lets `lib.rs`/`prelude` re-export it without exposing a second public path.
-pub(crate) mod frame_rate;
+// `FrameRate` is a scheduling input, so it lives with the runtime. `pub`
+// (not `pub(crate)`) because `runtime` itself is already `pub(crate)`,
+// which caps this submodule's effective reachability the same way;
+// `lib.rs`/`prelude` still need it nameable for their re-exports.
+pub mod frame_rate;
 mod frame_scheduler;
 mod pending_work;
 
@@ -128,7 +130,7 @@ use self::core::RuntimeCore;
 ///
 /// # Examples
 ///
-/// See the [module-level documentation](self) for a complete example.
+/// See the [crate-level documentation](crate) for a complete example.
 pub struct Runtime<App: Application> {
     /// The runtime's owned execution resources (app, channels, subscriptions, tasks)
     core: RuntimeCore<App>,
@@ -299,7 +301,7 @@ impl<App: Application> Runtime<App> {
     ///
     /// This is the main entry point for executing the application. It starts the event loop
     /// that processes messages, renders the UI, and manages subscriptions. The loop continues
-    /// until the application sends a quit signal via [`Command::quit`](crate::command::Command::quit).
+    /// until the application sends a quit signal via [`Command::quit`](crate::Command::quit).
     ///
     /// # Event Loop
     ///

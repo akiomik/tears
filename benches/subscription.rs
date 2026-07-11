@@ -16,10 +16,8 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::stream::{self, StreamExt};
-use tears::BoxStream;
-use tears::subscription::{
-    BenchSubscriptionManager, Subscription, SubscriptionId, SubscriptionSource,
-};
+use tears::subscription::BenchSubscriptionManager;
+use tears::{BoxStream, Subscription, SubscriptionId, SubscriptionSource};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 

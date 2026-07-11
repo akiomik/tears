@@ -19,7 +19,8 @@ use super::{SubscriptionId, SubscriptionSource};
 /// # Example
 ///
 /// ```rust,no_run
-/// use tears::subscription::{Subscription, terminal::TerminalEvents};
+/// use tears::Subscription;
+/// use tears::subscription::terminal::TerminalEvents;
 /// use crossterm::event::{Event, KeyCode};
 ///
 /// enum Message {

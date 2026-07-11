@@ -6,7 +6,8 @@
 //! # Basic Usage
 //!
 //! ```
-//! use tears::subscription::{Subscription, mock::MockSource};
+//! use tears::Subscription;
+//! use tears::subscription::mock::MockSource;
 //!
 //! let mock = MockSource::<i32>::new();
 //! let subscription = Subscription::new(mock.clone());
@@ -76,7 +77,8 @@
 //! Test subscriptions that change based on application state:
 //!
 //! ```
-//! # use tears::subscription::{Subscription, mock::MockSource};
+//! # use tears::Subscription;
+//! # use tears::subscription::mock::MockSource;
 //! struct App {
 //!     enabled: bool,
 //!     mock: MockSource<i32>,

@@ -333,7 +333,8 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 /// # Example
 ///
 /// ```rust,ignore
-/// use tears::subscription::{Subscription, http::{Query, QueryClient}};
+/// use tears::Subscription;
+/// use tears::subscription::http::{Query, QueryClient};
 /// use std::sync::Arc;
 ///
 /// let client = Arc::new(QueryClient::new());

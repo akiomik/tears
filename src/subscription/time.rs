@@ -43,7 +43,8 @@ pub enum TimerEvent {
 ///
 /// ```rust
 /// use std::num::NonZeroU64;
-/// use tears::subscription::{Subscription, time::Timer};
+/// use tears::Subscription;
+/// use tears::subscription::time::Timer;
 ///
 /// enum AppMessage {
 ///     Tick,

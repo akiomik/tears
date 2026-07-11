@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::result::Result as StdResult;
 use std::time::Duration;
 
-/// Target frames per second for [`Runtime`](crate::runtime::Runtime).
+/// Target frames per second for [`Runtime`](crate::Runtime).
 ///
 /// The value must be non-zero and small enough to produce a non-zero frame
 /// duration. This prevents divide-by-zero panics and invalid zero-duration
