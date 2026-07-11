@@ -39,7 +39,7 @@
 //! ## Transaction-based (HTTP)
 //!
 //! ```rust,ignore
-//! use tears::subscription::http::query::Query;
+//! use tears::subscription::http::Query;
 //!
 //! // In update():
 //! Query::new(client).fetch(id, fetch_fn, Message::UserLoaded)

@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `use tears::prelude::*;` no longer brings `FrameRateError` into scope;
     import it explicitly with `use tears::FrameRateError;` if needed
   - `tears::FrameRateError` (the crate-root path) is unaffected
+- **Breaking:** `subscription::http::mutation` and `subscription::http::query`
+  are no longer public modules (requires `http` feature)
+  - `tears::subscription::http::mutation::Mutation` and
+    `tears::subscription::http::query::Query` (and their sibling types) are
+    gone; import them from `tears::subscription::http` instead, e.g.
+    `use tears::subscription::http::Mutation;`
+  - `config` / `key` / `result` already followed this single-path pattern;
+    `mutation` / `query` were the only `http` submodules with a second,
+    deeper public path to the same types
 
 ### Added
 

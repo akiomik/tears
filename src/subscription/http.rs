@@ -64,9 +64,9 @@ mod config;
 #[cfg(feature = "http")]
 mod key;
 #[cfg(feature = "http")]
-pub mod mutation;
+mod mutation;
 #[cfg(feature = "http")]
-pub mod query;
+mod query;
 #[cfg(feature = "http")]
 mod reconcile;
 #[cfg(feature = "http")]
