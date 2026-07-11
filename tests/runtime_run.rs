@@ -175,9 +175,6 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     // enough, on this `current_thread` runtime, to blow through the timeout
     // below before the Timer subscription gets a chance to send Quit. Silence
     // the hook for the panic this test triggers; see docs/testing.md.
-    let _hook_guard = panic_hook::PANIC_HOOK_GUARD.lock().await;
-    let _silent_hook = panic_hook::SilentPanicHook::install();
-
     let recorder = TraceRecorder::new()
         .with_target("tears::runtime")
         .with_level(tracing::Level::ERROR);
@@ -186,7 +183,12 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     let mut terminal = common::test_terminal()?;
     let runtime = Runtime::<PanicCommandApp>::new((), frame_rate(60));
 
-    timeout(Duration::from_secs(5), runtime.run(&mut terminal)).await??;
+    let run_result = panic_hook::with_silent_panic_hook(timeout(
+        Duration::from_secs(5),
+        runtime.run(&mut terminal),
+    ))
+    .await;
+    run_result??;
 
     assert!(
         recorder.event_count() >= 1,

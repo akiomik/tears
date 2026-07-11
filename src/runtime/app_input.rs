@@ -1,46 +1,102 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use futures::stream::BoxStream;
 use tokio::sync::mpsc;
+
+use crate::command::{Action, CancelPolicy, CommandId};
+
+use super::keyed_commands::{KeyedCommands, ReceiverEvent};
 
 /// Input events consumed by the runtime's application loop.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) enum AppInput<Msg> {
     /// A message sent through the application's shared message channel.
     Shared(Msg),
+    /// Output sent through a cancellable command's private receiver.
+    Keyed(ReceiverEvent<Msg>),
 }
 
 /// Stream of application inputs backed by runtime message channels.
-pub(super) struct AppInputs<Msg> {
+pub(super) struct AppInputs<Msg: Send + 'static> {
     shared: mpsc::UnboundedReceiver<Msg>,
+    keyed: KeyedCommands<Msg>,
 }
 
-impl<Msg> AppInputs<Msg> {
+impl<Msg: Send + 'static> AppInputs<Msg> {
     /// Creates an input stream from the shared message receiver.
-    pub(super) const fn new(shared: mpsc::UnboundedReceiver<Msg>) -> Self {
-        Self { shared }
+    pub(super) fn new(shared: mpsc::UnboundedReceiver<Msg>) -> Self {
+        Self {
+            shared,
+            keyed: KeyedCommands::new(),
+        }
     }
 
     /// Returns the next queued input without waiting for new messages.
     pub(super) fn try_next_ready(&mut self) -> Option<AppInput<Msg>> {
-        self.shared.try_recv().ok().map(AppInput::Shared)
+        if let Ok(message) = self.shared.try_recv() {
+            return Some(AppInput::Shared(message));
+        }
+        self.keyed
+            .try_next_ready()
+            .map(|(_, event)| AppInput::Keyed(event))
+    }
+
+    pub(super) fn reconcile_keyed_available(&mut self) {
+        self.keyed.reconcile_available();
+    }
+
+    pub(super) fn cancel_keyed(&mut self, id: &CommandId) {
+        self.keyed.cancel(id);
+    }
+
+    pub(super) fn spawn_keyed(
+        &mut self,
+        id: CommandId,
+        policy: CancelPolicy,
+        stream: BoxStream<'static, Action<Msg>>,
+    ) {
+        self.keyed.spawn(id, policy, stream);
+    }
+
+    pub(super) fn shutdown_keyed(&mut self) {
+        self.keyed.shutdown();
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_closed_buffered(&self, id: &CommandId) -> bool {
+        self.keyed.has_closed_buffered(id)
     }
 }
 
-impl<Msg> futures::Stream for AppInputs<Msg> {
+impl<Msg: Send + 'static> futures::Stream for AppInputs<Msg> {
     type Item = AppInput<Msg>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.shared
-            .poll_recv(cx)
-            .map(|input| input.map(AppInput::Shared))
+        let shared_closed = match self.shared.poll_recv(cx) {
+            Poll::Ready(Some(message)) => return Poll::Ready(Some(AppInput::Shared(message))),
+            Poll::Ready(None) => true,
+            Poll::Pending => false,
+        };
+
+        match Pin::new(&mut self.keyed).poll_next(cx) {
+            Poll::Ready(Some((_, event))) => Poll::Ready(Some(AppInput::Keyed(event))),
+            Poll::Ready(None) | Poll::Pending if shared_closed && self.keyed.is_empty() => {
+                Poll::Ready(None)
+            }
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream::StreamExt;
+    use futures::stream::{self, StreamExt, pending};
+    use tokio::task::yield_now;
+    use tokio::time::{Duration, timeout};
+
+    use super::super::keyed_commands::{CommandOutput, ReceiverEvent};
 
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_shared_after_send() {
@@ -95,5 +151,72 @@ mod tests {
         drop(tx);
 
         assert_eq!(inputs.next().await, None);
+    }
+
+    #[tokio::test]
+    async fn shared_input_wins_when_keyed_output_is_also_ready() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut inputs = AppInputs::new(rx);
+        let id = CommandId::new("search");
+        inputs.spawn_keyed(
+            id.clone(),
+            CancelPolicy::CancelInFlight,
+            stream::iter([Action::Message(2)]).boxed(),
+        );
+        yield_now().await;
+        tx.send(1).expect("receiver should be open");
+
+        assert_eq!(inputs.next().await, Some(AppInput::Shared(1)));
+        inputs
+            .next()
+            .await
+            .and_then(|input| match input {
+                AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Message(2))) => Some(()),
+                AppInput::Shared(_)
+                | AppInput::Keyed(ReceiverEvent::Output(_) | ReceiverEvent::Closed) => None,
+            })
+            .expect("keyed output should follow the shared input");
+    }
+
+    #[tokio::test]
+    async fn closed_shared_channel_and_drained_keyed_entries_terminate_the_stream() {
+        let (tx, rx) = mpsc::unbounded_channel::<i32>();
+        let mut inputs = AppInputs::new(rx);
+        inputs.spawn_keyed(
+            CommandId::new("empty"),
+            CancelPolicy::CancelInFlight,
+            stream::empty().boxed(),
+        );
+        drop(tx);
+        yield_now().await;
+
+        let end = timeout(Duration::from_secs(1), async {
+            loop {
+                match inputs.next().await {
+                    Some(AppInput::Keyed(ReceiverEvent::Closed)) => {}
+                    Some(AppInput::Shared(_) | AppInput::Keyed(ReceiverEvent::Output(_))) => {
+                        return false;
+                    }
+                    None => return true,
+                }
+            }
+        })
+        .await
+        .expect("AppInputs should not hang after every sender closes");
+
+        assert!(end);
+    }
+
+    #[tokio::test]
+    async fn try_next_ready_does_not_wait_for_pending_keyed_streams() {
+        let (_tx, rx) = mpsc::unbounded_channel::<i32>();
+        let mut inputs = AppInputs::new(rx);
+        inputs.spawn_keyed(
+            CommandId::new("pending"),
+            CancelPolicy::CancelInFlight,
+            pending().boxed(),
+        );
+
+        assert_eq!(inputs.try_next_ready(), None);
     }
 }

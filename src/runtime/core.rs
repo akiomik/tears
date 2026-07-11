@@ -111,7 +111,19 @@ impl<App: Application> RuntimeCore<App> {
     ///
     /// Send failures are silently ignored as they only occur during application shutdown.
     pub(super) fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
-        if let Some(stream) = parts.into_stream() {
+        let (cancels, key, stream) = parts.into_execution_parts();
+
+        self.app_inputs.reconcile_keyed_available();
+        for id in cancels {
+            self.app_inputs.cancel_keyed(&id);
+        }
+
+        if let Some(stream) = stream {
+            if let Some(key) = key {
+                self.app_inputs.spawn_keyed(key.id, key.policy, stream);
+                return;
+            }
+
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
 
@@ -187,6 +199,7 @@ impl<App: Application> RuntimeCore<App> {
     pub(super) fn shutdown(&mut self) {
         self.subscription_manager.shutdown();
         self.command_tasks.abort_all();
+        self.app_inputs.shutdown_keyed();
     }
 }
 
@@ -204,7 +217,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, advance, timeout};
 
-    use crate::command::{Command, RetryPolicy};
+    use crate::command::{Command, CommandId, RetryPolicy};
     use crate::runtime::AppInput;
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
@@ -562,6 +575,46 @@ mod tests {
         wait_until(
             || aborted.load(Ordering::SeqCst),
             "dropping the core should abort running command tasks",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_dropping_core_aborts_keyed_command_tasks() {
+        struct AbortGuard(Arc<AtomicBool>);
+
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let aborted = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut core = RuntimeCore::<TestApp>::new(0);
+            let guard = AbortGuard(Arc::clone(&aborted));
+            let (started_tx, started_rx) = oneshot::channel();
+            core.enqueue_command(
+                Command::future(async move {
+                    let _guard = guard;
+                    let _ = started_tx.send(());
+                    pending::<TestMessage>().await
+                })
+                .cancellable(CommandId::new("running"))
+                .into_runtime_parts(),
+            );
+
+            timeout(Duration::from_secs(1), started_rx)
+                .await
+                .expect("keyed command task should start before the timeout")
+                .expect("keyed command task should signal that it started");
+            assert!(!aborted.load(Ordering::SeqCst));
+        }
+
+        wait_until(
+            || aborted.load(Ordering::SeqCst),
+            "dropping the core should abort running keyed command tasks",
         )
         .await;
     }

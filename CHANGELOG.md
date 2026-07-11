@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in command cancellation keyed by `command::CommandId`, including
+  `Command::cancellable`, `Command::cancellable_with`, `Command::cancel`, and
+  the `command::CancelPolicy` same-id behavior
 - `Command::quit()` for requesting the application to quit, replacing the
   public use of `Command::effect(Action::Quit)`
 

@@ -113,22 +113,33 @@ easy to compare across the two copies.
 
 ## Process-Global Panic Hook Tests
 
-Use `crate::test_support::PANIC_HOOK_GUARD` for crate-internal tests that call
-`std::panic::set_hook`, `std::panic::take_hook`, or deliberately trigger a panic
-while a recording hook is installed. The panic hook is process-global and tests
-run in parallel by default, so hook-swapping tests can otherwise clobber each
-other or observe an unrelated panic.
+Use `crate::test_support::PANIC_HOOK_GUARD` for crate-internal tests that directly
+call `std::panic::set_hook` or `std::panic::take_hook`. The panic hook is
+process-global and tests run in parallel by default, so hook-swapping tests can
+otherwise clobber each other or observe an unrelated panic.
 
 Hold the guard for the full critical section: install or take the hook, trigger
 and catch the panic if needed, restore the previous hook, and then inspect any
 recorded hook state. Ordinary tests that do not mutate the panic hook do not
 need the guard.
 
-If an integration test ever needs to mutate the panic hook, add a focused local
-guard under `tests/common/` rather than exposing the crate-internal test helper
-as public API. Because integration tests are async, that local guard should use
-`tokio::sync::Mutex` (not `std::sync::Mutex`) so it can be held across
-`.await` — see `tests/common/panic_hook.rs`.
+Crate-internal timing-bound tests that intentionally panic should run the
+relevant future through `crate::test_support::with_silent_panic_hook`. The helper
+owns the guard, catches an unexpected panic long enough to restore the previous
+hook, and only then resumes unwinding. Its guard uses `std::sync::Mutex`, so the
+helper is restricted to `current_thread` tests.
+
+Integration tests cannot use crate-private test support, so they use the focused
+local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses
+`tokio::sync::Mutex` so it can be held across `.await` without blocking a runtime
+worker thread.
+
+Do not expose or directly hold the internal silent-hook RAII guard. Calling
+`std::panic::set_hook` from a panicking thread itself panics, so attempting to
+restore a hook from `Drop` during unwinding can abort the entire test process.
+The scoped helpers prevent that failure mode structurally. Keep ordinary
+timeout failures as `Result` values where practical, leave the silent scope,
+and perform assertions only after the previous hook has been restored.
 
 ### Panic Hook Cost In Timing-Bound Tests
 
@@ -148,10 +159,9 @@ otherwise finishes in single-digit milliseconds can intermittently blow
 through a one-second timeout on a loaded Windows runner.
 
 If a test intentionally triggers a command-task panic under a bounded
-`timeout`, install a no-op panic hook for the duration (see
-`tests/common/panic_hook.rs::SilentPanicHook`) rather than only widening the
-timeout. Widening the timeout alone hides the same unbounded cost behind a
-larger number instead of removing it.
+`timeout`, use the appropriate `with_silent_panic_hook` scope. Widening the
+timeout alone hides the same unbounded cost behind a larger number instead of
+removing it.
 
 ## Sleep Audit Notes
 
