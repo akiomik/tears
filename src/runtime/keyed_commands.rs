@@ -107,19 +107,11 @@ enum LifecycleState {
     Draining { token: RunToken },
 }
 
-impl LifecycleState {
-    const fn token(self) -> RunToken {
-        match self {
-            Self::Running { token } | Self::Draining { token } => token,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum LifecycleEvent {
+enum LifecycleEvent<Msg> {
     Spawn {
         token: RunToken,
         policy: CancelPolicy,
+        stream: BoxStream<'static, Action<Msg>>,
     },
     Cancel,
     Reconcile(ReceiverFacts),
@@ -131,98 +123,111 @@ enum LifecycleEvent {
     Closed,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct LifecycleEffects {
-    spawn: bool,
-    abort: bool,
-    drop_receiver: bool,
+enum LifecycleDecision<Msg> {
+    NoChange,
+    KeepInFlight {
+        stream: BoxStream<'static, Action<Msg>>,
+    },
+    Start {
+        token: RunToken,
+        stream: BoxStream<'static, Action<Msg>>,
+    },
+    ReplaceRunning {
+        token: RunToken,
+        stream: BoxStream<'static, Action<Msg>>,
+    },
+    ReplaceDraining {
+        token: RunToken,
+        stream: BoxStream<'static, Action<Msg>>,
+    },
+    AbortAndRemove,
+    Remove,
+    MarkDraining {
+        token: RunToken,
+    },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LifecycleTransition {
-    state: Option<LifecycleState>,
-    effects: LifecycleEffects,
+impl<Msg> LifecycleDecision<Msg> {
+    const fn next_state(&self, current: Option<LifecycleState>) -> Option<LifecycleState> {
+        match self {
+            Self::NoChange | Self::KeepInFlight { .. } => current,
+            Self::Start { token, .. }
+            | Self::ReplaceRunning { token, .. }
+            | Self::ReplaceDraining { token, .. } => {
+                Some(LifecycleState::Running { token: *token })
+            }
+            Self::AbortAndRemove | Self::Remove => None,
+            Self::MarkDraining { token } => Some(LifecycleState::Draining { token: *token }),
+        }
+    }
+
+    const fn starts_run(&self) -> bool {
+        matches!(
+            self,
+            Self::Start { .. } | Self::ReplaceRunning { .. } | Self::ReplaceDraining { .. }
+        )
+    }
+
+    const fn removes_without_replacement(&self) -> bool {
+        matches!(self, Self::AbortAndRemove | Self::Remove)
+    }
 }
 
-fn lifecycle_transition(
+fn lifecycle_transition<Msg>(
     state: Option<LifecycleState>,
-    event: LifecycleEvent,
-) -> LifecycleTransition {
-    let occupied = state.is_some();
-    let running = matches!(state, Some(LifecycleState::Running { .. }));
-
+    event: LifecycleEvent<Msg>,
+) -> LifecycleDecision<Msg> {
     match event {
-        LifecycleEvent::Spawn { token, policy } => {
-            if occupied && policy == CancelPolicy::KeepInFlight {
-                return LifecycleTransition {
-                    state,
-                    effects: LifecycleEffects::default(),
-                };
+        LifecycleEvent::Spawn {
+            token,
+            policy,
+            stream,
+        } => match (state, policy) {
+            (Some(_), CancelPolicy::KeepInFlight) => LifecycleDecision::KeepInFlight { stream },
+            (None, _) => LifecycleDecision::Start { token, stream },
+            (Some(LifecycleState::Running { .. }), CancelPolicy::CancelInFlight) => {
+                LifecycleDecision::ReplaceRunning { token, stream }
             }
-
-            LifecycleTransition {
-                state: Some(LifecycleState::Running { token }),
-                effects: LifecycleEffects {
-                    spawn: true,
-                    abort: running,
-                    drop_receiver: occupied,
-                },
+            (Some(LifecycleState::Draining { .. }), CancelPolicy::CancelInFlight) => {
+                LifecycleDecision::ReplaceDraining { token, stream }
             }
-        }
-        LifecycleEvent::Cancel => LifecycleTransition {
-            state: None,
-            effects: LifecycleEffects {
-                spawn: false,
-                abort: running,
-                drop_receiver: occupied,
-            },
         },
-        LifecycleEvent::Reconcile(facts) | LifecycleEvent::Output(facts) => {
-            let state = match state {
-                Some(_) if facts.sender_closed && facts.buffered == 0 => None,
-                Some(state) if facts.sender_closed => Some(LifecycleState::Draining {
-                    token: state.token(),
-                }),
-                state => state,
-            };
-            LifecycleTransition {
-                effects: LifecycleEffects {
-                    drop_receiver: occupied && state.is_none(),
-                    ..LifecycleEffects::default()
-                },
-                state,
+        LifecycleEvent::Cancel => match state {
+            None => LifecycleDecision::NoChange,
+            Some(LifecycleState::Running { .. }) => LifecycleDecision::AbortAndRemove,
+            Some(LifecycleState::Draining { .. }) => LifecycleDecision::Remove,
+        },
+        LifecycleEvent::Reconcile(facts) | LifecycleEvent::Output(facts) => match state {
+            Some(_) if facts.sender_closed && facts.buffered == 0 => LifecycleDecision::Remove,
+            Some(LifecycleState::Running { token }) if facts.sender_closed => {
+                LifecycleDecision::MarkDraining { token }
             }
-        }
+            None | Some(_) => LifecycleDecision::NoChange,
+        },
         LifecycleEvent::TaskExit { token, facts } => {
             let matching = matches!(
                 state,
                 Some(LifecycleState::Running { token: current }) if current == token
             );
-            let state = if matching {
-                if facts.buffered == 0 {
-                    None
-                } else {
-                    Some(LifecycleState::Draining { token })
-                }
+            if !matching {
+                LifecycleDecision::NoChange
+            } else if facts.buffered == 0 {
+                LifecycleDecision::Remove
             } else {
-                state
-            };
-            LifecycleTransition {
-                effects: LifecycleEffects {
-                    drop_receiver: matching && state.is_none(),
-                    ..LifecycleEffects::default()
-                },
-                state,
+                LifecycleDecision::MarkDraining { token }
             }
         }
-        LifecycleEvent::Closed => LifecycleTransition {
-            state: None,
-            effects: LifecycleEffects {
-                drop_receiver: occupied,
-                ..LifecycleEffects::default()
-            },
+        LifecycleEvent::Closed => match state {
+            Some(_) => LifecycleDecision::Remove,
+            None => LifecycleDecision::NoChange,
         },
     }
+}
+
+pub(super) enum KeyedPoll<Msg> {
+    Item(CommandId, ReceiverEvent<Msg>),
+    PendingWithWakeSource,
+    Quiescent,
 }
 
 struct TaskExit {
@@ -254,17 +259,31 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
         self.reconcile_available();
         let token = RunToken(self.next_token);
         let state = self.reconcile_receiver(&id);
-        let transition = lifecycle_transition(state, LifecycleEvent::Spawn { token, policy });
-        if !transition.effects.spawn {
+        let decision = lifecycle_transition(
+            state,
+            LifecycleEvent::Spawn {
+                token,
+                policy,
+                stream,
+            },
+        );
+        let starts_run = decision.starts_run();
+        if !starts_run {
             tracing::trace!(
                 target: "tears::runtime",
                 id = ?id,
                 "keyed command kept in-flight; new stream dropped"
             );
-            return;
         }
+        self.apply_transition(id, decision);
+    }
 
-        self.apply_transition(&id, state, transition);
+    fn start_run(
+        &mut self,
+        id: CommandId,
+        token: RunToken,
+        stream: BoxStream<'static, Action<Msg>>,
+    ) {
         self.next_token = self.next_token.wrapping_add(1);
         let (output_tx, output_rx) = mpsc::unbounded_channel();
         let task_id = id.clone();
@@ -312,9 +331,10 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
 
     pub(super) fn cancel(&mut self, id: &CommandId) {
         let state = self.lifecycle_state(id);
-        let transition = lifecycle_transition(state, LifecycleEvent::Cancel);
-        if transition.effects.drop_receiver {
-            self.apply_transition(id, state, transition);
+        let decision = lifecycle_transition(state, LifecycleEvent::Cancel);
+        let will_remove_entry = decision.removes_without_replacement();
+        self.apply_transition(id.clone(), decision);
+        if will_remove_entry {
             tracing::trace!(target: "tears::runtime", id = ?id, "keyed command cancelled");
         }
     }
@@ -333,14 +353,14 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
         }) else {
             return;
         };
-        let transition = lifecycle_transition(
+        let decision = lifecycle_transition(
             Some(state),
             LifecycleEvent::TaskExit {
                 token: exit.token,
                 facts,
             },
         );
-        self.apply_transition(&exit.id, Some(state), transition);
+        self.apply_transition(exit.id.clone(), decision);
     }
 
     fn record_receiver_event(&mut self, id: &CommandId, event: &ReceiverEvent<Msg>) {
@@ -353,17 +373,18 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
             ReceiverEvent::Output(_) => LifecycleEvent::Output(facts),
             ReceiverEvent::Closed => LifecycleEvent::Closed,
         };
-        let transition = lifecycle_transition(Some(state), lifecycle_event);
-        self.apply_transition(id, Some(state), transition);
+        let decision = lifecycle_transition(Some(state), lifecycle_event);
+        self.apply_transition(id.clone(), decision);
     }
 
     fn reconcile_receiver(&mut self, id: &CommandId) -> Option<LifecycleState> {
         let (state, facts) = self.entries.iter().find_map(|(entry_id, entry)| {
             (entry_id == id).then(|| (entry.run.lifecycle_state(), entry.receiver.facts()))
         })?;
-        let transition = lifecycle_transition(Some(state), LifecycleEvent::Reconcile(facts));
-        self.apply_transition(id, Some(state), transition);
-        transition.state
+        let decision = lifecycle_transition(Some(state), LifecycleEvent::Reconcile(facts));
+        let next_state = decision.next_state(Some(state));
+        self.apply_transition(id.clone(), decision);
+        next_state
     }
 
     fn lifecycle_state(&self, id: &CommandId) -> Option<LifecycleState> {
@@ -372,63 +393,92 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
             .find_map(|(entry_id, entry)| (entry_id == id).then(|| entry.run.lifecycle_state()))
     }
 
-    fn apply_transition(
-        &mut self,
-        id: &CommandId,
-        current: Option<LifecycleState>,
-        transition: LifecycleTransition,
-    ) {
-        if current == transition.state && transition.effects == LifecycleEffects::default() {
-            return;
+    fn apply_transition(&mut self, id: CommandId, decision: LifecycleDecision<Msg>) {
+        match decision {
+            LifecycleDecision::NoChange => {}
+            LifecycleDecision::KeepInFlight { stream } => drop(stream),
+            LifecycleDecision::Start { token, stream } => {
+                debug_assert!(!self.entries.contains_key(&id));
+                self.start_run(id, token, stream);
+            }
+            LifecycleDecision::ReplaceRunning { token, stream } => {
+                self.abort_running_entry(&id);
+                self.start_run(id, token, stream);
+            }
+            LifecycleDecision::ReplaceDraining { token, stream } => {
+                self.remove_draining_entry(&id);
+                self.start_run(id, token, stream);
+            }
+            LifecycleDecision::AbortAndRemove => self.abort_running_entry(&id),
+            LifecycleDecision::Remove => self.remove_entry(&id),
+            LifecycleDecision::MarkDraining { token } => self.mark_draining(id, token),
         }
-        let Some(mut entry) = self.entries.remove(id) else {
+    }
+
+    fn abort_running_entry(&mut self, id: &CommandId) {
+        let Some(entry) = self.entries.remove(id) else {
+            debug_assert!(false, "running entry should exist before removal");
             return;
         };
-
-        if transition.effects.abort
-            && let KeyRun::Running { abort, .. } = &entry.run
-        {
+        if let KeyRun::Running { abort, .. } = entry.run {
             abort.abort();
+        } else {
+            debug_assert!(false, "entry should be running before abort");
         }
+    }
 
-        if transition.effects.drop_receiver {
+    fn remove_draining_entry(&mut self, id: &CommandId) {
+        let Some(entry) = self.entries.remove(id) else {
+            debug_assert!(false, "draining entry should exist before replacement");
             return;
+        };
+        debug_assert!(matches!(entry.run, KeyRun::Draining { .. }));
+    }
+
+    fn remove_entry(&mut self, id: &CommandId) {
+        let removed = self.entries.remove(id);
+        debug_assert!(removed.is_some(), "entry should exist before removal");
+    }
+
+    fn mark_draining(&mut self, id: CommandId, token: RunToken) {
+        let Some(mut entry) = self.entries.remove(&id) else {
+            debug_assert!(false, "running entry should exist before draining");
+            return;
+        };
+        debug_assert!(matches!(entry.run, KeyRun::Running { .. }));
+        debug_assert_eq!(entry.run.token(), token);
+        entry.run = KeyRun::Draining { token };
+        self.entries.insert(id, entry);
+    }
+
+    pub(super) fn poll_event(&mut self, cx: &mut Context<'_>) -> KeyedPoll<Msg> {
+        self.reconcile_available();
+        if self.entries.is_empty() {
+            return KeyedPoll::Quiescent;
         }
 
-        match transition.state {
-            None => {
-                debug_assert!(transition.effects.drop_receiver);
+        match Pin::new(&mut self.entries).poll_next(cx) {
+            Poll::Ready(Some((id, event))) => {
+                self.record_receiver_event(&id, &event);
+                KeyedPoll::Item(id, event)
             }
-            Some(LifecycleState::Running { token }) => {
-                debug_assert_eq!(entry.run.token(), token);
-                self.entries.insert(id.clone(), entry);
-            }
-            Some(LifecycleState::Draining { token }) => {
-                entry.run = KeyRun::Draining { token };
-                self.entries.insert(id.clone(), entry);
-            }
+            Poll::Ready(None) => KeyedPoll::Quiescent,
+            Poll::Pending if self.entries.is_empty() => KeyedPoll::Quiescent,
+            Poll::Pending => KeyedPoll::PendingWithWakeSource,
         }
     }
 
     pub(super) fn try_next_ready(&mut self) -> Option<(CommandId, ReceiverEvent<Msg>)> {
-        self.reconcile_available();
         let mut context = Context::from_waker(noop_waker_ref());
-        match Pin::new(&mut self.entries).poll_next(&mut context) {
-            Poll::Ready(Some((id, event))) => {
-                self.record_receiver_event(&id, &event);
-                Some((id, event))
-            }
-            Poll::Ready(None) | Poll::Pending => None,
+        match self.poll_event(&mut context) {
+            KeyedPoll::Item(id, event) => Some((id, event)),
+            KeyedPoll::PendingWithWakeSource | KeyedPoll::Quiescent => None,
         }
     }
 
     pub(super) fn shutdown(&mut self) {
         self.tasks.abort_all();
         self.entries.clear();
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     #[cfg(test)]
@@ -447,22 +497,6 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
     }
 }
 
-impl<Msg: Send + 'static> Stream for KeyedCommands<Msg> {
-    type Item = (CommandId, ReceiverEvent<Msg>);
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let manager = &mut *self;
-        manager.reconcile_available();
-        match Pin::new(&mut manager.entries).poll_next(cx) {
-            Poll::Ready(Some((id, event))) => {
-                manager.record_receiver_event(&id, &event);
-                Poll::Ready(Some((id, event)))
-            }
-            Poll::Ready(None) | Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +508,7 @@ mod tests {
     use std::time::Duration;
 
     use futures::stream;
+    use futures::task::{ArcWake, waker_ref};
     use tokio::sync::oneshot;
     use tokio::task::yield_now;
     use tokio::time::{advance, timeout};
@@ -494,6 +529,32 @@ mod tests {
     fn command_stream(command: Command<i32>) -> BoxStream<'static, Action<i32>> {
         let (_, _, stream) = command.into_runtime_parts().into_execution_parts();
         stream.expect("command should have a stream")
+    }
+
+    struct WakeCounter(AtomicUsize);
+
+    impl ArcWake for WakeCounter {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn insert_pending_receiver(
+        manager: &mut KeyedCommands<i32>,
+        id: CommandId,
+    ) -> mpsc::UnboundedSender<CommandOutput<i32>> {
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let token = RunToken(manager.next_token);
+        manager.next_token = manager.next_token.wrapping_add(1);
+        let abort = manager.tasks.spawn(pending::<TaskExit>());
+        manager.entries.insert(
+            id,
+            KeyedEntry {
+                receiver: CommandReceiver::new(output_rx),
+                run: KeyRun::Running { token, abort },
+            },
+        );
+        output_tx
     }
 
     async fn wait_for_closed_buffered(manager: &mut KeyedCommands<i32>, id: &CommandId) {
@@ -522,6 +583,61 @@ mod tests {
             ReceiverEvent::Output(CommandOutput::Quit) | ReceiverEvent::Closed => None,
         }
         .expect("expected a keyed message")
+    }
+
+    #[tokio::test]
+    async fn pending_keyed_poll_wakes_after_output() {
+        let id = CommandId::new("output-wake");
+        let mut manager = KeyedCommands::new();
+        let output_tx = insert_pending_receiver(&mut manager, id.clone());
+        let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = waker_ref(&wake_counter);
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(
+            manager.poll_event(&mut context),
+            KeyedPoll::PendingWithWakeSource
+        ));
+        output_tx
+            .send(CommandOutput::Message(42))
+            .expect("receiver should remain open");
+        assert!(wake_counter.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(
+            manager.poll_event(&mut context),
+            KeyedPoll::Item(
+                event_id,
+                ReceiverEvent::Output(CommandOutput::Message(42))
+            ) if event_id == id
+        ));
+
+        manager.shutdown();
+    }
+
+    #[tokio::test]
+    async fn pending_keyed_poll_wakes_after_sender_closure() {
+        let id = CommandId::new("closure-wake");
+        let mut manager = KeyedCommands::new();
+        let output_tx = insert_pending_receiver(&mut manager, id.clone());
+        let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = waker_ref(&wake_counter);
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(
+            manager.poll_event(&mut context),
+            KeyedPoll::PendingWithWakeSource
+        ));
+        drop(output_tx);
+        assert!(wake_counter.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(
+            manager.poll_event(&mut context),
+            KeyedPoll::Item(event_id, ReceiverEvent::Closed) if event_id == id
+        ));
+        assert!(matches!(
+            manager.poll_event(&mut context),
+            KeyedPoll::Quiescent
+        ));
+
+        manager.shutdown();
     }
 
     #[tokio::test]
@@ -602,57 +718,6 @@ mod tests {
         .await;
         assert!(!manager.contains(&id));
         assert!(manager.try_next_ready().is_none());
-    }
-
-    #[tokio::test]
-    async fn transition_applier_honors_abort_without_dropping_the_receiver() {
-        struct AbortGuard(Arc<AtomicBool>);
-
-        impl Drop for AbortGuard {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let id = CommandId::new("abort-only");
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = AbortGuard(Arc::clone(&dropped));
-        let (started_tx, started_rx) = oneshot::channel();
-        let mut manager = KeyedCommands::new();
-        manager.spawn(
-            id.clone(),
-            CancelPolicy::CancelInFlight,
-            command_stream(Command::future(async move {
-                let _guard = guard;
-                let _ = started_tx.send(());
-                pending().await
-            })),
-        );
-        timeout(Duration::from_secs(1), started_rx)
-            .await
-            .expect("keyed command should start before the timeout")
-            .expect("keyed command should signal that it started");
-
-        let state = manager.lifecycle_state(&id);
-        manager.apply_transition(
-            &id,
-            state,
-            LifecycleTransition {
-                state,
-                effects: LifecycleEffects {
-                    abort: true,
-                    ..LifecycleEffects::default()
-                },
-            },
-        );
-
-        wait_until(
-            || dropped.load(Ordering::SeqCst),
-            "abort-only transition should stop the task",
-        )
-        .await;
-        assert!(manager.contains(&id));
-        manager.cancel(&id);
     }
 
     #[tokio::test]
@@ -959,6 +1024,7 @@ mod tests {
 #[cfg(test)]
 mod lifecycle_model_tests {
     use super::*;
+    use futures::stream;
     use proptest::prelude::*;
 
     #[derive(Clone, Copy, Debug)]
@@ -989,15 +1055,17 @@ mod lifecycle_model_tests {
             }
         }
 
-        fn apply(&mut self, input: Input) -> LifecycleEffects {
+        fn apply(&mut self, input: Input) -> LifecycleDecision<()> {
             let event = match input {
                 Input::SpawnCancel => LifecycleEvent::Spawn {
                     token: RunToken(self.next_token),
                     policy: CancelPolicy::CancelInFlight,
+                    stream: stream::empty().boxed(),
                 },
                 Input::SpawnKeep => LifecycleEvent::Spawn {
                     token: RunToken(self.next_token),
                     policy: CancelPolicy::KeepInFlight,
+                    stream: stream::empty().boxed(),
                 },
                 Input::Cancel => LifecycleEvent::Cancel,
                 Input::Reconcile(facts) => LifecycleEvent::Reconcile(facts),
@@ -1005,12 +1073,20 @@ mod lifecycle_model_tests {
                 Input::TaskExit { token, facts } => LifecycleEvent::TaskExit { token, facts },
                 Input::Closed => LifecycleEvent::Closed,
             };
-            let transition = lifecycle_transition(self.state, event);
-            if transition.effects.spawn {
+            let decision = lifecycle_transition(self.state, event);
+            if decision.starts_run() {
                 self.next_token = self.next_token.wrapping_add(1);
             }
-            self.state = transition.state;
-            transition.effects
+            self.state = decision.next_state(self.state);
+            decision
+        }
+    }
+
+    fn spawn_event(token: u64, policy: CancelPolicy) -> LifecycleEvent<()> {
+        LifecycleEvent::Spawn {
+            token: RunToken(token),
+            policy,
+            stream: stream::empty().boxed(),
         }
     }
 
@@ -1040,25 +1116,67 @@ mod lifecycle_model_tests {
     }
 
     #[test]
-    fn closed_empty_reconciliation_drops_the_owned_receiver() {
-        let transition = lifecycle_transition(
+    fn transition_produces_every_decision_variant() {
+        let running = Some(LifecycleState::Running { token: RunToken(7) });
+        let draining = Some(LifecycleState::Draining { token: RunToken(7) });
+        let decisions = [
+            lifecycle_transition(None, LifecycleEvent::<()>::Cancel),
+            lifecycle_transition(running, spawn_event(8, CancelPolicy::KeepInFlight)),
+            lifecycle_transition(None, spawn_event(8, CancelPolicy::CancelInFlight)),
+            lifecycle_transition(running, spawn_event(8, CancelPolicy::CancelInFlight)),
+            lifecycle_transition(draining, spawn_event(8, CancelPolicy::CancelInFlight)),
+            lifecycle_transition(running, LifecycleEvent::<()>::Cancel),
+            lifecycle_transition(draining, LifecycleEvent::<()>::Cancel),
+            lifecycle_transition(
+                running,
+                LifecycleEvent::<()>::Reconcile(ReceiverFacts {
+                    sender_closed: true,
+                    buffered: 1,
+                }),
+            ),
+        ];
+        let mut seen = [false; 8];
+
+        for decision in decisions {
+            let variant_index = match decision {
+                LifecycleDecision::NoChange => 0,
+                LifecycleDecision::KeepInFlight { .. } => 1,
+                LifecycleDecision::Start { token, .. } => {
+                    assert_eq!(token, RunToken(8));
+                    2
+                }
+                LifecycleDecision::ReplaceRunning { token, .. } => {
+                    assert_eq!(token, RunToken(8));
+                    3
+                }
+                LifecycleDecision::ReplaceDraining { token, .. } => {
+                    assert_eq!(token, RunToken(8));
+                    4
+                }
+                LifecycleDecision::AbortAndRemove => 5,
+                LifecycleDecision::Remove => 6,
+                LifecycleDecision::MarkDraining { token } => {
+                    assert_eq!(token, RunToken(7));
+                    7
+                }
+            };
+            seen[variant_index] = true;
+        }
+
+        assert_eq!(seen, [true; 8]);
+    }
+
+    #[test]
+    fn closed_empty_reconciliation_removes_the_owned_receiver() {
+        let decision = lifecycle_transition(
             Some(LifecycleState::Running { token: RunToken(7) }),
-            LifecycleEvent::Reconcile(ReceiverFacts {
+            LifecycleEvent::<()>::Reconcile(ReceiverFacts {
                 sender_closed: true,
                 buffered: 0,
             }),
         );
 
-        assert_eq!(
-            transition,
-            LifecycleTransition {
-                state: None,
-                effects: LifecycleEffects {
-                    drop_receiver: true,
-                    ..LifecycleEffects::default()
-                },
-            }
-        );
+        assert!(matches!(decision, LifecycleDecision::Remove));
     }
 
     proptest! {
@@ -1068,20 +1186,50 @@ mod lifecycle_model_tests {
 
             for input in sequence {
                 let before = model.state;
-                let effects = model.apply(input);
+                let decision = model.apply(input);
 
                 match input {
                     Input::Cancel => {
-                        prop_assert_eq!(effects.drop_receiver, before.is_some());
+                        match before {
+                            None => prop_assert!(matches!(decision, LifecycleDecision::NoChange)),
+                            Some(LifecycleState::Running { .. }) => {
+                                prop_assert!(matches!(decision, LifecycleDecision::AbortAndRemove));
+                            }
+                            Some(LifecycleState::Draining { .. }) => {
+                                prop_assert!(matches!(decision, LifecycleDecision::Remove));
+                            }
+                        }
                         prop_assert_eq!(model.state, None);
                     }
                     Input::SpawnKeep if before.is_some() => {
-                        prop_assert!(!effects.spawn);
+                        let keeps_in_flight = matches!(
+                            decision,
+                            LifecycleDecision::KeepInFlight { .. }
+                        );
+                        prop_assert!(keeps_in_flight);
                         prop_assert_eq!(model.state, before);
                     }
                     Input::SpawnCancel => {
-                        prop_assert!(effects.spawn);
-                        prop_assert_eq!(effects.drop_receiver, before.is_some());
+                        match before {
+                            None => {
+                                let starts = matches!(decision, LifecycleDecision::Start { .. });
+                                prop_assert!(starts);
+                            }
+                            Some(LifecycleState::Running { .. }) => {
+                                let replaces_running = matches!(
+                                    decision,
+                                    LifecycleDecision::ReplaceRunning { .. }
+                                );
+                                prop_assert!(replaces_running);
+                            }
+                            Some(LifecycleState::Draining { .. }) => {
+                                let replaces_draining = matches!(
+                                    decision,
+                                    LifecycleDecision::ReplaceDraining { .. }
+                                );
+                                prop_assert!(replaces_draining);
+                            }
+                        }
                     }
                     Input::TaskExit { token, .. } => {
                         let matches_current = matches!(
@@ -1089,11 +1237,17 @@ mod lifecycle_model_tests {
                             Some(LifecycleState::Running { token: current }) if current == token
                         );
                         if !matches_current {
+                            prop_assert!(matches!(decision, LifecycleDecision::NoChange));
                             prop_assert_eq!(model.state, before);
                         }
                     }
                     Input::Reconcile(ReceiverFacts { sender_closed: true, buffered: 0 })
                     | Input::Output(ReceiverFacts { sender_closed: true, buffered: 0 }) => {
+                        if before.is_some() {
+                            prop_assert!(matches!(decision, LifecycleDecision::Remove));
+                        } else {
+                            prop_assert!(matches!(decision, LifecycleDecision::NoChange));
+                        }
                         prop_assert_eq!(model.state, None);
                     }
                     _ => {}
@@ -1110,11 +1264,11 @@ mod lifecycle_model_tests {
 
             model.apply(Input::Cancel);
             let after_first = model.state;
-            let second_effects = model.apply(Input::Cancel);
+            let second_decision = model.apply(Input::Cancel);
 
             prop_assert_eq!(after_first, None);
             prop_assert_eq!(model.state, None);
-            prop_assert_eq!(second_effects, LifecycleEffects::default());
+            prop_assert!(matches!(second_decision, LifecycleDecision::NoChange));
         }
     }
 }
