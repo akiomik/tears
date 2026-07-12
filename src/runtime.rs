@@ -100,11 +100,13 @@ mod core;
 // `lib.rs`/`prelude` still need it nameable for their re-exports.
 pub mod frame_rate;
 mod frame_scheduler;
+mod keyed_commands;
 mod pending_work;
 
 use app_input::AppInput;
 use frame_rate::FrameRate;
 use frame_scheduler::FrameScheduler;
+use keyed_commands::{CommandOutput, ReceiverEvent};
 // `self::` disambiguates the submodule from the built-in `core` crate.
 use self::core::RuntimeCore;
 
@@ -136,6 +138,19 @@ pub struct Runtime<App: Application> {
     core: RuntimeCore<App>,
     /// Schedules frame work and gates idle wake-ups
     scheduler: FrameScheduler,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BatchOutcome {
+    Continue,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputOutcome {
+    Updated,
+    NoUpdate,
+    Quit,
 }
 
 impl<App: Application> Runtime<App> {
@@ -190,7 +205,7 @@ impl<App: Application> Runtime<App> {
 
     #[cfg(test)]
     fn process_message_batch(&mut self, first_msg: App::Message) {
-        self.process_input_batch(AppInput::Shared(first_msg));
+        let _ = self.process_input_batch(AppInput::Shared(first_msg));
     }
 
     /// Processes a batch of application inputs that arrive in quick succession
@@ -200,20 +215,29 @@ impl<App: Application> Runtime<App> {
     /// inputs that arrived within 100μs. This reduces overhead by batching rapid
     /// input sequences while maintaining responsiveness.
     ///
-    /// Records a redraw request if any processed command wants one, and always
-    /// marks subscriptions dirty after processing.
-    fn process_input_batch(&mut self, first_input: AppInput<App::Message>) {
-        self.process_app_input(first_input);
-        let mut processed = 1usize;
+    /// Records a redraw request if any processed command wants one, and marks
+    /// subscriptions dirty when at least one input invokes `update`.
+    fn process_input_batch(&mut self, first_input: AppInput<App::Message>) -> BatchOutcome {
+        let mut processed = match self.process_app_input(first_input) {
+            InputOutcome::Updated => 1usize,
+            InputOutcome::NoUpdate => 0usize,
+            InputOutcome::Quit => return BatchOutcome::Quit,
+        };
 
         // Micro-batching: process additional messages that arrived during a short window
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
             match self.core.app_inputs.try_next_ready() {
-                Some(input) => {
-                    self.process_app_input(input);
-                    processed += 1;
-                }
+                Some(input) => match self.process_app_input(input) {
+                    InputOutcome::Updated => processed += 1,
+                    InputOutcome::NoUpdate => {}
+                    InputOutcome::Quit => {
+                        if processed > 0 {
+                            self.scheduler.mark_subscriptions_dirty();
+                        }
+                        return BatchOutcome::Quit;
+                    }
+                },
                 None => break, // No more inputs available
             }
         }
@@ -221,15 +245,22 @@ impl<App: Application> Runtime<App> {
         tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
 
         // Mark that subscriptions may have changed even when redraw is suppressed.
-        self.scheduler.mark_subscriptions_dirty();
+        if processed > 0 {
+            self.scheduler.mark_subscriptions_dirty();
+        }
+        BatchOutcome::Continue
     }
 
-    fn process_app_input(&mut self, input: AppInput<App::Message>) {
+    fn process_app_input(&mut self, input: AppInput<App::Message>) -> InputOutcome {
         match input {
-            AppInput::Shared(msg) => {
+            AppInput::Shared(msg)
+            | AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Message(msg))) => {
                 let cmd = self.core.app.update(msg);
                 self.dispatch_update_command(cmd);
+                InputOutcome::Updated
             }
+            AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Quit)) => InputOutcome::Quit,
+            AppInput::Keyed(ReceiverEvent::Closed) => InputOutcome::NoUpdate,
         }
     }
 
@@ -376,7 +407,10 @@ impl<App: Application> Runtime<App> {
             tokio::select! {
                 // Message received: batch process messages that arrive in quick succession
                 Some(input) = self.core.app_inputs.next() => {
-                    self.process_input_batch(input);
+                    if self.process_input_batch(input) == BatchOutcome::Quit {
+                        tracing::debug!(target: "tears::runtime", "keyed quit signal received");
+                        break;
+                    }
                 }
 
                 // Frame tick: render if needed and update subscriptions. The
@@ -408,17 +442,19 @@ impl<App: Application> Runtime<App> {
 mod tests {
     use super::*;
 
+    use std::future::pending;
     use std::num::NonZeroU32;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use futures::stream::{self, BoxStream};
+    use futures::stream::{self, BoxStream, iter};
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
+    use tokio::sync::oneshot;
     use tokio::time::{Duration, sleep, timeout};
 
     use crate::application::Application;
-    use crate::command::Command;
+    use crate::command::{CancelPolicy, Command, CommandId};
     use crate::subscription::{Subscription, SubscriptionId, SubscriptionSource};
     use crate::test_support::{TestApp, TestMessage, TraceRecorder, wait_until};
 
@@ -693,6 +729,186 @@ mod tests {
             .await
             .expect("run() should quit before the timeout")?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_cancel_drops_ready_keyed_output_before_batch_delivery() {
+        enum Message {
+            Leave,
+            Result(i32),
+        }
+
+        struct CancellationApp {
+            results: Vec<i32>,
+        }
+
+        impl Application for CancellationApp {
+            type Message = Message;
+            type Flags = ();
+
+            fn new((): ()) -> (Self, Command<Self::Message>) {
+                (
+                    Self {
+                        results: Vec::new(),
+                    },
+                    Command::none(),
+                )
+            }
+
+            fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+                match message {
+                    Message::Leave => Command::cancel(CommandId::new("search")),
+                    Message::Result(value) => {
+                        self.results.push(value);
+                        Command::none()
+                    }
+                }
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                Vec::new()
+            }
+        }
+
+        let id = CommandId::new("search");
+        let mut runtime = Runtime::<CancellationApp>::new((), frame_rate(60));
+        runtime.core.enqueue_command(
+            Command::stream(iter([Message::Result(1), Message::Result(2)]))
+                .cancellable(id.clone())
+                .into_runtime_parts(),
+        );
+        wait_until(
+            || runtime.core.app_inputs.has_closed_buffered(&id),
+            "keyed results should be buffered before cancellation",
+        )
+        .await;
+        runtime
+            .core
+            .msg_tx
+            .send(Message::Leave)
+            .expect("message receiver should be open");
+
+        let first = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("shared input should be ready");
+        assert!(matches!(first, AppInput::Shared(Message::Leave)));
+        assert_eq!(runtime.process_input_batch(first), BatchOutcome::Continue);
+
+        assert!(runtime.core.app.results.is_empty());
+        assert!(runtime.core.app_inputs.try_next_ready().is_none());
+    }
+
+    #[tokio::test]
+    async fn keep_in_flight_applies_redraw_and_cancels_before_dropping_new_stream() {
+        struct DropGuard(Arc<AtomicBool>);
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let keep_id = CommandId::new("kept");
+        let cancel_id = CommandId::new("cancelled");
+        let kept_dropped = Arc::new(AtomicBool::new(false));
+        let cancelled_dropped = Arc::new(AtomicBool::new(false));
+        let arrival_dropped = Arc::new(AtomicBool::new(false));
+        let (kept_started_tx, kept_started_rx) = oneshot::channel();
+        let (cancelled_started_tx, cancelled_started_rx) = oneshot::channel();
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        let kept_guard = DropGuard(Arc::clone(&kept_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = kept_guard;
+                let _ = kept_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable(keep_id.clone())
+            .into_runtime_parts(),
+        );
+        let cancelled_guard = DropGuard(Arc::clone(&cancelled_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = cancelled_guard;
+                let _ = cancelled_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable(cancel_id.clone())
+            .into_runtime_parts(),
+        );
+        timeout(Duration::from_secs(1), kept_started_rx)
+            .await
+            .expect("kept command should start before the timeout")
+            .expect("kept command should signal that it started");
+        timeout(Duration::from_secs(1), cancelled_started_rx)
+            .await
+            .expect("cancelled command should start before the timeout")
+            .expect("cancelled command should signal that it started");
+
+        runtime.scheduler.pending.needs_redraw = false;
+        let arrival_guard = DropGuard(Arc::clone(&arrival_dropped));
+        let dropped_arrival = Command::future(async move {
+            let _guard = arrival_guard;
+            pending::<TestMessage>().await
+        });
+        let command = Command::batch([Command::cancel(cancel_id), dropped_arrival])
+            .cancellable_with(keep_id, CancelPolicy::KeepInFlight);
+
+        runtime.dispatch_update_command(command);
+
+        assert!(runtime.scheduler.pending.needs_redraw);
+        assert!(arrival_dropped.load(Ordering::SeqCst));
+        assert!(!kept_dropped.load(Ordering::SeqCst));
+        wait_until(
+            || cancelled_dropped.load(Ordering::SeqCst),
+            "explicit cancels should be applied before KeepInFlight drops the arrival",
+        )
+        .await;
+
+        runtime.core.shutdown();
+        wait_until(
+            || kept_dropped.load(Ordering::SeqCst),
+            "shutdown should clean up the kept command",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_keyed_quit_exits_the_runtime() -> Result<()> {
+        struct KeyedQuitApp;
+
+        impl Application for KeyedQuitApp {
+            type Message = ();
+            type Flags = ();
+
+            fn new((): ()) -> (Self, Command<Self::Message>) {
+                (Self, Command::quit().cancellable(CommandId::new("quit")))
+            }
+
+            fn update(&mut self, (): ()) -> Command<Self::Message> {
+                Command::none()
+            }
+
+            fn view(&self, _frame: &mut Frame<'_>) {}
+
+            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+                Vec::new()
+            }
+        }
+
+        let runtime = Runtime::<KeyedQuitApp>::new((), frame_rate(60));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        timeout(Duration::from_secs(1), runtime.run(&mut terminal))
+            .await
+            .expect("live keyed quit should stop the runtime")?;
         Ok(())
     }
 

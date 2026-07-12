@@ -58,6 +58,8 @@ criterion = "0.8"
 # Used by the nightly-only `tests/api_surface.rs` structural check; see
 # docs/testing.md "Public API Surface Tests".
 public-api = "0.52"
+# Exercises RFC 0003's pure keyed-command lifecycle state machine.
+proptest = "1"
 rustdoc-json = "0.9"
 rustdoc-types = "0.57"
 serde = { version = "1", features = ["derive"] }

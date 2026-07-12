@@ -1,6 +1,6 @@
 # RFC 0003: Command Cancellation
 
-- Status: Accepted
+- Status: Implemented
 - Target: 0.10.0, additive public API with an internal runtime rework
 - Scope: opt-in cancellation for command output delivery, keyed by `CommandId`
 - Feature flag: none
@@ -320,7 +320,7 @@ returning `None`, then parks pending until the runtime removes it. This avoids a
 `StreamMap` footgun: inner streams that return `None` are silently removed
 without revealing which key closed.
 
-`CommandReceiver` also exposes after-pull facts:
+`CommandReceiver` also exposes after-pull facts to its owning `KeyedCommands`:
 
 ```rust
 struct ReceiverFacts {
@@ -329,8 +329,11 @@ struct ReceiverFacts {
 }
 ```
 
-These facts are sampled immediately after an `Output` item is pulled and before
-`update()` runs. They are not a cleanup event; they tell the lifecycle whether
+These facts stay inside the keyed-command module; they are not fields of
+`ReceiverEvent` or `AppInput`, and callers do not participate in lifecycle
+accounting. `KeyedCommands` samples them immediately after an `Output` item is
+pulled, applies the lifecycle transition, and only then returns the payload
+toward `update()`. They are not a cleanup event; they tell the lifecycle whether
 the just-delivered item was the last possible item from that sender. The
 implementation reads `sender_closed` from
 `mpsc::UnboundedReceiver::is_closed()` and `buffered` from `len()`:
@@ -373,7 +376,7 @@ Running   Cancel                             Absent     drop entry, abort task
 Running   Output(sender open)                Running    deliver output
 Running   Output(sender_closed, buf > 0)     Draining   deliver output
 Running   Output(sender_closed, buf == 0)    Absent     deliver output, remove entry
-Running   ReceiverClosed                     Absent     remove entry
+Running   ReceiverEvent::Closed              Absent     remove entry
 Running   TaskExit matching, buf > 0         Draining   task no longer abortable
 Running   TaskExit matching, buf == 0        Absent     remove entry
 Running   TaskExit stale                     Running    ignore
@@ -383,7 +386,7 @@ Draining  Spawn(KeepInFlight)                Draining   drop new stream
 Draining  Cancel                             Absent     drop entry
 Draining  Output(buf > 0)                    Draining   deliver output
 Draining  Output(buf == 0)                   Absent     deliver output, remove entry
-Draining  ReceiverClosed                     Absent     remove entry
+Draining  ReceiverEvent::Closed              Absent     remove entry
 Draining  TaskExit matching                  Draining   ignore; task end already known
 Draining  TaskExit stale                     Draining   ignore
 ```
@@ -393,13 +396,14 @@ are normal under cancellation. Delivery inputs are generated only while a
 receiver is owned; property tests should still include stale and late `TaskExit`
 sequences across all states.
 
-Before any `Spawn(policy)` decision, the manager runs `reconcile_id(id)`:
-
-- reap any completed keyed tasks currently available;
-- if the entry receiver for `id` is sender-closed and empty, remove the entry and
-  set `Absent`;
-- if a matching task has exited and the receiver still has output, set
-  `Draining`.
+Before any `Spawn(policy)` decision, the manager reaps every completed keyed task
+currently available, then samples receiver facts once for the target id. Each
+matching `TaskExit` and the target receiver snapshot apply the same pure
+lifecycle transition used by delivery accounting: a stale token is ignored, a
+closed-empty run becomes `Absent`, and a run with buffered output becomes
+`Draining`. The targeted snapshot closes the interval where a panicking task has
+dropped its sender but has not yet published its `TaskExit` because panic logging
+is still in progress.
 
 `KeepInFlight` consults this reconciled state. A same-id retry returned by the
 `update` that just handled keyed output is spawned only when the pre-spawn
@@ -407,8 +411,8 @@ reconciliation can prove the previous receiver is both sender-closed and empty.
 If the previous receiver is still open, as it may be for an arbitrary
 `Command::stream`, the id remains occupied and `KeepInFlight` drops the retry.
 The runtime does not infer that a delivered item was a stream's final result
-unless `ReceiverFacts` or reconciliation establish that `sender_closed` is true
-and `buffered` is `0`.
+unless internally sampled `ReceiverFacts` or a reaped task exit establish that
+the previous run no longer owns deliverable output.
 
 ### 4.3 Dispatching a Command
 
@@ -444,7 +448,9 @@ enqueue_command(parts):
 ```
 
 The stream-less early return happens after cancels are applied. A command with
-neither cancels nor a stream still takes today's no-op path.
+neither cancels nor a stream still takes today's no-op path. Enqueue-time
+reconciliation remains necessary for cancel-only commands; it only drains
+currently ready `JoinSet` exits and does not scan every live keyed receiver.
 
 ### 4.4 Event Loop and Drain Discipline
 
@@ -454,7 +460,7 @@ RFC 0003 extends that mux with keyed receiver events:
 ```rust
 enum AppInput<Msg> {
     Shared(Msg),
-    Keyed(CommandId, ReceiverEvent<Msg>),
+    Keyed(ReceiverEvent<Msg>),
 }
 
 struct AppInputs<Msg> {
@@ -491,7 +497,6 @@ tokio::select! {
     }
 
     () = self.scheduler.next_work_frame() => {
-        self.core.app_inputs.reconcile_keyed_available();
         self.process_frame_tick(terminal)?;
     }
 
@@ -528,11 +533,12 @@ process_input_batch(first_input):
   set subscriptions_dirty only if at least one item ran update()
 ```
 
-`process_app_input` is the only place that interprets `AppInput`:
+`process_app_input` is the only place that interprets `AppInput`; keyed lifecycle
+accounting has already happened inside `KeyedCommands` before an event reaches
+this layer:
 
-- `ReceiverClosed` updates keyed lifecycle state, runs
-  `reconcile_keyed_available()`, and does not call `update()`.
-- A keyed message records delivery before calling `update(msg)`.
+- `ReceiverEvent::Closed` does not call `update()`.
+- A keyed message calls `update(msg)`.
 - A shared message calls `update(msg)` directly.
 - Any command returned by `update()` is dispatched before another app input is
   pulled.
@@ -547,7 +553,7 @@ AppInputs::try_next_ready():
   if shared.try_recv() yields a shared message:
       return Shared(msg)
   if keyed.try_next_ready() yields a keyed receiver event:
-      return Keyed(id, event)
+      return Keyed(event)
   return None
 ```
 
@@ -564,7 +570,7 @@ messages, delivery is recorded before `update()` so a sender-closed empty
 receiver can release the id before same-id retry work is returned.
 
 `subscriptions_dirty` is set only when at least one item in the batch actually
-ran through `update()`. `ReceiverClosed` and keyed `Quit` do not dirty
+ran through `update()`. `ReceiverEvent::Closed` and keyed `Quit` do not dirty
 subscriptions by themselves.
 
 ## 5. Implementation Notes
@@ -726,9 +732,12 @@ still matches the current `Running` entry. Stale exits are ignored.
 `KeyedEntry<Msg>` implements `Stream<Item = ReceiverEvent<Msg>>` by delegating to
 `CommandReceiver`; `StreamMap` is only the polling merge. Policy decisions,
 delivery accounting, receiver removal, and task-exit reconciliation all go
-through `KeyedCommands` methods. If an implementation needs keyed mutable access
-that `StreamMap` does not expose, it may temporarily remove, update, and reinsert
-an entry, but that pattern must stay inside `KeyedCommands`.
+through `KeyedCommands` methods. After a receiver event is pulled, its facts are
+sampled and the transition is applied before the event leaves this module. If an
+implementation needs keyed mutable access that `StreamMap` does not expose, it
+may temporarily remove, update, and reinsert an entry, but that pattern must stay
+inside `KeyedCommands`; identity transitions return early without churning the
+`StreamMap`.
 
 ### 5.5 Spawning a Keyed Run
 

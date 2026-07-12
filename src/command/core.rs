@@ -10,6 +10,7 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
 
 use super::Action;
+use super::cancellation::{CancelPolicy, CancellableCommand, CommandCancellation, CommandId};
 use super::effect::Effect;
 use super::retry::{self, RetryContext, RetryError, RetryPolicy};
 use super::runtime_directives::RuntimeDirectives;
@@ -39,6 +40,7 @@ pub struct Command<Msg: Send + 'static> {
     // `Effect::leaf_count()` without a dedicated accessor.
     pub(super) effect: Effect<Msg>,
     directives: RuntimeDirectives,
+    cancellation: CommandCancellation,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
@@ -46,6 +48,10 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self {
             effect,
             directives: RuntimeDirectives::DEFAULT,
+            cancellation: CommandCancellation {
+                key: None,
+                cancels: Vec::new(),
+            },
         }
     }
 
@@ -66,6 +72,10 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self {
             effect: Effect::none(),
             directives: RuntimeDirectives::DEFAULT,
+            cancellation: CommandCancellation {
+                key: None,
+                cancels: Vec::new(),
+            },
         }
     }
 
@@ -125,7 +135,11 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// Decompose this command into the runtime-facing parts that must be
     /// observed together.
     pub(crate) fn into_runtime_parts(self) -> RuntimeCommandParts<Msg> {
-        RuntimeCommandParts::new(self.directives, self.effect.into_stream())
+        RuntimeCommandParts::new(
+            self.directives,
+            self.effect.into_stream(),
+            self.cancellation,
+        )
     }
 
     /// Declare that the update returning this command did not change the
@@ -139,6 +153,51 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub const fn without_redraw(mut self) -> Self {
         self.directives = self.directives.without_redraw();
         self
+    }
+
+    /// Runs this command under `id`, replacing any deliverable same-id command.
+    ///
+    /// Cancellation is strict for output delivery: after replacement, buffered
+    /// messages and quit requests from the old command cannot affect the app.
+    /// This does not roll back external side effects that already occurred.
+    ///
+    /// A cancellation key applies to this top-level command only. If this
+    /// command is later passed as a child to [`Command::batch`], its key is
+    /// ignored; apply `cancellable` to the resulting batch instead.
+    #[must_use = "cancellable returns a modified command and does not mutate in place"]
+    pub fn cancellable(self, id: CommandId) -> Self {
+        self.cancellable_with(id, CancelPolicy::CancelInFlight)
+    }
+
+    /// Runs this command under `id` using the supplied same-id policy.
+    ///
+    /// [`CancelPolicy::CancelInFlight`] replaces current deliverable work;
+    /// [`CancelPolicy::KeepInFlight`] discards this command's stream while the
+    /// id is occupied. Runtime directives and explicit cancels still apply.
+    ///
+    /// A cancellation key applies to this top-level command only. Child keys
+    /// are ignored by [`Command::batch`]; key the resulting batch when the whole
+    /// batch should share one lifecycle.
+    #[must_use = "cancellable_with returns a modified command and does not mutate in place"]
+    pub fn cancellable_with(mut self, id: CommandId, policy: CancelPolicy) -> Self {
+        self.cancellation.key = Some(CancellableCommand { id, policy });
+        self
+    }
+
+    /// Cancels the current deliverable command for `id` without replacing it.
+    ///
+    /// Cancellation is idempotent and drops buffered messages and quit requests
+    /// in addition to aborting running work. Like other constructors, this
+    /// requests a redraw unless followed by [`Command::without_redraw`].
+    pub fn cancel(id: CommandId) -> Self {
+        Self {
+            effect: Effect::none(),
+            directives: RuntimeDirectives::DEFAULT,
+            cancellation: CommandCancellation {
+                key: None,
+                cancels: vec![id],
+            },
+        }
     }
 
     /// Add an overall deadline to every effect leaf in this command.
@@ -339,10 +398,19 @@ impl<Msg: Send + 'static> Command<Msg> {
         let mut directives = RuntimeDirectives::DEFAULT.without_redraw();
         let mut any_child = false;
         let mut effects = Vec::new();
+        let mut cancels = Vec::new();
 
         for cmd in commands {
             any_child = true;
             directives = directives.combine(cmd.directives);
+            if let Some(key) = cmd.cancellation.key {
+                tracing::warn!(
+                    target: "tears::command",
+                    id = ?key.id,
+                    "cancellable child key ignored by Command::batch"
+                );
+            }
+            cancels.extend(cmd.cancellation.cancels);
             effects.push(cmd.effect);
         }
 
@@ -350,6 +418,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             Self {
                 effect: Effect::batch(effects),
                 directives,
+                cancellation: CommandCancellation { key: None, cancels },
             }
         } else {
             Self::none()
@@ -446,9 +515,14 @@ impl<Msg: Send + 'static> Command<Msg> {
         T: Send + 'static,
     {
         let directives = self.directives;
+        let cancellation = self.cancellation;
         let effect = self.effect.map(f);
 
-        Command { effect, directives }
+        Command {
+            effect,
+            directives,
+            cancellation,
+        }
     }
 }
 
@@ -460,6 +534,9 @@ mod tests {
 
     use futures::stream;
     use tokio::time::{advance, sleep};
+    use tracing::Level;
+
+    use crate::test_support::TraceRecorder;
 
     #[test]
     fn test_redraw_defaults_to_true_for_constructors() {
@@ -478,6 +555,90 @@ mod tests {
     fn test_without_redraw_flips_redraw() {
         let cmd = Command::<i32>::none().without_redraw();
         assert!(!cmd.requests_redraw());
+    }
+
+    #[test]
+    fn test_cancellation_metadata_defaults_empty() {
+        let command = Command::<i32>::none();
+
+        assert!(command.cancellation.key.is_none());
+        assert!(command.cancellation.cancels.is_empty());
+    }
+
+    #[test]
+    fn test_cancellable_is_last_call_wins() {
+        let command = Command::message(1)
+            .cancellable_with(CommandId::new("first"), CancelPolicy::KeepInFlight)
+            .cancellable(CommandId::new("second"));
+        let key = command.cancellation.key.expect("key should be present");
+
+        assert_eq!(key.id, CommandId::new("second"));
+        assert_eq!(key.policy, CancelPolicy::CancelInFlight);
+    }
+
+    #[test]
+    fn test_cancel_is_streamless_and_preserves_redraw_control() {
+        let id = CommandId::new("search");
+        let command = Command::<i32>::cancel(id.clone()).without_redraw();
+
+        assert!(command.is_none());
+        assert!(!command.requests_redraw());
+        assert_eq!(command.cancellation.cancels, vec![id]);
+        assert!(command.cancellation.key.is_none());
+    }
+
+    #[test]
+    fn test_map_preserves_cancellation_metadata() {
+        let cancel_id = CommandId::new("old");
+        let key_id = CommandId::new("current");
+        let command = Command::batch([Command::cancel(cancel_id.clone()), Command::message(1)])
+            .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
+            .map(|value| value.to_string());
+        let key = command.cancellation.key.expect("key should be present");
+
+        assert_eq!(command.cancellation.cancels, vec![cancel_id]);
+        assert_eq!(key.id, key_id);
+        assert_eq!(key.policy, CancelPolicy::KeepInFlight);
+    }
+
+    #[test]
+    fn test_batch_folds_cancels_and_discards_child_keys() {
+        let first = CommandId::new("first");
+        let second = CommandId::new("second");
+        let command = Command::batch([
+            Command::<i32>::cancel(first.clone()),
+            Command::cancel(second.clone()).cancellable(CommandId::new("ignored")),
+        ]);
+
+        assert_eq!(command.cancellation.cancels, vec![first, second]);
+        assert!(command.cancellation.key.is_none());
+    }
+
+    #[test]
+    fn test_batch_warns_when_discarding_a_child_key() {
+        let recorder = TraceRecorder::new()
+            .with_target("tears::command")
+            .with_level(Level::WARN);
+        let _guard = recorder.set_default();
+
+        let _command = Command::batch([
+            Command::message(1).cancellable(CommandId::new("ignored")),
+            Command::message(2),
+        ]);
+
+        assert_eq!(recorder.event_count(), 1);
+    }
+
+    #[test]
+    fn test_timeout_preserves_cancellation_metadata() {
+        let key_id = CommandId::new("timeout");
+        let command = Command::future(pending::<i32>())
+            .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
+            .timeout(Duration::from_secs(1), || 99);
+        let key = command.cancellation.key.expect("key should be present");
+
+        assert_eq!(key.id, key_id);
+        assert_eq!(key.policy, CancelPolicy::KeepInFlight);
     }
 
     #[test]

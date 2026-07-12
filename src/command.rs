@@ -24,12 +24,15 @@
 //! let cmd = Command::perform(load_data(), Message::DataLoaded);
 //! ```
 
+mod cancellation;
 pub(crate) mod core;
 mod effect;
 mod retry;
 mod runtime_directives;
 mod runtime_parts;
 
+pub(crate) use cancellation::CancellableCommand;
+pub use cancellation::{CancelPolicy, CommandId};
 pub(crate) use core::Command;
 pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};
 pub(crate) use runtime_parts::RuntimeCommandParts;
