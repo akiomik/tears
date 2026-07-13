@@ -13,9 +13,7 @@
 //! let subscription = Subscription::new(mock.clone());
 //!
 //! // Emit values from the mock (requires at least one receiver)
-//! # #[cfg(not(test))] // Skip in doctest
 //! let _ = mock.emit(42);
-//! # #[cfg(not(test))]
 //! let _ = mock.emit(100);
 //! ```
 //!
@@ -23,8 +21,9 @@
 //!
 //! `MockSource` is designed to be shared between your application and test code:
 //!
-//! ```no_run
+//! ```
 //! use tears::prelude::*;
+//! use tears::SubscriptionSource;
 //! use tears::subscription::mock::MockSource;
 //! # use ratatui::Frame;
 //!
@@ -54,22 +53,26 @@
 //!     }
 //! }
 //!
-//! #[tokio::test]
-//! async fn test_my_app() -> color_eyre::Result<()> {
-//!     let mock = MockSource::new();
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> color_eyre::Result<()> {
+//! let mock = MockSource::new();
 //!
-//!     // Pass mock to app
-//!     let (mut app, _) = MyApp::new(mock.clone());
+//! // Pass mock to app
+//! let (mut app, _) = MyApp::new(mock.clone());
 //!
-//!     // Emit events from test
-//!     mock.emit(())?;
+//! // Emit requires at least one receiver; normally the runtime subscribes
+//! // via `app.subscriptions()`, but here we hold a stream directly.
+//! let _stream = mock.stream();
 //!
-//!     // Manually call update for unit testing
-//!     app.update(());
+//! // Emit events from test
+//! mock.emit(())?;
 //!
-//!     assert_eq!(app.count, 1);
-//!     Ok(())
-//! }
+//! // Manually call update for unit testing
+//! app.update(());
+//!
+//! assert_eq!(app.count, 1);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Dynamic Subscriptions

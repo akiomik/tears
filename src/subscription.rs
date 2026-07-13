@@ -104,26 +104,26 @@
 //!
 //! Use [`mock::MockSource`] for deterministic testing without real I/O:
 //!
-//! ```no_run
+//! ```
 //! use tears::SubscriptionSource;
 //! use tears::subscription::mock::MockSource;
 //! use futures::StreamExt;
 //!
-//! #[tokio::test]
-//! async fn test_example() {
-//!     // Create a controllable mock
-//!     let mock = MockSource::<i32>::new();
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() {
+//! // Create a controllable mock
+//! let mock = MockSource::<i32>::new();
 //!
-//!     // Call the SubscriptionSource trait method directly to get a stream
-//!     let mut stream = mock.stream();
+//! // Call the SubscriptionSource trait method directly to get a stream
+//! let mut stream = mock.stream();
 //!
-//!     // Control events from your test
-//!     mock.emit(42).expect("should emit");
+//! // Control events from your test
+//! mock.emit(42).expect("should emit");
 //!
-//!     // Receive the value
-//!     let value = stream.next().await;
-//!     assert_eq!(value, Some(42));
-//! }
+//! // Receive the value
+//! let value = stream.next().await;
+//! assert_eq!(value, Some(42));
+//! # }
 //! ```
 //!
 //! See the [`mock`] module documentation for complete testing examples.
