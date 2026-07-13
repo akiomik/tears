@@ -704,7 +704,7 @@ mod tests {
     async fn test_timeout_composes_with_map_on_either_side() {
         let before = Command::future(pending::<i32>())
             .map(|value| value.to_string())
-            .timeout(Duration::from_secs(1), || "before".to_string());
+            .timeout(Duration::from_secs(1), || "before".to_owned());
         let after = Command::future(pending::<i32>())
             .timeout(Duration::from_secs(1), || 99)
             .map(|value| value.to_string());
@@ -1019,7 +1019,7 @@ mod tests {
     async fn test_perform_with_result() {
         #[allow(clippy::unused_async)]
         async fn fallible_operation() -> Result<String, String> {
-            Ok("success".to_string())
+            Ok("success".to_owned())
         }
 
         let cmd = Command::perform(fallible_operation(), |result| match result {
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_with_string() {
-        let cmd = Command::message("hello".to_string());
+        let cmd = Command::message("hello".to_owned());
 
         let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
@@ -1116,7 +1116,7 @@ mod tests {
     async fn test_future_with_delay() {
         let cmd = Command::future(async {
             sleep(Duration::from_millis(10)).await;
-            "delayed".to_string()
+            "delayed".to_owned()
         });
 
         let mut stream = cmd.into_stream().expect("stream should exist");
@@ -1222,8 +1222,7 @@ mod tests {
             Error(String),
         }
 
-        let cmd: Command<Result<String, String>> =
-            Command::future(async { Ok("data".to_string()) });
+        let cmd: Command<Result<String, String>> = Command::future(async { Ok("data".to_owned()) });
 
         let mapped = cmd.map(|result| match result {
             Ok(s) => Message::Success(s),

@@ -12,7 +12,7 @@ use rustdoc_types::Id;
 fn build_public_api() -> public_api::PublicApi {
     let json_path = rustdoc_json::Builder::default()
         .toolchain("nightly")
-        .manifest_path(env!("CARGO_MANIFEST_DIR").to_string() + "/Cargo.toml")
+        .manifest_path(env!("CARGO_MANIFEST_DIR").to_owned() + "/Cargo.toml")
         .all_features(true)
         .build()
         .expect(

@@ -33,7 +33,7 @@ impl QueryKey {
 
 impl From<&str> for QueryKey {
     fn from(value: &str) -> Self {
-        Self::from_parts([QueryKeyPart::Str(value.to_string())])
+        Self::from_parts([QueryKeyPart::Str(value.to_owned())])
     }
 }
 
@@ -87,7 +87,7 @@ where
 
 impl From<&str> for QueryKeyPart {
     fn from(value: &str) -> Self {
-        Self::Str(value.to_string())
+        Self::Str(value.to_owned())
     }
 }
 
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn string_keys_are_structural() {
-        assert_eq!(QueryKey::from("todos"), QueryKey::from("todos".to_string()));
+        assert_eq!(QueryKey::from("todos"), QueryKey::from("todos".to_owned()));
         assert_ne!(QueryKey::from("todos"), QueryKey::from("users"));
     }
 
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(
             key,
             QueryKey::from_parts([
-                QueryKeyPart::Str("todos".to_string()),
+                QueryKeyPart::Str("todos".to_owned()),
                 QueryKeyPart::U64(42),
                 QueryKeyPart::Bool(false),
             ])

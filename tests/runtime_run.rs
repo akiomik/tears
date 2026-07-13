@@ -211,9 +211,9 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
 
         fn new((): ()) -> (Self, Command<String>) {
             let cmd = Command::batch(vec![
-                Command::future(async { "msg1".to_string() }),
-                Command::future(async { "msg2".to_string() }),
-                Command::future(async { "msg3".to_string() }),
+                Command::future(async { "msg1".to_owned() }),
+                Command::future(async { "msg2".to_owned() }),
+                Command::future(async { "msg3".to_owned() }),
             ]);
             (Self { received: vec![] }, cmd)
         }

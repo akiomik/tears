@@ -310,7 +310,7 @@ mod tests {
         type Flags = ();
 
         fn new(_flags: ()) -> (Self, Command<Self::Message>) {
-            let cmd = Command::future(async { "initialized".to_string() });
+            let cmd = Command::future(async { "initialized".to_owned() });
             (Self, cmd)
         }
 

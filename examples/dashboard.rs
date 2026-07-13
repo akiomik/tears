@@ -312,19 +312,19 @@ impl TaskListState {
         Self {
             tasks: vec![
                 Task {
-                    title: "Review release checklist".to_string(),
+                    title: "Review release checklist".to_owned(),
                     done: false,
-                    notes: "Check docs, examples, and CI status.".to_string(),
+                    notes: "Check docs, examples, and CI status.".to_owned(),
                 },
                 Task {
-                    title: "Update onboarding guide".to_string(),
+                    title: "Update onboarding guide".to_owned(),
                     done: true,
-                    notes: "Keep the first example small.".to_string(),
+                    notes: "Keep the first example small.".to_owned(),
                 },
                 Task {
-                    title: "Plan next subscription API".to_string(),
+                    title: "Plan next subscription API".to_owned(),
                     done: false,
-                    notes: "Collect friction from examples first.".to_string(),
+                    notes: "Collect friction from examples first.".to_owned(),
                 },
             ],
             selected: 0,
@@ -375,7 +375,7 @@ impl TaskListState {
         self.tasks.push(Task {
             title: title.clone(),
             done: false,
-            notes: "Add notes in the details panel.".to_string(),
+            notes: "Add notes in the details panel.".to_owned(),
         });
         self.selected = self.tasks.len() - 1;
         TaskOutcome::activity("Added a task", format!("added: {title}"))
@@ -445,7 +445,7 @@ impl DetailState {
     fn from_task(task: Option<&Task>) -> Self {
         let Some(task) = task else {
             return Self {
-                title: "No task selected".to_string(),
+                title: "No task selected".to_owned(),
                 notes: String::new(),
             };
         };
@@ -500,7 +500,7 @@ struct ActivityLogState {
 impl ActivityLogState {
     fn new() -> Self {
         Self {
-            entries: vec!["Application started".to_string()],
+            entries: vec!["Application started".to_owned()],
         }
     }
 
@@ -544,7 +544,7 @@ struct StatusState {
 impl Default for StatusState {
     fn default() -> Self {
         Self {
-            message: "Ready".to_string(),
+            message: "Ready".to_owned(),
         }
     }
 }

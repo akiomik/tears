@@ -66,7 +66,7 @@ impl Application for App {
         (
             Self {
                 should_quit: false,
-                signal_log: vec!["Application started".to_string()],
+                signal_log: vec!["Application started".to_owned()],
             },
             Command::none(),
         )
@@ -80,14 +80,14 @@ impl Application for App {
                 match code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         self.signal_log
-                            .push("User requested quit (q/Esc)".to_string());
+                            .push("User requested quit (q/Esc)".to_owned());
                         self.should_quit = true;
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+C is captured by terminal events in raw mode
                         // We need to treat it as quit here since signal won't receive it
                         self.signal_log
-                            .push("Received Ctrl+C (via terminal event)".to_string());
+                            .push("Received Ctrl+C (via terminal event)".to_owned());
                         self.should_quit = true;
                     }
                     KeyCode::Char('c') => {
@@ -103,17 +103,17 @@ impl Application for App {
             }
             #[cfg(unix)]
             Message::SignalInterrupt => {
-                self.signal_log.push("Received SIGINT".to_string());
+                self.signal_log.push("Received SIGINT".to_owned());
                 self.should_quit = true;
             }
             #[cfg(unix)]
             Message::SignalTerminate => {
-                self.signal_log.push("Received SIGTERM".to_string());
+                self.signal_log.push("Received SIGTERM".to_owned());
                 self.should_quit = true;
             }
             #[cfg(unix)]
             Message::SignalHangup => {
-                self.signal_log.push("Received SIGHUP".to_string());
+                self.signal_log.push("Received SIGHUP".to_owned());
                 // Don't quit on SIGHUP, just log it
             }
             #[cfg(unix)]

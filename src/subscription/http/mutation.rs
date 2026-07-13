@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(result.data(), None);
 
         let result: MutationResult<i32> = MutationResult {
-            state: MutationState::Error("error".to_string()),
+            state: MutationState::Error("error".to_owned()),
         };
         assert_eq!(result.data(), None);
     }
@@ -237,7 +237,7 @@ mod tests {
         assert!(!success.is_error());
 
         let error: MutationResult<i32> = MutationResult {
-            state: MutationState::Error("error".to_string()),
+            state: MutationState::Error("error".to_owned()),
         };
         assert!(!error.is_loading());
         assert!(!error.is_success());
