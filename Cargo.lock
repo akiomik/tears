@@ -3087,7 +3087,6 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rustdoc-json",
- "rustdoc-types",
  "rustls",
  "serde",
  "serde_json",
