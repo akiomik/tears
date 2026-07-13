@@ -10,9 +10,12 @@ use public_api::tokens::Token;
 use rustdoc_types::Id;
 
 fn build_public_api() -> public_api::PublicApi {
+    let mut manifest_path = env!("CARGO_MANIFEST_DIR").to_owned();
+    manifest_path.push_str("/Cargo.toml");
+
     let json_path = rustdoc_json::Builder::default()
         .toolchain("nightly")
-        .manifest_path(env!("CARGO_MANIFEST_DIR").to_owned() + "/Cargo.toml")
+        .manifest_path(manifest_path)
         .all_features(true)
         .build()
         .expect(
