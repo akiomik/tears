@@ -148,9 +148,14 @@ a future `Reducer` API.
 **A. Unequal logical keys are not made equal by hash collision.** Hashing may
 select a container bucket, but full equality compares structural values.
 
-**B. Subscription source type remains a namespace.** Two different source
-types using equal logical-key types and values remain different subscription
-IDs. This preserves the useful part of `SubscriptionId::of::<Self>`.
+**B. The concrete subscription source type remains a namespace.** The public
+constructor takes a `&Source` witness and infers `Source`; it does not accept a
+caller-selected namespace through a turbofish. The `SubscriptionSource::id`
+contract requires implementations to pass `self` as that witness. Therefore two
+conforming source implementations with different concrete `Self` types and
+equal logical keys produce different subscription IDs. This preserves the
+useful part of `SubscriptionId::of::<Self>` without relying on callers to repeat
+`Self` correctly.
 
 **C. Logical-key type is also part of identity.** Equal-looking values of
 different Rust types are distinct. Type erasure must not introduce
@@ -259,14 +264,15 @@ has the conceptual path:
 [OuterId::Main, InnerId(7)] / local
 ```
 
-Consequently:
+Consequently, when the reversed structural segment sequence differs from the
+original:
 
 ```text
 local.scoped(a).scoped(b) != local.scoped(b).scoped(a)
 ```
 
-unless the two resulting structural paths are independently equal, which is
-not possible merely because the segments have colliding hashes.
+When `a == b`, both paths are `[a, a]` and remain equal. Hash collisions alone
+cannot make unequal segment sequences equal.
 
 The implementation may use a flat path, a persistent linked path, or nested
 nodes. Segment boundaries must remain structural internally and must not be
@@ -303,26 +309,35 @@ pub struct SubscriptionId { /* private */ }
 
 impl SubscriptionId {
     pub fn new<Source>(
+        source: &Source,
         key: impl Eq + std::hash::Hash + Send + Sync + 'static,
     ) -> Self
     where
-        Source: 'static;
+        Source: SubscriptionSource + ?Sized + 'static;
 }
 
 impl std::fmt::Debug for SubscriptionId { /* diagnostic only */ }
 impl PartialEq for SubscriptionId { /* source type + erased structural key */ }
 impl Eq for SubscriptionId {}
 impl std::hash::Hash for SubscriptionId { /* same structural components */ }
+impl std::panic::UnwindSafe for SubscriptionId { /* preserved compatibility */ }
+impl std::panic::RefUnwindSafe for SubscriptionId { /* preserved compatibility */ }
 ```
 
-Using `impl Trait` for the key keeps the source namespace explicit while the key
-type is inferred:
+The source witness is used only to obtain its concrete type namespace; the
+reference is not stored. Both source and logical-key types are inferred:
 
 ```rust
 fn id(&self) -> SubscriptionId {
-    SubscriptionId::new::<Self>(self.interval_ms)
+    SubscriptionId::new(self, self.interval_ms)
 }
 ```
+
+Passing a value other than `self` as the source witness from
+`SubscriptionSource::id` violates the trait contract. The API deliberately has
+no `new::<SharedNamespace>(key)` form: a normal implementation cannot
+accidentally substitute an unrelated namespace while following the documented
+`new(self, key)` pattern.
 
 The constructor owns its logical key. A borrowed field is accepted only when
 the borrow is actually `'static`; otherwise callers use an owned value or a
@@ -332,8 +347,16 @@ The bounds serve distinct contracts:
 
 - `Eq + Hash` provides collision-safe registry behavior;
 - `'static` permits safe type erasure and downcasting; and
-- `Send + Sync` preserves `SubscriptionId`'s current auto-trait usability and
-  permits an `Arc`-backed implementation without weakening `Subscription`.
+- `Send + Sync` preserves `SubscriptionId`'s cross-thread usability and permits
+  an `Arc`-backed implementation without weakening `Subscription`.
+
+In addition to the explicit constructor bounds, `SubscriptionId` preserves its
+current `UnwindSafe` and `RefUnwindSafe` auto-trait compatibility. The erased
+key does not expose references or mutation through `SubscriptionId`; its
+`Eq`/`Hash` implementation is already required to behave as a stable map key.
+An implementation may use `AssertUnwindSafe` around the private erased storage
+or an equivalent audited representation. This preservation does not add
+`UnwindSafe` or `RefUnwindSafe` bounds to logical-key types.
 
 `SubscriptionId` remains re-exported through the same canonical crate-root path
 as before. This RFC changes construction and trait implementations, not export
@@ -367,7 +390,7 @@ the correctness hole for migrated applications indefinitely.
 When a source's *actual* logical key is a `u64`, it passes that value directly:
 
 ```rust
-SubscriptionId::new::<Self>(self.connection_number)
+SubscriptionId::new(self, self.connection_number)
 ```
 
 When the old `u64` was produced by hashing several fields, the source passes
@@ -380,7 +403,7 @@ struct WatchKey {
     recursive: bool,
 }
 
-SubscriptionId::new::<Self>(WatchKey {
+SubscriptionId::new(self, WatchKey {
     path: self.path.clone(),
     recursive: self.recursive,
 })
@@ -587,8 +610,9 @@ Phase A is intentionally breaking and belongs in 0.10.0:
 
 | Existing contract | Phase A change |
 | --- | --- |
-| `SubscriptionId::of::<Source>(hash)` | Removed; use `new::<Source>(logical_key)` |
+| `SubscriptionId::of::<Source>(hash)` | Removed; use `new(self, logical_key)` inside `SubscriptionSource::id` |
 | `SubscriptionId: Copy` | Removed; use `Clone` |
+| `SubscriptionId: Send + Sync + UnwindSafe + RefUnwindSafe` | Preserved and pinned by positive compile-time assertions |
 | Caller chooses and freezes a hash digest | Framework hashes the original structural key |
 | Key needs no traits after hashing | Logical key requires `Eq + Hash + Send + Sync + 'static` |
 
@@ -627,15 +651,19 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   equal.
 - **INV-2: collision safety.** Unequal logical keys remain unequal even when
   they feed identical bytes or a constant value into every `Hasher`.
-- **INV-3: source namespace.** Equal keys from different subscription source
-  types are different IDs.
+- **INV-3: source namespace.** For conforming `SubscriptionSource::id`
+  implementations that pass `self` to `SubscriptionId::new`, equal keys from
+  different concrete source types are different IDs. The constructor exposes no
+  caller-selected source namespace parameter.
 - **INV-4: key type namespace.** Equal-looking keys of different concrete Rust
   types are different IDs.
 - **INV-5: hash consistency.** Equal IDs hash equally. Hash equality does not
   imply ID equality.
 - **INV-6: owned erasure.** IDs do not borrow non-`'static` source state.
-- **INV-7: public separation.** `CommandId` and `SubscriptionId` remain distinct
-  public types even if they share internal machinery.
+- **INV-7: public shape compatibility.** `CommandId` and `SubscriptionId` remain
+  distinct public types even if they share internal machinery.
+  `SubscriptionId` remains `Send + Sync + UnwindSafe + RefUnwindSafe`; only
+  `Copy` is intentionally removed from its existing auto/marker trait surface.
 
 ### 6.2 Subscription manager invariants
 
@@ -658,8 +686,10 @@ as `Partially Implemented (Phase A)` until both public phases ship.
 
 - **INV-14: typed scope segments.** Scope segment type and value both
   participate in equality.
-- **INV-15: ordered nesting.** Reversing scope application reverses the path and
-  produces a distinct full identity.
+- **INV-15: ordered nesting.** Reversing scope application reverses the path.
+  The full identity is distinct exactly when the reversed structural segment
+  sequence differs from the original; reversing two equal segments preserves
+  equality.
 - **INV-16: independent child instances.** Equal local IDs under unequal scope
   paths do not alias in subscription or command registries.
 - **INV-17: map propagation.** `Subscription::map` and `Command::map` preserve
@@ -681,14 +711,16 @@ Phase A unit tests:
 
 - same source type, key type, and equal value compare equal;
 - unequal values compare unequal;
-- different source types compare unequal;
+- different concrete source types using `SubscriptionId::new(self, key)`
+  compare unequal;
 - different key types compare unequal;
 - two unequal values with constant `Hash` output have equal computed hashes
   under a test hasher but unequal IDs;
 - cloning preserves equality and hashing;
-- `Debug` reports type clues without requiring or exposing values; and
-- compile-time assertions preserve `Send + Sync` while public API surface
-  tracking records removal of `Copy`.
+- `Debug` reports type clues without requiring or exposing values;
+- a positive compile-time assertion requires
+  `SubscriptionId: Send + Sync + UnwindSafe + RefUnwindSafe`; and
+- public API surface tracking records removal of `Copy`.
 
 Phase A manager tests:
 
@@ -707,8 +739,19 @@ Phase B scope tests:
 - same local command ID in two pane scopes does not cross-cancel, replace, or
   trigger `KeepInFlight` suppression;
 - a scoped explicit cancel affects only its matching scoped spawn;
-- scope type differences and nesting order affect equality;
-- `map`/`scoped` placement preserves lifecycle behavior; and
+- two unequal values of one scope type whose `Hash` implementation writes a
+  constant value still start independent subscriptions;
+- the same constant-hash scope values keep command replacement, suppression,
+  and explicit cancellation isolated;
+- scope type differences affect equality;
+- reversing two unequal scope segments changes identity, while reversing two
+  equal segments preserves it;
+- `map`/`scoped` placement preserves lifecycle behavior;
+- `cancellable(local).scoped(pane)` produces a pane-scoped spawn key;
+- `scoped(pane).cancellable(global)` produces a root-global spawn key;
+- in a mixed command, explicit cancels present before `scoped(pane)` remain
+  pane-scoped while a spawn key attached by a later `cancellable(global)` is
+  root-global;
 - batch tests retain RFC 0003's ignored-child-key warning and folded-cancel
   behavior.
 
@@ -769,7 +812,17 @@ trait ErasedKey: Send + Sync {
 A private `StructuralKey` can own `Arc<dyn ErasedKey>` and implement `Clone`,
 typed equality, hashing, and diagnostic type names once. `CommandId` can migrate
 to that helper without changing RFC 0003 behavior. `SubscriptionId` adds the
-source `TypeId` namespace around the same key primitive.
+`TypeId` inferred from its `&Source` witness around the same key primitive.
+
+A bare `Arc<dyn ErasedKey>` does not preserve `UnwindSafe` or `RefUnwindSafe`.
+The `SubscriptionId` representation must therefore wrap its private erased
+storage in `AssertUnwindSafe` or use an equivalent representation that
+preserves both marker traits. This is an intentional compatibility assertion:
+the ID owns its key, exposes no references into it, and requires stable `Eq` and
+`Hash` behavior. Do not solve this by adding unwind-safety bounds to the shared
+`ErasedKey` trait, because that would unnecessarily narrow `CommandId` and the
+logical-key API. A positive compile-time assertion pins the resulting public
+contract.
 
 Scope nodes should use the structural primitive but carry an internal node tag
 or representation that preserves path boundaries. A user-created tuple that
@@ -802,7 +855,7 @@ Each built-in source must identify its actual lifecycle inputs:
 - benchmark/test sources: their caller-controlled logical key.
 
 Do not mechanically replace `of::<Self>(hasher.finish())` with
-`new::<Self>(hasher.finish())` when that value is still a digest. That would use
+`new(self, hasher.finish())` when that value is still a digest. That would use
 the new type without fixing the old semantics.
 
 ### 8.4 Delivery sequence
@@ -815,7 +868,8 @@ Phase A:
 3. Adapt `SubscriptionManager` to non-`Copy` IDs and add duplicate diagnostics.
 4. Migrate every built-in source, test, example, doctest, and benchmark to
    original logical keys.
-5. Add unit and manager collision regression tests.
+5. Add unit and manager collision regression tests, including positive
+   `Send + Sync + UnwindSafe + RefUnwindSafe` assertions.
 6. Run API-surface, full feature, MSRV, lint, documentation, and benchmark
    verification.
 7. Add the 0.10.0 changelog migration example.
@@ -825,7 +879,8 @@ Phase B:
 1. Add the internal ordered scope node/path without changing unscoped equality.
 2. Add `Subscription::scoped` and its composition tests.
 3. Add `Command::scoped`, covering spawn keys and explicit cancels.
-4. Pin modifier ordering and RFC 0003 batch compatibility.
+4. Pin scope-hash collision safety, modifier ordering (including mixed scoped
+   cancels/root-global spawn metadata), and RFC 0003 batch compatibility.
 5. Add scoped command runtime tests and scoped benchmark cases.
 6. Document manual child composition and the per-effect batch limitation.
 
@@ -843,6 +898,15 @@ Rejected. Existing examples explicitly teach callers to pass a digest. A
 deprecated escape hatch would keep producing false equality and make the new
 correctness guarantee conditional on voluntary migration. 0.10.0 already
 permits the necessary breaking change.
+
+### Let callers choose `SubscriptionId::new::<Source>(key)`
+
+Rejected. A caller-selected generic parameter is only a declared namespace; it
+does not guarantee the concrete `SubscriptionSource` type. Two unrelated source
+implementations could accidentally choose the same shared namespace and key.
+Taking `&Source` and requiring `SubscriptionSource::id` implementations to pass
+`self` lets the compiler infer the concrete source type in the supported API
+pattern.
 
 ### Widen the digest to 128 or 256 bits
 
@@ -875,6 +939,16 @@ identity types. Type-only diagnostics match `CommandId`.
 Rejected as a public constraint. Arbitrary owned structural values cannot in
 general fit a stable small inline layout. Internal optimization remains possible
 without promising `Copy`.
+
+### Drop `UnwindSafe` and `RefUnwindSafe`
+
+Rejected. Both marker traits are part of the current public type's auto-trait
+surface, and structural erasure alone is not a reason to remove them. The
+opaque ID owns its stable map key and exposes no inner references, so the
+private erased storage can be wrapped in `AssertUnwindSafe` without adding
+unwind-safety bounds to every logical key. Positive compile-time assertions
+keep this compatibility visible even though the structural API-surface test
+does not enumerate auto traits.
 
 ### Encode pane identity directly in every child ID enum
 
