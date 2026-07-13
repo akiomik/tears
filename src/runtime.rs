@@ -84,11 +84,10 @@
 //! }
 //! ```
 
-use std::time::{Duration, Instant};
-
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
+use tokio::time::{Duration, Instant};
 
 use crate::{application::Application, command::Command};
 
@@ -224,7 +223,9 @@ impl<App: Application> Runtime<App> {
             InputOutcome::Quit => return BatchOutcome::Quit,
         };
 
-        // Micro-batching: process additional messages that arrived during a short window
+        // Micro-batching: process additional messages that arrived during a short window.
+        // Uses tokio::time::Instant (not std) so tests can pause the clock and avoid
+        // flaking under CI scheduling jitter around this tight deadline.
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
             match self.core.app_inputs.try_next_ready() {
@@ -604,7 +605,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_event_loop_process_message_batch_with_batching() {
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
