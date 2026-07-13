@@ -184,47 +184,6 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Command timeouts and retries
-
-Commands can enforce an overall deadline without changing their message type:
-
-```rust
-use std::time::Duration;
-use tears::prelude::*;
-
-enum Message {
-    Loaded(String),
-    TimedOut,
-}
-
-let command = Command::perform(async { "data".to_string() }, Message::Loaded)
-    .timeout(Duration::from_secs(5), || Message::TimedOut);
-```
-
-Retrying commands take a factory so every attempt receives a fresh future.
-Retry support types are imported explicitly from `tears::command` rather than
-from the crate root or prelude:
-
-```rust
-use std::num::NonZeroUsize;
-use std::time::Duration;
-use tears::Command;
-use tears::command::{RetryError, RetryPolicy};
-
-enum Message {
-    Loaded(Result<String, RetryError<&'static str>>),
-}
-
-let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"))
-    .with_fixed_backoff(Duration::from_millis(200));
-
-let command = Command::retry(
-    policy,
-    |_| async { Ok::<_, &'static str>("data".to_string()) },
-    Message::Loaded,
-);
-```
-
 ## Architecture
 
 Tears follows **The Elm Architecture (TEA)** pattern:
@@ -279,8 +238,13 @@ Check out the [`examples/`](examples/) directory for more examples:
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
 - [`dashboard.rs`](examples/dashboard.rs) - Structured state management with nested state and child messages
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
+- [`command_timeout_retry.rs`](examples/command_timeout_retry.rs) - Enforcing a `Command` deadline with `timeout` and recovering from failures with `retry`
+- [`command_cancellation.rs`](examples/command_cancellation.rs) - Cancelling superseded in-flight commands with `cancellable`/`cancellable_with` and `CancelPolicy`
 - [`websocket.rs`](examples/websocket.rs) - WebSocket echo chat demonstrating real-time communication (requires `ws` feature)
 - [`http_todo.rs`](examples/http_todo.rs) - HTTP Todo list with Query subscription, Mutation, and cache management (requires `http` feature)
+
+`RetryError`/`RetryPolicy` and `CommandId`/`CancelPolicy` are imported explicitly
+from `tears::command` rather than from the crate root or prelude.
 
 Run an example:
 
@@ -290,6 +254,8 @@ cargo run --example panic_hook
 cargo run --example views
 cargo run --example dashboard
 cargo run --example signals
+cargo run --example command_timeout_retry
+cargo run --example command_cancellation
 cargo run --example websocket --features ws,rustls
 cargo run --example http_todo --features http
 ```
