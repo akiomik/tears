@@ -22,6 +22,47 @@ the contract:
 - Use integration tests for end-to-end runtime behavior, public API contracts,
   and interactions between runtime components.
 
+## Why Test Helpers Are Duplicated Instead of Shared
+
+`src/test_support.rs` (crate-internal, white-box) and `tests/common/`
+(integration, black-box; see "Test Placement" above) intentionally keep
+separate copies of small helpers like `TraceRecorder` and
+`with_silent_panic_hook` rather than sharing one implementation. Two
+alternatives have been considered and rejected:
+
+- **A workspace-only helper crate.** This made publish/tarball behavior less
+  intuitive and added a crate to navigate, for little payoff at the current
+  helper size.
+- **A `test-support` Cargo feature** exposing `src/test_support` publicly,
+  mirroring `bench-internals`/`loom-core`. Rejected because:
+  - Cargo has no notion of a private feature: anyone depending on `tears`
+    could enable it and rely on internals that are "not covered by semver"
+    only by documentation convention. `bench-internals` and `loom-core`
+    accept that risk for one bench-only wrapper and one `cfg` swap
+    respectively; `test_support` is a wider, still-growing surface
+    (recorders, panic-hook guards, async wait helpers, fixtures), so the
+    same risk compounds with every future helper.
+  - It would blur integration tests from black-box (exercising the public
+    API the way downstream users would) into partially white-box, since
+    they would import literal crate-internal fixtures through the feature
+    door.
+  - It adds an invocation mode contributors must remember for every
+    integration-test target that needs it: `required-features` wiring (as
+    `[[bench]]` already needs for `bench-internals`) and passing
+    `--features test-support` locally, instead of today's zero-flag
+    `cargo test`.
+
+Duplication is also not always a pure copy: `src/test_support/panic_hook.rs`
+uses `std::sync::Mutex` because it only serializes `current_thread` tests,
+while `tests/common/panic_hook.rs` uses `tokio::sync::Mutex` because
+integration tests hold the guard across `.await` on a multi-threaded runtime.
+A shared implementation would need to satisfy both constraints, not just
+merge two identical files.
+
+Keep duplicating small helpers for now. Revisit only if a helper's
+implementation, not just its call sites, needs to change often enough that
+keeping copies in sync becomes the bottleneck.
+
 ## Public API Surface Tests
 
 `tests/api_surface.rs` is a different category from the rest of `tests/`:
@@ -107,9 +148,10 @@ tracing assertion is installed. This prevents callsites first reached by other
 parallel test threads from caching `Interest::never` while the asserting test's
 thread-local recorder is active.
 
-The unit-test and integration-test recorders are intentionally duplicated for
-now. Keep their structure aligned when changing shared behavior so fixes are
-easy to compare across the two copies.
+The unit-test and integration-test recorders are intentionally duplicated (see
+"Why Test Helpers Are Duplicated Instead of Shared" above). Keep their
+structure aligned when changing shared behavior so fixes are easy to compare
+across the two copies.
 
 ## Process-Global Panic Hook Tests
 
@@ -132,7 +174,8 @@ helper is restricted to `current_thread` tests.
 Integration tests cannot use crate-private test support, so they use the focused
 local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses
 `tokio::sync::Mutex` so it can be held across `.await` without blocking a runtime
-worker thread.
+worker thread. See "Why Test Helpers Are Duplicated Instead of Shared" above for
+why this is a separate implementation rather than a shared one.
 
 Do not expose or directly hold the internal silent-hook RAII guard. Calling
 `std::panic::set_hook` from a panicking thread itself panics, so attempting to
