@@ -451,7 +451,7 @@ fn trace_url(url: &str) -> String {
     let base = url.split_once(['?', '#']).map_or(url, |(base, _)| base);
 
     let Some((scheme, rest)) = base.split_once("://") else {
-        return base.to_string();
+        return base.to_owned();
     };
 
     let (authority, path) = rest
@@ -459,7 +459,7 @@ fn trace_url(url: &str) -> String {
         .map_or((rest, ""), |(authority, path)| (authority, path));
 
     let Some((_, host)) = authority.split_once('@') else {
-        return base.to_string();
+        return base.to_owned();
     };
 
     if path.is_empty() {
@@ -549,7 +549,7 @@ mod tests {
         // Test Error variant
         matches!(
             WebSocketMessage::Error {
-                error: "test".to_string()
+                error: "test".to_owned()
             },
             WebSocketMessage::Error { .. }
         );

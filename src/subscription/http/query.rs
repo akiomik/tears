@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(result.data(), None);
 
         let result: QueryResult<i32> = QueryResult::failed(
-            QueryError::FetchError("error".to_string()),
+            QueryError::FetchError("error".to_owned()),
             None,
             false,
             FetchStatus::Idle,
@@ -726,7 +726,7 @@ mod tests {
         assert!(stale.is_stale());
 
         let error: QueryResult<i32> = QueryResult::failed(
-            QueryError::FetchError("error".to_string()),
+            QueryError::FetchError("error".to_owned()),
             None,
             false,
             FetchStatus::Idle,
@@ -893,10 +893,10 @@ mod tests {
 
     #[test]
     fn test_query_error_display() {
-        let err = QueryError::FetchError("test error".to_string());
+        let err = QueryError::FetchError("test error".to_owned());
         assert_eq!(err.to_string(), "Fetch failed: test error");
 
-        let err = QueryError::NetworkError("network error".to_string());
+        let err = QueryError::NetworkError("network error".to_owned());
         assert_eq!(err.to_string(), "Network error: network error");
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
         );
         let query2 = Query::new(
             "data",
-            || Box::pin(async { Ok::<String, QueryError>("test".to_string()) }),
+            || Box::pin(async { Ok::<String, QueryError>("test".to_owned()) }),
             client,
         );
 
@@ -1253,7 +1253,7 @@ mod tests {
                 let count = str_fetches_clone.clone();
                 Box::pin(async move {
                     count.fetch_add(1, Ordering::SeqCst);
-                    Ok::<String, QueryError>("one".to_string())
+                    Ok::<String, QueryError>("one".to_owned())
                 })
             },
             client.clone(),
@@ -1459,7 +1459,7 @@ mod tests {
                 Box::pin(async move {
                     let fetch_number = count.fetch_add(1, Ordering::SeqCst) + 1;
                     if fetch_number == 1 {
-                        Err::<i32, QueryError>(QueryError::FetchError("boom".to_string()))
+                        Err::<i32, QueryError>(QueryError::FetchError("boom".to_owned()))
                     } else {
                         Ok::<i32, QueryError>(42)
                     }
@@ -1553,7 +1553,7 @@ mod tests {
                 Box::pin(async move {
                     count.fetch_add(1, Ordering::SeqCst);
                     gates.next().await.expect("fetch gate should be released");
-                    Err::<i32, QueryError>(QueryError::FetchError("boom".to_string()))
+                    Err::<i32, QueryError>(QueryError::FetchError("boom".to_owned()))
                 })
             },
             client,

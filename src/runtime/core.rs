@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_with_string_flags() {
-        let core = RuntimeCore::<AppWithStringFlags>::new("test".to_string());
+        let core = RuntimeCore::<AppWithStringFlags>::new("test".to_owned());
         assert_eq!(core.app.name, "test");
     }
 

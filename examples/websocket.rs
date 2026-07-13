@@ -54,7 +54,7 @@ impl Default for EchoChat {
     fn default() -> Self {
         Self {
             input: String::new(),
-            messages: vec!["Connecting to WebSocket...".to_string()],
+            messages: vec!["Connecting to WebSocket...".to_owned()],
             ws_sender: None,
         }
     }
@@ -95,10 +95,10 @@ impl EchoChat {
             {
                 self.messages.push(format!("Sent: {text}"));
             } else {
-                self.messages.push("Failed to send message".to_string());
+                self.messages.push("Failed to send message".to_owned());
             }
         } else {
-            self.messages.push("Not connected to WebSocket".to_string());
+            self.messages.push("Not connected to WebSocket".to_owned());
         }
 
         Command::none()
@@ -144,11 +144,10 @@ impl Application for EchoChat {
                 match ws_msg {
                     WebSocketMessage::Connected { sender } => {
                         self.ws_sender = Some(sender);
-                        self.messages.push("Connected to WebSocket!".to_string());
+                        self.messages.push("Connected to WebSocket!".to_owned());
                     }
                     WebSocketMessage::Disconnected => {
-                        self.messages
-                            .push("Disconnected from WebSocket".to_string());
+                        self.messages.push("Disconnected from WebSocket".to_owned());
                         self.ws_sender = None;
                     }
                     WebSocketMessage::Received(msg) => {

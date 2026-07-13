@@ -80,7 +80,7 @@ impl Application for App {
                 should_quit: false,
                 query: String::new(),
                 policy: CancelPolicy::CancelInFlight,
-                log: vec!["Ready".to_string()],
+                log: vec!["Ready".to_owned()],
             },
             Command::none(),
         )
@@ -106,14 +106,14 @@ impl Application for App {
                 KeyCode::Esc => {
                     self.query.clear();
                     self.log
-                        .push("Query cleared, cancelling in-flight search".to_string());
+                        .push("Query cleared, cancelling in-flight search".to_owned());
                     return Command::cancel(search_id());
                 }
                 KeyCode::Backspace => {
                     self.query.pop();
                     if self.query.is_empty() {
                         self.log
-                            .push("Query empty, cancelling in-flight search".to_string());
+                            .push("Query empty, cancelling in-flight search".to_owned());
                         return Command::cancel(search_id());
                     }
                     return self.search_command();

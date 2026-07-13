@@ -59,7 +59,7 @@ impl Application for App {
         (
             Self {
                 should_quit: false,
-                log: vec!["Ready".to_string()],
+                log: vec!["Ready".to_owned()],
             },
             Command::none(),
         )
@@ -76,7 +76,7 @@ impl Application for App {
                 }
                 KeyCode::Char('f') => {
                     self.log
-                        .push("Fast fetch: started (1s deadline)".to_string());
+                        .push("Fast fetch: started (1s deadline)".to_owned());
                     return Command::perform(
                         fetch(Duration::from_millis(200), "fast data"),
                         Message::Loaded,
@@ -85,7 +85,7 @@ impl Application for App {
                 }
                 KeyCode::Char('s') => {
                     self.log
-                        .push("Slow fetch: started (800ms deadline)".to_string());
+                        .push("Slow fetch: started (800ms deadline)".to_owned());
                     return Command::perform(
                         fetch(Duration::from_secs(3), "slow data"),
                         Message::Loaded,
@@ -94,14 +94,14 @@ impl Application for App {
                 }
                 KeyCode::Char('r') => {
                     self.log
-                        .push("Recovering fetch: started (3 attempts)".to_string());
+                        .push("Recovering fetch: started (3 attempts)".to_owned());
                     let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"))
                         .with_fixed_backoff(Duration::from_millis(300));
                     return Command::retry(policy, recovering_fetch, Message::RetryFinished);
                 }
                 KeyCode::Char('x') => {
                     self.log
-                        .push("Exhausting fetch: started (2 attempts)".to_string());
+                        .push("Exhausting fetch: started (2 attempts)".to_owned());
                     let policy = RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero"))
                         .with_fixed_backoff(Duration::from_millis(300));
                     return Command::retry(policy, always_failing_fetch, Message::RetryFinished);
@@ -117,7 +117,7 @@ impl Application for App {
                 self.log.push(format!("Loaded: {data}"));
             }
             Message::TimedOut => {
-                self.log.push("Timed out before the deadline".to_string());
+                self.log.push("Timed out before the deadline".to_owned());
             }
             Message::RetryFinished(Ok(data)) => {
                 self.log.push(format!("Retry succeeded: {data}"));
@@ -198,7 +198,7 @@ impl App {
 
 async fn fetch(delay: Duration, data: &'static str) -> String {
     sleep(delay).await;
-    data.to_string()
+    data.to_owned()
 }
 
 async fn recovering_fetch(ctx: RetryContext) -> Result<String, String> {

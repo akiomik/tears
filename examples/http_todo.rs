@@ -116,13 +116,13 @@ impl Application for App {
             }
             Message::SubmitTodo => {
                 if self.input.is_empty() {
-                    self.status = "Please enter a todo title".to_string();
+                    "Please enter a todo title".clone_into(&mut self.status);
                     return Command::none();
                 }
 
                 let title = self.input.clone();
                 self.input.clear();
-                self.status = "Creating todo...".to_string();
+                "Creating todo...".clone_into(&mut self.status);
 
                 Mutation::mutate(
                     Todo {
@@ -239,7 +239,7 @@ impl App {
                 if result.is_error() {
                     let message = result
                         .error()
-                        .map_or_else(|| "unknown error".to_string(), ToString::to_string);
+                        .map_or_else(|| "unknown error".to_owned(), ToString::to_string);
                     let error = Paragraph::new(format!("Error loading todos: {message}"))
                         .style(Style::default().fg(Color::Red))
                         .block(Block::default().borders(Borders::ALL).title("Todos"));
