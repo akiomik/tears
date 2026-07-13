@@ -6,8 +6,9 @@
   namespacing for composed command and subscription lifecycles
 - Feature flag: none
 - CHANGELOG:
-  - Phase A: `Changed` / `Fixed` (`SubscriptionId::of` replaced by structural
-    `SubscriptionId::new`; pre-hash collision removed; `Copy` removed)
+  - Phase A: `Changed` / `Fixed` (`SubscriptionSource::id` replaced by
+    associated `Key` / `key`; framework-owned structural `SubscriptionId`;
+    pre-hash collision removed; `Copy` removed)
   - Phase B: `Added` (`Subscription::scoped`, `Command::scoped`)
 
 > **Normative boundary.** The non-negotiables, public API and observable
@@ -26,8 +27,10 @@ keys with the same 64-bit hash become equal to the runtime. The
 restarts the wrong lifecycle, and can retain the wrong message mapping. This is
 a correctness failure, not merely an unlikely `HashMap` performance collision.
 
-This RFC replaces the pre-hashed surrogate with an erased structural key. A
-subscription identity compares its source type, logical-key type, and original
+This RFC replaces the pre-hashed surrogate with a framework-owned erased
+structural key. Each `SubscriptionSource` returns an associated `Key`, and
+`Subscription::new` combines the concrete source type with that original key.
+A subscription identity compares its source type, logical-key type, and
 logical-key value. Hashing remains an indexing operation; equality is never
 reduced to a hash digest.
 
@@ -148,14 +151,13 @@ a future `Reducer` API.
 **A. Unequal logical keys are not made equal by hash collision.** Hashing may
 select a container bucket, but full equality compares structural values.
 
-**B. The concrete subscription source type remains a namespace.** The public
-constructor takes a `&Source` witness and infers `Source`; it does not accept a
-caller-selected namespace through a turbofish. The `SubscriptionSource::id`
-contract requires implementations to pass `self` as that witness. Therefore two
-conforming source implementations with different concrete `Self` types and
-equal logical keys produce different subscription IDs. This preserves the
-useful part of `SubscriptionId::of::<Self>` without relying on callers to repeat
-`Self` correctly.
+**B. The concrete subscription source type is a framework-owned namespace.** A
+source returns only its associated logical `Key`; `Subscription::new<Source>`
+constructs the opaque `SubscriptionId` using `TypeId::of::<Source>()`. Source
+implementations cannot choose or substitute this namespace. Therefore two
+different concrete source types with equal logical keys produce different
+subscription IDs by construction. This preserves the useful part of
+`SubscriptionId::of::<Self>` without relying on an implementation convention.
 
 **C. Logical-key type is also part of identity.** Equal-looking values of
 different Rust types are distinct. Type erasure must not introduce
@@ -245,6 +247,14 @@ scope boundaries, and scope order into the caller's `Hasher`. The normal Rust
 contract applies: equal IDs must hash equally. Unequal IDs may have equal hash
 output and must remain unequal under `Eq`.
 
+As with every `HashMap` key, this guarantee assumes each logical-key and scope
+type obeys the Rust `Eq` / `Hash` laws: equal values hash equally, and equality
+and hashing remain stable while the value is used as a registry key. The
+framework cannot make a deliberately unlawful `Eq` or nondeterministic `Hash`
+implementation correct; such implementations violate the associated `Key`
+bounds' semantic contract. This is the same trust boundary as a user-defined
+key placed directly in `HashMap`.
+
 ### 2.3 Scoped equality
 
 A scope segment contains its erased Rust type and original structural value.
@@ -301,19 +311,25 @@ must use distinct scopes.
 
 ### 3.1 Public API
 
-Phase A replaces `SubscriptionId::of` with:
+Phase A removes public `SubscriptionId` construction and changes the source
+contract so the framework receives the original logical key:
 
 ```rust
 #[derive(Clone)]
 pub struct SubscriptionId { /* private */ }
 
-impl SubscriptionId {
-    pub fn new<Source>(
-        source: &Source,
-        key: impl Eq + std::hash::Hash + Send + Sync + 'static,
-    ) -> Self
+pub trait SubscriptionSource: Send {
+    type Output;
+    type Key: Eq + std::hash::Hash + Send + Sync + 'static;
+
+    fn stream(&self) -> BoxStream<'static, Self::Output>;
+    fn key(&self) -> Self::Key;
+}
+
+impl<Msg: 'static> Subscription<Msg> {
+    pub fn new<Source>(source: Source) -> Self
     where
-        Source: SubscriptionSource + ?Sized + 'static;
+        Source: SubscriptionSource<Output = Msg> + 'static;
 }
 
 impl std::fmt::Debug for SubscriptionId { /* diagnostic only */ }
@@ -324,24 +340,42 @@ impl std::panic::UnwindSafe for SubscriptionId { /* preserved compatibility */ }
 impl std::panic::RefUnwindSafe for SubscriptionId { /* preserved compatibility */ }
 ```
 
-The source witness is used only to obtain its concrete type namespace; the
-reference is not stored. Both source and logical-key types are inferred:
+`Subscription::new<Source>` obtains `source.key()` and calls a private
+constructor equivalent to:
 
 ```rust
-fn id(&self) -> SubscriptionId {
-    SubscriptionId::new(self, self.interval_ms)
+SubscriptionId::from_source::<Source, Source::Key>(source.key())
+```
+
+Only the framework can select `Source`; the public source implementation returns
+the key value but never constructs an ID. The source namespace is therefore
+enforced by the generic `Source` already being moved into `Subscription::new`,
+not supplied again by user code.
+
+A typical source implementation becomes:
+
+```rust
+impl SubscriptionSource for Timer {
+    type Output = TimerEvent;
+    type Key = NonZeroU64;
+
+    fn stream(&self) -> BoxStream<'static, Self::Output> {
+        // ...
+    }
+
+    fn key(&self) -> Self::Key {
+        self.interval_ms
+    }
 }
 ```
 
-Passing a value other than `self` as the source witness from
-`SubscriptionSource::id` violates the trait contract. The API deliberately has
-no `new::<SharedNamespace>(key)` form: a normal implementation cannot
-accidentally substitute an unrelated namespace while following the documented
-`new(self, key)` pattern.
-
-The constructor owns its logical key. A borrowed field is accepted only when
-the borrow is actually `'static`; otherwise callers use an owned value or a
-small owned key type.
+`key()` returns an owned value. A source with borrowed or compound identity uses
+an owned key type, and a source that caches an instance token returns or clones
+that token. The trait does not require `Key: Clone`; each implementation decides
+how to produce its owned key. One source implementation has one `Key` type; if
+its logical identity has several shapes, it uses an enum rather than changing
+the erased key type between instances. This reduced flexibility makes the
+source's identity schema explicit and stable.
 
 The bounds serve distinct contracts:
 
@@ -350,7 +384,7 @@ The bounds serve distinct contracts:
 - `Send + Sync` preserves `SubscriptionId`'s cross-thread usability and permits
   an `Arc`-backed implementation without weakening `Subscription`.
 
-In addition to the explicit constructor bounds, `SubscriptionId` preserves its
+In addition to the associated `Key` bounds, `SubscriptionId` preserves its
 current `UnwindSafe` and `RefUnwindSafe` auto-trait compatibility. The erased
 key does not expose references or mutation through `SubscriptionId`; its
 `Eq`/`Hash` implementation is already required to behave as a stable map key.
@@ -359,8 +393,25 @@ or an equivalent audited representation. This preservation does not add
 `UnwindSafe` or `RefUnwindSafe` bounds to logical-key types.
 
 `SubscriptionId` remains re-exported through the same canonical crate-root path
-as before. This RFC changes construction and trait implementations, not export
-placement.
+as before, but has no public constructor. This preserves the public identity
+type and its diagnostic/trait surface while making namespace construction a
+framework responsibility.
+
+Adding `Key` does not by itself make `SubscriptionSource` non-object-safe: a
+trait object can spell both associated types, for example
+`dyn SubscriptionSource<Output = O, Key = K>`. It is nevertheless a breaking
+change for any existing trait-object spelling that specifies only `Output`, and
+heterogeneous sources with different key types still need an application-level
+erasure wrapper. The repository currently accepts concrete `impl
+SubscriptionSource` values and has no `dyn SubscriptionSource` use, so the
+stronger construction guarantee is preferred for 0.10.0.
+
+For a public source implementation, its associated `Key` is part of the public
+trait surface. Built-in sources should use existing public structural types
+where practical (`()`, integers, `String`, `QueryKey`, or tuples of them) and
+introduce a small opaque public token type only when an instance identity cannot
+be expressed otherwise. This extra API surface is accepted in exchange for
+making the source namespace impossible to forge through normal construction.
 
 ### 3.2 `Copy` removal
 
@@ -368,12 +419,15 @@ placement.
 shared ownership, and promising `Copy` would constrain the implementation to a
 small inline representation that cannot hold arbitrary logical keys.
 
-This is an intentional 0.10.0 breaking change. Internal manager code and public
-sources that store an ID must clone it explicitly:
+This is an intentional 0.10.0 breaking change. Internal manager code clones the
+opaque ID explicitly. Sources that previously cached a `SubscriptionId` cache
+their associated key or instance token instead:
 
 ```rust
-fn id(&self) -> SubscriptionId {
-    self.id.clone()
+type Key = InstanceToken;
+
+fn key(&self) -> Self::Key {
+    self.instance_token.clone()
 }
 ```
 
@@ -390,7 +444,11 @@ the correctness hole for migrated applications indefinitely.
 When a source's *actual* logical key is a `u64`, it passes that value directly:
 
 ```rust
-SubscriptionId::new(self, self.connection_number)
+type Key = u64;
+
+fn key(&self) -> Self::Key {
+    self.connection_number
+}
 ```
 
 When the old `u64` was produced by hashing several fields, the source passes
@@ -403,15 +461,20 @@ struct WatchKey {
     recursive: bool,
 }
 
-SubscriptionId::new(self, WatchKey {
-    path: self.path.clone(),
-    recursive: self.recursive,
-})
+type Key = WatchKey;
+
+fn key(&self) -> Self::Key {
+    WatchKey {
+        path: self.path.clone(),
+        recursive: self.recursive,
+    }
+}
 ```
 
 Built-in sources must migrate from `DefaultHasher::finish()` to original
 logical components. A per-instance source such as `MockSource` must keep a real
-instance token rather than treating a timestamp digest as exact identity.
+instance token as its associated `Key` rather than treating a timestamp digest
+as exact identity.
 
 ### 3.4 Debug behavior
 
@@ -533,6 +596,14 @@ or explicit cancel to qualify.
 Like the existing command modifiers, call order is meaningful. `scoped` wraps
 metadata present when it is called:
 
+> **Ordering requirement.** `scoped` is a boundary operation over existing
+> lifecycle metadata, not a persistent mode inherited by later modifiers.
+> Calling `cancellable` after `scoped` installs a new root-global spawn key. The
+> Phase B implementation must place this warning prominently in the rustdoc for
+> `Command::scoped`, `Command::cancellable`, and `Command::cancellable_with`,
+> with examples of both orders. A cross-link hidden only in an RFC or general
+> composition guide is insufficient.
+
 ```rust
 work.cancellable(CommandId::new(RequestId::Load))
     .scoped(PaneId(pane_id));
@@ -602,6 +673,27 @@ decide at least:
 Those decisions belong to a separate RFC. The structural path defined here is
 forward-compatible with such work but does not pre-accept its API or behavior.
 
+### 4.6 Residual composition risk
+
+Phase B provides the vocabulary to express correct instance-local identity, but
+manual scoping alone does not make incorrect composition unrepresentable. A
+parent can omit `scoped`, reuse the same scope value for two child instances, or
+attach a local command key after the scope boundary. In each case the code
+compiles and may alias lifecycle slots.
+
+Subscriptions partially expose this mistake through the duplicate warning when
+two equal full IDs appear in one desired set. Commands cannot generally warn:
+an unscoped or reused full `CommandId` is indistinguishable from the intentional
+root-global shared slot supported by RFC 0003, so replacement, suppression, or
+cross-cancellation may be silent.
+
+Making child-instance scoping correct by construction requires a future
+composition layer to own the boundary and apply the instance scope
+automatically, such as collection/reducer composition keyed by the child
+instance ID. This RFC intentionally defers that API. Phase B is therefore an
+explicit manual primitive and a prerequisite for that stronger design, not the
+final construction guarantee for composed applications.
+
 ## 5. Compatibility and delivery
 
 ### 5.1 Phase A compatibility
@@ -610,7 +702,9 @@ Phase A is intentionally breaking and belongs in 0.10.0:
 
 | Existing contract | Phase A change |
 | --- | --- |
-| `SubscriptionId::of::<Source>(hash)` | Removed; use `new(self, logical_key)` inside `SubscriptionSource::id` |
+| `SubscriptionId::of::<Source>(hash)` | Removed with no public replacement; `Subscription::new<Source>` constructs the ID |
+| `SubscriptionSource::id() -> SubscriptionId` | Replaced by associated `type Key` and `key() -> Self::Key` |
+| `dyn SubscriptionSource<Output = O>` spelling | Must also specify `Key = K`; heterogeneous key types require separate erasure |
 | `SubscriptionId: Copy` | Removed; use `Clone` |
 | `SubscriptionId: Send + Sync + UnwindSafe + RefUnwindSafe` | Preserved and pinned by positive compile-time assertions |
 | Caller chooses and freezes a hash digest | Framework hashes the original structural key |
@@ -625,11 +719,13 @@ show before-and-after custom source code and call out the loss of `Copy`.
 Phase B is additive. Unscoped subscriptions and commands keep an empty scope
 path and retain Phase A / RFC 0003 behavior. No application is automatically
 scoped based on closure type, message mapper, vector position, or memory
-address.
+address. As specified in section 4.6, forgetting or reusing a manual scope
+remains valid code, and command aliasing can be silent until a future
+composition API owns this boundary.
 
 Deferring Phase B implementation does not require another breaking change. The
 opaque public ID representations permit a later structural scope node without
-changing constructors or trait signatures.
+changing the Phase A source-key or subscription-construction signatures.
 
 ### 5.3 RFC status across phases
 
@@ -651,14 +747,15 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   equal.
 - **INV-2: collision safety.** Unequal logical keys remain unequal even when
   they feed identical bytes or a constant value into every `Hasher`.
-- **INV-3: source namespace.** For conforming `SubscriptionSource::id`
-  implementations that pass `self` to `SubscriptionId::new`, equal keys from
-  different concrete source types are different IDs. The constructor exposes no
-  caller-selected source namespace parameter.
+- **INV-3: source namespace.** `Subscription::new<Source>` constructs the ID
+  using `TypeId::of::<Source>()` and `Source::Key`; source implementations return
+  only the key and cannot select the source namespace. Equal keys from different
+  concrete source types are therefore different IDs by construction.
 - **INV-4: key type namespace.** Equal-looking keys of different concrete Rust
   types are different IDs.
-- **INV-5: hash consistency.** Equal IDs hash equally. Hash equality does not
-  imply ID equality.
+- **INV-5: hash consistency.** Assuming logical key and scope types obey the
+  Rust `Eq` / `Hash` laws, equal IDs hash equally. Hash equality does not imply
+  ID equality.
 - **INV-6: owned erasure.** IDs do not borrow non-`'static` source state.
 - **INV-7: public shape compatibility.** `CommandId` and `SubscriptionId` remain
   distinct public types even if they share internal machinery.
@@ -684,8 +781,10 @@ as `Partially Implemented (Phase A)` until both public phases ship.
 
 ### 6.3 Scope invariants
 
-- **INV-14: typed scope segments.** Scope segment type and value both
-  participate in equality.
+- **INV-14: typed and tagged scope segments.** Scope segment type and value both
+  participate in equality, and the framework's scope node kind is distinct from
+  every user local-key shape. Embedding the same values in an unscoped tuple or
+  struct cannot forge a scoped identity.
 - **INV-15: ordered nesting.** Reversing scope application reverses the path.
   The full identity is distinct exactly when the reversed structural segment
   sequence differs from the original; reversing two equal segments preserves
@@ -711,7 +810,7 @@ Phase A unit tests:
 
 - same source type, key type, and equal value compare equal;
 - unequal values compare unequal;
-- different concrete source types using `SubscriptionId::new(self, key)`
+- different concrete source types with the same associated `Key` type and value
   compare unequal;
 - different key types compare unequal;
 - two unequal values with constant `Hash` output have equal computed hashes
@@ -720,7 +819,8 @@ Phase A unit tests:
 - `Debug` reports type clues without requiring or exposing values;
 - a positive compile-time assertion requires
   `SubscriptionId: Send + Sync + UnwindSafe + RefUnwindSafe`; and
-- public API surface tracking records removal of `Copy`.
+- public API surface tracking records removal of `Copy`, removal of public ID
+  constructors, and addition of `SubscriptionSource::Key` / `key`.
 
 Phase A manager tests:
 
@@ -743,6 +843,10 @@ Phase B scope tests:
   constant value still start independent subscriptions;
 - the same constant-hash scope values keep command replacement, suppression,
   and explicit cancellation isolated;
+- an unscoped local key containing the same values as a scope and local key
+  (for example `(PaneId(1), RequestId::Load)`) is unequal to the framework
+  identity produced by `.scoped(PaneId(1))`, for both subscriptions and
+  commands;
 - scope type differences affect equality;
 - reversing two unequal scope segments changes identity, while reversing two
   equal segments preserves it;
@@ -772,9 +876,10 @@ The existing Criterion subscription benchmark remains the primary comparison:
   and
 - counts `1`, `8`, `64`, and `256`.
 
-The Phase A benchmark migration must construct IDs through the same public path
-as real sources so constructor allocation is not accidentally excluded. Record
-before/after distributions for time and, where practical, allocation counts.
+The Phase A benchmark migration must construct IDs through the same framework
+path as real sources (`Subscription::new<Source>` calling `Source::key`) so ID
+allocation is not accidentally excluded. Record before/after distributions for
+time and, where practical, allocation counts.
 The benchmark notes must distinguish:
 
 - ID construction cost;
@@ -782,10 +887,11 @@ The benchmark notes must distinguish:
 - structural hashing and equality in steady reconcile; and
 - task abort/spawn cost that dominates churn at larger counts.
 
-If allocation dominates, permitted follow-ups include reusing source-owned IDs,
-sharing erased keys, small-object optimization, or reducing manager clones.
-They must preserve every identity invariant and remain internal. Reintroducing a
-pre-hashed equality surrogate is not a permitted optimization.
+If allocation dominates, permitted follow-ups include source-owned shared key
+values, framework-side sharing of erased keys, small-object optimization, or
+reducing manager clones. They must preserve every identity invariant and remain
+internal. Reintroducing a pre-hashed equality surrogate is not a permitted
+optimization.
 
 Phase B adds a separate scoped steady-state case before its implementation is
 declared complete. It should compare empty, one-segment, and representative
@@ -812,7 +918,9 @@ trait ErasedKey: Send + Sync {
 A private `StructuralKey` can own `Arc<dyn ErasedKey>` and implement `Clone`,
 typed equality, hashing, and diagnostic type names once. `CommandId` can migrate
 to that helper without changing RFC 0003 behavior. `SubscriptionId` adds the
-`TypeId` inferred from its `&Source` witness around the same key primitive.
+`TypeId` selected by `Subscription::new<Source>` around the same key primitive.
+The private subscription-ID constructor accepts `Source::Key`; it is not
+reachable from downstream source implementations.
 
 A bare `Arc<dyn ErasedKey>` does not preserve `UnwindSafe` or `RefUnwindSafe`.
 The `SubscriptionId` representation must therefore wrap its private erased
@@ -844,19 +952,20 @@ hashes for equality.
 
 ### 8.3 Built-in source migration
 
-Each built-in source must identify its actual lifecycle inputs:
+Each built-in source must expose its actual lifecycle inputs as its associated
+`Key`:
 
 - `Timer`: interval value;
 - terminal and signal sources: the semantic configuration or signal kind;
 - WebSocket: connection inputs that currently participate in its `Hash`;
 - HTTP `Query`: client identity, response type through `Self`, and structural
   `QueryKey` inputs;
-- `MockSource`: one clone-stable per-instance token; and
+- `MockSource`: one clone-stable per-instance token stored by the source; and
 - benchmark/test sources: their caller-controlled logical key.
 
-Do not mechanically replace `of::<Self>(hasher.finish())` with
-`new(self, hasher.finish())` when that value is still a digest. That would use
-the new type without fixing the old semantics.
+Do not mechanically replace `id()` with `type Key = u64` and return
+`hasher.finish()` when that value is still a digest. That would use the new trait
+shape without fixing the old semantics.
 
 ### 8.4 Delivery sequence
 
@@ -864,7 +973,8 @@ Phase A:
 
 1. Add or extract the internal structural-key helper and keep `CommandId`
    contract tests green.
-2. Replace the `SubscriptionId` representation and constructor.
+2. Replace the `SubscriptionId` representation, make construction private, and
+   change `SubscriptionSource::id` to associated `Key` / `key`.
 3. Adapt `SubscriptionManager` to non-`Copy` IDs and add duplicate diagnostics.
 4. Migrate every built-in source, test, example, doctest, and benchmark to
    original logical keys.
@@ -882,7 +992,8 @@ Phase B:
 4. Pin scope-hash collision safety, modifier ordering (including mixed scoped
    cancels/root-global spawn metadata), and RFC 0003 batch compatibility.
 5. Add scoped command runtime tests and scoped benchmark cases.
-6. Document manual child composition and the per-effect batch limitation.
+6. Document manual child composition, the silent aliasing residual risk, the
+   modifier-order warning in method rustdoc, and the per-effect batch limitation.
 
 ## 9. Alternatives considered
 
@@ -904,9 +1015,17 @@ permits the necessary breaking change.
 Rejected. A caller-selected generic parameter is only a declared namespace; it
 does not guarantee the concrete `SubscriptionSource` type. Two unrelated source
 implementations could accidentally choose the same shared namespace and key.
-Taking `&Source` and requiring `SubscriptionSource::id` implementations to pass
-`self` lets the compiler infer the concrete source type in the supported API
-pattern.
+Framework-owned construction from `Source::Key` removes that choice entirely.
+
+### Infer the namespace from `SubscriptionId::new(&source, key)`
+
+Rejected after initially being selected. Passing `self` is the easiest and
+documented path, but a source implementation can still pass another
+`SubscriptionSource` value and silently choose its type namespace. This is a
+useful ergonomic guardrail, not a construction guarantee. Returning an
+associated `Key` and letting `Subscription::new<Source>` construct the ID makes
+the concrete source namespace a consequence of the type system instead of a
+trait convention.
 
 ### Widen the digest to 128 or 256 bits
 
