@@ -61,7 +61,7 @@ public-api = "0.52"
 # Exercises RFC 0003's pure keyed-command lifecycle state machine.
 proptest = "1"
 rustdoc-json = "0.9"
-rustdoc-types = "0.57"
+rustdoc-types = "0.60"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `test-util` (not part of `full`) provides paused virtual time for the idle
