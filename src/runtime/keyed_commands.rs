@@ -398,7 +398,10 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
             LifecycleDecision::NoChange => {}
             LifecycleDecision::KeepInFlight { stream } => drop(stream),
             LifecycleDecision::Start { token, stream } => {
-                debug_assert!(!self.entries.contains_key(&id));
+                debug_assert!(
+                    !self.entries.contains_key(&id),
+                    "entry should not already exist before starting a new run"
+                );
                 self.start_run(id, token, stream);
             }
             LifecycleDecision::ReplaceRunning { token, stream } => {
@@ -432,7 +435,10 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
             debug_assert!(false, "draining entry should exist before replacement");
             return;
         };
-        debug_assert!(matches!(entry.run, KeyRun::Draining { .. }));
+        debug_assert!(
+            matches!(entry.run, KeyRun::Draining { .. }),
+            "entry should be draining before replacement"
+        );
     }
 
     fn remove_entry(&mut self, id: &CommandId) {
@@ -445,8 +451,15 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
             debug_assert!(false, "running entry should exist before draining");
             return;
         };
-        debug_assert!(matches!(entry.run, KeyRun::Running { .. }));
-        debug_assert_eq!(entry.run.token(), token);
+        debug_assert!(
+            matches!(entry.run, KeyRun::Running { .. }),
+            "entry should be running before draining"
+        );
+        debug_assert_eq!(
+            entry.run.token(),
+            token,
+            "token should match the entry's current run before draining"
+        );
         entry.run = KeyRun::Draining { token };
         self.entries.insert(id, entry);
     }
