@@ -1,8 +1,6 @@
-// Focused local guard for integration tests that mutate the process-global
-// panic hook, per docs/testing.md "Process-Global Panic Hook Tests". Kept
-// separate because crate test support is not public API, and uses an async
-// mutex because integration tests may hold the guard across `.await` while a
-// spawned command panics.
+// Intentionally duplicated with `src/test_support/panic_hook.rs`. See
+// docs/testing.md "Why Test Helpers Are Duplicated Instead of Shared" and
+// "Process-Global Panic Hook Tests" for why, and how the two copies differ.
 
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};

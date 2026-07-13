@@ -10,10 +10,8 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::{DefaultGuard, Interest, set_default};
 use tracing::{Dispatch, Event, Level, Metadata, Subscriber};
 
-// Intentionally overlaps with `src/test_support/trace_recorder.rs`. A shared
-// workspace-only crate made publish/tarball behavior less intuitive for this
-// small helper, and a feature-gated public test API would add test invocation
-// constraints. Integration tests keep a local copy for now.
+// Intentionally duplicated with `src/test_support/trace_recorder.rs`. See
+// docs/testing.md "Why Test Helpers Are Duplicated Instead of Shared" for why.
 
 // `tracing`'s dispatcher registry and callsite interest cache are process-wide.
 // Serialize recorder install/drop cache rebuilds, and keep a no-op dispatcher

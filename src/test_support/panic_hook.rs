@@ -1,7 +1,6 @@
-// Intentionally duplicated with `tests/common/panic_hook.rs`. A shared
-// workspace-only crate made publish/tarball behavior less intuitive for this
-// small helper, and a feature-gated public test API would add test invocation
-// constraints. Unit and integration tests keep local copies for now.
+// Intentionally duplicated with `tests/common/panic_hook.rs`. See
+// docs/testing.md "Why Test Helpers Are Duplicated Instead of Shared" and
+// "Process-Global Panic Hook Tests" for why, and how the two copies differ.
 
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
