@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use public_api::PublicItem;
+use public_api::rustdoc_types::Id;
 use public_api::tokens::Token;
-use rustdoc_types::Id;
 
 fn build_public_api() -> public_api::PublicApi {
     let mut manifest_path = env!("CARGO_MANIFEST_DIR").to_owned();
