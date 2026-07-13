@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::command::{Action, CancelPolicy, CommandId};
 
-use super::keyed_commands::{KeyedCommands, ReceiverEvent};
+use super::keyed_commands::{KeyedCommands, KeyedPoll, ReceiverEvent};
 
 /// Input events consumed by the runtime's application loop.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -79,12 +79,10 @@ impl<Msg: Send + 'static> futures::Stream for AppInputs<Msg> {
             Poll::Pending => false,
         };
 
-        match Pin::new(&mut self.keyed).poll_next(cx) {
-            Poll::Ready(Some((_, event))) => Poll::Ready(Some(AppInput::Keyed(event))),
-            Poll::Ready(None) | Poll::Pending if shared_closed && self.keyed.is_empty() => {
-                Poll::Ready(None)
-            }
-            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        match self.keyed.poll_event(cx) {
+            KeyedPoll::Item(_, event) => Poll::Ready(Some(AppInput::Keyed(event))),
+            KeyedPoll::Quiescent if shared_closed => Poll::Ready(None),
+            KeyedPoll::PendingWithWakeSource | KeyedPoll::Quiescent => Poll::Pending,
         }
     }
 }
@@ -179,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_shared_channel_and_drained_keyed_entries_terminate_the_stream() {
+    async fn closed_shared_channel_and_same_poll_keyed_reconciliation_terminate_the_stream() {
         let (tx, rx) = mpsc::unbounded_channel::<i32>();
         let mut inputs = AppInputs::new(rx);
         inputs.spawn_keyed(
@@ -190,21 +188,11 @@ mod tests {
         drop(tx);
         yield_now().await;
 
-        let end = timeout(Duration::from_secs(1), async {
-            loop {
-                match inputs.next().await {
-                    Some(AppInput::Keyed(ReceiverEvent::Closed)) => {}
-                    Some(AppInput::Shared(_) | AppInput::Keyed(ReceiverEvent::Output(_))) => {
-                        return false;
-                    }
-                    None => return true,
-                }
-            }
-        })
-        .await
-        .expect("AppInputs should not hang after every sender closes");
+        let next = timeout(Duration::from_secs(1), inputs.next())
+            .await
+            .expect("AppInputs should not hang after every sender closes");
 
-        assert!(end);
+        assert_eq!(next, None);
     }
 
     #[tokio::test]

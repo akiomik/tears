@@ -360,41 +360,66 @@ Draining { token }         // task ended; receiver has buffered output
 `Draining` is non-empty by invariant. If the receiver is closed and empty, the
 state is `Absent`.
 
-Transitions:
+The production transition returns a closed decision type. Its shape is:
+
+```rust
+enum LifecycleDecision<Msg> {
+    NoChange,
+    KeepInFlight { stream: BoxStream<'static, Action<Msg>> },
+    Start { token: RunToken, stream: BoxStream<'static, Action<Msg>> },
+    ReplaceRunning { token: RunToken, stream: BoxStream<'static, Action<Msg>> },
+    ReplaceDraining { token: RunToken, stream: BoxStream<'static, Action<Msg>> },
+    AbortAndRemove,
+    Remove,
+    MarkDraining { token: RunToken },
+}
+```
+
+The transition table is therefore expressed in decisions, not in an
+independent product of a next state and boolean effects:
 
 ```text
-state     input                              next       effects
---------- ---------------------------------- ---------- -----------------------------
-Absent    Spawn(any policy)                  Running'   spawn task, insert entry
-Absent    Cancel                             Absent     no-op
-Absent    TaskExit(any)                      Absent     ignore
+state     input                              decision
+--------- ---------------------------------- -----------------------------------------
+Absent    Spawn(any policy)                  Start { token, stream }
+Absent    Cancel                             NoChange
+Absent    TaskExit(any)                      NoChange
 
-Running   Spawn(CancelInFlight)              Running'   drop entry, abort old,
-                                                         spawn successor
-Running   Spawn(KeepInFlight)                Running    drop new stream
-Running   Cancel                             Absent     drop entry, abort task
-Running   Output(sender open)                Running    deliver output
-Running   Output(sender_closed, buf > 0)     Draining   deliver output
-Running   Output(sender_closed, buf == 0)    Absent     deliver output, remove entry
-Running   ReceiverEvent::Closed              Absent     remove entry
-Running   TaskExit matching, buf > 0         Draining   task no longer abortable
-Running   TaskExit matching, buf == 0        Absent     remove entry
-Running   TaskExit stale                     Running    ignore
+Running   Spawn(CancelInFlight)              ReplaceRunning { token, stream }
+Running   Spawn(KeepInFlight)                KeepInFlight { stream }
+Running   Cancel                             AbortAndRemove
+Running   Output(sender open)                NoChange
+Running   Output(sender_closed, buf > 0)     MarkDraining { token }
+Running   Output(sender_closed, buf == 0)    Remove
+Running   ReceiverEvent::Closed              Remove
+Running   TaskExit matching, buf > 0         MarkDraining { token }
+Running   TaskExit matching, buf == 0        Remove
+Running   TaskExit stale                     NoChange
 
-Draining  Spawn(CancelInFlight)              Running'   drop entry, spawn successor
-Draining  Spawn(KeepInFlight)                Draining   drop new stream
-Draining  Cancel                             Absent     drop entry
-Draining  Output(buf > 0)                    Draining   deliver output
-Draining  Output(buf == 0)                   Absent     deliver output, remove entry
-Draining  ReceiverEvent::Closed              Absent     remove entry
-Draining  TaskExit matching                  Draining   ignore; task end already known
-Draining  TaskExit stale                     Draining   ignore
+Draining  Spawn(CancelInFlight)              ReplaceDraining { token, stream }
+Draining  Spawn(KeepInFlight)                KeepInFlight { stream }
+Draining  Cancel                             Remove
+Draining  Output(buf > 0)                    NoChange
+Draining  Output(buf == 0)                   Remove
+Draining  ReceiverEvent::Closed              Remove
+Draining  TaskExit matching                  NoChange
+Draining  TaskExit stale                     NoChange
 ```
 
 The transition function is total for task-exit inputs because late completions
 are normal under cancellation. Delivery inputs are generated only while a
 receiver is owned; property tests should still include stale and late `TaskExit`
 sequences across all states.
+
+Each decision variant fixes both the next logical state and the permitted
+physical action. For example, `ReplaceRunning` always removes the old receiver,
+aborts the old running task, and starts the supplied successor;
+`ReplaceDraining` removes the old receiver and starts the successor without an
+abort; `AbortAndRemove` cannot retain a receiver; and `MarkDraining` cannot
+remove one. There is no representation corresponding to arbitrary combinations
+such as “spawn without becoming `Running`” or “abort while retaining the same
+running entry.” The type therefore makes logical-state/physical-action
+contradictions unrepresentable.
 
 Before any `Spawn(policy)` decision, the manager reaps every completed keyed task
 currently available, then samples receiver facts once for the target id. Each
@@ -563,6 +588,44 @@ work, then returns to the outer `select!`, where `poll_next` registers real
 wakers. Keeping shared-first inside `AppInputs` prevents the wait path and batch
 drain from diverging.
 
+The blocking path does not interpret a keyed `Poll::Pending` through a separate
+emptiness query. `KeyedCommands::poll_event` reconciles completed tasks, polls
+the receiver merge, and returns a dedicated result:
+
+```rust
+enum KeyedPoll<Msg> {
+    Item(CommandId, ReceiverEvent<Msg>),
+    PendingWithWakeSource,
+    Quiescent,
+}
+```
+
+`Quiescent` means reconciliation has completed and no keyed entry remains.
+`PendingWithWakeSource` means at least one keyed receiver remains and was polled
+with the current context, so it registered the current waker with a channel that
+can wake after output or sender closure. An empty manager never returns
+`PendingWithWakeSource`.
+
+After checking shared input first, `AppInputs::poll_next` applies these rules:
+
+```text
+shared result   keyed result              AppInputs result
+--------------- ------------------------- -----------------------------
+Item(message)   not polled                Ready(Some(Shared(message)))
+open/pending    Item(event)               Ready(Some(Keyed(event)))
+closed          Item(event)               Ready(Some(Keyed(event)))
+open/pending    PendingWithWakeSource     Pending
+closed          PendingWithWakeSource     Pending
+open/pending    Quiescent                 Pending
+closed          Quiescent                 Ready(None)
+```
+
+The last row is decided in the same `AppInputs::poll_next` invocation in which
+keyed reconciliation reports `Quiescent`; it does not first return an unwakeable
+`Pending`. Consequently, every `Poll::Pending` returned by `AppInputs` is
+future-wakeable: either the open shared receiver or at least one keyed receiver
+has registered the current waker.
+
 No prefetching across `update` is allowed. This is part of the cancellation
 contract: if one message returns `Command::cancel(id)`, buffered keyed output for
 `id` that has not yet been pulled is dropped before the next pull. For keyed
@@ -729,6 +792,14 @@ struct TaskExit {
 new same-id task has started, so task exits mutate state only when `(id, token)`
 still matches the current `Running` entry. Stale exits are ignored.
 
+`KeyedCommands` is a dynamic manager, not a normally terminating `Stream`.
+Having no entries is a quiescent snapshot, not permanent termination: a later
+runtime command may insert a new keyed run. A conventional stream result cannot
+express both that reusable quiescence and pending keyed work without collapsing
+one of them into `Ready(None)` or `Pending`. The manager therefore exposes the
+dedicated `KeyedPoll` result from section 4.4 and leaves only `AppInputs` as the
+terminating application-input stream.
+
 `KeyedEntry<Msg>` implements `Stream<Item = ReceiverEvent<Msg>>` by delegating to
 `CommandReceiver`; `StreamMap` is only the polling merge. Policy decisions,
 delivery accounting, receiver removal, and task-exit reconciliation all go
@@ -738,6 +809,16 @@ implementation needs keyed mutable access that `StreamMap` does not expose, it
 may temporarily remove, update, and reinsert an entry, but that pattern must stay
 inside `KeyedCommands`; identity transitions return early without churning the
 `StreamMap`.
+
+The pure production transition returns `LifecycleDecision`; one transition
+applier matches that closed type exhaustively. `Start`, `ReplaceRunning`, and
+`ReplaceDraining` perform their corresponding task/receiver insertion paths;
+`AbortAndRemove`, `Remove`, and `MarkDraining` perform exactly the removal,
+abort, or state update encoded by the variant; `KeepInFlight` drops only the
+rejected incoming stream; and `NoChange` performs no `StreamMap`
+remove/reinsert. Adding a lifecycle action therefore requires updating both the
+closed decision type and this exhaustive match, rather than constructing a new
+combination of independent effect flags.
 
 ### 5.5 Spawning a Keyed Run
 
@@ -819,6 +900,14 @@ existing command-task shutdown guarantee.
   the shared message is returned first. The top-level event loop remains fair
   between app input, frame ticks, and quit signals, but this RFC does not provide
   bounded fairness between shared and keyed app inputs.
+- **INV-15: closed lifecycle action space.** Invalid lifecycle action
+  combinations are not representable. The production transition returns a
+  closed decision whose variant determines both the next logical state and the
+  exhaustive physical action applied by `KeyedCommands`.
+- **INV-16: pending is future-wakeable.** Every `Poll::Pending` returned by
+  `AppInputs` has registered the current waker with an open shared receiver or a
+  remaining keyed receiver. If shared input is closed and keyed reconciliation
+  reports `Quiescent`, the same poll returns `Poll::Ready(None)`.
 
 ## 7. Testing Strategy
 
@@ -840,19 +929,30 @@ White-box tests in `src/command.rs`:
 
 ### 7.2 Pure Lifecycle Property Tests
 
-Add `proptest` as a dev-dependency and test a pure model of the per-id state
-machine. The pure model uses abstract receiver facts (`sender_closed`, buffered
-count) and emits effects such as `Spawn`, `Abort`, and `DropReceiver`.
+Use `proptest` to call the same pure `lifecycle_transition` function used by
+production `KeyedCommands`. Generated sequences supply lifecycle states, spawn
+policies, run tokens, and abstract receiver facts (`sender_closed`, buffered
+count) directly to that production function and assert on its closed
+`LifecycleDecision` result.
+
+The property-test sequence driver may retain the current state and next token so
+it can feed the next generated event, but it must derive state changes from the
+production decision. It must not implement and test a separate pure transition
+model or a parallel state/effect table. Deterministic transition tests also
+exercise every decision variant so a variant cannot exist only for an
+unexplained applier-internal purpose.
 
 Properties:
 
 - at most one receiver is owned per id;
-- cancel is total and idempotent;
-- supersede and cancel emit `DropReceiver` exactly when the current state owns a
-  receiver; `Absent + Cancel` emits no effect;
+- cancel is total and idempotent: `Running` produces `AbortAndRemove`,
+  `Draining` produces `Remove`, and `Absent` produces `NoChange`;
+- `CancelInFlight` produces `Start`, `ReplaceRunning`, or `ReplaceDraining`
+  according to the reconciled state;
 - stale and late `TaskExit` inputs are accepted in every state and do not change
   current state unless they match the current `Running` token;
-- `KeepInFlight` on occupied state never emits `Spawn`;
+- `KeepInFlight` on occupied state produces `KeepInFlight`, retains the current
+  state, and never starts a successor;
 - delivering the last item of a sender-closed receiver transitions to `Absent`;
 - `Draining` is reachable only with buffered output.
 
@@ -882,6 +982,9 @@ Required coverage:
   shared-first rule as `poll_next` and never awaits keyed streams; an unkeyed
   message returning `Command::cancel(id)` prevents the next buffered keyed item
   for `id` in the same batch from being delivered.
+- **Poll liveness:** pending keyed work wakes after output or sender closure;
+  when shared input is closed and reconciliation removes the final keyed entry,
+  the same app-input poll returns `Ready(None)` rather than `Pending`.
 - **RFC 0004 forward integration:** cancelling a keyed command before its
   `.timeout(...)` deadline elapses suppresses the timeout message; superseding
   a keyed command during a retry's backoff delay suppresses that retry's final
@@ -961,15 +1064,17 @@ starts from those seams.
 2. Extend `RuntimeCommandParts` with `cancels` and `key`; extend `Command` with
    a `cancellation` field; update every constructor, `map`, `batch`, docs, and
    tests.
-3. Re-export `CommandId` and `CancelPolicy` from `crate::command`, `crate`, and
+3. Export `CommandId` and `CancelPolicy` only from the canonical
+   `crate::command` module; do not re-export them from the crate root or
    `prelude`.
-4. Add a runtime-internal keyed command manager, either in `src/runtime/core.rs`
-   or a new `src/runtime/command_lifecycle.rs` module.
+4. Add the runtime-internal keyed command manager in
+   `src/runtime/keyed_commands.rs`.
 5. Implement `CommandReceiver` so receiver closure is surfaced as
    `ReceiverEvent::Closed` instead of letting `StreamMap` silently remove keys.
 6. Extend `AppInputs` with `AppInput::Keyed` and route keyed receiver polling
    through the existing app-input mux.
-7. Add `proptest` as a dev-dependency for the pure lifecycle model.
+7. Add `proptest` as a dev-dependency and property-test the same pure lifecycle
+   transition function used by production.
 8. Add lifecycle property tests and runtime contract tests before widening the
    public docs.
 
