@@ -1,7 +1,7 @@
-use std::any::{Any, TypeId, type_name};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+
+use crate::structural_key::StructuralKey;
 
 /// Identifies one cancellable command-output lifecycle.
 ///
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// distinct command ids.
 #[derive(Clone)]
 pub struct CommandId {
-    inner: Arc<dyn ErasedCommandId>,
+    inner: StructuralKey,
 }
 
 impl CommandId {
@@ -20,7 +20,7 @@ impl CommandId {
         T: Eq + Hash + Send + Sync + 'static,
     {
         Self {
-            inner: Arc::new(TypedCommandId(value)),
+            inner: StructuralKey::new(value),
         }
     }
 }
@@ -36,8 +36,7 @@ impl fmt::Debug for CommandId {
 
 impl PartialEq for CommandId {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.erased_type_id() == other.inner.erased_type_id()
-            && self.inner.eq_erased(other.inner.as_ref())
+        self.inner == other.inner
     }
 }
 
@@ -45,46 +44,7 @@ impl Eq for CommandId {}
 
 impl Hash for CommandId {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.erased_type_id().hash(state);
-        self.inner.hash_erased(state);
-    }
-}
-
-trait ErasedCommandId: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn erased_type_id(&self) -> TypeId;
-    fn type_name(&self) -> &'static str;
-    fn eq_erased(&self, other: &dyn ErasedCommandId) -> bool;
-    fn hash_erased(&self, state: &mut dyn Hasher);
-}
-
-struct TypedCommandId<T>(T);
-
-impl<T> ErasedCommandId for TypedCommandId<T>
-where
-    T: Eq + Hash + Send + Sync + 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn erased_type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-
-    fn type_name(&self) -> &'static str {
-        type_name::<T>()
-    }
-
-    fn eq_erased(&self, other: &dyn ErasedCommandId) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .is_some_and(|other| self.0 == other.0)
-    }
-
-    fn hash_erased(&self, mut state: &mut dyn Hasher) {
-        self.0.hash(&mut state);
+        self.inner.hash(state);
     }
 }
 

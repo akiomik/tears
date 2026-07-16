@@ -96,6 +96,7 @@ pub mod command;
 pub(crate) mod panic;
 pub mod prelude;
 pub(crate) mod runtime;
+mod structural_key;
 pub mod subscription;
 
 // Re-export commonly used types
