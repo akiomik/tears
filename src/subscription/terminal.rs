@@ -3,13 +3,13 @@
 //! This module provides the [`TerminalEvents`] subscription source for handling
 //! terminal input events using crossterm.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::Hash;
 use std::io;
 
 use crossterm::event::{Event, EventStream};
 use futures::{StreamExt, stream, stream::BoxStream};
 
-use super::{SubscriptionId, SubscriptionSource};
+use super::SubscriptionSource;
 
 /// A subscription source for terminal events.
 ///
@@ -106,6 +106,7 @@ impl TerminalEvents {
 
 impl SubscriptionSource for TerminalEvents {
     type Output = Result<Event, io::Error>;
+    type Key = ();
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
         let stream = EventStream::new();
@@ -138,12 +139,7 @@ impl SubscriptionSource for TerminalEvents {
         .boxed()
     }
 
-    fn id(&self) -> SubscriptionId {
-        // Since TerminalEvents is a singleton (no parameters), use a constant ID
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        SubscriptionId::of::<Self>(hasher.finish())
-    }
+    fn key(&self) -> Self::Key {}
 }
 
 const fn trace_event_type(event: &Event) -> &'static str {
@@ -160,6 +156,7 @@ const fn trace_event_type(event: &Event) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Subscription;
 
     #[test]
     fn test_terminal_events_new() {
@@ -173,6 +170,6 @@ mod tests {
         let events2 = TerminalEvents::new();
 
         // Same subscription should have the same ID
-        assert_eq!(events1.id(), events2.id());
+        assert_eq!(Subscription::new(events1).id, Subscription::new(events2).id);
     }
 }

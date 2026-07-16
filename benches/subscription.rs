@@ -17,7 +17,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::stream::{self, StreamExt};
 use tears::subscription::BenchSubscriptionManager;
-use tears::{BoxStream, Subscription, SubscriptionId, SubscriptionSource};
+use tears::{BoxStream, Subscription, SubscriptionSource};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 
@@ -29,13 +29,14 @@ struct BenchSource {
 
 impl SubscriptionSource for BenchSource {
     type Output = ();
+    type Key = u64;
 
     fn stream(&self) -> BoxStream<'static, ()> {
         stream::pending().boxed()
     }
 
-    fn id(&self) -> SubscriptionId {
-        SubscriptionId::of::<Self>(self.id)
+    fn key(&self) -> Self::Key {
+        self.id
     }
 }
 

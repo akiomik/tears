@@ -456,7 +456,7 @@ mod tests {
 
     use crate::application::Application;
     use crate::command::{CancelPolicy, Command, CommandId};
-    use crate::subscription::{Subscription, SubscriptionId, SubscriptionSource};
+    use crate::subscription::{Subscription, SubscriptionSource};
     use crate::test_support::{TestApp, TestMessage, TraceRecorder, wait_until};
 
     fn frame_rate(value: u32) -> FrameRate {
@@ -1005,15 +1005,14 @@ mod tests {
 
         impl SubscriptionSource for ParkedSource {
             type Output = ();
+            type Key = ();
 
             fn stream(&self) -> BoxStream<'static, ()> {
                 self.spawns.fetch_add(1, Ordering::SeqCst);
                 stream::pending().boxed()
             }
 
-            fn id(&self) -> SubscriptionId {
-                SubscriptionId::of::<Self>(0)
-            }
+            fn key(&self) -> Self::Key {}
         }
 
         struct App {
@@ -1175,6 +1174,7 @@ mod tests {
 
         impl SubscriptionSource for OneshotSource {
             type Output = ();
+            type Key = ();
 
             fn stream(&self) -> BoxStream<'static, ()> {
                 self.counters.spawns.fetch_add(1, Ordering::SeqCst);
@@ -1193,10 +1193,9 @@ mod tests {
                 .boxed()
             }
 
-            fn id(&self) -> SubscriptionId {
+            fn key(&self) -> Self::Key {
                 // A constant ID: the set of IDs never changes across frames,
                 // which is exactly the case the removed hash cache skipped.
-                SubscriptionId::of::<Self>(0)
             }
         }
 

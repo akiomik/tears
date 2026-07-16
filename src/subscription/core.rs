@@ -5,7 +5,11 @@
 //! SubscriptionSource}` paths. See `runtime::frame_rate` for the same
 //! pattern applied to `Runtime`'s scheduling input.
 
-use std::any::TypeId;
+use std::any::{Any, TypeId, type_name};
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use futures::{StreamExt, stream::BoxStream};
 
@@ -54,8 +58,11 @@ impl<Msg: 'static> Subscription<Msg> {
     /// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")));
     /// ```
     #[must_use]
-    pub fn new(source: impl SubscriptionSource<Output = Msg> + 'static) -> Self {
-        let id = source.id();
+    pub fn new<Source>(source: Source) -> Self
+    where
+        Source: SubscriptionSource<Output = Msg> + 'static,
+    {
+        let id = SubscriptionId::from_source::<Source>(source.key());
 
         Self {
             id,
@@ -106,10 +113,9 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 /// # Example
 ///
 /// ```
-/// use tears::{SubscriptionSource, SubscriptionId};
+/// use tears::SubscriptionSource;
 /// use tears::BoxStream;
 /// use futures::{StreamExt, stream};
-/// use std::hash::{Hash, Hasher};
 ///
 /// struct MySubscription {
 ///     interval_ms: u64,
@@ -117,15 +123,14 @@ impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscriptio
 ///
 /// impl SubscriptionSource for MySubscription {
 ///     type Output = ();
+///     type Key = u64;
 ///
 ///     fn stream(&self) -> BoxStream<'static, Self::Output> {
 ///         stream::empty().boxed()
 ///     }
 ///
-///     fn id(&self) -> SubscriptionId {
-///         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-///         self.interval_ms.hash(&mut hasher);
-///         SubscriptionId::of::<Self>(hasher.finish())
+///     fn key(&self) -> Self::Key {
+///         self.interval_ms
 ///     }
 /// }
 /// ```
@@ -133,52 +138,227 @@ pub trait SubscriptionSource: Send {
     /// The type of messages this subscription produces.
     type Output;
 
+    /// The owned structural key for one subscription lifecycle.
+    ///
+    /// This key must be stable across equivalent evaluations of a source. A
+    /// changing key expresses a new lifecycle, causing the old subscription to
+    /// stop and a new one to start during reconciliation.
+    type Key: Eq + Hash + Send + Sync + 'static;
+
     /// Create the stream of messages for this subscription.
     fn stream(&self) -> BoxStream<'static, Self::Output>;
 
-    /// Get a unique identifier for this subscription.
+    /// Get the structural key for this subscription.
     ///
-    /// Subscriptions with the same ID are considered identical.
-    fn id(&self) -> SubscriptionId;
+    /// The framework combines this value with the concrete source type when it
+    /// constructs the opaque subscription identity.
+    fn key(&self) -> Self::Key;
 }
 
 /// A unique identifier for a subscription.
 ///
 /// Two subscriptions with the same ID are considered identical.
-/// The ID includes type information and a hash value to prevent collisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// IDs compare their concrete source type and original structural key. Hashing
+/// is used only for indexing and never makes unequal keys equal.
 pub struct SubscriptionId {
-    pub(super) type_id: TypeId,
-    hash: u64,
+    pub(super) source_type_id: TypeId,
+    source_type_name: &'static str,
+    key: AssertUnwindSafe<Arc<dyn ErasedSubscriptionKey>>,
+}
+
+impl Clone for SubscriptionId {
+    fn clone(&self) -> Self {
+        Self {
+            source_type_id: self.source_type_id,
+            source_type_name: self.source_type_name,
+            key: AssertUnwindSafe(self.key.0.clone()),
+        }
+    }
 }
 
 impl SubscriptionId {
-    /// Create a subscription ID from a type and a hash value.
-    ///
-    /// Typically used when implementing [`SubscriptionSource::id`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tears::SubscriptionId;
-    /// use std::hash::{Hash, Hasher};
-    /// use std::collections::hash_map::DefaultHasher;
-    ///
-    /// struct MySubscription { interval_ms: u64 }
-    ///
-    /// impl MySubscription {
-    ///     fn compute_id(&self) -> SubscriptionId {
-    ///         let mut hasher = DefaultHasher::new();
-    ///         self.interval_ms.hash(&mut hasher);
-    ///         SubscriptionId::of::<Self>(hasher.finish())
-    ///     }
-    /// }
-    /// ```
-    #[must_use]
-    pub fn of<T: 'static>(hash: u64) -> Self {
+    fn from_source<Source>(key: Source::Key) -> Self
+    where
+        Source: SubscriptionSource + 'static,
+    {
         Self {
-            type_id: TypeId::of::<T>(),
-            hash,
+            source_type_id: TypeId::of::<Source>(),
+            source_type_name: type_name::<Source>(),
+            key: AssertUnwindSafe(Arc::new(TypedSubscriptionKey(key))),
         }
+    }
+}
+
+impl fmt::Debug for SubscriptionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubscriptionId")
+            .field("source", &self.source_type_name)
+            .field("key", &self.key.0.type_name())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for SubscriptionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_type_id == other.source_type_id
+            && self.key.0.erased_type_id() == other.key.0.erased_type_id()
+            && self.key.0.eq_erased(other.key.0.as_ref())
+    }
+}
+
+impl Eq for SubscriptionId {}
+
+impl Hash for SubscriptionId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.source_type_id.hash(state);
+        self.key.0.erased_type_id().hash(state);
+        self.key.0.hash_erased(state);
+    }
+}
+
+trait ErasedSubscriptionKey: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn erased_type_id(&self) -> TypeId;
+    fn type_name(&self) -> &'static str;
+    fn eq_erased(&self, other: &dyn ErasedSubscriptionKey) -> bool;
+    fn hash_erased(&self, state: &mut dyn Hasher);
+}
+
+struct TypedSubscriptionKey<T>(T);
+
+impl<T> ErasedSubscriptionKey for TypedSubscriptionKey<T>
+where
+    T: Eq + Hash + Send + Sync + 'static,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn erased_type_id(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    fn type_name(&self) -> &'static str {
+        type_name::<T>()
+    }
+
+    fn eq_erased(&self, other: &dyn ErasedSubscriptionKey) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self.0 == other.0)
+    }
+
+    fn hash_erased(&self, mut state: &mut dyn Hasher) {
+        self.0.hash(&mut state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::panic::{RefUnwindSafe, UnwindSafe};
+
+    use futures::{StreamExt, stream};
+
+    struct SourceA(u8);
+    struct SourceB(u8);
+
+    impl SubscriptionSource for SourceA {
+        type Output = ();
+        type Key = u8;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            stream::empty().boxed()
+        }
+
+        fn key(&self) -> Self::Key {
+            self.0
+        }
+    }
+
+    impl SubscriptionSource for SourceB {
+        type Output = ();
+        type Key = u8;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            stream::empty().boxed()
+        }
+
+        fn key(&self) -> Self::Key {
+            self.0
+        }
+    }
+
+    #[derive(Eq, PartialEq)]
+    struct Collision(u8);
+
+    impl Hash for Collision {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            0_u8.hash(state);
+        }
+    }
+
+    struct CollisionSource(Collision);
+
+    impl SubscriptionSource for CollisionSource {
+        type Output = ();
+        type Key = Collision;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            stream::empty().boxed()
+        }
+
+        fn key(&self) -> Self::Key {
+            Collision(self.0.0)
+        }
+    }
+
+    fn hash(id: &SubscriptionId) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn subscription_ids_are_structural_and_source_namespaced() {
+        let first = Subscription::new(SourceA(1)).id;
+        let equal = Subscription::new(SourceA(1)).id;
+        let different_key = Subscription::new(SourceA(2)).id;
+        let different_source = Subscription::new(SourceB(1)).id;
+
+        assert_eq!(first, equal);
+        assert_ne!(first, different_key);
+        assert_ne!(first, different_source);
+        assert_eq!(hash(&first), hash(&equal));
+        assert_eq!(first, first.clone());
+    }
+
+    #[test]
+    fn hash_collisions_do_not_make_subscription_ids_equal() {
+        let first = Subscription::new(CollisionSource(Collision(1))).id;
+        let second = Subscription::new(CollisionSource(Collision(2))).id;
+
+        assert_eq!(hash(&first), hash(&second));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn debug_only_reports_type_names() {
+        let first = format!("{:?}", Subscription::new(SourceA(1)).id);
+        let second = format!("{:?}", Subscription::new(SourceA(2)).id);
+
+        assert_eq!(first, second);
+        assert!(first.contains("SourceA"));
+        assert!(!first.contains('1'));
+    }
+
+    #[test]
+    fn subscription_id_preserves_marker_traits() {
+        fn assert_traits<T: Send + Sync + UnwindSafe + RefUnwindSafe>() {}
+        assert_traits::<SubscriptionId>();
     }
 }

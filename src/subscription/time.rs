@@ -3,7 +3,7 @@
 //! This module provides the [`Timer`] subscription source for creating
 //! time-based events in your application.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use tokio::time::MissedTickBehavior;
 use tokio::time::interval;
 use tokio_stream::wrappers::IntervalStream;
 
-use super::{SubscriptionId, SubscriptionSource};
+use super::SubscriptionSource;
 
 /// Events produced by the [`Timer`] subscription.
 #[derive(Debug, Clone)]
@@ -90,6 +90,7 @@ impl Timer {
 
 impl SubscriptionSource for Timer {
     type Output = TimerEvent;
+    type Key = NonZeroU64;
 
     fn stream(&self) -> BoxStream<'static, TimerEvent> {
         // NOTE: Using Skip behavior to drop missed ticks rather than trying to catch up.
@@ -110,10 +111,8 @@ impl SubscriptionSource for Timer {
             .boxed()
     }
 
-    fn id(&self) -> SubscriptionId {
-        let mut hasher = DefaultHasher::new();
-        self.interval_ms.hash(&mut hasher);
-        SubscriptionId::of::<Self>(hasher.finish())
+    fn key(&self) -> Self::Key {
+        self.interval_ms
     }
 }
 
@@ -126,6 +125,7 @@ impl Hash for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hash::DefaultHasher;
 
     use tokio::time::{Duration, Instant, timeout};
 
@@ -146,7 +146,7 @@ mod tests {
         let timer2 = timer(1000);
 
         // Same configuration should produce the same ID
-        assert_eq!(timer1.id(), timer2.id());
+        assert_eq!(timer1.key(), timer2.key());
     }
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
         let timer2 = timer(2000);
 
         // Different intervals should produce different IDs
-        assert_ne!(timer1.id(), timer2.id());
+        assert_ne!(timer1.key(), timer2.key());
     }
 
     #[test]

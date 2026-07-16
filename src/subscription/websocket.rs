@@ -50,7 +50,7 @@
 //! tears = { version = "0.9", features = ["ws", "native-tls"] }
 //! ```
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::Hash;
 
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use futures::{SinkExt as _, StreamExt as _, stream};
@@ -60,7 +60,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use super::{SubscriptionId, SubscriptionSource};
+use super::SubscriptionSource;
 
 /// Commands that can be sent to the WebSocket connection.
 #[derive(Debug, Clone)]
@@ -233,6 +233,7 @@ enum WsStreamState {
 
 impl SubscriptionSource for WebSocket {
     type Output = WebSocketMessage;
+    type Key = String;
 
     #[allow(clippy::too_many_lines)]
     fn stream(&self) -> BoxStream<'static, WebSocketMessage> {
@@ -420,10 +421,8 @@ impl SubscriptionSource for WebSocket {
         .boxed()
     }
 
-    fn id(&self) -> SubscriptionId {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        SubscriptionId::of::<Self>(hasher.finish())
+    fn key(&self) -> Self::Key {
+        self.url.clone()
     }
 }
 
@@ -486,7 +485,7 @@ mod tests {
         let ws2 = WebSocket::new("wss://example.com");
 
         // Same configuration should produce the same ID
-        assert_eq!(ws1.id(), ws2.id());
+        assert_eq!(ws1.key(), ws2.key());
     }
 
     #[test]
@@ -495,7 +494,7 @@ mod tests {
         let ws2 = WebSocket::new("wss://different.com");
 
         // Different urls should produce different IDs
-        assert_ne!(ws1.id(), ws2.id());
+        assert_ne!(ws1.key(), ws2.key());
     }
 
     #[test]

@@ -6,16 +6,13 @@
 
 #[cfg(unix)]
 mod unix_signal {
-    use std::{
-        hash::{DefaultHasher, Hash, Hasher},
-        io,
-    };
+    use std::{hash::Hash, io};
 
     use futures::stream::BoxStream;
     use futures::{StreamExt as _, stream};
     use tokio::signal::unix::{Signal as TokioSignal, SignalKind, signal};
 
-    use crate::subscription::{SubscriptionId, SubscriptionSource};
+    use crate::subscription::SubscriptionSource;
 
     /// A subscription source for Unix signals.
     ///
@@ -114,6 +111,7 @@ mod unix_signal {
 
     impl SubscriptionSource for Signal {
         type Output = Result<(), io::Error>;
+        type Key = SignalKind;
 
         fn stream(&self) -> BoxStream<'static, Self::Output> {
             let kind = self.kind;
@@ -169,10 +167,8 @@ mod unix_signal {
             .boxed()
         }
 
-        fn id(&self) -> SubscriptionId {
-            let mut hasher = DefaultHasher::new();
-            self.hash(&mut hasher);
-            SubscriptionId::of::<Self>(hasher.finish())
+        fn key(&self) -> Self::Key {
+            self.kind
         }
     }
 
@@ -192,7 +188,7 @@ mod unix_signal {
             let sig2 = Signal::new(SignalKind::interrupt());
 
             // Same signal kind should produce the same ID
-            assert_eq!(sig1.id(), sig2.id());
+            assert_eq!(sig1.key(), sig2.key());
         }
 
         #[test]
@@ -201,7 +197,7 @@ mod unix_signal {
             let sig2 = Signal::new(SignalKind::terminate());
 
             // Different signal kinds should produce different IDs
-            assert_ne!(sig1.id(), sig2.id());
+            assert_ne!(sig1.key(), sig2.key());
         }
     }
 }
@@ -222,7 +218,7 @@ mod windows_signal {
         CtrlBreak as TokioCtrlBreak, CtrlC as TokioCtrlC, ctrl_break, ctrl_c,
     };
 
-    use crate::subscription::{SubscriptionId, SubscriptionSource};
+    use crate::subscription::SubscriptionSource;
 
     /// A subscription source for Windows Ctrl+C events.
     ///
@@ -284,6 +280,7 @@ mod windows_signal {
 
     impl SubscriptionSource for CtrlC {
         type Output = Result<(), io::Error>;
+        type Key = ();
 
         fn stream(&self) -> BoxStream<'static, Self::Output> {
             // Create a stream that yields () each time Ctrl+C is pressed
@@ -337,11 +334,7 @@ mod windows_signal {
             .boxed()
         }
 
-        fn id(&self) -> SubscriptionId {
-            let mut hasher = DefaultHasher::new();
-            self.hash(&mut hasher);
-            SubscriptionId::of::<Self>(hasher.finish())
-        }
+        fn key(&self) -> Self::Key {}
     }
 
     /// A subscription source for Windows Ctrl+Break events.
@@ -404,6 +397,7 @@ mod windows_signal {
 
     impl SubscriptionSource for CtrlBreak {
         type Output = Result<(), io::Error>;
+        type Key = ();
 
         fn stream(&self) -> BoxStream<'static, Self::Output> {
             // Create a stream that yields () each time Ctrl+Break is pressed
@@ -457,11 +451,7 @@ mod windows_signal {
             .boxed()
         }
 
-        fn id(&self) -> SubscriptionId {
-            let mut hasher = DefaultHasher::new();
-            self.hash(&mut hasher);
-            SubscriptionId::of::<Self>(hasher.finish())
-        }
+        fn key(&self) -> Self::Key {}
     }
 
     #[cfg(test)]
@@ -474,7 +464,7 @@ mod windows_signal {
             let ctrl_c2 = CtrlC::new();
 
             // Same subscription should have the same ID
-            assert_eq!(ctrl_c1.id(), ctrl_c2.id());
+            assert_eq!(ctrl_c1.key(), ctrl_c2.key());
         }
 
         #[test]
@@ -483,7 +473,7 @@ mod windows_signal {
             let ctrl_break2 = CtrlBreak::new();
 
             // Same subscription should have the same ID
-            assert_eq!(ctrl_break1.id(), ctrl_break2.id());
+            assert_eq!(ctrl_break1.key(), ctrl_break2.key());
         }
 
         #[test]
@@ -492,7 +482,7 @@ mod windows_signal {
             let ctrl_break = CtrlBreak::new();
 
             // Different signal types should have different IDs
-            assert_ne!(ctrl_c.id(), ctrl_break.id());
+            assert_eq!(ctrl_c.key(), ctrl_break.key());
         }
     }
 }

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Subscription identity is now structural and collision-safe
+  - `SubscriptionSource::id() -> SubscriptionId` is replaced by an associated
+    `type Key` and `key() -> Self::Key`; return the owned logical key instead
+    of a precomputed hash digest
+  - `Subscription::new(source)` now combines that key with the concrete source
+    type, and `SubscriptionId::of::<T>(u64)` is removed
+  - `SubscriptionId` is `Clone` but no longer `Copy`; it remains `Send`,
+    `Sync`, `UnwindSafe`, and `RefUnwindSafe`
+  - Duplicate desired subscriptions still keep the first declaration and now
+    emit a warning under the `tears::subscription` tracing target
 - **Breaking:** Raised MSRV to Rust 1.88.0 (from 1.86.0)
   - Required to pull in `time >=0.3.47`, which resolves RUSTSEC-2026-0009
     (denial of service via stack exhaustion) in the `time` crate pulled in

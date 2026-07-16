@@ -1,6 +1,6 @@
 # RFC 0005: Structural Lifecycle Identity and Composition Scopes
 
-- Status: Accepted
+- Status: Partially Implemented (Phase A); Phase B pending
 - Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive)
 - Scope: collision-safe subscription identity and hierarchical identity
   namespacing for composed command and subscription lifecycles
