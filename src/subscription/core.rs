@@ -5,13 +5,14 @@
 //! SubscriptionSource}` paths. See `runtime::frame_rate` for the same
 //! pattern applied to `Runtime`'s scheduling input.
 
-use std::any::{Any, TypeId, type_name};
+use std::any::{TypeId, type_name};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 
 use futures::{StreamExt, stream::BoxStream};
+
+use crate::structural_key::StructuralKey;
 
 /// A subscription represents an ongoing source of messages.
 ///
@@ -172,7 +173,7 @@ pub trait SubscriptionSource: Send {
 pub struct SubscriptionId {
     pub(super) source_type_id: TypeId,
     source_type_name: &'static str,
-    key: AssertUnwindSafe<Arc<dyn ErasedSubscriptionKey>>,
+    key: AssertUnwindSafe<StructuralKey>,
 }
 
 impl Clone for SubscriptionId {
@@ -193,7 +194,7 @@ impl SubscriptionId {
         Self {
             source_type_id: TypeId::of::<Source>(),
             source_type_name: type_name::<Source>(),
-            key: AssertUnwindSafe(Arc::new(TypedSubscriptionKey(key))),
+            key: AssertUnwindSafe(StructuralKey::new(key)),
         }
     }
 }
@@ -210,9 +211,9 @@ impl fmt::Debug for SubscriptionId {
 
 impl PartialEq for SubscriptionId {
     fn eq(&self, other: &Self) -> bool {
-        self.source_type_id == other.source_type_id
-            && self.key.0.erased_type_id() == other.key.0.erased_type_id()
-            && self.key.0.eq_erased(other.key.0.as_ref())
+        // One concrete source type has exactly one associated `Key` type, so
+        // the source namespace already fixes the erased key type.
+        self.source_type_id == other.source_type_id && self.key.0.value_eq(&other.key.0)
     }
 }
 
@@ -220,47 +221,10 @@ impl Eq for SubscriptionId {}
 
 impl Hash for SubscriptionId {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the source namespace once; its associated `Key` type does not
+        // need a second type namespace in this identity.
         self.source_type_id.hash(state);
-        self.key.0.erased_type_id().hash(state);
-        self.key.0.hash_erased(state);
-    }
-}
-
-trait ErasedSubscriptionKey: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn erased_type_id(&self) -> TypeId;
-    fn type_name(&self) -> &'static str;
-    fn eq_erased(&self, other: &dyn ErasedSubscriptionKey) -> bool;
-    fn hash_erased(&self, state: &mut dyn Hasher);
-}
-
-struct TypedSubscriptionKey<T>(T);
-
-impl<T> ErasedSubscriptionKey for TypedSubscriptionKey<T>
-where
-    T: Eq + Hash + Send + Sync + 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn erased_type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-
-    fn type_name(&self) -> &'static str {
-        type_name::<T>()
-    }
-
-    fn eq_erased(&self, other: &dyn ErasedSubscriptionKey) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .is_some_and(|other| self.0 == other.0)
-    }
-
-    fn hash_erased(&self, mut state: &mut dyn Hasher) {
-        self.0.hash(&mut state);
+        self.key.0.hash_value(state);
     }
 }
 
