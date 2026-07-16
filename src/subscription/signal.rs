@@ -207,10 +207,7 @@ pub use unix_signal::Signal;
 
 #[cfg(windows)]
 mod windows_signal {
-    use std::{
-        hash::{DefaultHasher, Hash, Hasher},
-        io,
-    };
+    use std::io;
 
     use futures::StreamExt as _;
     use futures::stream::{self, BoxStream};
@@ -457,6 +454,7 @@ mod windows_signal {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::subscription::Subscription;
 
         #[test]
         fn test_ctrl_c_id_consistency() {
@@ -464,7 +462,7 @@ mod windows_signal {
             let ctrl_c2 = CtrlC::new();
 
             // Same subscription should have the same ID
-            assert_eq!(ctrl_c1.key(), ctrl_c2.key());
+            assert_eq!(Subscription::new(ctrl_c1).id, Subscription::new(ctrl_c2).id);
         }
 
         #[test]
@@ -473,7 +471,10 @@ mod windows_signal {
             let ctrl_break2 = CtrlBreak::new();
 
             // Same subscription should have the same ID
-            assert_eq!(ctrl_break1.key(), ctrl_break2.key());
+            assert_eq!(
+                Subscription::new(ctrl_break1).id,
+                Subscription::new(ctrl_break2).id
+            );
         }
 
         #[test]
@@ -482,7 +483,10 @@ mod windows_signal {
             let ctrl_break = CtrlBreak::new();
 
             // Different signal types should have different IDs
-            assert_eq!(ctrl_c.key(), ctrl_break.key());
+            assert_ne!(
+                Subscription::new(ctrl_c).id,
+                Subscription::new(ctrl_break).id
+            );
         }
     }
 }

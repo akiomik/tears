@@ -148,10 +148,18 @@ pub trait SubscriptionSource: Send {
     /// Create the stream of messages for this subscription.
     fn stream(&self) -> BoxStream<'static, Self::Output>;
 
-    /// Get the structural key for this subscription.
+    /// Get the owned structural key for this subscription.
     ///
     /// The framework combines this value with the concrete source type when it
     /// constructs the opaque subscription identity.
+    ///
+    /// This method must return equal keys for the same logical source identity
+    /// across calls, including when fresh source values are constructed by
+    /// successive [`Application::subscriptions`](crate::Application::subscriptions)
+    /// evaluations. A per-instance source must generate its instance token
+    /// once, store it, and return the stored token here. Generating a fresh key
+    /// on each evaluation aborts and respawns the subscription during
+    /// reconciliation.
     fn key(&self) -> Self::Key;
 }
 

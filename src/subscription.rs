@@ -333,7 +333,7 @@ mod tests {
     use super::*;
 
     use std::hash::{Hash, Hasher};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
 
@@ -358,6 +358,96 @@ mod tests {
         }
 
         fn key(&self) -> Self::Key {}
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    struct ManagerCollisionKey(u8);
+
+    impl Hash for ManagerCollisionKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            0_u8.hash(state);
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleProbe {
+        starts: AtomicUsize,
+        drops: AtomicUsize,
+    }
+
+    struct StreamDropProbe(Arc<LifecycleProbe>);
+
+    impl Drop for StreamDropProbe {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProbedStream {
+        Pending,
+        Once(i32),
+    }
+
+    #[derive(Clone)]
+    struct ProbedCollidingSource {
+        key: ManagerCollisionKey,
+        stream: ProbedStream,
+        probe: Arc<LifecycleProbe>,
+    }
+
+    impl ProbedCollidingSource {
+        fn pending(key: u8) -> Self {
+            Self {
+                key: ManagerCollisionKey(key),
+                stream: ProbedStream::Pending,
+                probe: Arc::new(LifecycleProbe::default()),
+            }
+        }
+
+        fn once(key: u8, value: i32) -> Self {
+            Self {
+                key: ManagerCollisionKey(key),
+                stream: ProbedStream::Once(value),
+                probe: Arc::new(LifecycleProbe::default()),
+            }
+        }
+
+        fn restarted_with(&self, value: i32) -> Self {
+            Self {
+                key: self.key,
+                stream: ProbedStream::Once(value),
+                probe: self.probe.clone(),
+            }
+        }
+    }
+
+    impl SubscriptionSource for ProbedCollidingSource {
+        type Output = i32;
+        type Key = ManagerCollisionKey;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            self.probe.starts.fetch_add(1, Ordering::SeqCst);
+            let drop_probe = StreamDropProbe(self.probe.clone());
+
+            match self.stream {
+                ProbedStream::Pending => stream::pending()
+                    .map(move |value| {
+                        let _ = &drop_probe;
+                        value
+                    })
+                    .boxed(),
+                ProbedStream::Once(value) => stream::once(async move {
+                    let _drop_probe = drop_probe;
+                    value
+                })
+                .boxed(),
+            }
+        }
+
+        fn key(&self) -> Self::Key {
+            self.key
+        }
     }
 
     async fn assert_completed_oneshot_subscription_restarts() -> Result<()> {
@@ -770,6 +860,76 @@ mod tests {
             recorder.event_count(),
             0,
             "hash collisions are not duplicates"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removing_one_hash_colliding_subscription_aborts_only_its_stream() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let first = ProbedCollidingSource::pending(1);
+        let second = ProbedCollidingSource::pending(2);
+
+        manager.update(vec![
+            Subscription::new(first.clone()),
+            Subscription::new(second.clone()),
+        ]);
+        assert_eq!(first.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(second.probe.starts.load(Ordering::SeqCst), 1);
+
+        manager.update(vec![Subscription::new(second.clone())]);
+
+        wait_until(
+            || first.probe.drops.load(Ordering::SeqCst) == 1,
+            "removed colliding stream should be dropped after abort",
+        )
+        .await;
+        assert_eq!(second.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(second.probe.drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_hash_colliding_subscription_restarts_without_replacing_the_other()
+    -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let completed = ProbedCollidingSource::once(1, 10);
+        let continuing = ProbedCollidingSource::pending(2);
+        let completed_subscription = Subscription::new(completed.clone());
+        let completed_id = completed_subscription.id.clone();
+
+        manager.update(vec![
+            completed_subscription,
+            Subscription::new(continuing.clone()),
+        ]);
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(10)
+        );
+        wait_until(
+            || {
+                manager
+                    .running
+                    .get(&completed_id)
+                    .is_some_and(|running| running.handle.is_finished())
+            },
+            "colliding one-shot subscription should finish before restart",
+        )
+        .await;
+
+        manager.update(vec![
+            Subscription::new(completed.restarted_with(11)),
+            Subscription::new(continuing.clone()),
+        ]);
+
+        assert_eq!(completed.probe.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(continuing.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(continuing.probe.drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(11)
         );
 
         Ok(())

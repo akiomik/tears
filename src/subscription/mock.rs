@@ -139,6 +139,8 @@ impl<T: Clone + 'static> MockSource<T> {
     ///
     /// # Panics
     ///
+    /// Panics if `capacity` is zero.
+    ///
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);

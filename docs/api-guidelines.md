@@ -65,13 +65,13 @@ directly.
 
 A second, narrower test covers the extension contract behind a skeleton
 item. Every `Subscription` is built (via `From`) from an implementation of
-`SubscriptionSource`, whose `id()` method returns a `SubscriptionId` —
-together they are the single general mechanism the subscription system is
-built on, not one feature among several. The dividing question: is the
-item the one contract all implementations satisfy (root-eligible), or one
-implementation among several? `Timer`, `WebSocket`, and `http::Query` are
-implementations — each one is still just one option, however common, so
-none of them get promoted.
+`SubscriptionSource`, whose associated `Key` and `key()` method let the
+framework construct a `SubscriptionId` — together they are the single general
+mechanism the subscription system is built on, not one feature among several.
+The dividing question: is the item the one contract all implementations satisfy
+(root-eligible), or one implementation among several? `Timer`, `WebSocket`, and
+`http::Query` are implementations — each one is still just one option, however
+common, so none of them get promoted.
 
 An item that fails both tests does **not** need root promotion just
 because it is public: it stays at its domain path

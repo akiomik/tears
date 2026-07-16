@@ -19,6 +19,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Sync`, `UnwindSafe`, and `RefUnwindSafe`
   - Duplicate desired subscriptions still keep the first declaration and now
     emit a warning under the `tears::subscription` tracing target
+
+  Before:
+
+  ```rust
+  impl SubscriptionSource for WatchSource {
+      type Output = WatchEvent;
+
+      fn id(&self) -> SubscriptionId {
+          let mut hasher = DefaultHasher::new();
+          self.path.hash(&mut hasher);
+          SubscriptionId::of::<Self>(hasher.finish())
+      }
+
+      // ...
+  }
+  ```
+
+  After, return the original logical key and let `Subscription::new` construct
+  the ID:
+
+  ```rust
+  impl SubscriptionSource for WatchSource {
+      type Output = WatchEvent;
+      type Key = PathBuf;
+
+      fn key(&self) -> Self::Key {
+          self.path.clone()
+      }
+
+      // ...
+  }
+  ```
 - **Breaking:** Raised MSRV to Rust 1.88.0 (from 1.86.0)
   - Required to pull in `time >=0.3.47`, which resolves RUSTSEC-2026-0009
     (denial of service via stack exhaustion) in the `time` crate pulled in
