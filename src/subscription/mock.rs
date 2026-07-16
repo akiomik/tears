@@ -106,17 +106,16 @@
 //! assert_eq!(app.subscriptions().len(), 0);
 //! ```
 
-use std::any::type_name;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::BoxStream;
-use crate::subscription::{SubscriptionId, SubscriptionSource};
+use crate::subscription::SubscriptionSource;
+
+static NEXT_MOCK_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A mock subscription source that emits values on demand.
 ///
@@ -128,7 +127,7 @@ use crate::subscription::{SubscriptionId, SubscriptionSource};
 #[derive(Debug, Clone)]
 pub struct MockSource<T: Clone> {
     sender: broadcast::Sender<T>,
-    id: SubscriptionId,
+    key: u64,
 }
 
 impl<T: Clone + 'static> MockSource<T> {
@@ -140,23 +139,14 @@ impl<T: Clone + 'static> MockSource<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the system time is before [`std::time::UNIX_EPOCH`] (should never happen on modern systems).
+    /// Panics if `capacity` is zero.
+    ///
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        // Use a random ID for each instance
-        let mut hasher = DefaultHasher::new();
-        // Use current timestamp + type name for uniqueness
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time before UNIX_EPOCH")
-            .as_nanos()
-            .hash(&mut hasher);
-        type_name::<T>().hash(&mut hasher);
-
         let (tx, _rx) = broadcast::channel(capacity);
         Self {
             sender: tx,
-            id: SubscriptionId::of::<Self>(hasher.finish()),
+            key: NEXT_MOCK_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -190,14 +180,15 @@ impl<T: Clone + 'static> Default for MockSource<T> {
 
 impl<T: Clone + Send + 'static> SubscriptionSource for MockSource<T> {
     type Output = T;
+    type Key = u64;
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
         let rx = self.sender.subscribe();
         Box::pin(BroadcastStream::new(rx).filter_map(|result| async move { result.ok() }))
     }
 
-    fn id(&self) -> SubscriptionId {
-        self.id
+    fn key(&self) -> Self::Key {
+        self.key
     }
 }
 

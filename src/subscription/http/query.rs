@@ -74,7 +74,7 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use thiserror::Error;
 
-use crate::subscription::{SubscriptionId, SubscriptionSource};
+use crate::subscription::SubscriptionSource;
 
 use super::cell::{AnyCell, Cell, CellSubscription};
 use super::config::QueryConfig;
@@ -398,6 +398,7 @@ where
     V: Clone + Send + Sync + 'static,
 {
     type Output = QueryResult<V>;
+    type Key = (u64, QueryKey);
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
         let key = self.key.clone();
@@ -473,10 +474,8 @@ where
         .boxed()
     }
 
-    fn id(&self) -> SubscriptionId {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        SubscriptionId::of::<Self>(hasher.finish())
+    fn key(&self) -> Self::Key {
+        (self.client.client_id, self.key.clone())
     }
 }
 
@@ -1136,7 +1135,7 @@ mod tests {
         );
 
         // Same key should produce the same ID
-        assert_eq!(query1.id(), query2.id());
+        assert_eq!(query1.key(), query2.key());
     }
 
     #[test]
@@ -1156,7 +1155,7 @@ mod tests {
         );
 
         // Different keys should produce different IDs
-        assert_ne!(query1.id(), query2.id());
+        assert_ne!(query1.key(), query2.key());
     }
 
     #[test]
@@ -1176,8 +1175,8 @@ mod tests {
         );
 
         assert_ne!(
-            query1.id(),
-            query2.id(),
+            query1.key(),
+            query2.key(),
             "same-key queries on different QueryClient instances should be distinct subscriptions"
         );
     }
@@ -1199,8 +1198,8 @@ mod tests {
         );
 
         assert_eq!(
-            query1.id(),
-            query2.id(),
+            query1.key(),
+            query2.key(),
             "QueryClient::clone should preserve the client identity"
         );
     }
@@ -1222,8 +1221,12 @@ mod tests {
         );
 
         // Same key but different types should produce different IDs
-        // because SubscriptionId::of::<Self> includes the type information
-        assert_ne!(query1.id(), query2.id());
+        // The source type includes the response type, so full IDs differ even
+        // though these logical keys are equal.
+        assert_ne!(
+            crate::Subscription::new(query1).id,
+            crate::Subscription::new(query2).id
+        );
     }
 
     /// Same-key queries with different output types must use independent cells.

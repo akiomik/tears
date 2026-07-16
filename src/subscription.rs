@@ -70,10 +70,9 @@
 //! create your own subscription types:
 //!
 //! ```
-//! use tears::{Subscription, SubscriptionId, SubscriptionSource};
+//! use tears::{Subscription, SubscriptionSource};
 //! use tears::BoxStream;
 //! use futures::{StreamExt, stream};
-//! use std::hash::{Hash, Hasher};
 //!
 //! struct MySubscription {
 //!     id: u64,
@@ -81,13 +80,14 @@
 //!
 //! impl SubscriptionSource for MySubscription {
 //!     type Output = String;
+//!     type Key = u64;
 //!
 //!     fn stream(&self) -> BoxStream<'static, Self::Output> {
 //!         stream::once(async { "Hello".to_string() }).boxed()
 //!     }
 //!
-//!     fn id(&self) -> SubscriptionId {
-//!         SubscriptionId::of::<Self>(self.id)
+//!     fn key(&self) -> Self::Key {
+//!         self.id
 //!     }
 //! }
 //!
@@ -197,12 +197,14 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         let mut new_subs = Vec::new();
         let mut new_ids = HashSet::new();
 
-        for sub in subscriptions {
+        for Subscription { id, spawn } in subscriptions {
             // Keep the first subscription for a given ID. Subscriptions with
             // the same ID are considered identical, and preserving the first
             // one avoids making duplicate IDs silently "last one wins".
-            if new_ids.insert(sub.id) {
-                new_subs.push((sub.id, sub.spawn));
+            if new_ids.insert(id.clone()) {
+                new_subs.push((id, spawn));
+            } else {
+                tracing::warn!(target: "tears::subscription", subscription_id = ?id, "duplicate subscription ignored");
             }
         }
 
@@ -212,7 +214,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         self.running.retain(|id, rs| {
             let finished = rs.handle.is_finished();
             if finished {
-                finished_ids.insert(*id);
+                finished_ids.insert(id.clone());
             }
             !finished
         });
@@ -330,7 +332,8 @@ impl<Msg: Send + 'static> BenchSubscriptionManager<Msg> {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
 
@@ -347,14 +350,103 @@ mod tests {
 
     impl SubscriptionSource for OneshotSource {
         type Output = i32;
+        type Key = ();
 
         fn stream(&self) -> BoxStream<'static, i32> {
             let v = self.value;
             stream::once(async move { v }).boxed()
         }
 
-        fn id(&self) -> SubscriptionId {
-            SubscriptionId::of::<Self>(0)
+        fn key(&self) -> Self::Key {}
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    struct ManagerCollisionKey(u8);
+
+    impl Hash for ManagerCollisionKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            0_u8.hash(state);
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleProbe {
+        starts: AtomicUsize,
+        drops: AtomicUsize,
+    }
+
+    struct StreamDropProbe(Arc<LifecycleProbe>);
+
+    impl Drop for StreamDropProbe {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProbedStream {
+        Pending,
+        Once(i32),
+    }
+
+    #[derive(Clone)]
+    struct ProbedCollidingSource {
+        key: ManagerCollisionKey,
+        stream: ProbedStream,
+        probe: Arc<LifecycleProbe>,
+    }
+
+    impl ProbedCollidingSource {
+        fn pending(key: u8) -> Self {
+            Self {
+                key: ManagerCollisionKey(key),
+                stream: ProbedStream::Pending,
+                probe: Arc::new(LifecycleProbe::default()),
+            }
+        }
+
+        fn once(key: u8, value: i32) -> Self {
+            Self {
+                key: ManagerCollisionKey(key),
+                stream: ProbedStream::Once(value),
+                probe: Arc::new(LifecycleProbe::default()),
+            }
+        }
+
+        fn restarted_with(&self, value: i32) -> Self {
+            Self {
+                key: self.key,
+                stream: ProbedStream::Once(value),
+                probe: self.probe.clone(),
+            }
+        }
+    }
+
+    impl SubscriptionSource for ProbedCollidingSource {
+        type Output = i32;
+        type Key = ManagerCollisionKey;
+
+        fn stream(&self) -> BoxStream<'static, Self::Output> {
+            self.probe.starts.fetch_add(1, Ordering::SeqCst);
+            let drop_probe = StreamDropProbe(self.probe.clone());
+
+            match self.stream {
+                ProbedStream::Pending => stream::pending()
+                    .map(move |value| {
+                        let _ = &drop_probe;
+                        value
+                    })
+                    .boxed(),
+                ProbedStream::Once(value) => stream::once(async move {
+                    let _drop_probe = drop_probe;
+                    value
+                })
+                .boxed(),
+            }
+        }
+
+        fn key(&self) -> Self::Key {
+            self.key
         }
     }
 
@@ -401,7 +493,7 @@ mod tests {
         let sub = Subscription::new(mock);
 
         // Should have correct ID type
-        assert_eq!(sub.id.type_id, TypeId::of::<MockSource<i32>>());
+        assert_eq!(sub.id.source_type_id, TypeId::of::<MockSource<i32>>());
     }
 
     #[tokio::test]
@@ -461,21 +553,53 @@ mod tests {
     }
 
     #[test]
-    fn test_subscription_id_of() {
-        let id1 = SubscriptionId::of::<i32>(12345);
-        let id2 = SubscriptionId::of::<i32>(12345);
-        let id3 = SubscriptionId::of::<i32>(67890);
+    fn test_subscription_id_is_structural() {
+        struct Source(u64);
+        impl SubscriptionSource for Source {
+            type Output = ();
+            type Key = u64;
+            fn stream(&self) -> BoxStream<'static, ()> {
+                stream::empty().boxed()
+            }
+            fn key(&self) -> Self::Key {
+                self.0
+            }
+        }
+        let id1 = Subscription::new(Source(12345)).id;
+        let id2 = Subscription::new(Source(12345)).id;
+        let id3 = Subscription::new(Source(67890)).id;
 
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
     }
 
     #[test]
-    fn test_subscription_id_different_types() {
-        // Same hash value but different types should produce different IDs
-        let id_i32 = SubscriptionId::of::<i32>(12345);
-        let id_u64 = SubscriptionId::of::<u64>(12345);
-        let id_string = SubscriptionId::of::<String>(12345);
+    fn test_subscription_id_different_source_types() {
+        struct I32Source;
+        struct U64Source;
+        impl SubscriptionSource for I32Source {
+            type Output = ();
+            type Key = u64;
+            fn stream(&self) -> BoxStream<'static, ()> {
+                stream::empty().boxed()
+            }
+            fn key(&self) -> Self::Key {
+                12345
+            }
+        }
+        impl SubscriptionSource for U64Source {
+            type Output = ();
+            type Key = u64;
+            fn stream(&self) -> BoxStream<'static, ()> {
+                stream::empty().boxed()
+            }
+            fn key(&self) -> Self::Key {
+                12345
+            }
+        }
+        let id_i32 = Subscription::new(I32Source).id;
+        let id_u64 = Subscription::new(U64Source).id;
+        let id_string = Subscription::new(MockSource::<String>::new()).id;
 
         assert_ne!(id_i32, id_u64);
         assert_ne!(id_i32, id_string);
@@ -514,6 +638,7 @@ mod tests {
         struct InfiniteSub;
         impl SubscriptionSource for InfiniteSub {
             type Output = i32;
+            type Key = ();
 
             fn stream(&self) -> BoxStream<'static, Self::Output> {
                 stream::unfold(0, |state| async move {
@@ -523,9 +648,7 @@ mod tests {
                 .boxed()
             }
 
-            fn id(&self) -> SubscriptionId {
-                SubscriptionId::of::<Self>(999)
-            }
+            fn key(&self) -> Self::Key {}
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -563,6 +686,7 @@ mod tests {
         }
         impl SubscriptionSource for ParkedSource {
             type Output = i32;
+            type Key = ();
 
             fn stream(&self) -> BoxStream<'static, i32> {
                 let started = self.started.clone();
@@ -575,9 +699,7 @@ mod tests {
                 .boxed()
             }
 
-            fn id(&self) -> SubscriptionId {
-                SubscriptionId::of::<Self>(0)
-            }
+            fn key(&self) -> Self::Key {}
         }
 
         let started = Arc::new(AtomicBool::new(false));
@@ -643,20 +765,199 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscription_manager_starts_new_subscriptions_in_input_order() {
-        struct OrderedStart;
+    async fn duplicate_subscriptions_keep_the_first_and_warn() {
+        let recorder = TraceRecorder::new()
+            .with_target("tears::subscription")
+            .with_level(tracing::Level::WARN);
+        let _guard = recorder.set_default();
 
-        fn recording_subscription(id_hash: u64, started: Arc<Mutex<Vec<u64>>>) -> Subscription<()> {
-            Subscription {
-                id: SubscriptionId::of::<OrderedStart>(id_hash),
-                spawn: Box::new(move || {
-                    started
-                        .lock()
-                        .expect("started order mutex should not be poisoned")
-                        .push(id_hash);
-                    stream::empty().boxed()
-                }),
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let first = MockSource::<i32>::new();
+        let duplicate = first.clone();
+
+        manager.update(vec![
+            Subscription::new(first.clone()),
+            Subscription::new(duplicate.clone()),
+        ]);
+
+        wait_for_mock_receivers(&first, 1).await;
+        assert_eq!(
+            duplicate.receiver_count(),
+            1,
+            "only the first spawner should run"
+        );
+        assert_eq!(
+            recorder.event_count(),
+            1,
+            "the ignored duplicate should warn"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_colliding_subscriptions_start_and_map_independently() -> Result<()> {
+        #[derive(Eq, PartialEq)]
+        struct CollisionKey(u8);
+
+        impl Hash for CollisionKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                0_u8.hash(state);
             }
+        }
+
+        struct CollidingSource {
+            key: CollisionKey,
+            value: u8,
+        }
+
+        impl SubscriptionSource for CollidingSource {
+            type Output = u8;
+            type Key = CollisionKey;
+
+            fn stream(&self) -> BoxStream<'static, Self::Output> {
+                let value = self.value;
+                stream::once(async move { value }).boxed()
+            }
+
+            fn key(&self) -> Self::Key {
+                CollisionKey(self.key.0)
+            }
+        }
+
+        #[derive(Debug, Eq, PartialEq)]
+        enum Message {
+            First(u8),
+            Second(u8),
+        }
+
+        let recorder = TraceRecorder::new()
+            .with_target("tears::subscription")
+            .with_level(tracing::Level::WARN);
+        let _guard = recorder.set_default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        manager.update(vec![
+            Subscription::new(CollidingSource {
+                key: CollisionKey(1),
+                value: 10,
+            })
+            .map(Message::First),
+            Subscription::new(CollidingSource {
+                key: CollisionKey(2),
+                value: 20,
+            })
+            .map(Message::Second),
+        ]);
+
+        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let messages = [first, second];
+
+        assert!(messages.contains(&Some(Message::First(10))));
+        assert!(messages.contains(&Some(Message::Second(20))));
+        assert_eq!(
+            recorder.event_count(),
+            0,
+            "hash collisions are not duplicates"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removing_one_hash_colliding_subscription_aborts_only_its_stream() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let first = ProbedCollidingSource::pending(1);
+        let second = ProbedCollidingSource::pending(2);
+
+        manager.update(vec![
+            Subscription::new(first.clone()),
+            Subscription::new(second.clone()),
+        ]);
+        assert_eq!(first.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(second.probe.starts.load(Ordering::SeqCst), 1);
+
+        manager.update(vec![Subscription::new(second.clone())]);
+
+        wait_until(
+            || first.probe.drops.load(Ordering::SeqCst) == 1,
+            "removed colliding stream should be dropped after abort",
+        )
+        .await;
+        assert_eq!(second.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(second.probe.drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_hash_colliding_subscription_restarts_without_replacing_the_other()
+    -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let completed = ProbedCollidingSource::once(1, 10);
+        let continuing = ProbedCollidingSource::pending(2);
+        let completed_subscription = Subscription::new(completed.clone());
+        let completed_id = completed_subscription.id.clone();
+
+        manager.update(vec![
+            completed_subscription,
+            Subscription::new(continuing.clone()),
+        ]);
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(10)
+        );
+        wait_until(
+            || {
+                manager
+                    .running
+                    .get(&completed_id)
+                    .is_some_and(|running| running.handle.is_finished())
+            },
+            "colliding one-shot subscription should finish before restart",
+        )
+        .await;
+
+        manager.update(vec![
+            Subscription::new(completed.restarted_with(11)),
+            Subscription::new(continuing.clone()),
+        ]);
+
+        assert_eq!(completed.probe.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(continuing.probe.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(continuing.probe.drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            timeout(Duration::from_millis(100), rx.recv()).await?,
+            Some(11)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscription_manager_starts_new_subscriptions_in_input_order() {
+        struct OrderedStart {
+            id: u64,
+            started: Arc<Mutex<Vec<u64>>>,
+        }
+        impl SubscriptionSource for OrderedStart {
+            type Output = ();
+            type Key = u64;
+            fn stream(&self) -> BoxStream<'static, ()> {
+                self.started
+                    .lock()
+                    .expect("started order mutex should not be poisoned")
+                    .push(self.id);
+                stream::empty().boxed()
+            }
+            fn key(&self) -> Self::Key {
+                self.id
+            }
+        }
+
+        fn recording_subscription(id: u64, started: Arc<Mutex<Vec<u64>>>) -> Subscription<()> {
+            Subscription::new(OrderedStart { id, started })
         }
 
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -792,14 +1093,13 @@ mod tests {
 
         impl SubscriptionSource for OneshotSource {
             type Output = i32;
+            type Key = ();
 
             fn stream(&self) -> BoxStream<'static, i32> {
                 stream::once(async move { 42 }).boxed()
             }
 
-            fn id(&self) -> SubscriptionId {
-                SubscriptionId::of::<Self>(0)
-            }
+            fn key(&self) -> Self::Key {}
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
