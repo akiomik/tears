@@ -1,6 +1,6 @@
 # RFC 0005: Structural Lifecycle Identity and Composition Scopes
 
-- Status: Draft
+- Status: Accepted
 - Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive)
 - Scope: collision-safe subscription identity and hierarchical identity
   namespacing for composed command and subscription lifecycles
@@ -377,6 +377,18 @@ its logical identity has several shapes, it uses an enum rather than changing
 the erased key type between instances. This reduced flexibility makes the
 source's identity schema explicit and stable.
 
+`key()` must also be stable across evaluations. Successive calls for the same
+logical source identity — including calls on fresh source values constructed by
+successive `Application::subscriptions` evaluations — must return equal keys.
+Full-ID equality across re-evaluations is what expresses lifecycle continuity
+(section 2.4), so a key that changes between evaluations (for example, a value
+freshly randomized inside `key()`) silently aborts and respawns the
+subscription on every dirty frame. A per-instance source therefore generates
+its instance token once, stores it, and returns the stored token. The type
+system cannot enforce this stability, so it is a normative contract of the
+trait: the Phase A implementation must state it in the rustdoc for
+`SubscriptionSource::key`.
+
 The bounds serve distinct contracts:
 
 - `Eq + Hash` provides collision-safe registry behavior;
@@ -620,6 +632,13 @@ applies the later, root-global key to the command, consistent with RFC 0003's
 last-call-wins rule. Explicit cancel IDs already wrapped by the earlier
 `scoped` call remain scoped.
 
+The framework deliberately emits no diagnostic when `cancellable` follows
+`scoped`. A later root-global key is a legitimate composition — for example, a
+pane-scoped effect that participates in an application-wide slot such as
+`GlobalRefresh` — so the runtime cannot distinguish that intent from the
+mistake of attaching a key after the boundary. The prominent rustdoc warning
+above is the chosen mitigation.
+
 Composition helpers should apply child scope after constructing the child
 command and may place `map` on either side:
 
@@ -673,6 +692,13 @@ decide at least:
 Those decisions belong to a separate RFC. The structural path defined here is
 forward-compatible with such work but does not pre-accept its API or behavior.
 
+One concrete client of that future RFC is already known: TCA-parity collection
+composition (a `forEach`-style reducer) must automatically cancel a removed
+child instance's in-flight effects when the child leaves the collection. Full
+effect parity in the reducer composition RFC therefore depends on prefix
+teardown, and scheduling should treat teardown as a prerequisite of that work
+rather than an optional extension.
+
 ### 4.6 Residual composition risk
 
 Phase B provides the vocabulary to express correct instance-local identity, but
@@ -705,6 +731,7 @@ Phase A is intentionally breaking and belongs in 0.10.0:
 | `SubscriptionId::of::<Source>(hash)` | Removed with no public replacement; `Subscription::new<Source>` constructs the ID |
 | `SubscriptionSource::id() -> SubscriptionId` | Replaced by associated `type Key` and `key() -> Self::Key` |
 | `dyn SubscriptionSource<Output = O>` spelling | Must also specify `Key = K`; heterogeneous key types require separate erasure |
+| `impl<A: SubscriptionSource> From<A> for Subscription` | Preserved; the blanket conversion constructs the ID through the same `Subscription::new` path |
 | `SubscriptionId: Copy` | Removed; use `Clone` |
 | `SubscriptionId: Send + Sync + UnwindSafe + RefUnwindSafe` | Preserved and pinned by positive compile-time assertions |
 | Caller chooses and freezes a hash digest | Framework hashes the original structural key |
@@ -960,7 +987,12 @@ Each built-in source must expose its actual lifecycle inputs as its associated
 - WebSocket: connection inputs that currently participate in its `Hash`;
 - HTTP `Query`: client identity, response type through `Self`, and structural
   `QueryKey` inputs;
-- `MockSource`: one clone-stable per-instance token stored by the source; and
+- `MockSource`: one clone-stable per-instance token stored by the source. The
+  token's value is now exact identity, so its generation must be unique within
+  the process — for example a monotonically increasing atomic counter. Do not
+  keep the current timestamp-plus-type-name digest as the token value: two
+  instances created in the same clock tick would alias, reproducing the old
+  collision semantics through the new trait shape; and
 - benchmark/test sources: their caller-controlled logical key.
 
 Do not mechanically replace `id()` with `type Key = u64` and return
@@ -1083,6 +1115,21 @@ two panes commonly use the same mapper. Message variants distinguish routing
 cases but not collection elements or repeated instances. Automatic derivation
 would be unstable and incomplete.
 
+### Enforce scoping with a distinct `Scoped` wrapper type
+
+Rejected for Phase B. `scoped` could return a distinct
+`ScopedSubscription<Msg>` / `ScopedCommand<Msg>` (or add a type-state
+parameter) so that parent-facing composition APIs could demand proof that a
+boundary was applied, making the missing-scope mistake in section 4.6
+unrepresentable at that boundary. The current composition surface, however, is
+plain `Vec<Subscription<Msg>>` and `Command<Msg>` values returned from
+`Application` methods: a second parallel type either bifurcates every consumer
+signature or is immediately erased back into the unscoped type, losing the
+guarantee it exists to provide. The type-level enforcement point belongs to
+the future composition layer that owns the child boundary (section 4.6), where
+the child instance key is available and the framework — not the application
+author — constructs the scoped value.
+
 ### Add scope only to subscriptions
 
 Rejected at the identity-model level. The current subscription failure is more
@@ -1138,7 +1185,9 @@ Follow-up order is:
 3. design per-effect command cancellation/batch composition;
 4. use scoped identity and deterministic effect testing as inputs to the
    reducer composition RFC; and
-5. consider prefix teardown only with a concrete ownership use case.
+5. design prefix teardown before or together with collection
+   (`forEach`-style) reducer composition; automatic cancellation of a removed
+   child's in-flight effects is its known concrete use case (section 4.5).
 
 ## 11. References
 
