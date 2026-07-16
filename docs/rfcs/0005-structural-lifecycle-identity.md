@@ -984,7 +984,8 @@ Each built-in source must expose its actual lifecycle inputs as its associated
 
 - `Timer`: interval value;
 - terminal and signal sources: the semantic configuration or signal kind;
-- WebSocket: connection inputs that currently participate in its `Hash`;
+- WebSocket: connection inputs that define its lifecycle identity (currently
+  the URL);
 - HTTP `Query`: client identity, response type through `Self`, and structural
   `QueryKey` inputs;
 - `MockSource`: one clone-stable per-instance token stored by the source. The
