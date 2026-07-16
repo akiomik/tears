@@ -6,7 +6,7 @@
 
 #[cfg(unix)]
 mod unix_signal {
-    use std::{hash::Hash, io};
+    use std::io;
 
     use futures::stream::BoxStream;
     use futures::{StreamExt as _, stream};
@@ -79,7 +79,7 @@ mod unix_signal {
     ///
     /// Multiple subscriptions for the same signal kind are allowed. Each subscription
     /// will independently receive the signal.
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Signal {
         kind: SignalKind,
     }
@@ -256,7 +256,7 @@ mod windows_signal {
     ///
     /// This is a singleton subscription - all instances are considered identical
     /// and only one Ctrl+C handler will be active at a time.
-    #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct CtrlC;
 
     impl CtrlC {
@@ -373,7 +373,7 @@ mod windows_signal {
     ///
     /// This is a singleton subscription - all instances are considered identical
     /// and only one Ctrl+Break handler will be active at a time.
-    #[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct CtrlBreak;
 
     impl CtrlBreak {

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     type, and `SubscriptionId::of::<T>(u64)` is removed
   - `SubscriptionId` is `Clone` but no longer `Copy`; it remains `Send`,
     `Sync`, `UnwindSafe`, and `RefUnwindSafe`
+  - Built-in subscription source types no longer implement `Hash`: `Timer`,
+    `TerminalEvents`, Unix `Signal`, Windows `CtrlC` / `CtrlBreak`, and
+    feature-gated `WebSocket` / `Query`; hash or store their structural key
+    returned by `SubscriptionSource::key()` when lifecycle identity is needed
   - Duplicate desired subscriptions still keep the first declaration and now
     emit a warning under the `tears::subscription` tracing target
 

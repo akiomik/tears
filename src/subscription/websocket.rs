@@ -50,8 +50,6 @@
 //! tears = { version = "0.9", features = ["ws", "native-tls"] }
 //! ```
 
-use std::hash::Hash;
-
 use futures::stream::{BoxStream, SplitSink, SplitStream};
 use futures::{SinkExt as _, StreamExt as _, stream};
 use tokio::net::TcpStream;
@@ -189,7 +187,7 @@ pub enum WebSocketMessage {
 ///   a very high rate and the consumer is slower than the arrival rate, TCP receive-window
 ///   pressure will propagate back to the server.  Applications that need to decouple
 ///   consumption speed from network read speed should add their own buffering layer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSocket {
     url: String,
 }

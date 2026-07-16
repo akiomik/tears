@@ -479,16 +479,6 @@ where
     }
 }
 
-impl<V> Hash for Query<V> {
-    fn hash<H>(&self, hasher: &mut H)
-    where
-        H: Hasher,
-    {
-        self.client.client_id.hash(hasher);
-        self.key.hash(hasher);
-    }
-}
-
 #[derive(Clone, Copy)]
 struct QueryTrace {
     client_id: u64,

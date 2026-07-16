@@ -3,7 +3,6 @@
 //! This module provides the [`Timer`] subscription source for creating
 //! time-based events in your application.
 
-use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -116,16 +115,9 @@ impl SubscriptionSource for Timer {
     }
 }
 
-impl Hash for Timer {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.interval_ms.hash(state);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::DefaultHasher;
 
     use tokio::time::{Duration, Instant, timeout};
 
@@ -156,38 +148,6 @@ mod tests {
 
         // Different intervals should produce different IDs
         assert_ne!(timer1.key(), timer2.key());
-    }
-
-    #[test]
-    fn test_timer_hash_consistency() {
-        let timer1 = timer(1000);
-        let timer2 = timer(1000);
-
-        let mut hasher1 = DefaultHasher::new();
-        timer1.hash(&mut hasher1);
-        let hash1 = hasher1.finish();
-
-        let mut hasher2 = DefaultHasher::new();
-        timer2.hash(&mut hasher2);
-        let hash2 = hasher2.finish();
-
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_timer_hash_different_intervals() {
-        let timer1 = timer(1000);
-        let timer2 = timer(2000);
-
-        let mut hasher1 = DefaultHasher::new();
-        timer1.hash(&mut hasher1);
-        let hash1 = hasher1.finish();
-
-        let mut hasher2 = DefaultHasher::new();
-        timer2.hash(&mut hasher2);
-        let hash2 = hasher2.finish();
-
-        assert_ne!(hash1, hash2);
     }
 
     #[tokio::test]

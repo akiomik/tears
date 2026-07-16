@@ -3,7 +3,6 @@
 //! This module provides the [`TerminalEvents`] subscription source for handling
 //! terminal input events using crossterm.
 
-use std::hash::Hash;
 use std::io;
 
 use crossterm::event::{Event, EventStream};
@@ -85,7 +84,7 @@ use super::SubscriptionSource;
 ///
 /// This is a singleton subscription - all instances are considered identical
 /// and only one terminal event stream will be active at a time.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TerminalEvents;
 
 impl TerminalEvents {
