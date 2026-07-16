@@ -75,10 +75,18 @@ tracing = "0.1"
 [target.'cfg(not(loom))'.dev-dependencies]
 reqwest = { version = "0.13", features = ["json", "query"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+# Peak-RSS measurement (`getrusage`) in `benches/runtime_load.rs`.
+libc = "0.2"
+
 [[bench]]
 name = "subscription"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "runtime_load"
+harness = false
 
 [[example]]
 name = "websocket"
