@@ -316,6 +316,12 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 Contributions are welcome! Please feel free to submit issues or pull requests.
 
+Design contracts and invariants live in [docs/rfcs](docs/rfcs/README.md).
+If you are writing or amending an RFC, run the
+[pre-review checklist](docs/rfcs/pre-review-checklist.md) before
+requesting review. Testing conventions are documented in
+[docs/testing.md](docs/testing.md).
+
 ---
 
 Built with ❤️ using [ratatui](https://ratatui.rs/)
