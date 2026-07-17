@@ -13,20 +13,22 @@
 - Amendments: 2026-07-17 — open question 8 resolved: quit-under-backlog
   scenarios added and measured (section 2, F6/F7), bounded-vs-unbounded
   acceptance matrix defined (section 5.1). 2026-07-17 — open question 3
-  resolved: no producer admission limit — R1/R3 stay scoped to channel
-  buffers with an application-owned, observable producer-count premise, and
-  keyed channels are bounded per command, not by a shared pool (sections
-  1.2, 4.4, 4.5, 5)
+  resolved: no producer admission limit — R1 is scoped to per-channel
+  bounds with the active-`CommandId` count an application-owned contract
+  input, the producer-count premise is application-owned and observable,
+  and keyed channels are bounded per command, not by a shared pool
+  (INV-L8/L9; sections 1.2, 4.4, 4.5, 5, 5.1)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
 > sections 4–6 turns out to be unimplementable without breaking the public
 > API. Sections 4–6 fix the direction of the load-control contract but their
 > details (capacities, batching caps, per-source classes) remain open until
-> implementation. In particular, cross-channel fairness (section 4.3), the
-> quit delivery path (section 4.2), and the exact scope of the memory bound
-> (INV-L1) are contracts to settle before the post-0.10.0 implementation;
-> none of them gates the 0.10.0 release.
+> implementation. In particular, cross-channel fairness (section 4.3) and
+> the quit delivery path (section 4.2) are contracts to settle before the
+> post-0.10.0 implementation; the exact scope of the memory bound (INV-L1)
+> was the third such contract and is now settled (open question 3, section
+> 4.5). None of them gates the 0.10.0 release.
 
 ## Summary
 
@@ -89,17 +91,22 @@ Scheduling facts that interact with load:
 
 ### 1.2 Requirements carried into the contract
 
-- **R1**: Memory used by pending runtime-owned channel buffers must be
-  boundable by configuration. This is a bound on buffered messages waiting
-  in a channel, not on all pending-work memory: each producer blocked
-  awaiting channel capacity additionally holds one in-flight message
-  outside the channel, and the number of concurrent producers (active
-  subscriptions, running commands) is controlled by the application, not by
-  `RuntimeConfig`. A full memory bound also requires bounding producer
+- **R1**: Memory used by *each* pending runtime-owned channel buffer must be
+  boundable by configuration. The bound is per channel, not aggregate:
+  `RuntimeConfig` alone bounds the shared channel and each keyed channel
+  individually, and the buffer total is `app_channel_capacity + m ×
+  keyed_channel_capacity`, where `m` — the number of active `CommandId`s —
+  is a contract input the application must bound, not something
+  `RuntimeConfig` controls (it is one component of the producer-count
+  premise, section 4.5). Nor is this a bound on all pending-work memory:
+  each producer blocked awaiting channel capacity additionally holds one
+  in-flight message outside the channel, and the number of concurrent
+  producers (active subscriptions, running commands) is likewise controlled
+  by the application. A full memory bound also requires bounding producer
   count, which this RFC's channel-capacity controls do not deliver on their
-  own; open question 3 resolved this by keeping R1 scoped to channel
-  buffers, with the producer-count premise application-owned and observable
-  (INV-L1, section 4.5).
+  own; open question 3 resolved this by keeping R1 scoped as stated —
+  per-channel bounds from configuration, with the producer-count premise
+  (including `m`) application-owned and observable (INV-L1, section 4.5).
 - **R2**: A configured bound must not silently drop messages by default;
   backpressure (slowing the producer) is the default overload response.
 - **R3**: Input-to-screen latency under load must be observable and, with a
@@ -453,11 +460,14 @@ orthogonal. A pool also cannot rescue a total bound: the number of active
 `CommandId`s is application-owned, so with or without a pool the premise
 stays with the application. Per-command capacity matches the per-command
 FIFO contract and the existing one-private-channel-per-`CommandId`
-structure, at the cost of a looser conceptual total (INV-L1's
-`Σ(per-command keyed capacity)`).
+structure, at a deliberate cost R1 states explicitly: the keyed buffer
+total is `m × keyed_channel_capacity` with `m` — the number of active
+`CommandId`s — an application-owned contract input, not a `RuntimeConfig`
+knob.
 
-The decision is captured as INV-L8: load control paces sends, never
-producer admission.
+The decision is captured in two invariants: INV-L8 (load control paces
+sends, never producer admission) and INV-L9 (keyed backpressure is
+isolated per command — the testable form of the no-shared-pool choice).
 
 ## 5. Invariants (draft)
 
@@ -472,7 +482,8 @@ To be finalized as contract tests before implementation:
   Σ(per-command keyed capacity)`. A single global memory bound would require
   a global permit pool or a cap on active producers; open question 3
   resolved against both, so this conceptual total *is* the contract, with
-  the producer count application-owned and observable (section 4.5).
+  the producer count — including `m`, the number of active `CommandId`s in
+  R1's buffer total — application-owned and observable (section 4.5).
 - **INV-L2**: Bounded mode never drops a message to relieve backpressure —
   capacity pressure is resolved only by the producer waiting, never by the
   runtime discarding queued or in-flight output. This does not override RFC
@@ -553,6 +564,13 @@ To be finalized as contract tests before implementation:
   future admission limit, and — because producers are created on the event
   loop task — it is also what keeps INV-L7's no-self-deadlock argument
   closed at spawn sites, not just send sites.
+- **INV-L9**: Keyed backpressure is isolated per command. A send blocked on
+  one keyed channel's full capacity never delays admission into the shared
+  channel or into any other keyed channel; each keyed channel's admission
+  depends only on that channel's own occupancy. This is the no-shared-pool
+  resolution of open question 3 (section 4.5) in testable form — a global
+  permit pool would satisfy INV-L1's per-channel capacity cells while
+  violating this one, so INV-L9 is what pins the isolation choice.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -561,9 +579,12 @@ the unbounded baseline grows linearly. The keyed-probe scenario becomes an
 acceptance measurement only once the fairness policy (open question 6) fixes
 what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
 are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
-INV-L7 and INV-L8 are structural rather than load-dependent and are checked
-by code review of every runtime-internal send and spawn site, not by a
-bench scenario.
+INV-L9's acceptance scenario is `keyed_isolation` (section 5.1), added with
+the implementation: hold one keyed channel at capacity and verify an
+independent key still fills and delivers up to its own capacity. INV-L7 and
+INV-L8 are structural rather than load-dependent and are checked by code
+review of every runtime-internal send and spawn site, not by a bench
+scenario.
 
 ### 5.1 Bounded vs. unbounded acceptance matrix
 
@@ -582,6 +603,7 @@ must meet and is filled with measured values when the implementation lands.
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
+| `keyed_isolation` (new scenario, added with the implementation) | key B send admission while key A's channel is held full | trivially isolated — unbounded sends never wait | key B's producer fills and delivers up to its own `keyed_channel_capacity` while key A's channel stays full; any key-B admission wait correlated with key A's occupancy is the regression signal (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
@@ -620,11 +642,15 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    synchronous on the event loop task, so a waiting limit is INV-L7's
    self-deadlock at the spawn site, and the non-waiting alternatives
    (reject, drop, defer) break the RFC 0005 reconciliation contract or
-   silently discard effects. R1 and R3 stay scoped to channel buffers; the
-   producer-count premise becomes an explicit, application-owned,
-   observable responsibility (producer gauges in section 4.4), and keyed
-   channels are bounded per command rather than by a shared pool. Full
-   rationale in section 4.5; the contract is captured as INV-L8.
+   silently discard effects. R1 is explicitly weakened to per-channel
+   bounds: the buffer total is `app_channel_capacity + m ×
+   keyed_channel_capacity` with `m` (active `CommandId`s) an
+   application-owned contract input, part of the producer-count premise
+   that becomes an explicit, observable responsibility (producer gauges in
+   section 4.4). Keyed channels are bounded per command rather than by a
+   shared pool, pinned as testable isolation (INV-L9, `keyed_isolation`
+   scenario in section 5.1). Full rationale in section 4.5; the
+   no-admission-limit contract itself is INV-L8.
 4. Where backpressure-wait telemetry lives (`tracing` only, or counters
    exposed by future profiling-hook work).
 5. Restart-rate-control interaction: whether a future restart-rate-control
