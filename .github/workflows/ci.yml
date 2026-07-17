@@ -51,7 +51,25 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        # Benches are excluded from this matrix (and run once, on Linux
+        # only, in the `bench` job below) since `runtime_load`'s custom
+        # harness ignores `cargo test`'s `--test` flag and always runs its
+        # full scenarios; matrixing that across every OS/toolchain makes
+        # Windows CI disproportionately slow for no additional coverage.
+        run: cargo test --lib --bins --tests --examples --all-features
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        # `--bench <name>` (singular, per-target) rather than `--benches`
+        # (plural): the plural form implicitly also runs the lib's unit
+        # tests, duplicating what the `test` job's matrix already covers.
+        run: cargo test --bench subscription --bench runtime_load --all-features
 
   loom:
     name: Loom
