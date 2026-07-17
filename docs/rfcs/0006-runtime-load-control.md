@@ -6,8 +6,9 @@
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
   under load; the delivery contract of every runtime-owned channel
 - Feature flag: none
-- CHANGELOG: `Added` (opt-in `RuntimeConfig`); no `Changed` entry is required
-  for 0.10.0 (see section 3)
+- CHANGELOG: `Added` entry lands at the load-control implementation release
+  (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
+  RFC (see section 3)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -34,8 +35,9 @@ This RFC defines the load-control contract in two steps:
 
 1. **0.10.0 release gate (decided here).** Load control can be delivered as an
    opt-in, additive `RuntimeConfig`; the default delivery semantics and the
-   existing constructors do not change. S4 therefore adds **no breaking
-   change** to 0.10.0, and 0.10.0 does not wait for the S4 implementation.
+   existing constructors do not change. This RFC therefore adds **no
+   breaking change** to 0.10.0, and 0.10.0 does not wait for this RFC's
+   implementation.
 2. **Post-0.10.0 implementation (direction fixed, details open).** A bounded
    delivery mode with per-source-class capacity and backpressure contracts,
    configured through `RuntimeConfig`, plus load observability via `tracing`.
@@ -84,7 +86,11 @@ Scheduling facts that interact with load:
   and its always-armed select branch must remain). Quit requests still
   traveling inside command streams — a keyed `Action::Quit` in its private
   channel, or a quit behind earlier sends of the same unkeyed stream —
-  follow their stream's delivery semantics (section 4.2).
+  follow their stream's delivery semantics (section 4.2). User-initiated
+  quit (a key press arriving as a shared input, turned into a quit command
+  by `update`) travels the shared path end-to-end, so it is not a gap in
+  this requirement — it improves under bounded mode along with INV-L3 like
+  any other shared input (section 4.2).
 - **R5**: RFC 0003's cancellation and FIFO invariants (per-command FIFO,
   cancel-before-delivery, INV-14) must be preserved or explicitly amended.
 - **R6**: The default (unconfigured) behavior of existing applications must
@@ -146,7 +152,7 @@ Findings:
 
 ## 3. Release-gate decision for 0.10.0
 
-Two questions decide whether S4 forces breaking changes into 0.10.0.
+Two questions decide whether this RFC forces breaking changes into 0.10.0.
 
 ### 3.1 Does the default send contract change?
 
@@ -165,10 +171,11 @@ release, made with migration notes — not a 0.10.0 gate.
 
 ### 3.2 Does the opt-in fit the existing public API additively?
 
-**Yes.** The opt-in surface is a new `RuntimeConfig` (task P7) consumed by a
-new constructor (for example `Runtime::with_config(flags, frame_rate,
-config)`), with `Runtime::new` unchanged and equivalent to the default
-configuration. Bounded behavior activates only through that surface:
+**Yes.** The opt-in surface is a new `RuntimeConfig` (design and ownership
+left to a separate `RuntimeConfig` RFC/task) consumed by a new constructor
+(for example `Runtime::with_config(flags, frame_rate, config)`), with
+`Runtime::new` unchanged and equivalent to the default configuration.
+Bounded behavior activates only through that surface:
 
 - Capacity limits replace the unbounded channels inside the runtime; no
   public channel type is exposed today, so this is internal.
@@ -185,15 +192,17 @@ guarantee, so offering a bounded mode contradicts no published contract.
 
 ### 3.3 Verdict
 
-**S4 requires no additional breaking change in 0.10.0.** The 0.10.0 release
-proceeds with the breaking changes already on `main`; the S4 implementation
-(sections 4–6) lands after 0.10.0 behind `RuntimeConfig`.
+**This RFC requires no additional breaking change in 0.10.0.** The 0.10.0
+release proceeds with the breaking changes already on `main`; the
+load-control implementation (sections 4–6) lands after 0.10.0 behind
+`RuntimeConfig`.
 
 ## 4. Contract design (post-0.10.0, direction fixed)
 
 ### 4.1 Configuration surface
 
-`RuntimeConfig` (owned by P7, consumed by this RFC) with at least:
+`RuntimeConfig` (design and ownership left to a separate `RuntimeConfig`
+RFC/task; the fields this RFC requires are listed below) with at least:
 
 - `app_channel_capacity: Option<NonZeroUsize>` — `None` (default) keeps the
   unbounded shared channel; `Some(n)` bounds it.
@@ -214,11 +223,11 @@ mode's send contract, by source class:
   user sources)**: the forwarding task awaits channel capacity. Backpressure
   propagates by not polling the source stream. Sources whose upstream cannot
   pause (e.g. a WebSocket peer) buffer or shed in source-specific policy —
-  that is P5 (debounce/throttle wrappers) and source-level concerns, not the
-  runtime's. Terminal input is a subscription like any other; awaiting simply
-  defers reading further input events, which is the desired behavior (typing
-  ahead of an overloaded app queues in the terminal, not in unbounded
-  memory).
+  that is a separate debounce/throttle task and source-level concerns, not
+  the runtime's. Terminal input is a subscription like any other; awaiting
+  simply defers reading further input events, which is the desired behavior
+  (typing ahead of an overloaded app queues in the terminal, not in
+  unbounded memory).
 - **Commands (keyed and unkeyed)**: the command task awaits capacity before
   its next send. Command streams are already async pull; no API change.
 - **Quit**: the dedicated quit channel is never blocked and never dropped,
@@ -229,12 +238,24 @@ mode's send contract, by source class:
   (keyed quit is already subject to shared-first pull ordering today).
   Whether quit requests should be re-routed to the dedicated channel at the
   producer side — letting quit bypass stream order, a deliberate semantic
-  change relative to RFC 0003's FIFO — is open question 7.
+  change relative to RFC 0003's FIFO — is open question 7. User-initiated
+  quit is a different, already-favorable case: a key press arrives as a
+  shared input, `update` turns it into a quit command, and that command's
+  output is itself unkeyed (shared-channel) delivery per section 1.1 — so
+  the whole path is shared-channel traffic and improves under bounded mode
+  along with INV-L3 (R4), rather than being subject to the deferral
+  described above for keyed or in-stream quits.
+
+This source-class split relies on a structural precondition: no send
+described above ever originates from the event loop task itself (INV-L7);
+otherwise an awaiting send under backpressure would block on progress that
+only the event loop can make.
 
 Delivery in bounded mode remains lossless up to shutdown: the runtime never
 drops a message to relieve pressure (R2). Lossy strategies (coalescing,
-sampling) are source-level policies layered on top (P5), where the semantics
-of "which messages may be merged" are known.
+sampling) are source-level policies layered on top (a separate
+debounce/throttle task), where the semantics of "which messages may be
+merged" are known.
 
 ### 4.3 Interaction with existing invariants
 
@@ -251,8 +272,21 @@ of "which messages may be merged" are known.
   INV-14 that preserves cancel-before-delivery; that policy is open
   question 6 and is not part of the initial bounded mode.
 - **Cancellation**: cancel-before-delivery and buffered-output suppression
-  (RFC 0003) are unaffected; a keyed producer blocked on a full private
-  channel is aborted exactly like a running one.
+  (RFC 0003) hold exactly as stated, and a keyed producer blocked on a full
+  private channel is aborted exactly like a running one — INV-14's literal
+  guarantee (a *ready* shared cancel message suppresses a *ready* keyed
+  output before delivery) is unchanged. Bounded mode does narrow the
+  guarantee's practical reach, though. With unbounded channels `send`
+  completes immediately, so a cancelling input that has occurred is, for all
+  practical purposes, already sitting in the shared queue and visible to the
+  shared-first pull. With bounded channels, the forwarding task carrying
+  that input can itself be waiting for admission — outside the queue — for
+  as long as the shared channel stays full, and a keyed output racing during
+  that admission window can still be delivered before the cancel arrives.
+  This is not an INV-14 violation (the input was never "ready" in the
+  channel), but it does mean RFC 0003's practical goal of prompt
+  cancellation is weaker in bounded mode than under the current unbounded
+  default.
 - **Redraw suppression** (RFC 0002) and subscription re-evaluation gating:
   unchanged; they operate downstream of input delivery.
 - **Shutdown**: bounded channels close exactly like unbounded ones; senders
@@ -262,9 +296,9 @@ of "which messages may be merged" are known.
 
 Bounded or not, the runtime should expose load signals under `tracing`
 targets (`tears::runtime::load` or similar): queue depth high-water marks,
-batch sizes, and time spent awaiting capacity. P12 (profiling hooks) decides
-whether more than `tracing` is needed; the load harness already demonstrates
-what to measure.
+batch sizes, and time spent awaiting capacity. Whether more than `tracing`
+is needed (for example dedicated profiling-hook counters) is a decision for
+that future work; the load harness already demonstrates what to measure.
 
 ## 5. Invariants (draft)
 
@@ -279,18 +313,42 @@ To be finalized as contract tests before implementation:
   Σ(per-command keyed capacity)`. A single global memory bound would require
   a global permit pool or a cap on active producers (open question 3).
 - **INV-L2**: Bounded mode never drops a message before shutdown.
-- **INV-L3**: With bounded capacity, a message accepted into the shared
+- **INV-L3**: With bounded capacity `n`, a message accepted into the shared
   channel is preceded by at most `n - 1` earlier shared messages (FIFO), so
-  its emission-to-update latency is bounded by the drain time of one full
-  queue plus the producer's own wait for acceptance, independent of overload
-  duration. No such bound exists for keyed delivery unless the fairness
-  policy (open question 6) defines one.
+  its drain-side wait — once accepted — is bounded by the drain time of one
+  full queue, independent of overload duration. The producer's own wait for
+  acceptance is a separate bound, not assumed here: tokio's bounded `mpsc`
+  grants permits in FIFO order, so a producer's admission wait is at most
+  `(k + n)` drain-equivalents, where `k` is the number of producers already
+  queued for a permit ahead of it. This is only a bound if `k` itself is
+  bounded — i.e. the number of concurrent producers is bounded — which is
+  the same open premise as INV-L1's per-producer accounting (open
+  question 3); INV-L3 as a whole does not hold without it. No such bound
+  exists for keyed delivery unless the fairness policy (open question 6)
+  defines one.
 - **INV-L4**: A quit signal already in the dedicated quit channel is
   delivered with latency independent of app-channel backlog. Quit requests
   still inside command streams are outside this invariant and follow their
   stream's delivery semantics (section 4.2).
 - **INV-L5**: All RFC 0003 invariants hold unchanged in bounded mode.
-- **INV-L6**: Default configuration reproduces current behavior exactly.
+- **INV-L6**: Default configuration (`app_channel_capacity: None`,
+  `keyed_channel_capacity: None`, `batch_max_messages: None`) reproduces
+  current behavior. This is checked structurally, not by diffing observed
+  behavior: the `None` path must construct the same
+  `mpsc::unbounded_channel` and never-await send code as today, not a
+  bounded channel configured with an unreachably large capacity. The
+  testable claim is "the default code path is unchanged," not an empirical
+  "outputs are identical under load," which is not practically checkable.
+- **INV-L7**: The event loop task never performs an awaiting `send` on a
+  channel it is itself responsible for draining. Every send into a
+  runtime-owned channel today originates from a worker task (a
+  subscription-forwarding task or a command task), never from the event
+  loop itself, so an awaiting send under backpressure can never block on
+  progress that only the event loop can make. This is a structural
+  precondition for bounded-mode soundness, not something the type system
+  enforces — a future change that has the event loop inject a message
+  directly into a shared or keyed channel it also drains would deadlock as
+  soon as that channel fills.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -298,7 +356,9 @@ INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario becomes an
 acceptance measurement only once the fairness policy (open question 6) fixes
 what keyed latency bound, if any, to expect; INV-L4 needs the new
-quit-under-backlog scenario (open question 8).
+quit-under-backlog scenario (open question 8). INV-L7 is structural rather
+than load-dependent and is checked by code review of every runtime-internal
+send site, not by a bench scenario.
 
 ## 6. Open questions (to resolve before implementation)
 
@@ -309,11 +369,11 @@ quit-under-backlog scenario (open question 8).
 3. Whether keyed channels share one capacity pool or are bounded per command
    (per-command is simpler and matches per-command FIFO; a pool bounds total
    memory more tightly).
-4. Where backpressure-wait telemetry lives (`tracing` only, or counters that
-   P12 exposes).
-5. S8a interaction: whether restart rate control consumes the same
-   `RuntimeConfig` surface or stays a subscription-level policy (current
-   position: subscription-level, per RFC backlog).
+4. Where backpressure-wait telemetry lives (`tracing` only, or counters
+   exposed by future profiling-hook work).
+5. Restart-rate-control interaction: whether a future restart-rate-control
+   feature consumes the same `RuntimeConfig` surface or stays a
+   subscription-level policy (current position: subscription-level).
 6. Cross-channel fairness: whether bounded keyed-delivery latency is a goal
    at all and, if so, which scheduling policy (for example a shared-pull
    quota per batch window) relaxes INV-14 while preserving
@@ -335,5 +395,3 @@ quit-under-backlog scenario (open question 8).
   cancel-before-delivery).
 - RFC 0005 — structural lifecycle identity (subscription reconciliation the
   load path feeds).
-- Backlog tasks: S4 (this RFC), P5 (debounce/throttle), P7 (`RuntimeConfig`),
-  P12 (profiling hooks), S8a (restart rate control).
