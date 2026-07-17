@@ -1,7 +1,7 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Draft (moves to Accepted when 0.10.0 ships on the section 3 verdict;
-  to Implemented when the sections 4–6 implementation lands)
+- Status: Accepted (0.10.0 shipped on the section 3 verdict on 2026-07-17;
+  moves to Implemented when the sections 4–6 implementation lands)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
