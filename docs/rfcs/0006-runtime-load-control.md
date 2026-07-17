@@ -51,7 +51,8 @@
   count per batch, opening input included, `ReceiverEvent::Closed`
   included; sections 4.1, 5); open question 4 resolved — load
   observability is `tracing`-only initially, with the normative minimal
-  event schema and its definition of done fixed in section 4.4
+  event schema and its value-verifying definition of done fixed in
+  section 4.4 and pinned as INV-L13 (section 5)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -493,7 +494,8 @@ remain future additive work that this schema does not preclude. The
 minimal schema below is normative — the implementation must emit these
 events with these targets, levels, fields, and firing conditions, in both
 delivery modes except where marked bounded-only; renaming or dropping any
-of them is a contract change:
+of them is a contract change. The schema and its verification are pinned
+as INV-L13 (section 5):
 
 - **Batch event** — target `tears::runtime::load`, level `trace`, fired
   once per completed micro-batch (a quit-terminated batch fires nothing —
@@ -530,10 +532,19 @@ each event once with wrong values must fail it:
 - **Batch event**: `pulled` and `updated` equal the scripted input
   counts, including a batch where the two differ — a scenario with a
   `ReceiverEvent::Closed` among the queued inputs must observe
-  `pulled = updated + 1`.
+  `pulled = updated + 1`. `shared_pending` is verified against a
+  scripted leftover, not merely present: with `batch_max_messages =
+  Some(n)` and `n + k` shared messages queued under the paused clock,
+  the capped batch must report `shared_pending = k`.
 - **Capacity-wait event**: an immediately accepted send fires no event;
   a send that had to await capacity fires exactly one event, at
   acceptance, with `channel` naming the channel that blocked it.
+  `wait_us` is verified against a controlled wait: a send held blocked
+  while the test advances the paused clock by a scripted duration
+  before freeing capacity must report `wait_us` of at least that
+  duration — which requires the wait to be measured with
+  `tokio::time::Instant`, the pausable clock the batch deadline already
+  uses — so an implementation that hardcodes `wait_us = 0` fails.
 - **Producer gauges**: starting a subscription, an unkeyed command, and
   a keyed command each raise the matching field, and each completion
   lowers it again; `blocked` rises when a producer begins awaiting
@@ -1091,6 +1102,22 @@ To be finalized as contract tests before implementation:
   batch — the off-by-one pair — plus a variant that places a
   `ReceiverEvent::Closed` among the queued inputs and asserts it
   consumes a slot in the count.
+- **INV-L13**: The runtime emits the load-observability events exactly
+  as the section 4.4 schema states — target `tears::runtime::load`, the
+  three event kinds with their levels, required fields, and firing
+  conditions, in both delivery modes except the bounded-only
+  capacity-wait event — and the field values carry the stated meanings:
+  `pulled` is INV-L12's counted unit, `shared_pending` the
+  shared-channel occupancy at batch end, `wait_us` the blocked send's
+  admission wait. The schema is contract surface: renaming, dropping, or
+  repurposing any part of it is an amendment to this RFC, not an
+  implementation detail. Behavioral check at the integration layer: the
+  section 4.4 definition-of-done test — a `tracing` subscriber over a
+  scripted load whose value assertions (scripted counts for
+  `pulled`/`updated`, a known leftover for `shared_pending`, a
+  controlled wait for `wait_us`, and gauge transitions including the
+  cancellation-abort decrement) distinguish an implementation that
+  emits the right events with wrong values.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -1134,7 +1161,8 @@ review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
 ordering half a unit-level test. INV-L11 and INV-L12 are behavioral at
-the unit layer; none of INV-L10, INV-L11, or INV-L12 needs a bench
+the unit layer, and INV-L13 at the integration layer (the section 4.4
+definition-of-done test); none of INV-L10 through INV-L13 needs a bench
 scenario, and in particular the
 `quit_keyed_backlog_50k` latency numbers are not a check for either — see
 section 5.1's row for why bounded-mode keyed-quit latency cannot serve as
@@ -1224,9 +1252,10 @@ default-value half of 2 — before code implementation starts.
    exposed by future profiling-hook work).
    **Resolved (2026-07-18).** `tracing` only for the initial
    implementation, with the normative minimal schema — target, levels,
-   fields, firing conditions, and the definition of done — fixed in
-   section 4.4. Profiling-hook counters remain future additive work;
-   adding them does not change the tracing schema.
+   fields, firing conditions, and the value-verifying definition of
+   done — fixed in section 4.4 and pinned as INV-L13 (section 5).
+   Profiling-hook counters remain future additive work; adding them
+   does not change the tracing schema.
 5. Restart-rate-control interaction: whether a future restart-rate-control
    feature consumes the same `RuntimeConfig` surface or stays a
    subscription-level policy (current position: subscription-level).
