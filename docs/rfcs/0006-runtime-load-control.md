@@ -91,8 +91,14 @@ Scheduling facts that interact with load:
 
 ### 1.2 Requirements carried into the contract
 
-- **R1**: Memory used by *each* pending runtime-owned channel buffer must be
-  boundable by configuration. The bound is per channel, not aggregate:
+- **R1**: Memory used by each pending *app-facing* runtime-owned channel
+  buffer — the shared app channel and each keyed command channel — must be
+  boundable by configuration. The dedicated quit channel is deliberately
+  outside R1: it is never bounded (R4, section 4.1) and does not appear in
+  the buffer total below; its occupancy needs no configuration knob because
+  each command task sends at most one quit signal before terminating, so it
+  is bounded by the producer count, the same application-owned premise as
+  the rest of this requirement. The bound is per channel, not aggregate:
   `RuntimeConfig` alone bounds the shared channel and each keyed channel
   individually, and the buffer total is `app_channel_capacity + m ×
   keyed_channel_capacity`, where `m` — the number of active `CommandId`s —
@@ -479,7 +485,9 @@ To be finalized as contract tests before implementation:
   each producer task blocked on a full channel additionally holds one
   in-flight message, and keyed channels exist per active `CommandId`, so the
   conceptual total is `shared capacity + number of blocked producers +
-  Σ(per-command keyed capacity)`. A single global memory bound would require
+  Σ(per-command keyed capacity)`; the dedicated quit channel is exempt from
+  capacity configuration and from this total (R1, R4). A single global
+  memory bound would require
   a global permit pool or a cap on active producers; open question 3
   resolved against both, so this conceptual total *is* the contract, with
   the producer count — including `m`, the number of active `CommandId`s in
@@ -580,8 +588,14 @@ acceptance measurement only once the fairness policy (open question 6) fixes
 what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
 are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
 INV-L9's acceptance scenario is `keyed_isolation` (section 5.1), added with
-the implementation: hold one keyed channel at capacity and verify an
-independent key still fills and delivers up to its own capacity. INV-L7 and
+the implementation, and it checks send *admission* only: with key A held at
+capacity and its next send pending, key B's first `capacity` sends must
+complete and only its `capacity + 1`-th send may be pending — pending on
+key B's own occupancy. Delivery is deliberately outside the scenario: the
+event loop's keyed pull drains every ready keyed receiver through one
+`StreamMap`, so observing key B's delivery necessarily drains key A too,
+and delivery latency belongs to the fairness question (open question 6),
+which INV-L9 does not answer. INV-L7 and
 INV-L8 are structural rather than load-dependent and are checked by code
 review of every runtime-internal send and spawn site, not by a bench
 scenario.
@@ -603,7 +617,7 @@ must meet and is filled with measured values when the implementation lands.
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
-| `keyed_isolation` (new scenario, added with the implementation) | key B send admission while key A's channel is held full | trivially isolated — unbounded sends never wait | key B's producer fills and delivers up to its own `keyed_channel_capacity` while key A's channel stays full; any key-B admission wait correlated with key A's occupancy is the regression signal (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | key B send admission while key A's channel is held full | trivially isolated — unbounded sends never wait | with key A at capacity and its `capacity + 1`-th send pending, key B's first `keyed_channel_capacity` sends complete and only its `capacity + 1`-th send is pending, on key B's own occupancy; admission only — delivery is excluded (draining B also drains A via the keyed `StreamMap`, and delivery latency is open question 6's territory) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
