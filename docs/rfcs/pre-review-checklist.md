@@ -42,6 +42,13 @@ Prompts that have already paid off:
   messages, held permits) outlive it.
 - A bounded test against an unbounded parameter: any finite scenario that
   saturates `j` units is passed by a pool larger than `j × capacity`.
+- An admission-window adversary: with bounded channels, the interval
+  between a consumer's pull and a blocked producer's re-send leaves the
+  channel momentarily empty, so orderings impossible under unbounded
+  sends become legal, compliant executions — an acceptance criterion
+  derived from unbounded behavior may falsely flag them (from PR #213: a
+  capacity-1 run delivers a keyed quit before the remaining producer
+  backlog while violating nothing).
 
 ## 3. Enforcement class, declared up front
 
@@ -85,6 +92,14 @@ original draft, and it is where false justifications creep in.
 because a task terminates after `send` while its signal stays queued —
 and a misdescription of `StreamMap::poll_next` as draining all ready
 receivers.
+
+Invariant citations are code claims too: "X is already carried by RFC
+N's INV-M" gets a fresh read of INV-M's exact statement, and an umbrella
+clause ("all RFC N invariants hold") covers only what RFC N actually
+states. *From PR #213:* a resolution leaned on "INV-L5 carries RFC 0003"
+for delivery-FIFO and quit precedence, but RFC 0003's INV-9 defines only
+post-dispatch suppression and INV-14 only same-pull-point ordering — the
+properties had to be pinned as new invariants with their own checks.
 
 ## 5. Re-derive, don't patch
 
