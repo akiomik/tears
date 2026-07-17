@@ -17,18 +17,25 @@
   bounds with the active-`CommandId` count an application-owned contract
   input, the producer-count premise is application-owned and observable,
   and keyed channels are bounded per command, not by a shared pool
-  (INV-L8/L9; sections 1.2, 4.4, 4.5, 5, 5.1)
+  (INV-L8/L9; sections 1.2, 4.4, 4.5, 5, 5.1). 2026-07-17 — open question
+  7 resolved: keyed `Action::Quit` stays in its command's private channel,
+  with no reroute to the dedicated quit channel in either shape — a keyed
+  quit's delivery order is its cancellation semantics, so any
+  backlog-independent delivery path would decide the quit-vs-cancel race
+  in the quit's favor by construction, and prompt unconditional quit is
+  already available unkeyed (sections 4.2, 4.6; F7 pinned as a regression
+  canary in section 5.1)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
 > sections 4–6 turns out to be unimplementable without breaking the public
 > API. Sections 4–6 fix the direction of the load-control contract but their
 > details (capacities, batching caps, per-source classes) remain open until
-> implementation. In particular, cross-channel fairness (section 4.3) and
-> the quit delivery path (section 4.2) are contracts to settle before the
-> post-0.10.0 implementation; the exact scope of the memory bound (INV-L1)
-> was the third such contract and is now settled (open question 3, section
-> 4.5). None of them gates the 0.10.0 release.
+> implementation. In particular, cross-channel fairness (section 4.3)
+> remains a contract to settle before the post-0.10.0 implementation; the
+> quit delivery path and the exact scope of the memory bound (INV-L1) were
+> the other two such contracts and are now settled (open questions 7 and 3,
+> sections 4.6 and 4.5). None of them gates the 0.10.0 release.
 
 ## Summary
 
@@ -237,9 +244,11 @@ Findings:
   the keyed variant's quit→delivered is p50 1.300s — the full drain of the
   remaining backlog at ~26µs per message — with spread across 20 trials
   under 0.2%. This is F4's shared-first starvation applied to quit: delivery
-  scales linearly with backlog depth. It quantifies the status quo that open
-  question 7 weighs against re-routing a front-of-stream keyed quit to the
-  dedicated channel.
+  scales linearly with backlog depth. It quantifies the status quo that
+  open question 7 resolved to keep: the wait is cancel-before-delivery
+  holding under load — any pending shared input could cancel the quit's
+  command, and shared-first pull processes them all before delivering it —
+  not incidental starvation (section 4.6).
 
 ## 3. Release-gate decision for 0.10.0
 
@@ -340,12 +349,13 @@ mode's send contract, by source class:
   channel instead, so in bounded mode it can wait on
   `keyed_channel_capacity` like any other keyed output, and is additionally
   subject to INV-14 shared-first pull once delivered (keyed quit is already
-  subject to that ordering today). Whether keyed / in-stream quit should
-  instead be re-routed to the dedicated channel — matching what unkeyed
-  `Action::Quit` already does — is open question 7, which also covers why
-  that reroute is not a trivial channel swap for a quit that follows
-  not-yet-sent earlier items in the same stream. User-initiated quit itself
-  is not part of that open question: as an unkeyed command with no earlier
+  subject to that ordering today). Open question 7 asked whether keyed /
+  in-stream quit should instead be re-routed to the dedicated channel —
+  matching what unkeyed `Action::Quit` already does — and resolved that it
+  stays in the private channel: that channel's delivery order is what keeps
+  a keyed quit cancellable, and a reroute in either shape would break RFC
+  0003's INV-9 and per-command FIFO (section 4.6). User-initiated quit
+  itself was never part of that question: as an unkeyed command with no earlier
   actions ahead of it, it already gets R4's independence from
   `app_channel_capacity`; only the input leg (the key press traveling
   through the shared channel to `update`) is shared-channel traffic and
@@ -474,6 +484,107 @@ The decision is captured in two invariants: INV-L8 (load control paces
 sends, never producer admission) and INV-L9 (keyed backpressure is
 isolated per command — the testable form of the no-shared-pool choice).
 
+### 4.6 Keyed quit routing (open question 7 resolved)
+
+A keyed `Action::Quit` is delivered through its command's private channel,
+like every other keyed output (sections 1.1, 4.2). Open question 7 asked
+whether it should instead be re-routed to the dedicated quit channel at
+the producer side — matching what unkeyed `Action::Quit` already does —
+in either of two shapes: re-routing once the quit reaches the front of
+its own stream, or bypassing stream order for a quit still behind unsent
+earlier items. The resolution: **no reroute, in either shape — keyed quit
+stays in the private channel.**
+
+The decisive fact is that a keyed quit's delivery order *is* its
+cancellation semantics. Keying a quit is the API's way of saying "quit,
+unless this command is cancelled or superseded first" (RFC 0003 INV-9: a
+cancelled or superseded keyed `Action::Quit` does not quit the
+application). An application that wants an unconditional, prompt quit
+already has one — unkeyed `Command::quit()` — with measured
+backlog-independent delivery (R4, F6). Both delivery behaviors therefore
+already exist in the API, chosen per command; a reroute would not add the
+fast path, it would remove the cancellable one.
+
+The front-of-stream shape — the one open question 7 called deliverable —
+breaks two contracts R5 promised to preserve:
+
+- **Cancellability (RFC 0003 INV-9, buffered-output suppression).** The
+  dedicated quit channel carries no command identity (its payload is
+  `()`), and its select branch is always armed. Once a keyed quit is sent
+  into it, no later explicit cancel or `CancelInFlight` supersede can
+  suppress it. Today suppression works precisely because the quit sits in
+  the keyed entry's private channel: cancellation removes the entry and
+  drops the buffered `CommandOutput::Quit` with it.
+- **Per-command FIFO (RFC 0003).** At the front of its stream, a quit's
+  earlier `Action::Message` items have been *sent* but not necessarily
+  *delivered*: under shared backlog they wait for the shared drain (F4)
+  while a dedicated-channel quit would be delivered at
+  backlog-independent speed (F6). The quit would overtake its own
+  command's earlier output — a command emitting `[Message(saved), Quit]`
+  would exit the application before `saved` reaches `update`.
+
+Adversarial variants considered and excluded:
+
+- **Identity-carrying quit channel** — the quit channel carries
+  `(CommandId, RunToken)` and the quit branch checks the keyed entry's
+  liveness at delivery. This fails precisely the case that motivates the
+  reroute. Every cancellation of a keyed command is dispatched through
+  `enqueue_command` — from the init command (before any keyed command
+  exists) or from a command returned by `update` — and every `update`
+  invocation consumes an input delivered through the shared channel or a
+  keyed channel. Under backlog, the cancel that should suppress the quit
+  is therefore itself an undelivered input; a liveness check at quit
+  delivery evaluates state that has not yet seen that cancel, and
+  honoring cancels still in the backlog means draining the backlog first
+  — the status quo. Backlog-independent keyed-quit delivery and
+  cancellability are mutually exclusive under backlog: any delivery path
+  faster than the input drain decides the quit-vs-cancel race in the
+  quit's favor by construction. F7's 1.30s at ~50k backlog is not
+  incidental starvation to engineer away; it is cancel-before-delivery
+  holding under load.
+- **Reroute only when the private channel is empty** — avoids the FIFO
+  violation but not the cancellability one, which is independent of
+  stream position; excluded for the same reason as the identity-carrying
+  variant.
+- **Drain-then-deliver at the quit branch** — the quit branch, on
+  receiving a keyed quit, processes the pending backlog before honoring
+  it. Latency-equivalent to the status quo (the backlog is processed
+  either way), so it buys nothing and couples the quit branch to app
+  input processing.
+- **The behind-stream shape** inherits every objection above and adds the
+  infeasibility already recorded in open question 7: discovering a quit
+  behind unsent items requires look-ahead buffering (unbounded memory,
+  contra R1/R2) or an out-of-band signal that abandons RFC 0003's
+  stream-order semantics.
+
+Consequences:
+
+- **No new invariant.** The pinned contract is RFC 0003 INV-9 plus
+  per-command FIFO, both already carried by INV-L5 (behavioral anchor:
+  RFC 0003's buffered-quit suppression test,
+  `cancelling_buffered_quit_suppresses_it`). The `quit_keyed_backlog_50k`
+  scenario (F7) stays in the harness as a regression canary: keyed
+  quit→delivered dropping to backlog-independent values without an open
+  question 6 fairness policy indicates exactly the reroute this
+  resolution rejects.
+- **Bounded mode changes neither the analysis nor the acceptance
+  criterion.** Capacity controls backlog memory, not the number of inputs
+  ahead of a keyed output (F4): in the burst scenario the burst's inputs
+  drain ahead of the keyed quit whether they are queued in the channel or
+  held by blocked producers, up to the admission-window races bounded mode
+  already concedes for keyed delivery in general (section 4.3) — races too
+  rare to move a per-trial p50. The section 5.1 row is fixed at
+  "unchanged".
+- **Latency, if ever wanted, goes through open question 6.** A fairness
+  policy that bounds keyed-delivery latency would apply to keyed quit as
+  to every other keyed output — and preserving cancel-before-delivery is
+  already that question's stated constraint. There is no quit-specific
+  delivery path to design.
+- **Documentation guidance** (lands with open question 1's
+  recommended-defaults documentation): use unkeyed `Command::quit()` for
+  a prompt unconditional quit; `.cancellable(id)` on a quit buys
+  suppression at the cost of waiting behind pending inputs under load.
+
 ## 5. Invariants (draft)
 
 To be finalized as contract tests before implementation:
@@ -531,7 +642,8 @@ To be finalized as contract tests before implementation:
   counts as passing), since a single harness run cannot validate a claim of
   the form "always independent of backlog." Quit requests still inside
   command streams are outside this invariant and follow their stream's
-  delivery semantics (section 4.2). The quit-under-backlog scenarios now
+  delivery semantics (section 4.2) — a scope kept deliberately by open
+  question 7's resolution (section 4.6). The quit-under-backlog scenarios now
   exist and are measured (section 2, F6), and they record the delivery
   instant itself — the quit branch firing, timestamped from the runtime's
   tracing events — not a proxy bound, so a regression in the quit branch's
@@ -633,7 +745,7 @@ must meet and is filled with measured values when the implementation lands.
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
-| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
+| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | unchanged — keyed quit stays in the private channel (open question 7, section 4.6), and bounded capacity does not reduce the inputs ahead of a keyed output (F4); a drop to backlog-independent delivery without an open question 6 fairness policy is the regression signal, not an improvement |
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency is open question 6's territory) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
@@ -710,6 +822,20 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    on stream position at all, which is a deliberate semantic change
    relative to RFC 0003's FIFO. Any resolution of this question should say
    which of the two shapes it delivers.
+   **Resolved (2026-07-17).** Neither shape: a keyed `Action::Quit` stays
+   in its command's private channel. Keying a quit is a request for
+   cancellability (RFC 0003 INV-9), and under backlog every cancel is
+   itself an undelivered shared or keyed input, so any quit delivery path
+   faster than the input drain — including an identity-carrying quit
+   channel checked for liveness at delivery — decides the quit-vs-cancel
+   race in the quit's favor by construction. The front-of-stream shape
+   additionally lets the quit overtake its own command's earlier buffered
+   messages (per-command FIFO), and the behind-stream shape was already
+   infeasible as stated above. Prompt unconditional quit remains available
+   as unkeyed `Command::quit()` (R4, F6). No new invariant: INV-L5 (RFC
+   0003 INV-9, per-command FIFO) pins the contract, and F7's scenario is
+   kept as a regression canary (section 5.1). Full rationale, including
+   the adversarial variants considered, in section 4.6.
 8. Harness follow-up: add a quit-under-backlog scenario (F5) and a bounded
    vs. unbounded comparison matrix before implementation.
    **Resolved (2026-07-17).** `benches/runtime_load.rs` now runs the
@@ -719,7 +845,7 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    matrix is defined in section 5.1 with the unbounded column measured; the
    bounded column is filled when the implementation lands. F6 is the input
    for INV-L4's (a)/(b) formulation choice; F7 is the quantified status quo
-   for open question 7.
+   that open question 7 has since resolved to keep (section 4.6).
 
 ## 7. References
 
