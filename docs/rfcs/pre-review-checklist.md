@@ -77,7 +77,12 @@ Whatever the class, name the production seam the check goes through: the
 concrete construction/send/spawn sites for a structural review, or, for a
 behavioral test, the production code path it exercises or the transition
 logic it shares with production. A test that exercises a parallel model
-of the mechanism proves nothing about the runtime.
+of the mechanism proves nothing about the runtime. And when the invariant
+quantifies over several seams — *every* pull point, *every* send site —
+the check covers each member: a non-compliant implementation can add its
+bypass on exactly the seam the single test does not touch (from PR #213:
+an "every `AppInputs` pull point" invariant tested only on
+`try_next_ready` misses a quit-specific bypass in `poll_next`).
 
 ## 4. Code claims verified against code
 
@@ -119,5 +124,11 @@ a chain of findings.
 - Cross-references: open-question numbers point at their resolutions;
   preamble/decision-scope status agrees with the body; the amendment
   header line is updated.
+- Citations of another document's invariants name things that actually
+  exist there, and a corrected claim is corrected everywhere: grep for
+  the old term across the RFC, its references section, and the index
+  (from PR #213: "RFC 0003's FIFO" survived in R5, §4.3, the
+  open-question text, and the references after the body had already
+  conceded RFC 0003 states no FIFO invariant).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).

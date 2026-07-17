@@ -21,8 +21,9 @@
   7 resolved: keyed `Action::Quit` stays in its command's private channel,
   with no reroute to the dedicated quit channel in either shape — a keyed
   quit's delivery order is its cancellation semantics, and a reroute would
-  outrun both ready cancelling inputs and post-dispatch suppression (RFC
-  0003 INV-9); the routing, per-run in-order delivery, and shared-first
+  outrun the ready shared cancelling inputs INV-L11 orders ahead of a
+  keyed quit and defeat post-dispatch suppression (RFC 0003 INV-9); the
+  routing, per-run in-order delivery, and shared-first
   precedence this rests on are pinned as INV-L10/INV-L11, and bounded-mode
   keyed-quit latency is capacity-dependent, so F7's regression check is
   scoped to the unbounded default (sections 4.2, 4.6, 5, 5.1)
@@ -144,8 +145,12 @@ Scheduling facts that interact with load:
   different again — it travels through its command's private channel like
   any other keyed output — and follows that channel's delivery semantics
   (section 4.2).
-- **R5**: RFC 0003's cancellation and FIFO invariants (per-command FIFO,
-  cancel-before-delivery, INV-14) must be preserved or explicitly amended.
+- **R5**: RFC 0003's cancellation and ordering invariants
+  (cancel-before-delivery, INV-14 shared-first pull, INV-10 one-item
+  drain) must be preserved or explicitly amended. Per-command in-order
+  delivery — which RFC 0003's model assumes but never states as an
+  invariant — is pinned by this RFC as INV-L10 (section 5) and preserved
+  under the same rule.
 - **R6**: The default (unconfigured) behavior of existing applications must
   not change in 0.10.0.
 
@@ -380,8 +385,11 @@ merged" are known.
 
 ### 4.3 Interaction with existing invariants
 
-- **Per-command and per-subscription FIFO** (RFC 0003): unchanged; awaiting a
-  send preserves order.
+- **Per-command and per-subscription in-order delivery**: unchanged;
+  awaiting a send preserves order. RFC 0003's model assumes this ordering
+  but states no FIFO invariant — the per-command form, quit included, is
+  pinned in this RFC as INV-L10 (section 5); the per-subscription form is
+  structural (one forwarding task sending into one FIFO channel).
 - **INV-14 shared-first pull**: unchanged, and bounded mode adds no fairness
   guarantee on top of it. A full shared channel is refilled by a waiting
   producer each time the loop pulls one message, so shared readiness — and
@@ -480,8 +488,9 @@ cancellation (RFC 0003), coupling two mechanisms this RFC otherwise keeps
 orthogonal. A pool also cannot rescue a total bound: the number of active
 `CommandId`s is application-owned, so with or without a pool the premise
 stays with the application. Per-command capacity matches the per-command
-FIFO contract and the existing one-private-channel-per-`CommandId`
-structure, at a deliberate cost R1 states explicitly: the keyed buffer
+in-order delivery contract (INV-L10) and the existing
+one-private-channel-per-`CommandId` structure, at a deliberate cost R1
+states explicitly: the keyed buffer
 total is `m × keyed_channel_capacity` with `m` — the number of active
 `CommandId`s — an application-owned contract input, not a `RuntimeConfig`
 knob.
@@ -540,7 +549,9 @@ RFC, INV-L10 and INV-L11 (section 5):
   inputs are still queued — and any of those inputs could be the one
   whose `update` cancels the quit's command. Private-channel routing
   instead orders the quit behind every ready shared input at each pull
-  point, so the potential cancels run first.
+  point, so those potential cancels run first. Cancelling inputs of
+  other classes — ready keyed outputs, inputs not yet admitted — are
+  ordered by neither routing (see the identity-carrying variant below).
 
 Adversarial variants considered and excluded:
 
@@ -552,18 +563,22 @@ Adversarial variants considered and excluded:
   init command (before any keyed command exists) or from a command
   returned by `update` — and every `update` invocation consumes an input
   delivered through the shared channel or a keyed channel. Under backlog,
-  the input whose `update` would dispatch the cancel is therefore often
-  still queued — *ready but unprocessed* — and a liveness check at quit
-  delivery evaluates state that has not seen it; honoring those inputs
-  means processing them before the quit, which is exactly the
-  shared-first precedence (INV-L11) the reroute abandons. So the variant
-  still decides the quit-vs-cancel race for the quit against every
-  not-yet-processed cancelling input, ready or not. Under the unbounded
-  default the difference is starkest: every pending input is already
-  ready, so private-channel routing waits for the full drain — F7's 1.30s
-  at ~50k backlog is cancel-before-delivery holding under load, not
-  incidental starvation — while the rerouted quit would wait for none of
-  it.
+  the input whose `update` would dispatch the cancel can be sitting
+  *ready* in the shared channel, unprocessed, and a liveness check at
+  quit delivery evaluates state that has not seen it. Ready shared
+  inputs are exactly the class of cancelling input the runtime orders
+  ahead of a keyed quit — INV-L11 — and the class F7's backlog consists
+  of; the reroute delivers the quit ahead of them by construction. For
+  the other classes neither routing orders the race: a cancelling input
+  arriving through another keyed channel has no guaranteed position
+  against the quit inside the keyed `StreamMap`, and an input not yet
+  admitted (the bounded-mode window, section 4.3) is invisible to both
+  designs. The reroute therefore strictly weakens cancellation
+  precedence and strengthens nothing. Under the unbounded default the
+  loss is starkest: every pending shared input is already ready, so
+  private-channel routing waits for the full drain — F7's 1.30s at ~50k
+  backlog is cancel-before-delivery holding under load, not incidental
+  starvation — while the rerouted quit would wait for none of it.
 - **Reroute only when the private channel is empty** — avoids the
   in-order-delivery violation (INV-L10's ordering half) but not the
   suppression and precedence ones, which are independent of stream
@@ -577,8 +592,9 @@ Adversarial variants considered and excluded:
 - **The behind-stream shape** inherits every objection above and adds the
   infeasibility already recorded in open question 7: discovering a quit
   behind unsent items requires look-ahead buffering (unbounded memory,
-  contra R1/R2) or an out-of-band signal that abandons RFC 0003's
-  stream-order semantics.
+  contra R1/R2) or an out-of-band signal that abandons the strict
+  stream-order consumption RFC 0003's model describes — the ordering
+  INV-L10 pins.
 
 Consequences:
 
@@ -748,9 +764,12 @@ To be finalized as contract tests before implementation:
   channels; it makes no claim about inputs not yet admitted (the
   bounded-mode admission window, section 4.3), which is why bounded-mode
   keyed-quit latency is capacity-dependent and carries no acceptance
-  bound (section 5.1). Behavioral check at the `AppInputs` layer: a unit
-  test, added with this amendment, in which a queued shared message wins
-  the pull over an already-buffered keyed quit.
+  bound (section 5.1). Behavioral check at the `AppInputs` layer: unit
+  tests, added with this amendment, in which a queued shared message
+  wins the pull over an already-buffered keyed quit on *each* pull point
+  the invariant quantifies over — the blocking `poll_next` path and the
+  non-waiting `try_next_ready` path — since a quit-specific bypass could
+  be introduced on either one alone.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -884,17 +903,20 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    buffering of unsent items — reintroducing unbounded memory and
    contradicting R1/R2 — or an out-of-band quit signal that does not depend
    on stream position at all, which is a deliberate semantic change
-   relative to RFC 0003's FIFO. Any resolution of this question should say
-   which of the two shapes it delivers.
+   relative to the strict stream-order consumption RFC 0003's model
+   describes (stated as an invariant only later, by INV-L10). Any
+   resolution of this question should say which of the two shapes it
+   delivers.
    **Resolved (2026-07-17).** Neither shape: a keyed `Action::Quit` stays
    in its command's private channel. Keying a quit is a request for
    cancellability, which decomposes into post-dispatch suppression (RFC
-   0003 INV-9) and precedence for the inputs that could still dispatch a
-   cancel — every cancellation comes from an `update` invocation fed by a
-   shared or keyed input, so a reroute to the always-armed dedicated
-   branch (with or without an identity-and-liveness check, which can only
-   see cancels already dispatched) delivers the quit ahead of ready
-   inputs whose `update` would cancel it. The front-of-stream shape
+   0003 INV-9) and precedence for the ready shared inputs that could
+   still dispatch a cancel — the one class of cancelling input the
+   runtime orders ahead of a keyed quit (INV-L11; ready keyed and
+   un-admitted inputs are ordered by neither routing). A reroute to the
+   always-armed dedicated branch (with or without an identity-and-liveness
+   check, which can only see cancels already dispatched) delivers the
+   quit ahead of exactly that class. The front-of-stream shape
    additionally lets the quit overtake its own run's earlier buffered
    messages, and the behind-stream shape was already infeasible as stated
    above. Prompt unconditional quit remains available as unkeyed
@@ -902,7 +924,8 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    pinned as INV-L10 (private-channel routing and per-run in-order
    delivery: structural at the keyed send site, plus a unit-level
    ordering test) and INV-L11 (a ready shared input wins the pull over a
-   ready keyed quit: unit-level test) — INV-L5 alone does not carry them,
+   ready keyed quit: unit-level tests on both pull paths, blocking and
+   non-waiting) — INV-L5 alone does not carry them,
    since RFC 0003 states neither a delivery-FIFO invariant that includes
    quit nor a quit-specific precedence. F7's full-drain wait is a
    regression check for the unbounded default only; bounded-mode
@@ -925,7 +948,8 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 - `benches/runtime_load.rs` — full-loop load harness and reference numbers
   (section 2).
 - RFC 0002 — redraw suppression (frame-branch behavior under load).
-- RFC 0003 — command cancellation (INV-14 shared-first pull, FIFO,
-  cancel-before-delivery).
+- RFC 0003 — command cancellation (INV-14 shared-first pull,
+  cancel-before-delivery, INV-9 buffered-quit suppression; it states no
+  FIFO invariant — per-run in-order delivery is this RFC's INV-L10).
 - RFC 0005 — structural lifecycle identity (subscription reconciliation the
   load path feeds).

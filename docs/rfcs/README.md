@@ -20,7 +20,7 @@ one or the other explicitly.
 | --- | --- |
 | [0001](0001-http-module-redesign.md) | HTTP module redesign |
 | [0002](0002-redraw-suppression.md) | Redraw suppression (message / redraw separation) |
-| [0003](0003-command-cancellation.md) | Command cancellation, keyed delivery, FIFO invariants |
+| [0003](0003-command-cancellation.md) | Command cancellation, keyed delivery, delivery-order invariants |
 | [0004](0004-command-timeout-retry.md) | Command timeout and retry |
 | [0005](0005-structural-lifecycle-identity.md) | Structural lifecycle identity and composition scope |
 | [0006](0006-runtime-load-control.md) | Runtime load control, backpressure, latency guarantees |
