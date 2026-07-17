@@ -34,6 +34,15 @@ results deferred only behind user actions) was false. Check the converse
 direction of every such claim against every row that feeds the same
 aggregate.
 
+Measurement and scenario tables are inventories too. An acceptance
+condition that quantifies over "each scenario" is checked against every
+row of the scenario table, including control rows whose intended behavior
+differs from what the condition demands. *From PR #215:* INV-L4's
+acceptance conditions quantified over "each `quit_*` scenario" — a set
+that includes the keyed control `quit_keyed_backlog_50k`, whose ~1.3s
+full-drain delivery is intended behavior — so the stated criterion could
+never pass.
+
 ## 2. Adversarial counterexample per invariant
 
 For each requirement and invariant, deliberately construct at least one
@@ -59,6 +68,12 @@ Prompts that have already paid off:
   derived from unbounded behavior may falsely flag them (from PR #213: a
   capacity-1 run delivers a keyed quit before the remaining producer
   backlog while violating nothing).
+- A minimal-effort adversary against acceptance criteria and definitions
+  of done, not only invariants: the implementation that does the named
+  thing once, with arbitrary values, or only on the member the test
+  happens to touch (from PR #215: an observability definition of done
+  that asserted "each event fires with its required fields" — satisfied
+  by emitting every event once with wrong values).
 
 ## 3. Enforcement class, declared up front
 
@@ -125,20 +140,57 @@ for delivery-FIFO and quit precedence, but RFC 0003's INV-9 defines only
 post-dispatch suppression and INV-14 only same-pull-point ordering — the
 properties had to be pinned as new invariants with their own checks.
 
-## 5. Re-derive, don't patch
+## 5. Normative force and readiness
+
+An RFC or amendment that gates implementation carries no soft spots in
+its normative sections. Three scans, all from the first review round of
+PR #215:
+
+- **Hedge scan.** Grep the normative sections for *should*, *may*, *or
+  similar*, *at least*, *for example*, *left to a separate task*. Each
+  hit is tightened into a requirement, moved into explicitly
+  non-normative rationale, or delegated — and a delegation is recorded
+  in the RFC body as a named prerequisite (which task owns it, what it
+  must fix, and that implementation waits on it), never left as an
+  aside. (§3.2/§4.1 held the `RuntimeConfig` API at "for example" / "at
+  least" with the owning task recorded nowhere as a gate; §4.4 specified
+  observability as "or similar" / "should" with no definition of done.)
+- **No pending choices inside invariants.** An invariant that still
+  contains a decision to make — "resolving this needs either (a) … or
+  (b) …", "the remaining step" — is not yet an invariant. Either resolve
+  the choice or state what resolves it and that implementation waits.
+  (INV-L4 shipped as a two-way choice in an RFC otherwise presented as
+  implementation-ready.)
+- **Surface–invariant coverage.** Every element of contract surface the
+  RFC introduces — configuration field, emitted event, public behavior —
+  maps to at least one invariant with a declared enforcement class
+  (item 3). Walk the surface list and name the invariant for each; an
+  element whose semantics are defined nowhere (`batch_max_messages` had
+  neither counting semantics nor a corresponding invariant) is a finding
+  you can file yourself.
+
+## 6. Re-derive, don't patch
 
 When a review finding changes a clause's premises, scope, invariants, or
 proof method — regardless of the severity label it carries — treat it as
 "the clause's derivation is broken", not "one sentence is wrong": rewrite
 the clause from its premises (the inventory, the requirements it serves),
-then run items 1–4 on the result as if it were new text. Severity is
+then run items 1–5 on the result as if it were new text. Severity is
 about impact, not about how deep the fix must go: PR #211's proof-method
 gap (a scenario presented as proof of pool absence) was filed as a P2 and
 still required re-deriving the invariant's entire enforcement story.
 Sentence-level patches under review pressure are how one finding becomes
 a chain of findings.
 
-## 6. Mechanical pass
+Patch text written in response to review is the highest-risk text this
+item covers, and the checklist applies to it in full. *From PR #215:*
+all three second-round findings — an acceptance condition quantified
+over an unchecked scenario inventory, a definition of done a wrong-value
+implementation passes, and a stale open-question description of a
+decision the same amendment had made — were introduced by first-round
+patch text and sit squarely in classes items 1, 2, and 7 already name.
+
+## 7. Mechanical pass
 
 - Cross-references: open-question numbers point at their resolutions;
   preamble/decision-scope status agrees with the body; the amendment
@@ -149,5 +201,11 @@ a chain of findings.
   (from PR #213: "RFC 0003's FIFO" survived in R5, §4.3, the
   open-question text, and the references after the body had already
   conceded RFC 0003 states no FIFO invariant).
+- Resolving a decision is a corrected claim: grep for the decision's own
+  vocabulary — its option labels ("(a)/(b)"), *pending*, *remaining
+  step*, *the input for the choice* — across the findings, every open
+  question's resolution text, and the amendment header (from PR #215:
+  open question 8 still described F6 as the input to a choice the same
+  amendment had already made).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
