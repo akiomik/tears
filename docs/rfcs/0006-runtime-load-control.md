@@ -10,6 +10,9 @@
 - CHANGELOG: `Added` entry lands at the load-control implementation release
   (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
   RFC (see section 3)
+- Amendments: 2026-07-17 — open question 8 resolved: quit-under-backlog
+  scenarios added and measured (section 2, F6/F7), bounded-vs-unbounded
+  acceptance matrix defined (section 5.1)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -137,6 +140,31 @@ rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS target.
 | `keyed_steady` | as `steady_20k` + keyed probe | 680 | 0.05ms / 2.2ms | 0.63ms / 8.9ms | 0.10ms / 5.2ms | 60 |
 | `keyed_overload` | as `overload` + keyed probe | 308,733 | 4.0s / 7.9s | 4.0s / 7.9s | **9.2s / 13.0s** | 60 |
 
+Quit responsiveness under backlog is measured by the `quit_*` scenarios
+(added 2026-07-17 for open question 8). Each scenario runs many short trials
+— the event loop's `select!` is unbiased, so quit latency is a distribution
+and only tail statistics across trials are meaningful. A trial floods the
+shared channel (burst or paced), then `update` returns `Command::quit()`
+while the backlog is still deep, mirroring a real quit key press: the
+unkeyed variant reaches the dedicated quit channel through its command task
+(section 1.1); the keyed variant travels its command's private channel
+instead (section 4.2). Two per-trial values are recorded: **quit→delivered**
+(quit request to the event loop's quit branch observing it — the harness
+installs a process-global `tracing` subscriber and timestamps the runtime's
+own "quit signal received" / "keyed quit signal received" debug events on
+the `tears::runtime` target, so this is the delivery instant itself, not a
+bound, and is usable as an acceptance measurement) and **quit→exit** (to
+`run()` returning, which adds teardown, including backlog deallocation that
+scales with depth and must not be misread as delivery).
+
+| Scenario | Load at quit | Trials | Depth at quit | Quit→delivered p50 / p99 / max | Quit→exit p50 / max |
+| --- | --- | --- | --- | --- | --- |
+| `quit_idle` | none | 200 | 0 | 0.59ms / 0.71ms / 1.9ms | 0.60ms / 1.9ms |
+| `quit_backlog_50k` | draining burst | 200 | ~50k | 0.11ms / 0.49ms / 0.64ms | 0.58ms / 1.1ms |
+| `quit_backlog_300k` | draining burst | 200 | ~300k | 0.11ms / 0.61ms / 0.61ms | 2.9ms / 3.4ms |
+| `quit_overload` | producer at 100k/s | 200 | ~8k | 0.11ms / 0.62ms / 0.84ms | 0.19ms / 0.92ms |
+| `quit_keyed_backlog_50k` | draining burst | 20 | ~50k | 1300ms / 1302ms / 1302ms | 1300ms / 1302ms |
+
 Findings:
 
 - **F1 — In-capacity behavior is healthy.** At up to 200k msg/s within
@@ -168,12 +196,31 @@ Findings:
 - **F5 — The frame branch survives overload.** The unbiased select plus the
   100µs batch cap kept the frame branch at 60 FPS through every overload
   scenario; no structural event-loop change is required for frame
-  scheduling. The harness does **not** measure quit responsiveness under
-  backlog: its quit is generated only after the last load message is
-  processed. A quit-under-backlog scenario is required before implementation
-  to validate INV-L4 and the quit-path contract (open question 8); because
-  the select is unbiased, that scenario needs tail latency across many
-  trials, not a single run, to say anything about INV-L4.
+  scheduling. Quit responsiveness under backlog is measured separately by
+  the `quit_*` trial scenarios above (F6, F7), added for open question 8.
+- **F6 — Unkeyed quit delivery is backlog-independent under the unbiased
+  select.** Across 600 loaded trials at depths from ~8k to ~300k,
+  quit→delivered stays at p50 0.11ms, p99 ≤ 0.62ms, max ≤ 0.84ms, with no
+  separation between the 50k and 300k depths and none between a draining
+  burst and an actively refilling producer. The idle baseline is *higher* at
+  p50 (0.59ms) because the quit request also marks a redraw and one 500µs
+  `view` usually runs before the quit branch wins; under load that render is
+  amortized into work already happening. The cost of a lost unbiased
+  tie-break is therefore a few micro-batches, not a function of queue depth.
+  Quit→exit *does* scale with depth (p50 0.58ms at 50k vs 2.9ms at 300k) —
+  that is shutdown-time backlog deallocation, not delivery. This is the
+  measurement basis INV-L4 was waiting for: the statistical formulation
+  (INV-L4 option (b)) is already satisfiable by the current implementation,
+  while a deterministic quit priority (option (a)) would buy a hard per-run
+  bound, not depth-independence, which the data shows the unbiased select
+  provides on its own.
+- **F7 — A keyed quit waits for the full shared drain.** With ~50k queued,
+  the keyed variant's quit→delivered is p50 1.300s — the full drain of the
+  remaining backlog at ~26µs per message — with spread across 20 trials
+  under 0.2%. This is F4's shared-first starvation applied to quit: delivery
+  scales linearly with backlog depth. It quantifies the status quo that open
+  question 7 weighs against re-routing a front-of-stream keyed quit to the
+  dedicated channel.
 
 ## 3. Release-gate decision for 0.10.0
 
@@ -390,9 +437,18 @@ To be finalized as contract tests before implementation:
   counts as passing), since a single harness run cannot validate a claim of
   the form "always independent of backlog." Quit requests still inside
   command streams are outside this invariant and follow their stream's
-  delivery semantics (section 4.2). The new quit-under-backlog scenario
-  (open question 8) needs to settle which of the two this invariant is
-  before it becomes an acceptance measurement.
+  delivery semantics (section 4.2). The quit-under-backlog scenarios now
+  exist and are measured (section 2, F6), and they record the delivery
+  instant itself — the quit branch firing, timestamped from the runtime's
+  tracing events — not a proxy bound, so a regression in the quit branch's
+  scheduling would show up directly. Delivery latency shows no depth
+  dependence from 0 to ~300k queued messages, so formulation (b) is
+  satisfiable by the current unbiased select with no structural change,
+  with measurement conditions of the form "≥ 200 trials per scenario,
+  quit→delivered p99 ≤ 1ms at every measured depth"; (a) remains the
+  fallback if a hard per-run bound is ever required. Choosing between (a)
+  and (b) is the remaining step before INV-L4 becomes an acceptance
+  measurement; F6 removes the empirical uncertainty from that choice.
 - **INV-L5**: All RFC 0003 invariants hold unchanged in bounded mode.
 - **INV-L6**: Default configuration (`app_channel_capacity: None`,
   `keyed_channel_capacity: None`, `batch_max_messages: None`) reproduces
@@ -418,10 +474,46 @@ integration test. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario becomes an
 acceptance measurement only once the fairness policy (open question 6) fixes
-what keyed latency bound, if any, to expect; INV-L4 needs the new
-quit-under-backlog scenario (open question 8). INV-L7 is structural rather
-than load-dependent and is checked by code review of every runtime-internal
-send site, not by a bench scenario.
+what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
+are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
+INV-L7 is structural rather than load-dependent and is checked by code
+review of every runtime-internal send site, not by a bench scenario.
+
+### 5.1 Bounded vs. unbounded acceptance matrix
+
+The bounded mode's acceptance measurement is a re-run of the harness under a
+bounded `RuntimeConfig`, compared cell by cell against the unbounded
+baseline below (measured 2026-07-17, reference machine of section 2). The
+unbounded column is fixed now so the implementation has a pinned before/after
+comparison; the bounded column states the acceptance criterion each cell
+must meet and is filled with measured values when the implementation lands.
+
+| Scenario | Metric | Unbounded baseline | Bounded acceptance criterion |
+| --- | --- | --- | --- |
+| `overload` | max queue depth | ~308k, grows linearly with overload duration (F3) | ≤ `app_channel_capacity` + concurrent producers — `capacity + 1` here; see the depth-accounting note below (INV-L1) |
+| `overload` | update latency p99 | 7.9s, grows with overload duration (F3) | bounded by the drain time of one full queue plus admission wait (INV-L3, its producer-count premise given) |
+| `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
+| `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
+| `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
+| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
+| `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
+
+Queue-depth cells use the harness's depth definition, `produced -
+processed`. Raw channel occupancy is not observable through the public API,
+so two in-flight positions outside the channel had to be settled
+explicitly. A producer blocked in a bounded `send` holds one message
+outside the channel — exactly the per-producer accounting INV-L1 already
+makes — and the depth *includes* it, because `produced` counts a message
+when the source stream yields it. The consumer side holds up to one more
+message inside `Application::update`, and the depth *excludes* it, because
+`processed` counts a message when `update` begins, i.e. once it has left
+the channel; counting at update completion instead would let a compliant
+implementation read `capacity + producers + 1` (channel full, one blocked
+producer refills the freed slot while the pulled message is still being
+processed) and be flagged as a regression. The observable acceptance bound
+is therefore `app_channel_capacity + concurrent shared-channel producers`
+(`capacity + 1` in these single-flood-producer scenarios); depth exceeding
+`capacity + producers` is the regression signal.
 
 ## 6. Open questions (to resolve before implementation)
 
@@ -468,6 +560,14 @@ send site, not by a bench scenario.
    which of the two shapes it delivers.
 8. Harness follow-up: add a quit-under-backlog scenario (F5) and a bounded
    vs. unbounded comparison matrix before implementation.
+   **Resolved (2026-07-17).** `benches/runtime_load.rs` now runs the
+   `quit_*` trial scenarios — unkeyed quit at three backlog depths plus an
+   actively refilling overload, and a keyed-quit control — with per-trial
+   tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
+   matrix is defined in section 5.1 with the unbounded column measured; the
+   bounded column is filled when the implementation lands. F6 is the input
+   for INV-L4's (a)/(b) formulation choice; F7 is the quantified status quo
+   for open question 7.
 
 ## 7. References
 
