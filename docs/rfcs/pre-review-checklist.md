@@ -24,6 +24,16 @@ them implied elsewhere in the document.
 *From PR #211:* R1 said "each runtime-owned channel" while the same RFC's
 §1.1 table listed the quit channel as unbounded by design.
 
+A one-row implicature is the same defect in reverse: a claim true of one
+inventory row used to characterize the whole aggregate it feeds. *From
+PR #214:* "every user input travels the shared channel" (true of the
+terminal-event row) was used to cast shared traffic as "exactly the
+user's controls" — but subscription output and unkeyed command output
+feed the same channel, and the argument built on the implicature (keyed
+results deferred only behind user actions) was false. Check the converse
+direction of every such claim against every row that feeds the same
+aggregate.
+
 ## 2. Adversarial counterexample per invariant
 
 For each requirement and invariant, deliberately construct at least one
@@ -97,6 +107,15 @@ original draft, and it is where false justifications creep in.
 because a task terminates after `send` while its signal stays queued —
 and a misdescription of `StreamMap::poll_next` as draining all ready
 receivers.
+
+The document's own derivations are citations too: when a clause credits
+a mechanism with resolving a failure mode, re-read the section that
+analyzed that mechanism — the analysis may already refute the credit.
+*From PR #214:* §4.7 justified declining a fairness policy partly
+because bounded mode "exists to exit" the overload regime, while §4.3
+had already established that bounded capacity leaves shared readiness —
+and with it keyed starvation — intact at any capacity; backpressure
+bounds memory and shared latency, not keyed liveness.
 
 Invariant citations are code claims too: "X is already carried by RFC
 N's INV-M" gets a fresh read of INV-M's exact statement, and an umbrella

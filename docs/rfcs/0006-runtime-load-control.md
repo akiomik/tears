@@ -26,18 +26,32 @@
   private-channel routing, keyed-quit ordering, and shared-first
   precedence this rests on are pinned as INV-L10/INV-L11, and bounded-mode
   keyed-quit latency is capacity-dependent, so F7's regression check is
-  scoped to the unbounded default (sections 4.2, 4.6, 5, 5.1)
+  scoped to the unbounded default (sections 4.2, 4.6, 5, 5.1). 2026-07-17
+  — open question 6 resolved: no cross-channel fairness policy — bounded
+  keyed-delivery latency is not a goal of this contract. Cancellation is
+  an `update` decision, so a pull point cannot know which ready shared
+  inputs are cancels; shared-first pull (INV-14) is therefore the
+  implementable form of cancel-before-delivery itself, and any policy
+  that guarantees a keyed-delivery bound (quota, aging, weighted
+  round-robin) must deliver keyed output past inputs that could still
+  cancel it — trading exactly what keying buys. Keyed liveness under
+  sustained shared readiness is explicitly forgone in both modes (bounded
+  capacity does not restore it — section 4.3's refill argument); INV-14
+  stays unrelaxed, the keyed-probe scenario stays measurement-only,
+  liveness-critical output is directed to the unkeyed path, and the
+  shared-wins unit tests now cover both pull paths for keyed messages
+  (sections 4.3, 4.7, 5, 5.1)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
 > sections 4–6 turns out to be unimplementable without breaking the public
 > API. Sections 4–6 fix the direction of the load-control contract but their
 > details (capacities, batching caps, per-source classes) remain open until
-> implementation. In particular, cross-channel fairness (section 4.3)
-> remains a contract to settle before the post-0.10.0 implementation; the
-> quit delivery path and the exact scope of the memory bound (INV-L1) were
-> the other two such contracts and are now settled (open questions 7 and 3,
-> sections 4.6 and 4.5). None of them gates the 0.10.0 release.
+> implementation. The three contracts flagged for settling before the
+> post-0.10.0 implementation — the exact scope of the memory bound
+> (INV-L1), the quit delivery path, and cross-channel fairness — are all
+> now settled (open questions 3, 7, and 6; sections 4.5, 4.6, and 4.7).
+> None of them gated the 0.10.0 release.
 
 ## Summary
 
@@ -228,8 +242,9 @@ Findings:
   message the loop pulls lets a waiting producer refill the queue, so the
   shared channel can stay continuously ready for as long as overload lasts,
   even with a capacity of 1. Capacity controls backlog and memory (F3);
-  bounded keyed-delivery latency needs a scheduling policy of its own
-  (section 4.3, open question 6).
+  bounded keyed-delivery latency would need a scheduling policy of its own
+  (section 4.3) — open question 6 has since resolved against adding one
+  (section 4.7).
 - **F5 — The frame branch survives overload.** The unbiased select plus the
   100µs batch cap kept the frame branch at 60 FPS through every overload
   scenario; no structural event-loop change is required for frame
@@ -407,11 +422,12 @@ merged" are known.
   producer each time the loop pulls one message, so shared readiness — and
   with it F4's keyed starvation — can persist for as long as overload
   lasts, independent of the configured capacity. Bounded capacity controls
-  backlog and memory only. If bounded keyed-delivery latency becomes a
-  requirement, it needs an explicit scheduling policy (for example a
-  shared-pull quota per batch window) defined as a deliberate relaxation of
-  INV-14 that preserves cancel-before-delivery; that policy is open
-  question 6 and is not part of the initial bounded mode.
+  backlog and memory only. Open question 6 asked whether bounded
+  keyed-delivery latency should be a goal and resolved that it is not: no
+  fairness policy is added — not in the initial bounded mode and not later
+  under this contract — because any policy that guarantees a
+  keyed-delivery bound must deliver keyed output while ready shared
+  inputs, the class that can still cancel it, remain queued (section 4.7).
 - **Cancellation**: cancel-before-delivery and buffered-output suppression
   (RFC 0003) hold exactly as stated, and a keyed producer blocked on a full
   private channel is aborted exactly like a running one — INV-14's literal
@@ -636,15 +652,177 @@ Consequences:
   and INV-L11 (no *ready* input is outrun) and uses no reroute, so
   bounded-mode keyed-quit latency is a measurement to record, never an
   acceptance bound or a reroute detector (section 5.1).
-- **Latency, if ever wanted, goes through open question 6.** A fairness
-  policy that bounds keyed-delivery latency would apply to keyed quit as
-  to every other keyed output — and preserving cancel-before-delivery is
-  already that question's stated constraint. There is no quit-specific
-  delivery path to design.
+- **Latency, if ever wanted, goes through the fairness question.** A
+  fairness policy that bounds keyed-delivery latency would apply to keyed
+  quit as to every other keyed output — and preserving
+  cancel-before-delivery is already that question's stated constraint.
+  There is no quit-specific delivery path to design. Open question 6 has
+  since resolved that question against any policy (section 4.7), which
+  also settles the quit-shaped form: reopening either is one and the same
+  new RFC.
 - **Documentation guidance** (lands with open question 1's
   recommended-defaults documentation): use unkeyed `Command::quit()` for
   a prompt unconditional quit; `.cancellable(id)` on a quit buys
   suppression at the cost of waiting behind pending inputs under load.
+
+### 4.7 Cross-channel fairness (open question 6 resolved)
+
+Under shared overload, keyed delivery waits until the shared channel is
+momentarily empty: F4 measured the limit of that deferral (p50 9.2s under
+sustained overload, max ≈ the run's wall time), and F7 measured its
+quit-shaped form. Open question 6 asked whether bounded keyed-delivery
+latency is a goal at all and, if so, which scheduling policy could relax
+INV-14's shared-first pull while preserving cancel-before-delivery. The
+resolution: **not a goal — no fairness policy, in either delivery mode,
+and INV-14 stays exactly as RFC 0003 states it.**
+
+The decisive fact is that shared-first pull *is* the cancellation
+mechanism, not a scheduling preference layered on top of one. A shared
+message is opaque to the runtime — the pull point sees a `Msg` and cannot
+know whether processing it will cancel anything — and a cancellation
+exists only once `update` has consumed that message and returned a command
+whose cancel list reaches `enqueue_command`. "Deliver keyed output unless
+a cancel is pending" is therefore not implementable at the pull point: the
+only way to honor a cancel still queued as an unprocessed shared input is
+to process every ready shared input first, which is precisely INV-14. A
+policy that *guarantees* a keyed-delivery latency bound must consequently,
+in some executions, deliver a keyed output while ready shared inputs
+remain queued — under the unbounded default a backlogged shared channel is
+continuously ready until fully drained, and bounded-mode admission windows
+(section 4.6) are scheduling-dependent, so no guarantee can be built on
+them. Every such policy trades exactly the property keying exists to buy;
+the question's constraint — relax INV-14 while preserving
+cancel-before-delivery — has no non-vacuous solution.
+
+Candidate policies considered and excluded:
+
+- **Shared-pull quota per batch window** (the example the question named):
+  after `q` shared pulls in one batch, poll keyed once. This does bound
+  the keyed wait (roughly `q` messages of update work) — at the cost
+  above: the keyed output is delivered while every ready shared input past
+  the quota position stays queued, so a stale result can reach `update`
+  after the input that cancels its command was already queued ahead of it.
+  Each quota firing is a literal INV-14 violation, and when the keyed pull
+  returns a quit, an INV-L11 violation. A quit-exempting variant (defer a
+  quota-pulled quit into a side buffer) restores INV-L11 but not the
+  message case — and since the keyed `StreamMap` cannot choose what a poll
+  returns, the exemption needs delivery-side buffering whose interaction
+  with INV-L10's ordering then has to be designed.
+- **Deadline or aging** — deliver a keyed output once it has waited longer
+  than `T`: age makes the queued shared inputs no less likely to cancel
+  the output; the same violation, plus a delivery order that depends on
+  wall time.
+- **Weighted or deficit round-robin across channels**: the quota with a
+  different `q`; excluded for the same reason.
+- **Cancel-aware scan** — inspect the ready shared prefix for cancels
+  before delivering keyed output: not implementable, because a cancel is
+  not visible in a message; it exists only after `update` runs. This is
+  section 4.6's identity-carrying-variant failure one step earlier in the
+  pipeline.
+- **Per-delivery liveness check**: already exists — cancellation removes
+  the keyed entry and drops its buffered output (RFC 0003) — and can see
+  only cancels already dispatched, never those still queued as unprocessed
+  shared inputs.
+
+Declining the goal itself, not merely each candidate, rests on the
+following, with the forgone half of the trade stated first and
+explicitly:
+
+- **What is forgone: keyed liveness under sustained shared readiness, in
+  both modes.** The unbounded default defers keyed delivery until the
+  full shared drain (F4). Bounded capacity does not restore liveness: a
+  waiting producer refills each freed slot, so shared readiness — and
+  with it the deferral — persists for as long as overload lasts,
+  independent of the configured capacity (section 4.3). Backpressure
+  bounds memory and shared drain-side latency (INV-L1, INV-L3), not
+  keyed deferral. The deferral is also indiscriminate about *why* the
+  shared channel is ready: user input arrives as terminal-event
+  subscription output, alongside every other subscription's output and
+  unkeyed command output (sections 1.1, 4.2), and any shared message —
+  not only a user-originated one — can be the input whose `update`
+  returns the cancel, which is the one thing the pull point cannot rank
+  them by. A keyed output that is still wanted can therefore wait
+  indefinitely behind unrelated hot-subscription traffic. This
+  resolution accepts that cost knowingly — cancellation correctness over
+  keyed liveness — rather than trading the former to buy the latter.
+- **Where applications live, keyed delivery needs no policy.** In
+  capacity, keyed delivery is already sub-millisecond (`keyed_steady`,
+  p50 0.10ms). Under the unbounded default's overload, shared
+  input-to-screen latency is itself seconds deep (F3), so faster keyed
+  delivery would surface results into a UI that is seconds stale either
+  way. Under bounded-mode overload the UI's staleness is bounded by
+  queue capacity instead of overload duration (INV-L3, its
+  producer-count premise given), which makes the persisting keyed
+  deferral the visible cost — that case is exactly the previous bullet's
+  explicit trade, remedied per command and at the source as described
+  below, not by a scheduling policy. The loop-level fairness that keeps
+  the application responsive and quittable — the frame branch and the
+  dedicated quit branch — is provided by the unbiased select and
+  measured healthy under overload (F5, F6).
+- **The API already prices the trade per command.** Unkeyed output travels
+  the shared FIFO: under backlog it waits its arrival-order turn rather
+  than the full drain, and in bounded mode it inherits INV-L3's
+  capacity-bounded drain-side latency. Keying opts into cancellability,
+  and with it deferral behind ready shared inputs. Both behaviors exist
+  today, chosen per command — the same structure as section 4.6's quit
+  guidance, now stated for every keyed output: liveness-critical output
+  belongs in an unkeyed command.
+- **A policy would add contract surface without adding a remedy the API
+  lacks.** A fairness knob in `RuntimeConfig` needs tuning coupled to
+  `update` cost and load profile, and weakens RFC 0003's cancellation
+  contract for every application. The liveness it would buy is already
+  available per command by not keying the output, and the load
+  discipline that restores keyed liveness for keyed commands — pacing or
+  debouncing hot sources so the shared channel empties intermittently —
+  is application-owned, the same trust class as the producer-count
+  premise (section 4.5).
+
+Consequences:
+
+- **No new invariant, no new configuration.** The resolution keeps
+  contracts already pinned: INV-14 (RFC 0003, imported unchanged by
+  INV-L5 — its statement already disclaims bounded shared/keyed fairness)
+  and, for quits, INV-L10/INV-L11. No new mechanism exists to pin. The
+  absence of a fairness policy is checked structurally, like INV-L7's and
+  INV-L8's checks, at the seams a policy would have to occupy: the two
+  `AppInputs` pull points INV-L11 names (the blocking `poll_next` path and
+  the non-waiting `try_next_ready` path) and the micro-batch loop that
+  drives the non-waiting one — a per-batch quota would live in that loop,
+  invisible to any single-pull test. Behaviorally, the
+  shared-input-wins-the-pull unit tests are regression checks, not proofs
+  (a quota with `q` larger than a test's pull count passes any finite
+  test — section 5's bounded-test-against-unbounded-parameter argument).
+  With this amendment those tests cover both pull paths for keyed
+  *messages*, as the INV-L11 tests already do for keyed quits, closing the
+  seam-coverage gap the pre-review checklist flags. `batch_max_messages`
+  (section 4.1) is not a fairness knob and does not become one: ending a
+  batch early returns to the select loop, whose next pull is shared-first
+  again — even a cap of 1 leaves every keyed output behind every ready
+  shared input.
+- **Keyed-to-keyed arbitration stays unspecified.** The keyed pull is one
+  `StreamMap` poll returning one ready element from a randomized start
+  position; no per-key delivery bound is stated or relied on — already the
+  reason section 5 excludes delivery from the `keyed_isolation` scenario.
+  This resolution adds no per-key claim.
+- **The keyed-probe scenario is permanently measurement-only.** F4's
+  numbers are the unbounded regression baseline; the bounded run is
+  recorded with pinned capacity and load when the implementation lands
+  (section 5.1). No keyed-delivery latency cell ever becomes an acceptance
+  bound under this contract.
+- **Reopening requires a new RFC, not a knob.** If field experience ever
+  makes bounded keyed-delivery latency a requirement, the change is a
+  deliberate amendment to RFC 0003's cancel-before-delivery contract
+  (INV-14), with the candidate inventory above as its starting point and
+  the quit exemption's interaction with INV-L10/INV-L11 as the first
+  problem it must solve.
+- **Documentation guidance** (lands with open question 1's
+  recommended-defaults documentation, extending section 4.6's): keying a
+  command buys cancellation and suppression at the cost of delivery
+  deferral behind ready shared inputs under load; put liveness-critical
+  output in unkeyed commands. For keyed outputs, liveness under load
+  comes only from the shared channel emptying intermittently — pace or
+  debounce hot sources — and not from bounded mode, which bounds memory
+  and shared latency but leaves keyed deferral intact (section 4.3).
 
 ## 5. Invariants (draft)
 
@@ -686,8 +864,10 @@ To be finalized as contract tests before implementation:
   premise as INV-L1's per-producer accounting, resolved by open question 3
   as explicit, application-owned, and observable rather than
   runtime-enforced (section 4.5); INV-L3 as a whole does not hold for an
-  application that violates it. No such bound exists for keyed delivery
-  unless the fairness policy (open question 6) defines one.
+  application that violates it. No such bound exists for keyed delivery —
+  open question 6 resolved against a fairness policy, so keyed-delivery
+  latency stays deliberately unbounded while ready shared inputs remain
+  (section 4.7).
 - **INV-L4**: A quit signal already in the dedicated quit channel is
   delivered with latency independent of app-channel backlog. This is not
   automatically a hard worst-case bound under the current implementation:
@@ -797,10 +977,12 @@ To be finalized as contract tests before implementation:
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
-the unbounded baseline grows linearly. The keyed-probe scenario becomes an
-acceptance measurement only once the fairness policy (open question 6) fixes
-what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
-are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
+the unbounded baseline grows linearly. The keyed-probe scenario never
+becomes an acceptance measurement: open question 6 resolved that no
+keyed-delivery latency bound exists under this contract, so its numbers are
+recorded as regression baselines only (section 4.7). INV-L4's acceptance
+scenarios are the `quit_*` trials (section 2), pending the (a)/(b)
+formulation choice.
 INV-L9's *primary* check is structural, like INV-L7's and INV-L8's: every
 bounded channel is constructed with its own capacity, and no permit,
 semaphore, or budget is shared across channels — checked by code review of
@@ -823,8 +1005,9 @@ scenario: the event loop's keyed pull goes through one `StreamMap` over
 every keyed receiver and cannot drain a chosen key selectively — each poll
 returns one ready element from whichever key is picked, so waiting for the
 probe's delivery may drain the saturated keys instead — and delivery
-latency belongs to the fairness question (open question 6), which INV-L9
-does not answer. INV-L7 and
+latency carries no bound to check (open question 6 resolved against a
+fairness policy, section 4.7), which INV-L9 does not answer either way.
+INV-L7 and
 INV-L8 are structural rather than load-dependent and are checked by code
 review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
@@ -849,10 +1032,10 @@ must meet and is filled with measured values when the implementation lands.
 | `overload` | max queue depth | ~308k, grows linearly with overload duration (F3) | ≤ `app_channel_capacity` + concurrent producers — `capacity + 1` here; see the depth-accounting note below (INV-L1) |
 | `overload` | update latency p99 | 7.9s, grows with overload duration (F3) | bounded by the drain time of one full queue plus admission wait (INV-L3, its producer-count premise given) |
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
-| `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
+| `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement with pinned capacity, depth, and trial count when the implementation lands |
-| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency is open question 6's territory) (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
@@ -909,6 +1092,31 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    at all and, if so, which scheduling policy (for example a shared-pull
    quota per batch window) relaxes INV-14 while preserving
    cancel-before-delivery (F4, section 4.3).
+   **Resolved (2026-07-17).** Not a goal — no fairness policy is added,
+   and INV-14 stays as RFC 0003 states it in both delivery modes. The
+   question's constraint has no non-vacuous solution: cancellation is an
+   `update` decision, so a pull point cannot know which ready shared
+   inputs are cancels, and processing them all first — INV-14 — is the
+   only implementable form of cancel-before-delivery; any policy that
+   guarantees a keyed-delivery bound (quota, aging, weighted round-robin)
+   must deliver keyed output past inputs that could still cancel it,
+   trading exactly what keying buys. The forgone half is explicit: keyed
+   liveness under sustained shared readiness is given up in both modes —
+   bounded capacity does not restore it, since a waiting producer refills
+   each freed slot (section 4.3), and the deferring shared traffic is any
+   mix of user input, subscription output, and unkeyed command output,
+   not user controls alone (section 1.1). Liveness-critical output
+   already has the unkeyed path (arrival-order shared FIFO, INV-L3-bounded
+   in bounded mode), in-capacity keyed latency is already sub-ms
+   (`keyed_steady`), and keyed liveness under load is restored by
+   source pacing, not by a scheduling policy or by bounded mode. No new
+   invariant is introduced: the pinned content is
+   INV-14 (via INV-L5) plus INV-L10/INV-L11, with policy absence checked
+   structurally at the pull seams and the shared-wins unit tests extended
+   to cover both pull paths for keyed messages. The keyed-probe scenario
+   stays measurement-only (section 5.1); reopening is a new RFC amending
+   RFC 0003's INV-14. Full rationale, including the candidate policies
+   considered and excluded, in section 4.7.
 7. Quit routing: whether a keyed `Action::Quit` should be re-routed to the
    dedicated quit channel at the producer side — matching what unkeyed
    `Action::Quit` already does — or stay in its private channel under
