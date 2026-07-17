@@ -833,6 +833,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keyed_quit_is_delivered_after_the_same_runs_earlier_output() {
+        let id = CommandId::new("save-then-quit");
+        let mut manager = KeyedCommands::new();
+        manager.spawn(
+            id.clone(),
+            CancelPolicy::CancelInFlight,
+            actions([Action::Message(1), Action::Quit]),
+        );
+        wait_for_closed_buffered(&mut manager, &id).await;
+
+        assert_eq!(take_message(&mut manager, &id), 1);
+        let (event_id, event) = manager
+            .try_next_ready()
+            .expect("keyed quit should be ready after the earlier message");
+        assert_eq!(event_id, id);
+        assert_eq!(event, ReceiverEvent::Output(CommandOutput::Quit));
+    }
+
+    #[tokio::test]
     async fn cancelling_buffered_quit_suppresses_it() {
         let id = CommandId::new("quit");
         let mut manager = KeyedCommands::new();

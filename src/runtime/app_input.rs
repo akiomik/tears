@@ -95,6 +95,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::super::keyed_commands::{CommandOutput, ReceiverEvent};
+    use crate::test_support::wait_until;
 
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_shared_after_send() {
@@ -174,6 +175,30 @@ mod tests {
                 | AppInput::Keyed(ReceiverEvent::Output(_) | ReceiverEvent::Closed) => None,
             })
             .expect("keyed output should follow the shared input");
+    }
+
+    #[tokio::test]
+    async fn shared_input_wins_when_keyed_quit_is_also_ready() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut inputs = AppInputs::new(rx);
+        let id = CommandId::new("quit");
+        inputs.spawn_keyed(
+            id.clone(),
+            CancelPolicy::CancelInFlight,
+            stream::iter([Action::Quit]).boxed(),
+        );
+        wait_until(
+            || inputs.has_closed_buffered(&id),
+            "keyed quit should be buffered before the pull",
+        )
+        .await;
+        tx.send(1).expect("receiver should be open");
+
+        assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
+        assert_eq!(
+            inputs.try_next_ready(),
+            Some(AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Quit)))
+        );
     }
 
     #[tokio::test]
