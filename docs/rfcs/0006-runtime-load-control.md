@@ -575,9 +575,12 @@ To be finalized as contract tests before implementation:
   one keyed channel's full capacity never delays admission into the shared
   channel or into any other keyed channel; each keyed channel's admission
   depends only on that channel's own occupancy. This is the no-shared-pool
-  resolution of open question 3 (section 4.5) in testable form — a global
+  resolution of open question 3 (section 4.5) in enforceable form — a global
   permit pool would satisfy INV-L1's per-channel capacity cells while
-  violating this one, so INV-L9 is what pins the isolation choice.
+  violating this one, so INV-L9 is what pins the isolation choice. Its
+  primary check is structural (channel-local capacity, no cross-channel
+  permit sharing), with `keyed_isolation` as a behavioral regression
+  scenario — see below for why a scenario alone cannot prove pool absence.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -586,23 +589,31 @@ the unbounded baseline grows linearly. The keyed-probe scenario becomes an
 acceptance measurement only once the fairness policy (open question 6) fixes
 what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
 are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
-INV-L9's acceptance scenario is `keyed_isolation` (section 5.1), added with
-the implementation, and it checks send *admission* only, on both halves of
-the invariant: with key A held at capacity and its next send pending, key
-B's first `capacity` sends must complete and only its `capacity + 1`-th
-send may be pending — pending on key B's own occupancy — and a shared
-producer's first `app_channel_capacity` sends must likewise complete, with
-only its next send pending on the shared channel's own occupancy. The
-shared half is what rules out an implementation whose keyed channels share
-permits with the shared channel while keyed-to-keyed stays isolated.
-Delivery is deliberately outside the scenario: the
-event loop's keyed pull drains every ready keyed receiver through one
-`StreamMap`, so observing key B's delivery necessarily drains key A too,
-and delivery latency belongs to the fairness question (open question 6),
-which INV-L9 does not answer. INV-L7 and
+INV-L9's *primary* check is structural, like INV-L7's and INV-L8's: every
+bounded channel is constructed with its own capacity, and no permit,
+semaphore, or budget is shared across channels — checked by code review of
+the channel-construction and send sites. It has to be structural because
+no finite scenario can prove the absence of a shared pool: any scenario
+that saturates `j` channels is passed by a per-channel-capacity-plus-pool
+implementation whose pool exceeds `j × capacity`. The `keyed_isolation`
+scenario (section 5.1), added with the implementation, is therefore a
+behavioral *regression* check, not a proof, and it is built to catch
+bounded pools rather than merely a second key: several keyed channels are
+held at capacity with their next sends pending — saturating any modest
+pool — while the two probe channels stay untouched until then. It checks
+send *admission* only, and proves the invariant's two halves separately:
+(a) keyed→keyed — a previously idle key's first `keyed_channel_capacity`
+sends complete, and only its `capacity + 1`-th send is pending, on that
+key's own occupancy; (b) keyed→shared — the shared producer's first
+`app_channel_capacity` sends complete, with only its next send pending on
+the shared channel's own occupancy. Delivery is deliberately outside the
+scenario: the event loop's keyed pull drains every ready keyed receiver
+through one `StreamMap`, so observing one key's delivery necessarily
+drains the others too, and delivery latency belongs to the fairness
+question (open question 6), which INV-L9 does not answer. INV-L7 and
 INV-L8 are structural rather than load-dependent and are checked by code
 review of every runtime-internal send and spawn site, not by a bench
-scenario.
+scenario; INV-L9 sits in both camps as described above.
 
 ### 5.1 Bounded vs. unbounded acceptance matrix
 
@@ -621,7 +632,7 @@ must meet and is filled with measured values when the implementation lands.
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
-| `keyed_isolation` (new scenario, added with the implementation) | key B and shared send admission while key A's channel is held full | trivially isolated — unbounded sends never wait | with key A at capacity and its `capacity + 1`-th send pending: key B's first `keyed_channel_capacity` sends complete and only its `capacity + 1`-th send is pending, on key B's own occupancy; a shared producer's first `app_channel_capacity` sends complete and only its next send is pending, on the shared channel's own occupancy; admission only — delivery is excluded (draining B also drains A via the keyed `StreamMap`, and delivery latency is open question 6's territory) (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` drains all ready receivers; delivery latency is open question 6's territory) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
