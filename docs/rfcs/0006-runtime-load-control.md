@@ -12,7 +12,11 @@
   RFC (see section 3)
 - Amendments: 2026-07-17 — open question 8 resolved: quit-under-backlog
   scenarios added and measured (section 2, F6/F7), bounded-vs-unbounded
-  acceptance matrix defined (section 5.1)
+  acceptance matrix defined (section 5.1). 2026-07-17 — open question 3
+  resolved: no producer admission limit — R1/R3 stay scoped to channel
+  buffers with an application-owned, observable producer-count premise, and
+  keyed channels are bounded per command, not by a shared pool (sections
+  1.2, 4.4, 4.5, 5)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -93,13 +97,16 @@ Scheduling facts that interact with load:
   subscriptions, running commands) is controlled by the application, not by
   `RuntimeConfig`. A full memory bound also requires bounding producer
   count, which this RFC's channel-capacity controls do not deliver on their
-  own (INV-L1, open question 3).
+  own; open question 3 resolved this by keeping R1 scoped to channel
+  buffers, with the producer-count premise application-owned and observable
+  (INV-L1, section 4.5).
 - **R2**: A configured bound must not silently drop messages by default;
   backpressure (slowing the producer) is the default overload response.
 - **R3**: Input-to-screen latency under load must be observable and, with a
   bounded configuration, bounded by queue capacity rather than by overload
-  duration — given a bounded number of concurrent producers, the same
-  premise INV-L3 and open question 3 depend on.
+  duration — given a bounded number of concurrent producers, the
+  application-owned premise INV-L3 depends on (open question 3, resolved in
+  section 4.5).
 - **R4**: A quit signal already in the dedicated quit channel must be
   delivered with latency independent of app backlog (the dedicated channel
   and its always-armed select branch must remain — see INV-L4 for the
@@ -382,9 +389,75 @@ merged" are known.
 
 Bounded or not, the runtime should expose load signals under `tracing`
 targets (`tears::runtime::load` or similar): queue depth high-water marks,
-batch sizes, and time spent awaiting capacity. Whether more than `tracing`
-is needed (for example dedicated profiling-hook counters) is a decision for
-that future work; the load harness already demonstrates what to measure.
+batch sizes, and time spent awaiting capacity. Producer-count gauges belong
+in the same signal set — active subscriptions, running unkeyed command
+tasks, active keyed entries, and, in bounded mode, how many producers are
+currently blocked awaiting capacity — because the producer-count premise
+INV-L1 and INV-L3 rest on is observable rather than enforced (section 4.5).
+Whether more than `tracing` is needed (for example dedicated
+profiling-hook counters) is a decision for that future work; the load
+harness already demonstrates what to measure.
+
+### 4.5 Producer-count premise (open question 3 resolved)
+
+INV-L1 and INV-L3 bound channel buffers and drain-side latency on a
+premise: the number of concurrent producers — subscription forwarding
+tasks, unkeyed command tasks, keyed command tasks — is bounded. Open
+question 3 asked whether the runtime should enforce that premise with an
+admission limit, upgrading R1/R3 from channel-buffer claims to
+total-pending-work guarantees. The resolution: **no admission limit — the
+premise stays with the application, and the runtime makes it observable
+instead of enforced.**
+
+An admission limit is structurally unsound in this runtime:
+
+- Every producer is created synchronously on the event loop task. A
+  command returned from `update` is dispatched (`enqueue_command`) before
+  the loop pulls its next input, and subscription reconciliation spawns
+  forwarding tasks inside the frame branch. An admission limit that
+  *waits* for a free producer slot would therefore have the event loop
+  await capacity that only its own draining can release — the self-deadlock
+  INV-L7 exists to prevent, moved from send sites to spawn sites.
+- The non-waiting alternatives change contracts this RFC promised to
+  preserve. Rejecting a subscription breaks the reconciliation contract
+  (a declared subscription runs, including restart of finished ones —
+  RFC 0005 and `SubscriptionManager::update`). Rejecting or dropping a
+  command silently discards an effect, a strictly worse loss than the
+  message loss R2 forbids. Parking un-admitted producers in a queue only
+  moves the unbounded buffer up one level, from messages to un-started
+  streams and closures, and defers effects for an unbounded time besides.
+
+Leaving the premise to the application is acceptable because producer
+count is a property of application structure, not of external load. A hot
+source raises the message *rate* through a fixed producer set — that is
+exactly what bounded channel capacity controls (F3). Producer *count*
+grows only through the application's own choices: the size of
+`subscriptions()` and how fast it spawns commands relative to how fast
+they complete. This is the same trust class as `update`'s CPU cost, which
+the runtime measures but does not bound. One load-coupled amplification
+deserves documentation as an anti-pattern: an application that spawns a
+command per processed message can, under bounded-mode overload, accumulate
+*blocked* command tasks — bounded channels convert message backlog into
+blocked-producer backlog for that pattern, and no channel capacity bounds
+it. The producer gauges in section 4.4 make that pattern visible; the
+recommended-defaults documentation (open question 1) should carry the
+anti-pattern note.
+
+Within the same question, keyed channels are bounded **per command**, not
+by a shared permit pool. A pool would couple backpressure across
+independent `CommandId`s — one hot command's backlog would block unrelated
+commands' sends, a producer-side analogue of F4's starvation — and permit
+accounting would have to reclaim permits from producers aborted by
+cancellation (RFC 0003), coupling two mechanisms this RFC otherwise keeps
+orthogonal. A pool also cannot rescue a total bound: the number of active
+`CommandId`s is application-owned, so with or without a pool the premise
+stays with the application. Per-command capacity matches the per-command
+FIFO contract and the existing one-private-channel-per-`CommandId`
+structure, at the cost of a looser conceptual total (INV-L1's
+`Σ(per-command keyed capacity)`).
+
+The decision is captured as INV-L8: load control paces sends, never
+producer admission.
 
 ## 5. Invariants (draft)
 
@@ -397,7 +470,9 @@ To be finalized as contract tests before implementation:
   in-flight message, and keyed channels exist per active `CommandId`, so the
   conceptual total is `shared capacity + number of blocked producers +
   Σ(per-command keyed capacity)`. A single global memory bound would require
-  a global permit pool or a cap on active producers (open question 3).
+  a global permit pool or a cap on active producers; open question 3
+  resolved against both, so this conceptual total *is* the contract, with
+  the producer count application-owned and observable (section 4.5).
 - **INV-L2**: Bounded mode never drops a message to relieve backpressure —
   capacity pressure is resolved only by the producer waiting, never by the
   runtime discarding queued or in-flight output. This does not override RFC
@@ -417,11 +492,12 @@ To be finalized as contract tests before implementation:
   drain-equivalents, where `k` is the number of producers already queued
   for a permit ahead of it — end to end, acceptance plus drain-side is at
   most `(k + 1) + n`. This is only a bound if `k` itself is
-  bounded — i.e. the number of concurrent producers is bounded — which is
-  the same open premise as INV-L1's per-producer accounting (open
-  question 3); INV-L3 as a whole does not hold without it. No such bound
-  exists for keyed delivery unless the fairness policy (open question 6)
-  defines one.
+  bounded — i.e. the number of concurrent producers is bounded — the same
+  premise as INV-L1's per-producer accounting, resolved by open question 3
+  as explicit, application-owned, and observable rather than
+  runtime-enforced (section 4.5); INV-L3 as a whole does not hold for an
+  application that violates it. No such bound exists for keyed delivery
+  unless the fairness policy (open question 6) defines one.
 - **INV-L4**: A quit signal already in the dedicated quit channel is
   delivered with latency independent of app-channel backlog. This is not
   automatically a hard worst-case bound under the current implementation:
@@ -468,6 +544,15 @@ To be finalized as contract tests before implementation:
   enforces — a future change that has the event loop inject a message
   directly into a shared or keyed channel it also drains would deadlock as
   soon as that channel fills.
+- **INV-L8**: The runtime never blocks, rejects, or defers producer
+  admission. Every subscription the reconciliation contract says should
+  run is started, and every command returned from `update` (or
+  `Application::new`) is dispatched, synchronously and unconditionally —
+  load control paces sends, never producer creation (section 4.5). This
+  protects the RFC 0005 reconciliation contract and effect delivery from a
+  future admission limit, and — because producers are created on the event
+  loop task — it is also what keeps INV-L7's no-self-deadlock argument
+  closed at spawn sites, not just send sites.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
 integration test. The overload scenario is the acceptance measurement for
@@ -476,8 +561,9 @@ the unbounded baseline grows linearly. The keyed-probe scenario becomes an
 acceptance measurement only once the fairness policy (open question 6) fixes
 what keyed latency bound, if any, to expect; INV-L4's acceptance scenarios
 are the `quit_*` trials (section 2), pending the (a)/(b) formulation choice.
-INV-L7 is structural rather than load-dependent and is checked by code
-review of every runtime-internal send site, not by a bench scenario.
+INV-L7 and INV-L8 are structural rather than load-dependent and are checked
+by code review of every runtime-internal send and spawn site, not by a
+bench scenario.
 
 ### 5.1 Bounded vs. unbounded acceptance matrix
 
@@ -530,6 +616,15 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    FIFO; a pool bounds total memory more tightly). Without an answer, R1's
    and R3's boundable-memory and bounded-latency claims hold only for
    channel buffers, not total pending-work memory or latency.
+   **Resolved (2026-07-17).** No admission limit. Producer creation is
+   synchronous on the event loop task, so a waiting limit is INV-L7's
+   self-deadlock at the spawn site, and the non-waiting alternatives
+   (reject, drop, defer) break the RFC 0005 reconciliation contract or
+   silently discard effects. R1 and R3 stay scoped to channel buffers; the
+   producer-count premise becomes an explicit, application-owned,
+   observable responsibility (producer gauges in section 4.4), and keyed
+   channels are bounded per command rather than by a shared pool. Full
+   rationale in section 4.5; the contract is captured as INV-L8.
 4. Where backpressure-wait telemetry lives (`tracing` only, or counters
    exposed by future profiling-hook work).
 5. Restart-rate-control interaction: whether a future restart-rate-control
