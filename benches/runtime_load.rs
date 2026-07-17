@@ -9,11 +9,13 @@
 //!
 //! - **Queue depth**: pending messages (produced - processed), sampled while
 //!   the scenario runs; all runtime channels are unbounded today, so this is
-//!   the direct driver of memory growth under overload. `produced` counts
-//!   source emissions, not channel admissions, so under a future bounded
-//!   configuration the observable bound is `capacity + producers` — each
-//!   producer blocked in `send` holds one in-flight message outside the
-//!   channel (RFC 0006 section 5.1).
+//!   the direct driver of memory growth under overload. `produced` counts a
+//!   message when the source stream yields it and `processed` counts it when
+//!   `update` begins (once it has left the channel), so under a future
+//!   bounded configuration the observable bound is `capacity + producers`:
+//!   each producer blocked in `send` holds one in-flight message outside the
+//!   channel, while the message currently inside `update` is already
+//!   excluded (RFC 0006 section 5.1).
 //! - **Update latency**: message emission to `Application::update`.
 //! - **Render latency**: message emission to the first `Application::view`
 //!   call that observes it (input-to-screen staleness).
@@ -68,6 +70,7 @@
 
 use std::fmt::Debug;
 use std::num::NonZeroU32;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -402,11 +405,13 @@ impl Metrics {
         }
     }
 
-    /// Pending messages as `produced - processed`. `produced` counts source
-    /// emissions, not channel admissions, so under a future bounded
-    /// configuration a producer blocked in `send` contributes the one
-    /// in-flight message it holds outside the channel: the observable bound
-    /// is `capacity + producers`, not raw channel occupancy (RFC 0006
+    /// Pending messages as `produced - processed`. `produced` counts a
+    /// message at source emission, not channel admission; `processed` counts
+    /// it when `update` begins, once it has left the channel. Under a future
+    /// bounded configuration a producer blocked in `send` therefore
+    /// contributes the one in-flight message it holds outside the channel,
+    /// while the message being processed contributes nothing: the observable
+    /// bound is `capacity + producers`, not raw channel occupancy (RFC 0006
     /// section 5.1).
     fn queue_depth(&self) -> u64 {
         let produced = self.produced.load(Ordering::Relaxed);
@@ -522,15 +527,20 @@ impl Application for LoadApp {
     fn update(&mut self, msg: Msg) -> Command<Msg> {
         match msg {
             Msg::Load { seq, sent_at } => {
+                // Counted when `update` begins, i.e. once the message has
+                // left the runtime's channel: queue depth then excludes the
+                // message being processed, keeping the bounded-mode
+                // acceptance bound at `capacity + producers` instead of
+                // adding a consumer in-flight slot (RFC 0006 section 5.1).
+                self.processed += 1;
+                self.metrics
+                    .processed
+                    .store(self.processed, Ordering::Relaxed);
                 spin(self.cfg.update_cost);
                 if seq % self.sample_every == 0 {
                     Metrics::push_latency(&self.metrics.update_lat_ns, sent_at);
                 }
                 self.last_processed = Some((seq, sent_at));
-                self.processed += 1;
-                self.metrics
-                    .processed
-                    .store(self.processed, Ordering::Relaxed);
                 let request_quit = match self.cfg.quit_at_seq {
                     Some(quit_seq) => seq == quit_seq,
                     None => self.processed == self.cfg.total,
@@ -910,7 +920,7 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
-fn main() {
+fn main() -> ExitCode {
     // Positional arguments select scenarios by name; flags (e.g. the
     // `--bench` cargo passes) are ignored.
     let selected: Vec<String> = env::args()
@@ -938,7 +948,7 @@ fn main() {
             )
             .collect();
         println!("no matching scenario; available: {}", names.join(", "));
-        return;
+        return ExitCode::FAILURE;
     }
 
     // Quit trials read delivery instants from the runtime's tracing events;
@@ -957,8 +967,20 @@ fn main() {
         let report = runtime.block_on(run_scenario(cfg));
         print_report(&report);
     }
+    let mut failed_trials = 0u32;
     for scenario in quit_to_run {
         let report = runtime.block_on(run_quit_scenario(&scenario));
         print_quit_report(&report);
+        failed_trials += report.timeouts + report.missing_delivery;
     }
+    // Quit-trial statistics feed RFC 0006 acceptance criteria, so a partial
+    // sample must fail the run (and the CI Benchmarks check) instead of
+    // silently reporting percentiles over fewer trials than configured.
+    if failed_trials > 0 {
+        eprintln!(
+            "error: {failed_trials} quit trial(s) failed (timed out or missing delivery event)"
+        );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
