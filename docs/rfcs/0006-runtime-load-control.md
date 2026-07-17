@@ -523,10 +523,26 @@ of them is a contract change:
 
 Definition of done for the observability slice: an integration test
 installs a `tracing` subscriber (the technique the `quit_*` harness
-already uses, section 2), drives a scripted load, and asserts that each
-of the three events fires with every required field; the bounded run of
-the section 5.1 matrix records capacity-wait and blocked-producer numbers
-from these same events. Per-keyed-channel occupancy gauges are
+already uses, section 2), drives a scripted load, and verifies values and
+firing conditions, not mere event presence — an implementation that emits
+each event once with wrong values must fail it:
+
+- **Batch event**: `pulled` and `updated` equal the scripted input
+  counts, including a batch where the two differ — a scenario with a
+  `ReceiverEvent::Closed` among the queued inputs must observe
+  `pulled = updated + 1`.
+- **Capacity-wait event**: an immediately accepted send fires no event;
+  a send that had to await capacity fires exactly one event, at
+  acceptance, with `channel` naming the channel that blocked it.
+- **Producer gauges**: starting a subscription, an unkeyed command, and
+  a keyed command each raise the matching field, and each completion
+  lowers it again; `blocked` rises when a producer begins awaiting
+  capacity, falls when the send is accepted, and also falls when a
+  blocked producer is aborted by cancellation (section 4.3) — the
+  decrement must not depend on the send ever completing.
+
+The bounded run of the section 5.1 matrix records capacity-wait and
+blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
 deliberately outside the minimal schema (emission cost scales with `m`,
 the active-`CommandId` count); if field experience needs them, adding
 events under this target is additive.
@@ -956,9 +972,18 @@ To be finalized as contract tests before implementation:
   for, while (a) would restructure the one event loop every configuration
   shares — including the default path R6 and INV-L6 protect — and re-open
   F5's frame-branch fairness, to buy a hard per-run bound no requirement
-  demands. The acceptance conditions are normative: **each `quit_*`
-  scenario of section 2, re-run with ≥ 200 trials per scenario, must show
-  quit→delivered p99 ≤ 1 ms at every measured depth**, where
+  demands. The acceptance conditions are normative and scoped to the
+  dedicated-channel scenarios — exactly the quits this invariant covers:
+  **each of `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, and
+  `quit_overload` (section 2), run with ≥ 200 trials per scenario, must
+  show quit→delivered p99 ≤ 1 ms at every measured depth, in both
+  delivery modes** — the unbounded default (already measured, section 2)
+  and the bounded re-run of the section 5.1 matrix, where the same
+  criterion applies because the quit channel is never bounded (R4).
+  `quit_keyed_backlog_50k` is outside these conditions: it is the keyed
+  control — a keyed quit never enters the dedicated channel (sections
+  4.2, 4.6) — and its full-drain latency is intended behavior, recorded
+  under section 5.1's F7 row, not measured against this invariant.
   quit→delivered is the delivery instant itself (the quit branch's
   tracing event, timestamped as in section 2), not a proxy — so a
   regression in the quit branch's scheduling shows up directly in the
@@ -1074,9 +1099,11 @@ the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
 keyed-delivery latency bound exists under this contract, so its numbers are
 recorded as regression baselines only (section 4.7). INV-L4's acceptance
-scenarios are the `quit_*` trials (section 2), under the normative
-conditions its resolved statistical formulation states (≥ 200 trials per
-scenario, quit→delivered p99 ≤ 1 ms at every measured depth).
+scenarios are the four dedicated-channel `quit_*` trials (section 2; the
+keyed control `quit_keyed_backlog_50k` is excluded — its full-drain wait
+is intended behavior), under the normative conditions its resolved
+statistical formulation states (≥ 200 trials per scenario, quit→delivered
+p99 ≤ 1 ms at every measured depth, in both delivery modes).
 INV-L9's *primary* check is structural, like INV-L7's and INV-L8's: every
 bounded channel is constructed with its own capacity, and no permit,
 semaphore, or budget is shared across channels — checked by code review of
@@ -1128,7 +1155,7 @@ must meet and is filled with measured values when the implementation lands.
 | `overload` | update latency p99 | 7.9s, grows with overload duration (F3) | bounded by the drain time of one full queue plus admission wait (INV-L3, its producer-count premise given) |
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
-| `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions; the quit channel is never bounded (R4) |
+| `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement with pinned capacity, depth, and trial count when the implementation lands |
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
@@ -1291,9 +1318,11 @@ default-value half of 2 — before code implementation starts.
    actively refilling overload, and a keyed-quit control — with per-trial
    tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
    matrix is defined in section 5.1 with the unbounded column measured; the
-   bounded column is filled when the implementation lands. F6 is the input
-   for INV-L4's (a)/(b) formulation choice; F7 is the quantified status quo
-   that open question 7 has since resolved to keep (section 4.6).
+   bounded column is filled when the implementation lands. F6 is the
+   measurement basis on which INV-L4 has since been resolved to its
+   statistical formulation (2026-07-18; section 5); F7 is the quantified
+   status quo that open question 7 has since resolved to keep (section
+   4.6).
 
 ## 7. References
 
