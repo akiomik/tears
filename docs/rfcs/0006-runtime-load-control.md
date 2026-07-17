@@ -1,6 +1,7 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Draft
+- Status: Draft (moves to Accepted when 0.10.0 ships on the section 3 verdict;
+  to Implemented when the sections 4–6 implementation lands)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
@@ -202,7 +203,12 @@ left to a separate `RuntimeConfig` RFC/task) consumed by a new constructor
 Bounded behavior activates only through that surface:
 
 - Capacity limits replace the unbounded channels inside the runtime; no
-  public channel type is exposed today, so this is internal.
+  public channel type is exposed today, so this is internal. The one
+  place a channel type appears in a `pub` signature —
+  `BenchSubscriptionManager::new` takes the shared
+  `mpsc::UnboundedSender` — is `bench-internals`-gated, `#[doc(hidden)]`,
+  and explicitly outside semver; the implementation updates that wrapper
+  (and `benches/subscription.rs`) alongside `SubscriptionManager`.
 - Backpressure applies inside the runtime-owned forwarding and command tasks:
   an awaiting `send` stops the task from polling its source stream or command
   stream until the consumer catches up. `SubscriptionSource::stream` and
@@ -359,9 +365,11 @@ To be finalized as contract tests before implementation:
   its drain-side wait — once accepted — is bounded by the drain time of one
   full queue, independent of overload duration. The producer's own wait for
   acceptance is a separate bound, not assumed here: tokio's bounded `mpsc`
-  grants permits in FIFO order, so a producer's admission wait is at most
-  `(k + n)` drain-equivalents, where `k` is the number of producers already
-  queued for a permit ahead of it. This is only a bound if `k` itself is
+  grants permits in FIFO order and each drained message releases exactly
+  one permit, so a producer's admission wait is at most `(k + 1)`
+  drain-equivalents, where `k` is the number of producers already queued
+  for a permit ahead of it — end to end, acceptance plus drain-side is at
+  most `(k + 1) + n`. This is only a bound if `k` itself is
   bounded — i.e. the number of concurrent producers is bounded — which is
   the same open premise as INV-L1's per-producer accounting (open
   question 3); INV-L3 as a whole does not hold without it. No such bound
