@@ -19,11 +19,34 @@
 //! - **Memory**: peak RSS delta per scenario plus an estimate of the backlog
 //!   footprint from the maximum observed queue depth.
 //!
+//! # Quit-latency scenarios (`quit_*`)
+//!
+//! The `quit_*` scenarios measure quit responsiveness under a shared-channel
+//! backlog (RFC 0006 INV-L4 / open question 8). Each one runs many short
+//! trials: a trial floods the shared channel, then `update` returns
+//! [`Command::quit`] while the backlog is still deep, mirroring how a real
+//! key press quits an application. Because the event loop's `select!` is
+//! unbiased, a single run says nothing about the tail; the report therefore
+//! aggregates per-trial values into percentiles across trials:
+//!
+//! - **quit -> last work**: quit request to the end of the last `update` or
+//!   `view` call — a lower bound on quit *delivery* (the loop breaks right
+//!   after the last work item, before teardown).
+//! - **quit -> exit**: quit request to `Runtime::run` returning — an upper
+//!   bound that additionally includes shutdown and backlog deallocation,
+//!   which scales with queue depth and must not be misread as delivery
+//!   latency.
+//!
+//! The keyed variant sends the quit through a cancellable command's private
+//! channel instead of the dedicated quit channel, quantifying the INV-14
+//! shared-first bias for in-band quit (RFC 0006 open question 7).
+//!
 //! Run all scenarios, or name a subset:
 //!
 //! ```bash
 //! cargo bench --bench runtime_load
 //! cargo bench --bench runtime_load -- overload keyed_overload
+//! cargo bench --bench runtime_load -- quit_idle quit_backlog_300k
 //! ```
 //!
 //! Peak RSS is process-wide and monotone, so for clean memory numbers run a
@@ -70,8 +93,23 @@ struct ScenarioCfg {
     render_cost: Duration,
     /// Whether to run a keyed command emitting probe messages every 25ms.
     keyed_probe: bool,
+    /// Have `update` return [`Command::quit`] when it processes the flood
+    /// message with this seq, instead of quitting at `total`. The flood keeps
+    /// the backlog deep past this point, so the quit races a loaded loop.
+    quit_at_seq: Option<u64>,
+    /// Route the triggered quit through a keyed (cancellable) command, i.e.
+    /// the command's private channel, instead of an unkeyed command's direct
+    /// send to the dedicated quit channel.
+    keyed_quit: bool,
     /// Wall-clock guard; the scenario is aborted and reported as timed out.
     max_wall: Duration,
+}
+
+/// A quit-latency scenario: `base` is run `trials` times and per-trial quit
+/// latencies are aggregated into one report.
+struct QuitScenarioCfg {
+    base: ScenarioCfg,
+    trials: u32,
 }
 
 fn scenarios() -> Vec<ScenarioCfg> {
@@ -84,6 +122,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(2),
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(30),
         },
         // Paced load near consumer capacity.
@@ -94,6 +134,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(2),
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(30),
         },
         // One burst dumped into the unbounded channel at t=0; measures drain
@@ -105,6 +147,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(2),
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(30),
         },
         // Sustained producer faster than the consumer: queue depth and
@@ -116,6 +160,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(25),
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(60),
         },
         // Control: keyed command outputs while the shared channel is lightly
@@ -127,6 +173,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(2),
             render_cost: Duration::from_micros(500),
             keyed_probe: true,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(30),
         },
         // Keyed command outputs while the shared channel is overloaded; the
@@ -139,7 +187,89 @@ fn scenarios() -> Vec<ScenarioCfg> {
             update_cost: Duration::from_micros(25),
             render_cost: Duration::from_micros(500),
             keyed_probe: true,
+            quit_at_seq: None,
+            keyed_quit: false,
             max_wall: Duration::from_secs(60),
+        },
+    ]
+}
+
+/// Trials for unkeyed quit scenarios. INV-L4's unbiased-select tie-break
+/// makes quit latency a distribution, so the tail needs many short trials.
+const QUIT_TRIALS: u32 = 200;
+
+/// Trials for the keyed quit scenario. Each trial drains the whole backlog
+/// before the quit is delivered, so trials are long and the expected effect
+/// (latency ~ drain time) is orders of magnitude above trial noise.
+const KEYED_QUIT_TRIALS: u32 = 20;
+
+fn quit_scenarios() -> Vec<QuitScenarioCfg> {
+    // All quit scenarios use the overload update cost (25µs) so the backlog
+    // drains slowly (~38k msg/s on the reference machine) and the depth at
+    // the quit request is dominated by `total - quit_at_seq`.
+    let base = ScenarioCfg {
+        name: "",
+        rate: BURST,
+        total: 0,
+        update_cost: Duration::from_micros(25),
+        render_cost: Duration::from_micros(500),
+        keyed_probe: false,
+        quit_at_seq: Some(5_000),
+        keyed_quit: false,
+        max_wall: Duration::from_secs(30),
+    };
+    vec![
+        // Control: quit with an empty queue; baseline delivery latency.
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_idle",
+                total: 1,
+                quit_at_seq: Some(0),
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+        },
+        // Quit while ~50k messages are still queued.
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_backlog_50k",
+                total: 55_000,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+        },
+        // Quit while ~300k messages are still queued; if quit latency were
+        // backlog-dependent, it must separate from the 50k scenario here.
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_backlog_300k",
+                total: 305_000,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+        },
+        // Quit while the producer is still actively refilling the shared
+        // channel (sustained overload rather than a draining burst).
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_overload",
+                rate: 100_000,
+                total: 500_000,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+        },
+        // Keyed quit under the 50k backlog: delivered through the command's
+        // private channel, so INV-14 shared-first pull defers it until the
+        // shared backlog drains (expected latency ~ full drain time).
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_keyed_backlog_50k",
+                total: 55_000,
+                keyed_quit: true,
+                ..base
+            },
+            trials: KEYED_QUIT_TRIALS,
         },
     ]
 }
@@ -157,6 +287,15 @@ struct Metrics {
     update_lat_ns: Mutex<Vec<u64>>,
     render_lat_ns: Mutex<Vec<u64>>,
     keyed_lat_ns: Mutex<Vec<u64>>,
+    /// Nanoseconds from `start` at which `update` requested the quit; 0 while
+    /// no quit has been requested.
+    quit_requested_ns: AtomicU64,
+    /// Queue depth at the moment the quit was requested.
+    depth_at_quit: AtomicU64,
+    /// Nanoseconds from `start` at which the most recent `update` or `view`
+    /// call finished; the loop breaks right after the last one, so this
+    /// lower-bounds the quit delivery instant without runtime instrumentation.
+    last_work_ns: AtomicU64,
 }
 
 impl Metrics {
@@ -171,6 +310,9 @@ impl Metrics {
             update_lat_ns: Mutex::new(Vec::new()),
             render_lat_ns: Mutex::new(Vec::new()),
             keyed_lat_ns: Mutex::new(Vec::new()),
+            quit_requested_ns: AtomicU64::new(0),
+            depth_at_quit: AtomicU64::new(0),
+            last_work_ns: AtomicU64::new(0),
         }
     }
 
@@ -178,6 +320,16 @@ impl Metrics {
         let produced = self.produced.load(Ordering::Relaxed);
         let processed = self.processed.load(Ordering::Relaxed);
         produced.saturating_sub(processed)
+    }
+
+    fn elapsed_ns(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Records that an `update` or `view` call just finished.
+    fn mark_work(&self) {
+        self.last_work_ns
+            .store(self.elapsed_ns(), Ordering::Relaxed);
     }
 
     fn push_latency(bucket: &Mutex<Vec<u64>>, sent_at: Instant) {
@@ -293,13 +445,32 @@ impl Application for LoadApp {
                 self.metrics
                     .processed
                     .store(self.processed, Ordering::Relaxed);
-                if self.processed == self.cfg.total {
-                    return Command::quit();
+                self.metrics.mark_work();
+                let request_quit = match self.cfg.quit_at_seq {
+                    Some(quit_seq) => seq == quit_seq,
+                    None => self.processed == self.cfg.total,
+                };
+                if request_quit {
+                    self.metrics
+                        .depth_at_quit
+                        .store(self.metrics.queue_depth(), Ordering::Relaxed);
+                    self.metrics
+                        .quit_requested_ns
+                        .store(self.metrics.elapsed_ns(), Ordering::Relaxed);
+                    // The unkeyed quit is sent by its command task straight to
+                    // the dedicated quit channel; the keyed variant travels the
+                    // command's private channel instead (RFC 0006 section 4.2).
+                    return if self.cfg.keyed_quit {
+                        Command::quit().cancellable(CommandId::new("quit"))
+                    } else {
+                        Command::quit()
+                    };
                 }
                 Command::none()
             }
             Msg::KeyedProbe { sent_at } => {
                 Metrics::push_latency(&self.metrics.keyed_lat_ns, sent_at);
+                self.metrics.mark_work();
                 Command::none()
             }
         }
@@ -318,6 +489,7 @@ impl Application for LoadApp {
                 Metrics::push_latency(&self.metrics.render_lat_ns, sent_at);
             }
         }
+        self.metrics.mark_work();
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
@@ -423,6 +595,119 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
         },
         cfg,
     }
+}
+
+/// One successful quit trial: queue depth at the quit request plus the two
+/// latency bounds bracketing quit delivery (see the module docs).
+struct QuitTrialSample {
+    depth: u64,
+    to_last_work_ns: u64,
+    to_exit_ns: u64,
+}
+
+struct QuitReport {
+    cfg: ScenarioCfg,
+    trials: u32,
+    timeouts: u32,
+    /// Sorted per-trial values.
+    depths: Vec<u64>,
+    to_last_work_ns: Vec<u64>,
+    to_exit_ns: Vec<u64>,
+}
+
+async fn run_quit_trial(cfg: ScenarioCfg) -> Option<QuitTrialSample> {
+    let metrics = Arc::new(Metrics::new());
+    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero fps"))
+        .expect("60 FPS is a valid frame rate");
+    let runtime = Runtime::<LoadApp>::new((cfg.clone(), Arc::clone(&metrics)), frame_rate);
+    let mut terminal =
+        Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
+
+    let timed_out = timeout(cfg.max_wall, runtime.run(&mut terminal))
+        .await
+        .is_err();
+    let exit_ns = metrics.elapsed_ns();
+
+    let quit_ns = metrics.quit_requested_ns.load(Ordering::Relaxed);
+    if timed_out || quit_ns == 0 {
+        return None;
+    }
+    Some(QuitTrialSample {
+        depth: metrics.depth_at_quit.load(Ordering::Relaxed),
+        to_last_work_ns: metrics
+            .last_work_ns
+            .load(Ordering::Relaxed)
+            .saturating_sub(quit_ns),
+        to_exit_ns: exit_ns.saturating_sub(quit_ns),
+    })
+}
+
+async fn run_quit_scenario(scenario: &QuitScenarioCfg) -> QuitReport {
+    let mut timeouts = 0;
+    let mut depths = Vec::new();
+    let mut to_last_work_ns = Vec::new();
+    let mut to_exit_ns = Vec::new();
+
+    for _ in 0..scenario.trials {
+        match run_quit_trial(scenario.base.clone()).await {
+            Some(sample) => {
+                depths.push(sample.depth);
+                to_last_work_ns.push(sample.to_last_work_ns);
+                to_exit_ns.push(sample.to_exit_ns);
+            }
+            None => timeouts += 1,
+        }
+    }
+
+    depths.sort_unstable();
+    to_last_work_ns.sort_unstable();
+    to_exit_ns.sort_unstable();
+
+    QuitReport {
+        cfg: scenario.base.clone(),
+        trials: scenario.trials,
+        timeouts,
+        depths,
+        to_last_work_ns,
+        to_exit_ns,
+    }
+}
+
+fn print_quit_report(report: &QuitReport) {
+    let cfg = &report.cfg;
+    println!("## {}", cfg.name);
+    let rate = if cfg.rate == BURST {
+        "burst".to_owned()
+    } else {
+        format!("{}/s", cfg.rate)
+    };
+    println!(
+        "   load: rate={rate} total={} update_cost={:?} quit_at_seq={} keyed_quit={}",
+        cfg.total,
+        cfg.update_cost,
+        cfg.quit_at_seq.expect("quit scenarios set quit_at_seq"),
+        cfg.keyed_quit,
+    );
+    println!(
+        "   trials: {} ok, {} timed out",
+        report.trials - report.timeouts,
+        report.timeouts,
+    );
+    if report.depths.is_empty() {
+        return;
+    }
+    println!(
+        "   depth at quit: min={} p50={} max={}",
+        report.depths.first().expect("non-empty"),
+        percentile(&report.depths, 0.50),
+        report.depths.last().expect("non-empty"),
+    );
+    println!(
+        "   quit -> last work: {}",
+        format_lat(&report.to_last_work_ns)
+    );
+    println!("   quit -> exit:      {}", format_lat(&report.to_exit_ns));
+    println!();
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -534,12 +819,25 @@ fn main() {
         .filter(|arg| !arg.starts_with('-'))
         .collect();
 
-    let to_run: Vec<ScenarioCfg> = scenarios()
+    let matches = |name: &str| selected.is_empty() || selected.iter().any(|s| s == name);
+    let load_to_run: Vec<ScenarioCfg> = scenarios()
         .into_iter()
-        .filter(|cfg| selected.is_empty() || selected.iter().any(|name| name == cfg.name))
+        .filter(|cfg| matches(cfg.name))
         .collect();
-    if to_run.is_empty() {
-        let names: Vec<&str> = scenarios().iter().map(|cfg| cfg.name).collect();
+    let quit_to_run: Vec<QuitScenarioCfg> = quit_scenarios()
+        .into_iter()
+        .filter(|scenario| matches(scenario.base.name))
+        .collect();
+    if load_to_run.is_empty() && quit_to_run.is_empty() {
+        let names: Vec<&str> = scenarios()
+            .into_iter()
+            .map(|cfg| cfg.name)
+            .chain(
+                quit_scenarios()
+                    .into_iter()
+                    .map(|scenario| scenario.base.name),
+            )
+            .collect();
         println!("no matching scenario; available: {}", names.join(", "));
         return;
     }
@@ -550,8 +848,12 @@ fn main() {
         .expect("tokio runtime");
 
     println!("# tears runtime load harness\n");
-    for cfg in to_run {
+    for cfg in load_to_run {
         let report = runtime.block_on(run_scenario(cfg));
         print_report(&report);
+    }
+    for scenario in quit_to_run {
+        let report = runtime.block_on(run_quit_scenario(&scenario));
+        print_quit_report(&report);
     }
 }
