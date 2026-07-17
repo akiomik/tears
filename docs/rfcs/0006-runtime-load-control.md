@@ -601,16 +601,18 @@ behavioral *regression* check, not a proof, and it is built to catch
 bounded pools rather than merely a second key: several keyed channels are
 held at capacity with their next sends pending — saturating any modest
 pool — while the two probe channels stay untouched until then. It checks
-send *admission* only, and proves the invariant's two halves separately:
+send *admission* only, and exercises the invariant's two halves separately:
 (a) keyed→keyed — a previously idle key's first `keyed_channel_capacity`
 sends complete, and only its `capacity + 1`-th send is pending, on that
 key's own occupancy; (b) keyed→shared — the shared producer's first
 `app_channel_capacity` sends complete, with only its next send pending on
 the shared channel's own occupancy. Delivery is deliberately outside the
-scenario: the event loop's keyed pull drains every ready keyed receiver
-through one `StreamMap`, so observing one key's delivery necessarily
-drains the others too, and delivery latency belongs to the fairness
-question (open question 6), which INV-L9 does not answer. INV-L7 and
+scenario: the event loop's keyed pull goes through one `StreamMap` over
+every keyed receiver and cannot drain a chosen key selectively — each poll
+returns one ready element from whichever key is picked, so waiting for the
+probe's delivery may drain the saturated keys instead — and delivery
+latency belongs to the fairness question (open question 6), which INV-L9
+does not answer. INV-L7 and
 INV-L8 are structural rather than load-dependent and are checked by code
 review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above.
@@ -632,7 +634,7 @@ must meet and is filled with measured values when the implementation lands.
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
 | `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
-| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` drains all ready receivers; delivery latency is open question 6's territory) (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency is open question 6's territory) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
