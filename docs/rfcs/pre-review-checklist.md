@@ -42,6 +42,13 @@ Prompts that have already paid off:
   messages, held permits) outlive it.
 - A bounded test against an unbounded parameter: any finite scenario that
   saturates `j` units is passed by a pool larger than `j × capacity`.
+- An admission-window adversary: with bounded channels, the interval
+  between a consumer's pull and a blocked producer's re-send leaves the
+  channel momentarily empty, so orderings impossible under unbounded
+  sends become legal, compliant executions — an acceptance criterion
+  derived from unbounded behavior may falsely flag them (from PR #213: a
+  capacity-1 run delivers a keyed quit before the remaining producer
+  backlog while violating nothing).
 
 ## 3. Enforcement class, declared up front
 
@@ -70,7 +77,12 @@ Whatever the class, name the production seam the check goes through: the
 concrete construction/send/spawn sites for a structural review, or, for a
 behavioral test, the production code path it exercises or the transition
 logic it shares with production. A test that exercises a parallel model
-of the mechanism proves nothing about the runtime.
+of the mechanism proves nothing about the runtime. And when the invariant
+quantifies over several seams — *every* pull point, *every* send site —
+the check covers each member: a non-compliant implementation can add its
+bypass on exactly the seam the single test does not touch (from PR #213:
+an "every `AppInputs` pull point" invariant tested only on
+`try_next_ready` misses a quit-specific bypass in `poll_next`).
 
 ## 4. Code claims verified against code
 
@@ -85,6 +97,14 @@ original draft, and it is where false justifications creep in.
 because a task terminates after `send` while its signal stays queued —
 and a misdescription of `StreamMap::poll_next` as draining all ready
 receivers.
+
+Invariant citations are code claims too: "X is already carried by RFC
+N's INV-M" gets a fresh read of INV-M's exact statement, and an umbrella
+clause ("all RFC N invariants hold") covers only what RFC N actually
+states. *From PR #213:* a resolution leaned on "INV-L5 carries RFC 0003"
+for delivery-FIFO and quit precedence, but RFC 0003's INV-9 defines only
+post-dispatch suppression and INV-14 only same-pull-point ordering — the
+properties had to be pinned as new invariants with their own checks.
 
 ## 5. Re-derive, don't patch
 
@@ -104,5 +124,11 @@ a chain of findings.
 - Cross-references: open-question numbers point at their resolutions;
   preamble/decision-scope status agrees with the body; the amendment
   header line is updated.
+- Citations of another document's invariants name things that actually
+  exist there, and a corrected claim is corrected everywhere: grep for
+  the old term across the RFC, its references section, and the index
+  (from PR #213: "RFC 0003's FIFO" survived in R5, §4.3, the
+  open-question text, and the references after the body had already
+  conceded RFC 0003 states no FIFO invariant).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
