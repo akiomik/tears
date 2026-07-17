@@ -9,7 +9,11 @@
 //!
 //! - **Queue depth**: pending messages (produced - processed), sampled while
 //!   the scenario runs; all runtime channels are unbounded today, so this is
-//!   the direct driver of memory growth under overload.
+//!   the direct driver of memory growth under overload. `produced` counts
+//!   source emissions, not channel admissions, so under a future bounded
+//!   configuration the observable bound is `capacity + producers` — each
+//!   producer blocked in `send` holds one in-flight message outside the
+//!   channel (RFC 0006 section 5.1).
 //! - **Update latency**: message emission to `Application::update`.
 //! - **Render latency**: message emission to the first `Application::view`
 //!   call that observes it (input-to-screen staleness).
@@ -29,13 +33,15 @@
 //! unbiased, a single run says nothing about the tail; the report therefore
 //! aggregates per-trial values into percentiles across trials:
 //!
-//! - **quit -> last work**: quit request to the end of the last `update` or
-//!   `view` call — a lower bound on quit *delivery* (the loop breaks right
-//!   after the last work item, before teardown).
-//! - **quit -> exit**: quit request to `Runtime::run` returning — an upper
-//!   bound that additionally includes shutdown and backlog deallocation,
-//!   which scales with queue depth and must not be misread as delivery
-//!   latency.
+//! - **quit -> delivered**: quit request to the event loop's quit branch
+//!   observing it. Delivery is not observable through the public API, so a
+//!   process-global tracing subscriber timestamps the runtime's own
+//!   `quit signal received` / `keyed quit signal received` debug events
+//!   (target `tears::runtime`) — the delivery instant itself, suitable as
+//!   an INV-L4 acceptance measurement.
+//! - **quit -> exit**: quit request to `Runtime::run` returning, which
+//!   additionally includes shutdown and backlog deallocation; the latter
+//!   scales with queue depth and must not be misread as delivery latency.
 //!
 //! The keyed variant sends the quit through a cancellable command's private
 //! channel instead of the dedicated quit channel, quantifying the INV-14
@@ -60,6 +66,7 @@
     clippy::cast_sign_loss
 )]
 
+use std::fmt::Debug;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -76,6 +83,11 @@ use tears::{BoxStream, SubscriptionSource};
 use tokio::runtime::Builder;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_stream::wrappers::IntervalStream;
+use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::set_global_default;
+use tracing::{Event, Level, Metadata, Subscriber};
 
 /// Message rate for scenarios that emit their whole load in one burst.
 const BURST: u64 = 0;
@@ -274,6 +286,80 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
     ]
 }
 
+/// The quit trial whose [`Metrics`] receive the next quit-delivery event;
+/// `None` outside quit trials, so load scenarios' completion quits are
+/// ignored. Trials run sequentially, so a single slot suffices.
+static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
+
+/// Records the instant the event loop's quit branch fires.
+///
+/// The runtime logs `debug!(target: "tears::runtime", "quit signal
+/// received")` (dedicated-channel quit) or `"keyed quit signal received"`
+/// (keyed quit surfacing through the input mux) at the moment its `select!`
+/// observes the quit — the delivery instant INV-L4 is about, which is not
+/// observable through the public API. This subscriber is installed once as
+/// the process-global tracing subscriber and timestamps that event into the
+/// current trial's metrics. If the runtime's message strings ever change,
+/// quit trials fail loudly as "no delivery event" instead of silently
+/// reporting skewed numbers.
+struct QuitDeliverySubscriber;
+
+impl Subscriber for QuitDeliverySubscriber {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.is_event()
+            && metadata.target() == "tears::runtime"
+            && *metadata.level() == Level::DEBUG
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::DEBUG)
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut visitor = QuitMessageVisitor { matched: false };
+        event.record(&mut visitor);
+        if !visitor.matched {
+            return;
+        }
+        if let Some(metrics) = TRIAL_METRICS
+            .lock()
+            .expect("trial metrics slot poisoned")
+            .as_ref()
+        {
+            metrics
+                .quit_delivered_ns
+                .store(metrics.elapsed_ns(), Ordering::Relaxed);
+        }
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
+struct QuitMessageVisitor {
+    matched: bool,
+}
+
+impl Visit for QuitMessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        if field.name() == "message" {
+            let text = format!("{value:?}");
+            if text == "quit signal received" || text == "keyed quit signal received" {
+                self.matched = true;
+            }
+        }
+    }
+}
+
 struct Metrics {
     start: Instant,
     produced: AtomicU64,
@@ -292,10 +378,10 @@ struct Metrics {
     quit_requested_ns: AtomicU64,
     /// Queue depth at the moment the quit was requested.
     depth_at_quit: AtomicU64,
-    /// Nanoseconds from `start` at which the most recent `update` or `view`
-    /// call finished; the loop breaks right after the last one, so this
-    /// lower-bounds the quit delivery instant without runtime instrumentation.
-    last_work_ns: AtomicU64,
+    /// Nanoseconds from `start` at which the event loop's quit branch
+    /// observed the quit, recorded by [`QuitDeliverySubscriber`] from the
+    /// runtime's own tracing events; 0 while undelivered.
+    quit_delivered_ns: AtomicU64,
 }
 
 impl Metrics {
@@ -312,10 +398,16 @@ impl Metrics {
             keyed_lat_ns: Mutex::new(Vec::new()),
             quit_requested_ns: AtomicU64::new(0),
             depth_at_quit: AtomicU64::new(0),
-            last_work_ns: AtomicU64::new(0),
+            quit_delivered_ns: AtomicU64::new(0),
         }
     }
 
+    /// Pending messages as `produced - processed`. `produced` counts source
+    /// emissions, not channel admissions, so under a future bounded
+    /// configuration a producer blocked in `send` contributes the one
+    /// in-flight message it holds outside the channel: the observable bound
+    /// is `capacity + producers`, not raw channel occupancy (RFC 0006
+    /// section 5.1).
     fn queue_depth(&self) -> u64 {
         let produced = self.produced.load(Ordering::Relaxed);
         let processed = self.processed.load(Ordering::Relaxed);
@@ -324,12 +416,6 @@ impl Metrics {
 
     fn elapsed_ns(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    /// Records that an `update` or `view` call just finished.
-    fn mark_work(&self) {
-        self.last_work_ns
-            .store(self.elapsed_ns(), Ordering::Relaxed);
     }
 
     fn push_latency(bucket: &Mutex<Vec<u64>>, sent_at: Instant) {
@@ -445,7 +531,6 @@ impl Application for LoadApp {
                 self.metrics
                     .processed
                     .store(self.processed, Ordering::Relaxed);
-                self.metrics.mark_work();
                 let request_quit = match self.cfg.quit_at_seq {
                     Some(quit_seq) => seq == quit_seq,
                     None => self.processed == self.cfg.total,
@@ -470,7 +555,6 @@ impl Application for LoadApp {
             }
             Msg::KeyedProbe { sent_at } => {
                 Metrics::push_latency(&self.metrics.keyed_lat_ns, sent_at);
-                self.metrics.mark_work();
                 Command::none()
             }
         }
@@ -489,7 +573,6 @@ impl Application for LoadApp {
                 Metrics::push_latency(&self.metrics.render_lat_ns, sent_at);
             }
         }
-        self.metrics.mark_work();
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
@@ -598,24 +681,33 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
 }
 
 /// One successful quit trial: queue depth at the quit request plus the two
-/// latency bounds bracketing quit delivery (see the module docs).
+/// latencies described in the module docs (delivery, and exit including
+/// teardown).
 struct QuitTrialSample {
     depth: u64,
-    to_last_work_ns: u64,
+    to_delivered_ns: u64,
     to_exit_ns: u64,
+}
+
+enum QuitTrialFailure {
+    TimedOut,
+    /// The runtime never emitted its quit-delivery tracing event; see
+    /// [`QuitDeliverySubscriber`].
+    NoDeliveryEvent,
 }
 
 struct QuitReport {
     cfg: ScenarioCfg,
     trials: u32,
     timeouts: u32,
+    missing_delivery: u32,
     /// Sorted per-trial values.
     depths: Vec<u64>,
-    to_last_work_ns: Vec<u64>,
+    to_delivered_ns: Vec<u64>,
     to_exit_ns: Vec<u64>,
 }
 
-async fn run_quit_trial(cfg: ScenarioCfg) -> Option<QuitTrialSample> {
+async fn run_quit_trial(cfg: ScenarioCfg) -> Result<QuitTrialSample, QuitTrialFailure> {
     let metrics = Arc::new(Metrics::new());
     let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero fps"))
         .expect("60 FPS is a valid frame rate");
@@ -623,52 +715,58 @@ async fn run_quit_trial(cfg: ScenarioCfg) -> Option<QuitTrialSample> {
     let mut terminal =
         Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
 
+    *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = Some(Arc::clone(&metrics));
     let timed_out = timeout(cfg.max_wall, runtime.run(&mut terminal))
         .await
         .is_err();
     let exit_ns = metrics.elapsed_ns();
+    *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = None;
 
-    let quit_ns = metrics.quit_requested_ns.load(Ordering::Relaxed);
-    if timed_out || quit_ns == 0 {
-        return None;
+    if timed_out {
+        return Err(QuitTrialFailure::TimedOut);
     }
-    Some(QuitTrialSample {
+    let quit_ns = metrics.quit_requested_ns.load(Ordering::Relaxed);
+    let delivered_ns = metrics.quit_delivered_ns.load(Ordering::Relaxed);
+    if quit_ns == 0 || delivered_ns == 0 {
+        return Err(QuitTrialFailure::NoDeliveryEvent);
+    }
+    Ok(QuitTrialSample {
         depth: metrics.depth_at_quit.load(Ordering::Relaxed),
-        to_last_work_ns: metrics
-            .last_work_ns
-            .load(Ordering::Relaxed)
-            .saturating_sub(quit_ns),
+        to_delivered_ns: delivered_ns.saturating_sub(quit_ns),
         to_exit_ns: exit_ns.saturating_sub(quit_ns),
     })
 }
 
 async fn run_quit_scenario(scenario: &QuitScenarioCfg) -> QuitReport {
     let mut timeouts = 0;
+    let mut missing_delivery = 0;
     let mut depths = Vec::new();
-    let mut to_last_work_ns = Vec::new();
+    let mut to_delivered_ns = Vec::new();
     let mut to_exit_ns = Vec::new();
 
     for _ in 0..scenario.trials {
         match run_quit_trial(scenario.base.clone()).await {
-            Some(sample) => {
+            Ok(sample) => {
                 depths.push(sample.depth);
-                to_last_work_ns.push(sample.to_last_work_ns);
+                to_delivered_ns.push(sample.to_delivered_ns);
                 to_exit_ns.push(sample.to_exit_ns);
             }
-            None => timeouts += 1,
+            Err(QuitTrialFailure::TimedOut) => timeouts += 1,
+            Err(QuitTrialFailure::NoDeliveryEvent) => missing_delivery += 1,
         }
     }
 
     depths.sort_unstable();
-    to_last_work_ns.sort_unstable();
+    to_delivered_ns.sort_unstable();
     to_exit_ns.sort_unstable();
 
     QuitReport {
         cfg: scenario.base.clone(),
         trials: scenario.trials,
         timeouts,
+        missing_delivery,
         depths,
-        to_last_work_ns,
+        to_delivered_ns,
         to_exit_ns,
     }
 }
@@ -689,9 +787,10 @@ fn print_quit_report(report: &QuitReport) {
         cfg.keyed_quit,
     );
     println!(
-        "   trials: {} ok, {} timed out",
-        report.trials - report.timeouts,
+        "   trials: {} ok, {} timed out, {} missing delivery event",
+        report.trials - report.timeouts - report.missing_delivery,
         report.timeouts,
+        report.missing_delivery,
     );
     if report.depths.is_empty() {
         return;
@@ -703,8 +802,8 @@ fn print_quit_report(report: &QuitReport) {
         report.depths.last().expect("non-empty"),
     );
     println!(
-        "   quit -> last work: {}",
-        format_lat(&report.to_last_work_ns)
+        "   quit -> delivered: {}",
+        format_lat(&report.to_delivered_ns)
     );
     println!("   quit -> exit:      {}", format_lat(&report.to_exit_ns));
     println!();
@@ -841,6 +940,12 @@ fn main() {
         println!("no matching scenario; available: {}", names.join(", "));
         return;
     }
+
+    // Quit trials read delivery instants from the runtime's tracing events;
+    // installed unconditionally because its filter rejects everything but
+    // rare debug events on the `tears::runtime` target.
+    set_global_default(QuitDeliverySubscriber)
+        .expect("no other global tracing subscriber is installed");
 
     let runtime = Builder::new_multi_thread()
         .enable_all()
