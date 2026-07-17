@@ -178,6 +178,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_input_wins_the_nonwaiting_pull_when_keyed_output_is_also_ready() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut inputs = AppInputs::new(rx);
+        let id = CommandId::new("search");
+        inputs.spawn_keyed(
+            id.clone(),
+            CancelPolicy::CancelInFlight,
+            stream::iter([Action::Message(2)]).boxed(),
+        );
+        wait_until(
+            || inputs.has_closed_buffered(&id),
+            "keyed output should be buffered before the pull",
+        )
+        .await;
+        tx.send(1).expect("receiver should be open");
+
+        assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
+        assert_eq!(
+            inputs.try_next_ready(),
+            Some(AppInput::Keyed(ReceiverEvent::Output(
+                CommandOutput::Message(2)
+            )))
+        );
+    }
+
+    #[tokio::test]
     async fn shared_input_wins_when_keyed_quit_is_also_ready() {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut inputs = AppInputs::new(rx);
