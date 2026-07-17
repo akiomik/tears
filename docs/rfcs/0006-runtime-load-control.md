@@ -499,14 +499,20 @@ must meet and is filled with measured values when the implementation lands.
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -
-processed`, which counts a message from the moment the source stream yields
-it. Raw channel occupancy is not observable through the public API, and a
-producer blocked in a bounded `send` holds its one in-flight message
-*outside* the channel — exactly the per-producer accounting INV-L1 already
-makes. The observable acceptance bound is therefore `app_channel_capacity +
-concurrent shared-channel producers` (`capacity + 1` in these
-single-flood-producer scenarios), not `capacity` alone; an observed depth of
-`capacity + 1` with one producer is compliant, and depth exceeding
+processed`. Raw channel occupancy is not observable through the public API,
+so two in-flight positions outside the channel had to be settled
+explicitly. A producer blocked in a bounded `send` holds one message
+outside the channel — exactly the per-producer accounting INV-L1 already
+makes — and the depth *includes* it, because `produced` counts a message
+when the source stream yields it. The consumer side holds up to one more
+message inside `Application::update`, and the depth *excludes* it, because
+`processed` counts a message when `update` begins, i.e. once it has left
+the channel; counting at update completion instead would let a compliant
+implementation read `capacity + producers + 1` (channel full, one blocked
+producer refills the freed slot while the pulled message is still being
+processed) and be flagged as a regression. The observable acceptance bound
+is therefore `app_channel_capacity + concurrent shared-channel producers`
+(`capacity + 1` in these single-flood-producer scenarios); depth exceeding
 `capacity + producers` is the regression signal.
 
 ## 6. Open questions (to resolve before implementation)
