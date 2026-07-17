@@ -34,9 +34,11 @@
   implementable form of cancel-before-delivery itself, and any policy
   that guarantees a keyed-delivery bound (quota, aging, weighted
   round-robin) must deliver keyed output past inputs that could still
-  cancel it — trading exactly what keying buys. INV-14 stays unrelaxed in
-  both delivery modes, the keyed-probe scenario stays measurement-only,
-  latency-critical output is directed to the unkeyed path, and the
+  cancel it — trading exactly what keying buys. Keyed liveness under
+  sustained shared readiness is explicitly forgone in both modes (bounded
+  capacity does not restore it — section 4.3's refill argument); INV-14
+  stays unrelaxed, the keyed-probe scenario stays measurement-only,
+  liveness-critical output is directed to the unkeyed path, and the
   shared-wins unit tests now cover both pull paths for keyed messages
   (sections 4.3, 4.7, 5, 5.1)
 
@@ -722,34 +724,58 @@ Candidate policies considered and excluded:
   only cancels already dispatched, never those still queued as unprocessed
   shared inputs.
 
-Declining the goal itself, not merely each candidate, rests on three
-further facts:
+Declining the goal itself, not merely each candidate, rests on the
+following, with the forgone half of the trade stated first and
+explicitly:
 
-- **The starvation regime is the wrong target for a latency guarantee.**
-  In capacity, keyed delivery is already sub-millisecond (`keyed_steady`,
-  p50 0.10ms); the deferral grows unbounded only under sustained overload
-  (F4), where shared input-to-screen latency is itself seconds deep (F3)
-  and delivering a stale keyed result faster restores nothing. The inputs
-  that retain precedence under overload are exactly the user's controls:
-  every user input — including the cancel or supersede that would make the
-  keyed output moot — travels the shared channel. And the loop-level
-  fairness that keeps the application responsive and quittable, the frame
-  branch and the dedicated quit branch, is already provided by the
-  unbiased select and measured healthy under overload (F5, F6).
+- **What is forgone: keyed liveness under sustained shared readiness, in
+  both modes.** The unbounded default defers keyed delivery until the
+  full shared drain (F4). Bounded capacity does not restore liveness: a
+  waiting producer refills each freed slot, so shared readiness — and
+  with it the deferral — persists for as long as overload lasts,
+  independent of the configured capacity (section 4.3). Backpressure
+  bounds memory and shared drain-side latency (INV-L1, INV-L3), not
+  keyed deferral. The deferral is also indiscriminate about *why* the
+  shared channel is ready: user input arrives as terminal-event
+  subscription output, alongside every other subscription's output and
+  unkeyed command output (sections 1.1, 4.2), and any shared message —
+  not only a user-originated one — can be the input whose `update`
+  returns the cancel, which is the one thing the pull point cannot rank
+  them by. A keyed output that is still wanted can therefore wait
+  indefinitely behind unrelated hot-subscription traffic. This
+  resolution accepts that cost knowingly — cancellation correctness over
+  keyed liveness — rather than trading the former to buy the latter.
+- **Where applications live, keyed delivery needs no policy.** In
+  capacity, keyed delivery is already sub-millisecond (`keyed_steady`,
+  p50 0.10ms). Under the unbounded default's overload, shared
+  input-to-screen latency is itself seconds deep (F3), so faster keyed
+  delivery would surface results into a UI that is seconds stale either
+  way. Under bounded-mode overload the UI's staleness is bounded by
+  queue capacity instead of overload duration (INV-L3, its
+  producer-count premise given), which makes the persisting keyed
+  deferral the visible cost — that case is exactly the previous bullet's
+  explicit trade, remedied per command and at the source as described
+  below, not by a scheduling policy. The loop-level fairness that keeps
+  the application responsive and quittable — the frame branch and the
+  dedicated quit branch — is provided by the unbiased select and
+  measured healthy under overload (F5, F6).
 - **The API already prices the trade per command.** Unkeyed output travels
   the shared FIFO: under backlog it waits its arrival-order turn rather
   than the full drain, and in bounded mode it inherits INV-L3's
   capacity-bounded drain-side latency. Keying opts into cancellability,
   and with it deferral behind ready shared inputs. Both behaviors exist
   today, chosen per command — the same structure as section 4.6's quit
-  guidance, now stated for every keyed output: latency-critical output
+  guidance, now stated for every keyed output: liveness-critical output
   belongs in an unkeyed command.
-- **A policy would add contract surface for a regime bounded mode exists
-  to exit.** A fairness knob in `RuntimeConfig` needs tuning coupled to
-  `update` cost and load profile, and weakens RFC 0003's contract for
-  every application in order to serve the overload regime — which
-  backpressure (sections 4.2, 4.3) already converts from unbounded growth
-  into paced producers.
+- **A policy would add contract surface without adding a remedy the API
+  lacks.** A fairness knob in `RuntimeConfig` needs tuning coupled to
+  `update` cost and load profile, and weakens RFC 0003's cancellation
+  contract for every application. The liveness it would buy is already
+  available per command by not keying the output, and the load
+  discipline that restores keyed liveness for keyed commands — pacing or
+  debouncing hot sources so the shared channel empties intermittently —
+  is application-owned, the same trust class as the producer-count
+  premise (section 4.5).
 
 Consequences:
 
@@ -792,9 +818,11 @@ Consequences:
 - **Documentation guidance** (lands with open question 1's
   recommended-defaults documentation, extending section 4.6's): keying a
   command buys cancellation and suppression at the cost of delivery
-  deferral behind ready shared inputs under load; put latency-critical
-  output in unkeyed commands, and keep sustained load inside capacity with
-  bounded mode and source-level pacing.
+  deferral behind ready shared inputs under load; put liveness-critical
+  output in unkeyed commands. For keyed outputs, liveness under load
+  comes only from the shared channel emptying intermittently — pace or
+  debounce hot sources — and not from bounded mode, which bounds memory
+  and shared latency but leaves keyed deferral intact (section 4.3).
 
 ## 5. Invariants (draft)
 
@@ -1072,11 +1100,17 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
    only implementable form of cancel-before-delivery; any policy that
    guarantees a keyed-delivery bound (quota, aging, weighted round-robin)
    must deliver keyed output past inputs that could still cancel it,
-   trading exactly what keying buys. Latency-critical output already has
-   the unkeyed path (arrival-order shared FIFO, INV-L3-bounded in bounded
-   mode), in-capacity keyed latency is already sub-ms (`keyed_steady`),
-   and the overload regime a bound would serve is the one bounded mode
-   exists to exit. No new invariant is introduced: the pinned content is
+   trading exactly what keying buys. The forgone half is explicit: keyed
+   liveness under sustained shared readiness is given up in both modes —
+   bounded capacity does not restore it, since a waiting producer refills
+   each freed slot (section 4.3), and the deferring shared traffic is any
+   mix of user input, subscription output, and unkeyed command output,
+   not user controls alone (section 1.1). Liveness-critical output
+   already has the unkeyed path (arrival-order shared FIFO, INV-L3-bounded
+   in bounded mode), in-capacity keyed latency is already sub-ms
+   (`keyed_steady`), and keyed liveness under load is restored by
+   source pacing, not by a scheduling policy or by bounded mode. No new
+   invariant is introduced: the pinned content is
    INV-14 (via INV-L5) plus INV-L10/INV-L11, with policy absence checked
    structurally at the pull seams and the shared-wins unit tests extended
    to cover both pull paths for keyed messages. The keyed-probe scenario
