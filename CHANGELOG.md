@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-17
+
 ### Changed
 
 - **Breaking:** Subscription identity is now structural and collision-safe
@@ -717,7 +719,8 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.9.3...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/akiomik/tears/releases/tag/v0.10.0
 [0.9.3]: https://github.com/akiomik/tears/releases/tag/v0.9.3
 [0.9.2]: https://github.com/akiomik/tears/releases/tag/v0.9.2
 [0.9.1]: https://github.com/akiomik/tears/releases/tag/v0.9.1
