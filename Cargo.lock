@@ -3081,6 +3081,7 @@ dependencies = [
  "crossterm 0.29.0",
  "dashmap",
  "futures",
+ "libc",
  "loom",
  "proptest",
  "public-api",
