@@ -14,7 +14,10 @@
 > sections 4–6 turns out to be unimplementable without breaking the public
 > API. Sections 4–6 fix the direction of the load-control contract but their
 > details (capacities, batching caps, per-source classes) remain open until
-> implementation.
+> implementation. In particular, cross-channel fairness (section 4.3), the
+> quit delivery path (section 4.2), and the exact scope of the memory bound
+> (INV-L1) are contracts to settle before the post-0.10.0 implementation;
+> none of them gates the 0.10.0 release.
 
 ## Summary
 
@@ -76,8 +79,12 @@ Scheduling facts that interact with load:
 - **R3**: Input-to-screen latency under load must be observable and, with a
   bounded configuration, bounded by queue capacity rather than by overload
   duration.
-- **R4**: Quit must stay responsive under load (it has a dedicated channel and
-  select branch; this must remain true).
+- **R4**: A quit signal already in the dedicated quit channel must be
+  delivered with latency independent of app backlog (the dedicated channel
+  and its always-armed select branch must remain). Quit requests still
+  traveling inside command streams — a keyed `Action::Quit` in its private
+  channel, or a quit behind earlier sends of the same unkeyed stream —
+  follow their stream's delivery semantics (section 4.2).
 - **R5**: RFC 0003's cancellation and FIFO invariants (per-command FIFO,
   cancel-before-delivery, INV-14) must be preserved or explicitly amended.
 - **R6**: The default (unconfigured) behavior of existing applications must
@@ -122,14 +129,20 @@ Findings:
   shared overload, keyed probe delivery is deferred until the shared backlog
   fully drains (p50 9.2s, max ≈ the run's full wall time), versus p50 0.1ms
   in the steady control. This is the INV-14 shared-first bias taken to its
-  limit. It is a consequence of *unbounded* shared readiness: with a bounded
-  shared queue, the starvation window is bounded by the time to drain one
-  queue capacity, so load control addresses it without amending INV-14.
-- **F5 — The frame and quit branches survive overload.** The unbiased select
-  plus the 100µs batch cap kept the frame branch at 60 FPS through every
-  overload scenario, and quit (delivered after the last processed message)
-  terminated each run promptly. No structural event-loop change is required
-  for frame or quit scheduling.
+  limit, and RFC 0003 already states that bounded fairness is not
+  guaranteed. A bounded shared queue does *not* bound this delay: every
+  message the loop pulls lets a waiting producer refill the queue, so the
+  shared channel can stay continuously ready for as long as overload lasts,
+  even with a capacity of 1. Capacity controls backlog and memory (F3);
+  bounded keyed-delivery latency needs a scheduling policy of its own
+  (section 4.3, open question 6).
+- **F5 — The frame branch survives overload.** The unbiased select plus the
+  100µs batch cap kept the frame branch at 60 FPS through every overload
+  scenario; no structural event-loop change is required for frame
+  scheduling. The harness does **not** measure quit responsiveness under
+  backlog: its quit is generated only after the last load message is
+  processed. A quit-under-backlog scenario is required before implementation
+  to validate INV-L4 and the quit-path contract (open question 8).
 
 ## 3. Release-gate decision for 0.10.0
 
@@ -189,8 +202,8 @@ proceeds with the breaking changes already on `main`; the S4 implementation
 - `batch_max_messages: Option<NonZeroUsize>` — count cap for one micro-batch
   window, complementing the 100µs time cap.
 
-The quit channel is never bounded (R4); quit signals are rare and must not
-participate in backpressure.
+The dedicated quit channel is never bounded (R4); signals in it are rare and
+must not participate in backpressure.
 
 ### 4.2 Backpressure semantics per source class
 
@@ -208,7 +221,15 @@ mode's send contract, by source class:
   memory).
 - **Commands (keyed and unkeyed)**: the command task awaits capacity before
   its next send. Command streams are already async pull; no API change.
-- **Quit**: never blocked, never dropped (R4).
+- **Quit**: the dedicated quit channel is never blocked and never dropped,
+  but that guarantee covers only signals already in that channel (R4). A
+  keyed `Action::Quit` is delivered through its command's private channel,
+  and a quit later in an unkeyed stream sits behind that stream's earlier
+  sends; in bounded mode both can therefore wait like any other output
+  (keyed quit is already subject to shared-first pull ordering today).
+  Whether quit requests should be re-routed to the dedicated channel at the
+  producer side — letting quit bypass stream order, a deliberate semantic
+  change relative to RFC 0003's FIFO — is open question 7.
 
 Delivery in bounded mode remains lossless up to shutdown: the runtime never
 drops a message to relieve pressure (R2). Lossy strategies (coalescing,
@@ -219,10 +240,16 @@ of "which messages may be merged" are known.
 
 - **Per-command and per-subscription FIFO** (RFC 0003): unchanged; awaiting a
   send preserves order.
-- **INV-14 shared-first pull**: unchanged. F4's starvation is unbounded only
-  because shared readiness is unbounded; with `app_channel_capacity = n`, the
-  keyed delivery delay is bounded by the drain time of at most `n` shared
-  messages plus producer refills, which the capacity also paces.
+- **INV-14 shared-first pull**: unchanged, and bounded mode adds no fairness
+  guarantee on top of it. A full shared channel is refilled by a waiting
+  producer each time the loop pulls one message, so shared readiness — and
+  with it F4's keyed starvation — can persist for as long as overload
+  lasts, independent of the configured capacity. Bounded capacity controls
+  backlog and memory only. If bounded keyed-delivery latency becomes a
+  requirement, it needs an explicit scheduling policy (for example a
+  shared-pull quota per batch window) defined as a deliberate relaxation of
+  INV-14 that preserves cancel-before-delivery; that policy is open
+  question 6 and is not part of the initial bounded mode.
 - **Cancellation**: cancel-before-delivery and buffered-output suppression
   (RFC 0003) are unaffected; a keyed producer blocked on a full private
   channel is aborted exactly like a running one.
@@ -243,21 +270,35 @@ what to measure.
 
 To be finalized as contract tests before implementation:
 
-- **INV-L1**: With `app_channel_capacity = n`, at most `n` shared messages
-  are pending at any time; total pending runtime work is bounded by the sum
-  of configured capacities.
+- **INV-L1**: With `app_channel_capacity = n`, the shared channel buffers at
+  most `n` messages, and each configured keyed channel buffers at most its
+  capacity. This bounds runtime-owned channel buffers, not all pending work:
+  each producer task blocked on a full channel additionally holds one
+  in-flight message, and keyed channels exist per active `CommandId`, so the
+  conceptual total is `shared capacity + number of blocked producers +
+  Σ(per-command keyed capacity)`. A single global memory bound would require
+  a global permit pool or a cap on active producers (open question 3).
 - **INV-L2**: Bounded mode never drops a message before shutdown.
-- **INV-L3**: With bounded capacity, emission-to-update latency of the oldest
-  pending message is bounded by the time to drain one full queue, independent
-  of overload duration.
-- **INV-L4**: Quit delivery latency is independent of app-channel backlog.
+- **INV-L3**: With bounded capacity, a message accepted into the shared
+  channel is preceded by at most `n - 1` earlier shared messages (FIFO), so
+  its emission-to-update latency is bounded by the drain time of one full
+  queue plus the producer's own wait for acceptance, independent of overload
+  duration. No such bound exists for keyed delivery unless the fairness
+  policy (open question 6) defines one.
+- **INV-L4**: A quit signal already in the dedicated quit channel is
+  delivered with latency independent of app-channel backlog. Quit requests
+  still inside command streams are outside this invariant and follow their
+  stream's delivery semantics (section 4.2).
 - **INV-L5**: All RFC 0003 invariants hold unchanged in bounded mode.
 - **INV-L6**: Default configuration reproduces current behavior exactly.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
-integration test; the harness's overload and keyed-probe scenarios are the
-acceptance measurements for INV-L1/L3 (bounded queue depth and keyed latency
-must flatten where the unbounded baseline grows linearly).
+integration test. The overload scenario is the acceptance measurement for
+INV-L1/L3: bounded queue depth and shared update latency must flatten where
+the unbounded baseline grows linearly. The keyed-probe scenario becomes an
+acceptance measurement only once the fairness policy (open question 6) fixes
+what keyed latency bound, if any, to expect; INV-L4 needs the new
+quit-under-backlog scenario (open question 8).
 
 ## 6. Open questions (to resolve before implementation)
 
@@ -273,6 +314,17 @@ must flatten where the unbounded baseline grows linearly).
 5. S8a interaction: whether restart rate control consumes the same
    `RuntimeConfig` surface or stays a subscription-level policy (current
    position: subscription-level, per RFC backlog).
+6. Cross-channel fairness: whether bounded keyed-delivery latency is a goal
+   at all and, if so, which scheduling policy (for example a shared-pull
+   quota per batch window) relaxes INV-14 while preserving
+   cancel-before-delivery (F4, section 4.3).
+7. Quit routing: whether keyed / in-stream `Action::Quit` should be
+   re-routed to the dedicated quit channel at the producer side — letting
+   quit bypass stream order, a deliberate semantic change relative to RFC
+   0003's FIFO — or stay in stream order under INV-L4's narrower scope
+   (section 4.2).
+8. Harness follow-up: add a quit-under-backlog scenario (F5) and a bounded
+   vs. unbounded comparison matrix before implementation.
 
 ## 7. References
 

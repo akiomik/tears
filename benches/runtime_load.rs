@@ -37,10 +37,10 @@
     clippy::cast_sign_loss
 )]
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, hint, mem};
 
@@ -290,7 +290,9 @@ impl Application for LoadApp {
                 }
                 self.last_processed = Some((seq, sent_at));
                 self.processed += 1;
-                self.metrics.processed.store(self.processed, Ordering::Relaxed);
+                self.metrics
+                    .processed
+                    .store(self.processed, Ordering::Relaxed);
                 if self.processed == self.cfg.total {
                     return Command::quit();
                 }
@@ -310,7 +312,9 @@ impl Application for LoadApp {
             let marker = seq + 1;
             // Only the runtime task calls `view`, so load-then-store is safe.
             if self.metrics.rendered_marker.load(Ordering::Relaxed) < marker {
-                self.metrics.rendered_marker.store(marker, Ordering::Relaxed);
+                self.metrics
+                    .rendered_marker
+                    .store(marker, Ordering::Relaxed);
                 Metrics::push_latency(&self.metrics.render_lat_ns, sent_at);
             }
         }
@@ -387,8 +391,7 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
     let samples = sampler.await.expect("sampler task");
 
     let producer_done_ns = metrics.producer_done_ns.load(Ordering::Relaxed);
-    let producer_done =
-        (producer_done_ns > 0).then(|| Duration::from_nanos(producer_done_ns));
+    let producer_done = (producer_done_ns > 0).then(|| Duration::from_nanos(producer_done_ns));
     let depth_at_producer_done = producer_done.and_then(|done| {
         samples
             .iter()
