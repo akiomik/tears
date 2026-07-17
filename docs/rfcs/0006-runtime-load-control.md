@@ -148,20 +148,22 @@ shared channel (burst or paced), then `update` returns `Command::quit()`
 while the backlog is still deep, mirroring a real quit key press: the
 unkeyed variant reaches the dedicated quit channel through its command task
 (section 1.1); the keyed variant travels its command's private channel
-instead (section 4.2). Two per-trial values bracket delivery, which is not
-directly observable from outside the runtime: **quit→last-work** (quit
-request to the end of the last `update`/`view` call; the loop breaks right
-after, so this lower-bounds delivery) and **quit→exit** (to `run()`
-returning; an upper bound that adds teardown, including backlog
-deallocation that scales with depth and must not be misread as delivery).
+instead (section 4.2). Two per-trial values are recorded: **quit→delivered**
+(quit request to the event loop's quit branch observing it — the harness
+installs a process-global `tracing` subscriber and timestamps the runtime's
+own "quit signal received" / "keyed quit signal received" debug events on
+the `tears::runtime` target, so this is the delivery instant itself, not a
+bound, and is usable as an acceptance measurement) and **quit→exit** (to
+`run()` returning, which adds teardown, including backlog deallocation that
+scales with depth and must not be misread as delivery).
 
-| Scenario | Load at quit | Trials | Depth at quit | Quit→last-work p50 / p99 / max | Quit→exit p50 / max |
+| Scenario | Load at quit | Trials | Depth at quit | Quit→delivered p50 / p99 / max | Quit→exit p50 / max |
 | --- | --- | --- | --- | --- | --- |
-| `quit_idle` | none | 200 | 0 | 0.51ms / 0.69ms / 1.0ms | 0.62ms / 2.1ms |
-| `quit_backlog_50k` | draining burst | 200 | ~50k | 0.11ms / 0.74ms / 0.90ms | 0.61ms / 5.4ms |
-| `quit_backlog_300k` | draining burst | 200 | ~300k | 0.13ms / 0.59ms / 1.0ms | 3.0ms / 4.2ms |
-| `quit_overload` | producer at 100k/s | 200 | ~8–9.5k | 0.11ms / 0.59ms / 1.2ms | 0.20ms / 1.3ms |
-| `quit_keyed_backlog_50k` | draining burst | 20 | ~50k | 1305ms / 1310ms / 1310ms | 1305ms / 1310ms |
+| `quit_idle` | none | 200 | 0 | 0.59ms / 0.71ms / 1.9ms | 0.60ms / 1.9ms |
+| `quit_backlog_50k` | draining burst | 200 | ~50k | 0.11ms / 0.49ms / 0.64ms | 0.58ms / 1.1ms |
+| `quit_backlog_300k` | draining burst | 200 | ~300k | 0.11ms / 0.61ms / 0.61ms | 2.9ms / 3.4ms |
+| `quit_overload` | producer at 100k/s | 200 | ~8k | 0.11ms / 0.62ms / 0.84ms | 0.19ms / 0.92ms |
+| `quit_keyed_backlog_50k` | draining burst | 20 | ~50k | 1300ms / 1302ms / 1302ms | 1300ms / 1302ms |
 
 Findings:
 
@@ -198,14 +200,14 @@ Findings:
   the `quit_*` trial scenarios above (F6, F7), added for open question 8.
 - **F6 — Unkeyed quit delivery is backlog-independent under the unbiased
   select.** Across 600 loaded trials at depths from ~8k to ~300k,
-  quit→last-work stays at p50 0.11–0.13ms, p99 ≤ 0.74ms, max ≤ 1.2ms, with
-  no separation between the 50k and 300k depths and none between a draining
+  quit→delivered stays at p50 0.11ms, p99 ≤ 0.62ms, max ≤ 0.84ms, with no
+  separation between the 50k and 300k depths and none between a draining
   burst and an actively refilling producer. The idle baseline is *higher* at
-  p50 (0.51ms) because the quit request also marks a redraw and one 500µs
+  p50 (0.59ms) because the quit request also marks a redraw and one 500µs
   `view` usually runs before the quit branch wins; under load that render is
   amortized into work already happening. The cost of a lost unbiased
   tie-break is therefore a few micro-batches, not a function of queue depth.
-  Quit→exit *does* scale with depth (p50 0.61ms at 50k vs 3.0ms at 300k) —
+  Quit→exit *does* scale with depth (p50 0.58ms at 50k vs 2.9ms at 300k) —
   that is shutdown-time backlog deallocation, not delivery. This is the
   measurement basis INV-L4 was waiting for: the statistical formulation
   (INV-L4 option (b)) is already satisfiable by the current implementation,
@@ -213,9 +215,9 @@ Findings:
   bound, not depth-independence, which the data shows the unbiased select
   provides on its own.
 - **F7 — A keyed quit waits for the full shared drain.** With ~50k queued,
-  the keyed variant's quit→last-work is p50 1.305s — the full drain of the
+  the keyed variant's quit→delivered is p50 1.300s — the full drain of the
   remaining backlog at ~26µs per message — with spread across 20 trials
-  under 0.5%. This is F4's shared-first starvation applied to quit: delivery
+  under 0.2%. This is F4's shared-first starvation applied to quit: delivery
   scales linearly with backlog depth. It quantifies the status quo that open
   question 7 weighs against re-routing a front-of-stream keyed quit to the
   dedicated channel.
@@ -436,11 +438,14 @@ To be finalized as contract tests before implementation:
   the form "always independent of backlog." Quit requests still inside
   command streams are outside this invariant and follow their stream's
   delivery semantics (section 4.2). The quit-under-backlog scenarios now
-  exist and are measured (section 2, F6): delivery latency shows no depth
+  exist and are measured (section 2, F6), and they record the delivery
+  instant itself — the quit branch firing, timestamped from the runtime's
+  tracing events — not a proxy bound, so a regression in the quit branch's
+  scheduling would show up directly. Delivery latency shows no depth
   dependence from 0 to ~300k queued messages, so formulation (b) is
   satisfiable by the current unbiased select with no structural change,
   with measurement conditions of the form "≥ 200 trials per scenario,
-  quit→last-work p99 ≤ 1ms at every measured depth"; (a) remains the
+  quit→delivered p99 ≤ 1ms at every measured depth"; (a) remains the
   fallback if a hard per-run bound is ever required. Choosing between (a)
   and (b) is the remaining step before INV-L4 becomes an acceptance
   measurement; F6 removes the empirical uncertainty from that choice.
@@ -485,13 +490,24 @@ must meet and is filled with measured values when the implementation lands.
 
 | Scenario | Metric | Unbounded baseline | Bounded acceptance criterion |
 | --- | --- | --- | --- |
-| `overload` | max queue depth | ~308k, grows linearly with overload duration (F3) | ≤ configured `app_channel_capacity` (INV-L1) |
+| `overload` | max queue depth | ~308k, grows linearly with overload duration (F3) | ≤ `app_channel_capacity` + concurrent producers — `capacity + 1` here; see the depth-accounting note below (INV-L1) |
 | `overload` | update latency p99 | 7.9s, grows with overload duration (F3) | bounded by the drain time of one full queue plus admission wait (INV-L3, its producer-count premise given) |
-| `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ capacity; producer waits instead; no message dropped (INV-L1, INV-L2) |
+| `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | unchanged — no keyed latency bound unless open question 6 adds a fairness policy (section 4.3) |
-| `quit_backlog_300k`, `quit_overload` | quit→last-work p99 | ≤ 0.74ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
-| `quit_keyed_backlog_50k` | quit→last-work p50 | ≈ full shared drain, 1.31s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
+| `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.62ms, depth-independent (F6) | unchanged from baseline — the quit channel is never bounded (R4, INV-L4) |
+| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | per open question 7's resolution; unchanged if keyed quit stays in the private channel |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
+
+Queue-depth cells use the harness's depth definition, `produced -
+processed`, which counts a message from the moment the source stream yields
+it. Raw channel occupancy is not observable through the public API, and a
+producer blocked in a bounded `send` holds its one in-flight message
+*outside* the channel — exactly the per-producer accounting INV-L1 already
+makes. The observable acceptance bound is therefore `app_channel_capacity +
+concurrent shared-channel producers` (`capacity + 1` in these
+single-flood-producer scenarios), not `capacity` alone; an observed depth of
+`capacity + 1` with one producer is compliant, and depth exceeding
+`capacity + producers` is the regression signal.
 
 ## 6. Open questions (to resolve before implementation)
 
