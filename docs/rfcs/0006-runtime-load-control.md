@@ -59,7 +59,17 @@
   (configuration under test, backlog depths, trial counts) move from
   implementation-time choices to prerequisite obligations of the
   `RuntimeConfig` RFC, which also owns the CI smoke-profile question
-  (sections 5, 5.1, 6)
+  (sections 5, 5.1, 6). 2026-07-18 — three review-follow-up
+  clarifications (no contract change): the `RuntimeConfig` RFC's
+  bounded-run parameter obligations now include redefining the bounded
+  `quit_backlog_*` scenarios around blocked-producer count and
+  channel-full churn rather than queue depth, since bounded depth caps
+  at `capacity + 1` (section 5.1); the capacity-wait event's per-send
+  firing granularity is pinned as a deliberate choice, with aggregation
+  left to `tracing` filtering and any future aggregate event kept
+  additive (section 4.4); and "active `CommandId`" in R1's `m` is
+  defined as an entry existing in the keyed map, including a
+  finished-but-undrained run (section 1.2)
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -150,7 +160,13 @@ Scheduling facts that interact with load:
   keyed_channel_capacity`, where `m` — the number of active `CommandId`s —
   is a contract input the application must bound, not something
   `RuntimeConfig` controls (it is one component of the producer-count
-  premise, section 4.5). Nor is this a bound on all pending-work memory:
+  premise, section 4.5). "Active" here means an entry exists in the keyed
+  map, including a finished-but-undrained run: a keyed channel outlives
+  its command's completion until its buffered output is drained and the
+  id released for retry (RFC 0005,
+  `delivering_the_closed_senders_last_item_releases_the_id_for_retry`), so
+  such a run still counts toward `m` and still occupies its
+  `keyed_channel_capacity` share. Nor is this a bound on all pending-work memory:
   each producer blocked awaiting channel capacity additionally holds one
   in-flight message outside the channel, and the number of concurrent
   producers (active subscriptions, running commands) is likewise controlled
@@ -521,7 +537,14 @@ as INV-L13 (section 5):
   the moment the send completes. Fields: `channel` (`"shared"` or
   `"keyed"`) and `wait_us` (time from the first unready attempt to
   acceptance). Sends accepted immediately fire nothing — in-capacity
-  operation stays silent at `debug`.
+  operation stays silent at `debug`. Per-send firing is a deliberate
+  choice, not a placeholder: sustained overload can emit tens of
+  thousands of these events per second, and that volume is expected to be
+  managed by `tracing` filtering (level or target), not by the runtime
+  aggregating internally. Because the schema is pinned as INV-L13,
+  collapsing this into a periodic aggregate later is a breaking change to
+  this event's firing condition; adding a separate aggregate event
+  alongside it is additive and does not require revisiting this choice.
 - **Producer gauges** — target `tears::runtime::load`, level `debug`,
   fired whenever any counted value changes. Fields: `subscriptions`
   (active forwarding tasks), `unkeyed_commands` (running unkeyed command
@@ -1199,7 +1222,15 @@ measurement rather than an implementation-time choice:
   obligations (section 6), alongside the recommended defaults it
   already owns (open question 1) — which these test values need not
   equal. A bounded column measured under parameters chosen at
-  implementation time would not be a reviewable acceptance run.
+  implementation time would not be a reviewable acceptance run. Bounded
+  queue depth caps at `capacity + 1` (the depth-accounting note below),
+  so the unbounded `quit_backlog_50k` / `quit_backlog_300k` scenarios —
+  which reach those depths by flooding an unbounded channel before
+  quitting — have no bounded-mode counterpart at the same depths: this
+  prerequisite obligation includes redefining what the bounded quit
+  scenarios vary, sized by blocked-producer count and channel-full churn
+  rather than queue depth, not reusing the unbounded scenario names or
+  depths unchanged.
 - **Every latency acceptance criterion is scoped to the reference
   machine of section 2.** The unbounded baseline column was measured
   there, so the cell-by-cell comparison — and with it INV-L4's
