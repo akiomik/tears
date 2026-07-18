@@ -444,6 +444,7 @@ mod tests {
     use super::*;
 
     use std::future::pending;
+    use std::hash::{Hash, Hasher};
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -884,7 +885,10 @@ mod tests {
     /// Derives the scoped `CommandId` that `.cancellable(CommandId::new(local)).scoped(scope)`
     /// would install as its keyed spawn id, without depending on `CommandId`'s
     /// internal shape.
-    fn scoped_local_id(local: &'static str, scope: &'static str) -> CommandId {
+    fn scoped_local_id<Scope>(local: &'static str, scope: Scope) -> CommandId
+    where
+        Scope: Eq + Hash + Send + Sync + 'static,
+    {
         let (cancels, _, _) = Command::<TestMessage>::cancel(CommandId::new(local))
             .scoped(scope)
             .into_runtime_parts()
@@ -893,6 +897,21 @@ mod tests {
             .into_iter()
             .next()
             .expect("cancel id should be present")
+    }
+
+    /// A scope segment type whose `Hash` implementation always writes the
+    /// same value, so its `PartialEq`/`Eq` (compared by `id`) is the only
+    /// thing distinguishing two instances. Used to pin RFC 0005 section 6.4's
+    /// requirement that constant-hash scope values still keep command
+    /// replacement, `KeepInFlight` suppression, and explicit cancellation
+    /// isolated per scope.
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    struct CollidingScope(u8);
+
+    impl Hash for CollidingScope {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            0_u8.hash(state);
+        }
     }
 
     // RFC 0005 Phase B: `Command::scoped` must make the same local
@@ -991,6 +1010,176 @@ mod tests {
         assert!(
             !pane_a_dropped.load(Ordering::SeqCst),
             "pane-a's in-flight command must not be cancelled by pane-b"
+        );
+
+        runtime.core.shutdown();
+    }
+
+    // RFC 0005 section 6.4: "the same constant-hash scope values keep
+    // command replacement, suppression, and explicit cancellation isolated."
+    // The tests above already cover ordinary (non-colliding) scope values;
+    // these three repeat that coverage under `CollidingScope`, whose `Hash`
+    // always writes the same byte, to pin that scope equality — not merely
+    // scope inequality — drives isolation.
+    #[tokio::test]
+    async fn scoped_explicit_cancel_is_isolated_under_hash_colliding_scopes() {
+        let scope_a = scoped_local_id("search", CollidingScope(1));
+        let scope_b = scoped_local_id("search", CollidingScope(2));
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable(CommandId::new("search"))
+                .scoped(CollidingScope(1))
+                .into_runtime_parts(),
+        );
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable(CommandId::new("search"))
+                .scoped(CollidingScope(2))
+                .into_runtime_parts(),
+        );
+
+        wait_until(
+            || {
+                runtime.core.app_inputs.has_closed_buffered(&scope_a)
+                    && runtime.core.app_inputs.has_closed_buffered(&scope_b)
+            },
+            "both hash-colliding scopes' keyed results should buffer independently",
+        )
+        .await;
+
+        runtime.core.app_inputs.cancel_keyed(&scope_a);
+
+        assert!(!runtime.core.app_inputs.has_closed_buffered(&scope_a));
+        assert!(
+            runtime.core.app_inputs.has_closed_buffered(&scope_b),
+            "cancelling one hash-colliding scope's id must not affect the other"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_keep_in_flight_is_isolated_under_hash_colliding_scopes() {
+        struct DropGuard(Arc<AtomicBool>);
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let scope_a_dropped = Arc::new(AtomicBool::new(false));
+        let (scope_a_started_tx, scope_a_started_rx) = oneshot::channel();
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        let guard = DropGuard(Arc::clone(&scope_a_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = guard;
+                let _ = scope_a_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
+            .scoped(CollidingScope(1))
+            .into_runtime_parts(),
+        );
+        timeout(Duration::from_secs(1), scope_a_started_rx)
+            .await
+            .expect("scope-1 command should start before the timeout")
+            .expect("scope-1 command should signal that it started");
+
+        // Same local id ("search") under a different, hash-colliding scope,
+        // also `KeepInFlight`. If scope equality fell back to the collided
+        // hash, both would alias one slot and scope-1's occupancy would
+        // silently discard this stream instead of delivering it.
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
+                .scoped(CollidingScope(2))
+                .into_runtime_parts(),
+        );
+
+        let scope_b = scoped_local_id("search", CollidingScope(2));
+        wait_until(
+            || runtime.core.app_inputs.has_closed_buffered(&scope_b),
+            "scope-2's stream must deliver instead of being suppressed by scope-1's occupancy",
+        )
+        .await;
+
+        assert!(
+            !scope_a_dropped.load(Ordering::SeqCst),
+            "scope-1's in-flight command must not be cancelled by scope-2"
+        );
+
+        runtime.core.shutdown();
+    }
+
+    #[tokio::test]
+    async fn scoped_replacement_is_isolated_under_hash_colliding_scopes() {
+        struct DropGuard(Arc<AtomicBool>);
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let scope_a_dropped = Arc::new(AtomicBool::new(false));
+        let scope_b_dropped = Arc::new(AtomicBool::new(false));
+        let (scope_a_started_tx, scope_a_started_rx) = oneshot::channel();
+        let (scope_b_started_tx, scope_b_started_rx) = oneshot::channel();
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        // Both use the default `CancelPolicy::CancelInFlight`, so a same-scope
+        // replacement is expected to cancel the prior occupant of that scope.
+        let guard_a = DropGuard(Arc::clone(&scope_a_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = guard_a;
+                let _ = scope_a_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable(CommandId::new("search"))
+            .scoped(CollidingScope(1))
+            .into_runtime_parts(),
+        );
+        let guard_b = DropGuard(Arc::clone(&scope_b_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = guard_b;
+                let _ = scope_b_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable(CommandId::new("search"))
+            .scoped(CollidingScope(2))
+            .into_runtime_parts(),
+        );
+        timeout(Duration::from_secs(1), scope_a_started_rx)
+            .await
+            .expect("scope-1 command should start before the timeout")
+            .expect("scope-1 command should signal that it started");
+        timeout(Duration::from_secs(1), scope_b_started_rx)
+            .await
+            .expect("scope-2 command should start before the timeout")
+            .expect("scope-2 command should signal that it started");
+
+        // Replace the same local id under scope-1 again. If scope equality
+        // fell back to the collided hash, this would also cancel scope-2.
+        runtime.core.enqueue_command(
+            Command::future(pending::<TestMessage>())
+                .cancellable(CommandId::new("search"))
+                .scoped(CollidingScope(1))
+                .into_runtime_parts(),
+        );
+
+        wait_until(
+            || scope_a_dropped.load(Ordering::SeqCst),
+            "the replaced scope-1 command should be cancelled",
+        )
+        .await;
+        assert!(
+            !scope_b_dropped.load(Ordering::SeqCst),
+            "replacing scope-1's occupant must not cancel scope-2's command"
         );
 
         runtime.core.shutdown();
