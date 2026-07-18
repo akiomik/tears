@@ -43,6 +43,19 @@ that includes the keyed control `quit_keyed_backlog_50k`, whose ~1.3s
 full-drain delivery is intended behavior — so the stated criterion could
 never pass.
 
+An execution profile is an inventory too. A claim that a scenario,
+test, or check is *part of* a profile — a CI job, a smoke selector, a
+feature-gated run — is checked by expanding the profile's actual member
+set (the selector's argument list, the job's invocation) and finding
+the named element in it. Being compiled is not being run: a scenario
+built into the binary a profile invokes is compiled under that profile
+without executing, so a rationale that needs the scenario to *run*
+cannot lean on a profile that merely builds it. *From PR #221:* eight
+`keyed_isolation` keys were justified as "cheap
+enough for the smoke profile's build check" while the `--smoke`
+selector's set never contained the scenario — and if the appeal was to
+compilation instead, key count never affected build cost at all.
+
 ## 2. Adversarial counterexample per invariant
 
 For each requirement and invariant, deliberately construct at least one
@@ -177,6 +190,20 @@ measured. Two classes from PR #220:
   25ms-cadence probe never buffers two messages and thus cannot
   distinguish 16 from 1.)
 
+Operational absolutes are code claims about a whole mechanism. A
+normative *only*, *never*, or *cannot fail* over a workflow, harness,
+or run profile is verified by enumerating every branch and every
+failure exit of the mechanism it quantifies over — timeout guards,
+exit-code paths, and abort conditions included, not only the assertions
+the sentence has in mind. And when the absolute restates another
+document's rule, it is checked against that rule's exact scope, which
+the restatement may silently narrow or widen. *From PR #221:* "a slow
+CI machine cannot fail the profile on speed" missed
+the harness's per-scenario `max_wall` timeout-failure exit, and "full
+scenarios run only on the reference machine" narrowed RFC 0006's
+scoping, which admits full runs on any machine and reserves only
+acceptance force to the reference machine.
+
 ## 5. Normative force and readiness
 
 An RFC or amendment that gates implementation carries no soft spots in
@@ -248,6 +275,19 @@ implementation passes, and a stale open-question description of a
 decision the same amendment had made — were introduced by first-round
 patch text and sit squarely in classes items 1, 2, and 7 already name.
 
+Make the re-check mechanical rather than remembered: for every
+review-fix commit, write out its changed-claims list — each claim the
+fix adds, strengthens, or rewords — and run items 1–5 on exactly that
+list as if it were new RFC text, before pushing. The list is the
+enforcement; without it the pass silently shrinks to the sentences the
+finding pointed at, and a small patch is precisely the patch whose
+re-check gets skipped. *From PR #221:* two of the three findings sat
+in claims PR #220's review-fix commit had added or reshaped
+— the reference-machine-exclusivity sentence, and the rewritten
+pass/fail derivation that carried "cannot fail on speed" into new
+surroundings — and both would have appeared on that commit's
+changed-claims list.
+
 ## 7. Mechanical pass
 
 - Cross-references: open-question numbers point at their resolutions;
@@ -265,5 +305,11 @@ patch text and sit squarely in classes items 1, 2, and 7 already name.
   question's resolution text, and the amendment header (from PR #215:
   open question 8 still described F6 as the input to a choice the same
   amendment had already made).
+- The PR title, body, and stated review focus match the final RFC text
+  after the last fix commit: a claim corrected during review is
+  corrected in the PR description too, and rationale or conclusions the
+  fixes removed from the RFC do not survive in the body. Re-read the
+  description at the end of each review round, not only when opening
+  the PR.
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
