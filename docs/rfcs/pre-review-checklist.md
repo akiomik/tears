@@ -155,6 +155,15 @@ PR #215:
   aside. (§3.2/§4.1 held the `RuntimeConfig` API at "for example" / "at
   least" with the owning task recorded nowhere as a gate; §4.4 specified
   observability as "or similar" / "should" with no definition of done.)
+
+  Scope this to the claim itself: within a labeled invariant or requirement
+  bullet (`- **INV-Lx**:` / `- **Rx**:`), write the opening sentence as the
+  complete, hedge-free claim, and carry qualification, rationale, and
+  resolved history in the sentences that follow within the same bullet.
+  When triaging a hit, a hedge in that opening sentence is a finding; a
+  hedge later in the same bullet usually is not — confirm it is doing
+  rationale work, not smuggling an unresolved qualification into the claim,
+  before waving it through.
 - **No pending choices inside invariants.** An invariant that still
   contains a decision to make — "resolving this needs either (a) … or
   (b) …", "the remaining step" — is not yet an invariant. Either resolve
