@@ -50,7 +50,10 @@ RFC is that document. It decides:
    trial counts carried over from RFC 0006's normative conditions, and the
    `keyed_isolation` saturation parameters (8 keys).
 5. **CI smoke profile**: yes — a reduced, latency-assertion-free harness
-   profile runs in CI and gates on completion only.
+   profile runs in CI and gates on completion (within the harness's
+   wall-clock guards) and lossless drain delivery, never on a latency
+   percentile; full runs leave CI and any machine may run them, with
+   acceptance force reserved to the reference machine per RFC 0006.
 
 ## 1. Delegated obligations (inventory)
 
@@ -358,8 +361,12 @@ quit rows vary blocked-producer count and channel-full churn instead:
   probes exactly as RFC 0006 §5.1's row defines them (a previously idle
   key's first 16 sends, and the shared producer's first 1024 sends). Eight
   saturated keys is the scale chosen to defeat a pooled implementation
-  sized near per-channel capacity while keeping the scenario cheap enough
-  for the smoke profile's build check (§6).
+  sized near per-channel capacity while keeping the row cheap to execute
+  in the full acceptance and regression runs it belongs to.
+  `keyed_isolation` is not part of the §6 smoke profile: the smoke build
+  compiles it along with every other scenario in the one harness binary,
+  but never runs it, so the key count is an acceptance-run cost choice,
+  not a smoke constraint.
 
 ## 6. CI smoke profile
 
@@ -374,9 +381,12 @@ open question was therefore never *whether* the harness runs in CI but
 statistical row this RFC adds (200-trial quit runs, the bounded matrix
 re-runs) while their latency numbers gate nothing on a CI machine. The
 resolution: the Benchmarks job's `runtime_load` invocation switches to
-the smoke profile, and the full scenarios run only as deliberate
-acceptance or regression runs on the reference machine (§5). The job's
-`subscription` bench invocation is unchanged.
+the smoke profile, and the full scenarios leave CI: they run as
+deliberate acceptance or regression runs (§5), on any machine, with RFC
+0006 §5.1's scoping unchanged — a full run carries acceptance force only
+on the reference machine, and runs on other machines are
+regression-informative, never acceptance. The job's `subscription` bench
+invocation is unchanged.
 
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
@@ -396,12 +406,27 @@ acceptance or regression runs on the reference machine (§5). The job's
   observation point a legal shutdown discard is indistinguishable from an
   illegal drop — a lossless assertion there would either pass illegal
   drops or fail legal discards — so the lossless gate lives on the
-  draining scenarios alone. No latency value is compared against
-  anything; a slow CI machine cannot fail the profile on speed.
+  draining scenarios alone. No latency percentile is compared against
+  anything — the profile carries no latency assertion. One wall-clock
+  condition remains: every smoke scenario carries the harness's
+  per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
+  at 30 s — the existing `steady_20k` and `quit_idle` keep their current
+  value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
+  same — and the smoke run fails when any scenario times out. That
+  timeout-failure rule is part of the profile's definition, not
+  something the harness fully provides today: quit trials already fail
+  the run on timeout, but a timed-out load scenario is currently
+  report-only, so the smoke implementation promotes it to a failure —
+  the lossless assertion alone does not cover it, because a run that
+  hangs after processing its last scripted message times out with
+  `processed` equal to the scripted total. The guard is the completion
+  gate itself: a machine slow enough to exceed it fails on
+  non-completion, never on a latency criterion.
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove the harness
-  still builds and its scenarios still terminate, at a wall time that
-  stays viable as the scenario set grows.
+  still builds (all scenarios compile in the one binary) and the smoke
+  scenarios still terminate, at a wall time that stays viable as the
+  scenario set grows.
 
 ## 7. Invariants
 
