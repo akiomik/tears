@@ -158,6 +158,25 @@ for delivery-FIFO and quit precedence, but RFC 0003's INV-9 defines only
 post-dispatch suppression and INV-14 only same-pull-point ordering — the
 properties had to be pinned as new invariants with their own checks.
 
+Measurement citations are code claims too, and they prove only what they
+measured. Two classes from PR #220:
+
+- An observed average or p50 supports an estimate, never an *at most*.
+  Deriving a worst-case bound as `n × average cost` is invalid — the
+  tail is unbounded by the mean — so either present the product as an
+  estimate on the measured workload, or define and measure the
+  worst-case service time the bound actually needs. (From PR #220: a
+  capacity recommendation claimed "adds at most ~27ms" from the
+  harness's average drain rate.)
+- A value presented as measurement-driven cites a measurement that can
+  *distinguish* the chosen value from the alternatives it rejects; a
+  workload indifferent between the candidates sizes nothing. Either add
+  the discriminating measurement, or state the value as a convention
+  with its trade-off spelled out — not as measurement-derived. (From PR
+  #220: `keyed_channel_capacity = 16` was justified by a scenario whose
+  25ms-cadence probe never buffers two messages and thus cannot
+  distinguish 16 from 1.)
+
 ## 5. Normative force and readiness
 
 An RFC or amendment that gates implementation carries no soft spots in

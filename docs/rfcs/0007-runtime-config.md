@@ -195,24 +195,40 @@ one exception that the sizing rule below must stay consistent with RFC
 ### 3.1 Sizing rule and starting values
 
 The documented rule: a bounded channel's capacity buys burst absorption and
-costs worst-case latency — once the queue is full, a newly accepted
-message waits up to `capacity × per-message drain cost` before reaching
-`update`. Per-message drain cost is application-dependent and measurable
-(RFC 0006 §2: ~2.2µs/message at 2µs `update` cost, ~26µs/message at 25µs —
-drain time tracks `update` cost, which the application controls).
+costs queueing latency — once the queue is full, a newly accepted message
+waits roughly `capacity × per-message drain cost` before reaching
+`update`, where the drain cost is the *observed average* service time of
+the application's own loop, application-dependent and measurable (RFC 0006
+§2: ~2.2µs/message average at 2µs `update` cost, ~26µs/message at 25µs —
+drain time tracks `update` cost, which the application controls). The
+product is an estimate on the measured workload, not a worst-case bound:
+an average cannot bound the tail, and neither RFC 0006 nor this RFC
+defines a per-message worst-case service time to build a hard bound on.
+An application that needs one derives it from its own measured tail
+service time, not from this rule.
 
-Documented starting values, derived from the section 2 reference numbers:
+Documented starting values, each with its basis stated:
 
-- **`app_channel_capacity = 1024`.** Large enough that the in-capacity
-  regime never engages backpressure (`steady_200k` peaks at depth 400), and
-  small enough that a full queue adds at most ~27ms (~1.6 frame periods at
-  60 FPS) even at the harness's heavy 25µs `update` cost. Applications with
-  larger expected bursts scale up by the rule above; `burst_200k` shows the
-  cost of undersizing is producer wait, not loss.
-- **`keyed_channel_capacity = 16`.** Keyed outputs are per-command result
-  streams, low-rate by construction in the measured workloads
-  (`keyed_steady`); 16 bounds each command's buffer share of `m × capacity`
-  (RFC 0006 R1) while leaving headroom above the harness's probe cadence.
+- **`app_channel_capacity = 1024`.** Measurement-derived at both ends:
+  large enough that the in-capacity regime never engages backpressure
+  (`steady_200k` peaks at depth 400), and small enough that a full queue
+  adds ~27ms of estimated queueing latency (~1.6 frame periods at 60 FPS)
+  at the harness's observed average drain rate under its heavy 25µs
+  `update` cost — an estimate per the rule above, not an upper bound.
+  Applications with larger expected bursts scale up by the same rule;
+  `burst_200k` shows the cost of undersizing is producer wait, not loss.
+- **`keyed_channel_capacity = 16`.** A margin choice, stated as such —
+  not measurement-derived: in the measured workloads a keyed channel never
+  buffers more than one message (`keyed_steady`'s probe fires every 25ms
+  and its observed worst-case delivery is 5.2ms), so those measurements
+  cannot distinguish 16 from 1, and the harness has no keyed-burst
+  scenario that would size the value. What 16 fixes is the trade read
+  from both sides: a command can emit a burst of up to 16 outputs without
+  awaiting the consumer, and the per-command share of the application's
+  `m × capacity` buffer total (RFC 0006 R1) is bounded at 16 messages.
+  Applications whose keyed commands emit larger bursts size up by that
+  same absorption-versus-memory reading; adding a keyed-burst harness
+  scenario, should field experience demand a measured basis, is additive.
 - **`batch_max_messages`: unset.** This resolves the default-value half of
   RFC 0006 open question 2 as delegated: no non-`None` value is
   recommended. F5 is the evidence — the 100µs time cap alone held the frame
@@ -293,9 +309,14 @@ batch_max_messages     = None
 
 ### 5.2 Bounded quit scenarios
 
-Bounded queue depth caps at `capacity + 1`, so the unbounded
+Two bounded depth quantities must not be conflated (RFC 0006 §5.1's
+depth-accounting note): shared-channel *occupancy* caps at
+`app_channel_capacity`, while the harness's *observed depth* (`produced -
+processed`, which counts the one in-flight message each blocked producer
+holds outside the channel) caps at `capacity + concurrent producers`.
+Either way, depth is capped near capacity, so the unbounded
 `quit_backlog_50k` / `quit_backlog_300k` rows have no bounded counterpart
-at their depths (RFC 0006 §5.1). Per the delegated obligation, the bounded
+at their ~50k/~300k depths. Per the delegated obligation, the bounded
 quit rows vary blocked-producer count and channel-full churn instead:
 
 | Scenario (bounded run) | What it varies | Definition | Trials | Criterion (RFC 0006 INV-L4) |
@@ -313,7 +334,11 @@ quit rows vary blocked-producer count and channel-full churn instead:
   scheduling artifact on the 10-core reference machine while remaining a
   realistic subscription count; the intent is to show quit→delivered does
   not scale with blocked-producer count, the bounded analogue of F6's
-  depth-independence.
+  depth-independence. Its depth accounting: channel occupancy stays
+  ≤ 1024, observed depth ≤ `1024 + 64` = 1088 (one in-flight message per
+  blocked producer). The row's criterion is quit latency, not depth, but
+  any depth it records is read against `capacity + producers`, never
+  `capacity + 1`.
 - Trial counts are RFC 0006's normative floor for INV-L4 (≥ 200 per
   acceptance scenario; 20 for the keyed control, matching its unbounded
   baseline row).
@@ -324,7 +349,8 @@ quit rows vary blocked-producer count and channel-full churn instead:
   `steady_200k`**: re-run under the §5.1 configuration with their RFC 0006
   §2 load parameters unchanged (rates, durations, `update`/`view` costs,
   probe cadence). Their criteria are RFC 0006 §5.1's cells verbatim; the
-  depth-accounting bound instantiates to `1024 + 1` for the
+  depth-accounting bound (`capacity + concurrent producers`, §5.2's
+  observed-depth quantity) instantiates to `1024 + 1` for these
   single-flood-producer rows.
 - **`keyed_isolation`**: 8 keyed channels are saturated (each holding
   16 messages with its next send pending — 128 buffered messages plus 8
@@ -337,28 +363,45 @@ quit rows vary blocked-producer count and channel-full churn instead:
 
 ## 6. CI smoke profile
 
-**Resolved: yes — a smoke profile of the harness runs in CI, gating on
-completion only.** RFC 0006 fixed that CI gates on no latency criterion;
-the open half was whether a latency-assertion-free profile runs at all. It
-does, because the alternative leaves the harness — now the carrier of every
-acceptance scenario — compiling and running only on the reference machine,
-where bit-rot is discovered at acceptance time.
+**Resolved: yes — CI runs a smoke profile of the harness, replacing the
+full-scenario run it performs today.** RFC 0006 fixed that CI gates on no
+latency criterion. CI already builds and runs the full harness on every
+push: `ci.yml`'s Benchmarks job runs `cargo test --bench runtime_load`,
+and the harness's custom `main` ignores `cargo test`'s filtering and
+executes its full scenarios (the job's own comment records this). The
+open question was therefore never *whether* the harness runs in CI but
+*which profile*: the full scenarios' wall time grows with every
+statistical row this RFC adds (200-trial quit runs, the bounded matrix
+re-runs) while their latency numbers gate nothing on a CI machine. The
+resolution: the Benchmarks job's `runtime_load` invocation switches to
+the smoke profile, and the full scenarios run only as deliberate
+acceptance or regression runs on the reference machine (§5). The job's
+`subscription` bench invocation is unchanged.
 
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
   shortened to 0.5s, a 20k-message bounded burst under the §5.1
-  configuration, `quit_idle` and `quit_blocked_1` at 5 trials each.
-- **Assertions**: scenario completion and the harness's internal
-  consistency counters (every produced message processed or accounted for
-  at shutdown — the lossless claim's bookkeeping); no latency value is
-  compared against anything. A slow CI machine cannot fail the profile on
-  speed alone.
-- **CI placement**: a step in the existing `ci.yml` test job, invoked
-  through a `just` recipe (`just bench-smoke`) so the local and CI
-  invocations are identical.
+  configuration, `quit_idle` and `quit_blocked_1` at 5 trials each. CI
+  invokes it through a `just` recipe (`just bench-smoke`) in the existing
+  Benchmarks job, so the local and CI invocations are identical.
+- **Pass/fail**: two assertion classes, split by what the observation
+  point can actually distinguish. The draining scenarios (`steady_20k`,
+  the bounded burst) assert `produced == processed == the scenario's
+  scripted total` after the drain — every scripted message delivered —
+  which is what makes an illegal bounded-mode drop (RFC 0006 INV-L2)
+  observable: a silently dropped message leaves `processed` short of the
+  scripted total. The quit scenarios assert completion only: after a
+  quit, undelivered messages are legally discarded at shutdown (INV-L2's
+  shutdown carve-out), and at the harness's `produced - processed`
+  observation point a legal shutdown discard is indistinguishable from an
+  illegal drop — a lossless assertion there would either pass illegal
+  drops or fail legal discards — so the lossless gate lives on the
+  draining scenarios alone. No latency value is compared against
+  anything; a slow CI machine cannot fail the profile on speed.
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove the harness
-  still builds and its scenarios still terminate.
+  still builds and its scenarios still terminate, at a wall time that
+  stays viable as the scenario set grows.
 
 ## 7. Invariants
 
@@ -380,11 +423,16 @@ Enforcement classes follow the pre-review checklist's definitions
   set field and the unchanged others).
 - **INV-C3**: no `RuntimeConfig` construction or setter can produce an
   invalid configuration, and none returns a `Result` or panics on any
-  input. Structural at the type level: every capacity field is
+  input. Structural, at the signatures *and* the bodies — a signature
+  check alone admits a setter that panics on a chosen value while staying
+  infallible in its type. Signatures: every capacity field is
   `Option<NonZeroUsize>`, so the sole invalid value (zero) is
-  unrepresentable in the argument types, and the frame rate arrives as the
-  already-validated `FrameRate`; the check is that no fallible signature
-  exists on the type.
+  unrepresentable in the argument types, the frame rate arrives as the
+  already-validated `FrameRate`, and no fallible signature exists on the
+  type. Bodies: `new` and each setter is a plain field write — no
+  branching on the argument's value, no arithmetic, no
+  `panic!`/`assert!`/`unwrap` path — checked by review of the four
+  function bodies.
 - **INV-C4**: the public surface of `RuntimeConfig` consists of exactly the
   frame rate and the three RFC 0006 §4.1 controls — in particular, no
   restart-rate field (§4). Structural: review of the type's public items.
