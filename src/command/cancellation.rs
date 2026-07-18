@@ -1,7 +1,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use crate::structural_key::StructuralKey;
+use crate::structural_key::{ScopePath, StructuralKey};
 
 /// Identifies one cancellable command-output lifecycle.
 ///
@@ -11,6 +11,7 @@ use crate::structural_key::StructuralKey;
 #[derive(Clone)]
 pub struct CommandId {
     inner: StructuralKey,
+    scope: ScopePath,
 }
 
 impl CommandId {
@@ -21,6 +22,18 @@ impl CommandId {
     {
         Self {
             inner: StructuralKey::new(value),
+            scope: ScopePath::empty(),
+        }
+    }
+
+    /// Returns a new id with an already-erased scope segment appended (see
+    /// RFC 0005 section 4.3). Used by [`Command::scoped`](super::Command::scoped)
+    /// to apply one scope value to every lifecycle id present at its call
+    /// boundary without requiring the scope type to be `Clone`.
+    pub(super) fn scoped_with(&self, segment: StructuralKey) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            scope: self.scope.appended_key(segment),
         }
     }
 }
@@ -36,7 +49,7 @@ impl fmt::Debug for CommandId {
 
 impl PartialEq for CommandId {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        self.inner == other.inner && self.scope == other.scope
     }
 }
 
@@ -45,6 +58,7 @@ impl Eq for CommandId {}
 impl Hash for CommandId {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.inner.hash(state);
+        self.scope.hash(state);
     }
 }
 
@@ -121,5 +135,42 @@ mod tests {
     #[test]
     fn default_policy_cancels_in_flight_work() {
         assert_eq!(CancelPolicy::default(), CancelPolicy::CancelInFlight);
+    }
+
+    #[test]
+    fn scoped_with_differs_from_unscoped() {
+        let unscoped = CommandId::new("load");
+        let scoped = unscoped.scoped_with(StructuralKey::new("pane-1"));
+
+        assert_ne!(unscoped, scoped);
+    }
+
+    #[test]
+    fn scoped_with_makes_independent_child_instances_distinct() {
+        let base = CommandId::new("load");
+        let first = base.scoped_with(StructuralKey::new("pane-1"));
+        let second = base.scoped_with(StructuralKey::new("pane-2"));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn scoped_with_equal_scope_is_equal() {
+        let base = CommandId::new("load");
+        let first = base.scoped_with(StructuralKey::new("pane-1"));
+        let second = base.scoped_with(StructuralKey::new("pane-1"));
+
+        assert_eq!(first, second);
+        assert_eq!(hash(&first), hash(&second));
+    }
+
+    #[test]
+    fn scoped_with_applies_one_shared_erasure_to_different_ids() {
+        let segment = StructuralKey::new("pane-1");
+        let first = CommandId::new("load").scoped_with(segment.clone());
+        let second = CommandId::new("save").scoped_with(segment);
+
+        // Different local ids under the same scope segment remain distinct.
+        assert_ne!(first, second);
     }
 }

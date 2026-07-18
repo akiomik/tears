@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Subscription::scoped` and `Command::scoped` qualify a subscription's or
+  command's lifecycle identity with one structural scope segment, so composed
+  child instances that reuse the same local source/key or `CommandId` no
+  longer alias each other's lifecycle (RFC 0005 Phase B)
+  - `Command::scoped` qualifies the keyed spawn id (if `cancellable`/
+    `cancellable_with` was already called) and every explicit cancel id
+    already present at the call boundary; it does not retroactively cover
+    ids attached by a later modifier call — see the ordering examples on
+    `Command::cancellable`'s rustdoc
+  - Scoping is additive: unscoped subscriptions and commands keep their
+    existing 0.10.0 behavior unchanged
+
 ## [0.10.0] - 2026-07-17
 
 ### Changed

@@ -881,6 +881,121 @@ mod tests {
         .await;
     }
 
+    /// Derives the scoped `CommandId` that `.cancellable(CommandId::new(local)).scoped(scope)`
+    /// would install as its keyed spawn id, without depending on `CommandId`'s
+    /// internal shape.
+    fn scoped_local_id(local: &'static str, scope: &'static str) -> CommandId {
+        let (cancels, _, _) = Command::<TestMessage>::cancel(CommandId::new(local))
+            .scoped(scope)
+            .into_runtime_parts()
+            .into_execution_parts();
+        cancels
+            .into_iter()
+            .next()
+            .expect("cancel id should be present")
+    }
+
+    // RFC 0005 Phase B: `Command::scoped` must make the same local
+    // `CommandId` independent across composition boundaries, so cancelling
+    // one scope's slot cannot affect an equal local id under another scope.
+    #[tokio::test]
+    async fn scoped_keyed_commands_do_not_cross_cancel_or_replace() {
+        let pane_a = scoped_local_id("search", "pane-a");
+        let pane_b = scoped_local_id("search", "pane-b");
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        // Both panes reuse the same local id ("search"); if scoping failed to
+        // qualify it, the second spawn would replace the first under
+        // `CancelPolicy::CancelInFlight` instead of buffering independently.
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable(CommandId::new("search"))
+                .scoped("pane-a")
+                .into_runtime_parts(),
+        );
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable(CommandId::new("search"))
+                .scoped("pane-b")
+                .into_runtime_parts(),
+        );
+
+        wait_until(
+            || {
+                runtime.core.app_inputs.has_closed_buffered(&pane_a)
+                    && runtime.core.app_inputs.has_closed_buffered(&pane_b)
+            },
+            "both pane-scoped keyed results should buffer independently",
+        )
+        .await;
+
+        runtime.core.app_inputs.cancel_keyed(&pane_a);
+
+        assert!(!runtime.core.app_inputs.has_closed_buffered(&pane_a));
+        assert!(
+            runtime.core.app_inputs.has_closed_buffered(&pane_b),
+            "cancelling one pane's scoped id must not affect the other pane"
+        );
+    }
+
+    // RFC 0005 Phase B (INV-19): reusing the same local `CommandId` under
+    // `CancelPolicy::KeepInFlight` in two different scopes must not let one
+    // pane's occupancy suppress the other pane's stream.
+    #[tokio::test]
+    async fn scoped_keep_in_flight_does_not_suppress_a_different_pane() {
+        struct DropGuard(Arc<AtomicBool>);
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let pane_a_dropped = Arc::new(AtomicBool::new(false));
+        let (pane_a_started_tx, pane_a_started_rx) = oneshot::channel();
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+
+        let guard = DropGuard(Arc::clone(&pane_a_dropped));
+        runtime.core.enqueue_command(
+            Command::future(async move {
+                let _guard = guard;
+                let _ = pane_a_started_tx.send(());
+                pending::<TestMessage>().await
+            })
+            .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
+            .scoped("pane-a")
+            .into_runtime_parts(),
+        );
+        timeout(Duration::from_secs(1), pane_a_started_rx)
+            .await
+            .expect("pane-a command should start before the timeout")
+            .expect("pane-a command should signal that it started");
+
+        // Same local id ("search") under pane-b, also `KeepInFlight`. If
+        // scoping failed and both aliased to one slot, pane-a's occupancy
+        // would silently discard this stream instead of delivering it.
+        runtime.core.enqueue_command(
+            Command::stream(iter([TestMessage::Increment]))
+                .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
+                .scoped("pane-b")
+                .into_runtime_parts(),
+        );
+
+        let pane_b = scoped_local_id("search", "pane-b");
+        wait_until(
+            || runtime.core.app_inputs.has_closed_buffered(&pane_b),
+            "pane-b's stream must deliver instead of being suppressed by pane-a's occupancy",
+        )
+        .await;
+
+        assert!(
+            !pane_a_dropped.load(Ordering::SeqCst),
+            "pane-a's in-flight command must not be cancelled by pane-b"
+        );
+
+        runtime.core.shutdown();
+    }
+
     #[tokio::test]
     async fn live_keyed_quit_exits_the_runtime() -> Result<()> {
         struct KeyedQuitApp;
