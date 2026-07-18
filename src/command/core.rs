@@ -3,11 +3,16 @@
 //! while closing the `command::Command` path. See `runtime::frame_rate` for
 //! the same pattern applied to `Runtime`'s scheduling input.
 
+use std::hash::Hash;
+#[cfg(test)]
+use std::hash::Hasher;
 use std::time::Duration;
 
 #[cfg(test)]
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
+
+use crate::structural_key::StructuralKey;
 
 use super::Action;
 use super::cancellation::{CancelPolicy, CancellableCommand, CommandCancellation, CommandId};
@@ -164,6 +169,28 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// A cancellation key applies to this top-level command only. If this
     /// command is later passed as a child to [`Command::batch`], its key is
     /// ignored; apply `cancellable` to the resulting batch instead.
+    ///
+    /// # Ordering with `scoped`
+    ///
+    /// [`Command::scoped`] only qualifies lifecycle ids already present when
+    /// it is called; it is a boundary operation, not a mode inherited by
+    /// later modifiers. Calling `cancellable` *after* `scoped` therefore
+    /// installs a new, unscoped, root-global key:
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    /// use tears::command::CommandId;
+    ///
+    /// // Scoped key: `scoped` qualifies the id already attached by `cancellable`.
+    /// let scoped_first = Command::message(1)
+    ///     .cancellable(CommandId::new("load"))
+    ///     .scoped("pane-1");
+    ///
+    /// // Root-global key: `cancellable` runs after `scoped`, so its id is not scoped.
+    /// let scoped_then_global = Command::message(1)
+    ///     .scoped("pane-1")
+    ///     .cancellable(CommandId::new("load"));
+    /// ```
     #[must_use = "cancellable returns a modified command and does not mutate in place"]
     pub fn cancellable(self, id: CommandId) -> Self {
         self.cancellable_with(id, CancelPolicy::CancelInFlight)
@@ -178,9 +205,88 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// A cancellation key applies to this top-level command only. Child keys
     /// are ignored by [`Command::batch`]; key the resulting batch when the whole
     /// batch should share one lifecycle.
+    ///
+    /// # Ordering with `scoped`
+    ///
+    /// [`Command::scoped`] only qualifies lifecycle ids already present when
+    /// it is called; it is a boundary operation, not a mode inherited by
+    /// later modifiers. Calling `cancellable_with` *after* `scoped` therefore
+    /// installs a new, unscoped, root-global key:
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    /// use tears::command::{CancelPolicy, CommandId};
+    ///
+    /// // Scoped key: `scoped` qualifies the id already attached by `cancellable_with`.
+    /// let scoped_first = Command::message(1)
+    ///     .cancellable_with(CommandId::new("load"), CancelPolicy::KeepInFlight)
+    ///     .scoped("pane-1");
+    ///
+    /// // Root-global key: `cancellable_with` runs after `scoped`, so its id is not scoped.
+    /// let scoped_then_global = Command::message(1)
+    ///     .scoped("pane-1")
+    ///     .cancellable_with(CommandId::new("load"), CancelPolicy::KeepInFlight);
+    /// ```
     #[must_use = "cancellable_with returns a modified command and does not mutate in place"]
     pub fn cancellable_with(mut self, id: CommandId, policy: CancelPolicy) -> Self {
         self.cancellation.key = Some(CancellableCommand { id, policy });
+        self
+    }
+
+    /// Qualifies this command's lifecycle ids with one structural scope
+    /// segment, expressing that this command belongs to a distinct child
+    /// composition boundary (see RFC 0005 section 4.3).
+    ///
+    /// `scoped` prepends `scope` to the keyed spawn id (if
+    /// [`Command::cancellable`] or [`Command::cancellable_with`] was already
+    /// called) and to every explicit cancel id already present, for example
+    /// from [`Command::cancel`] or a folded [`Command::batch`]. It does not
+    /// touch the effect stream, message mapping, redraw directive, timeout,
+    /// retry wrapper, or output.
+    ///
+    /// [`Command::none().scoped(scope)`](Command::none) is lifecycle-inert:
+    /// there is no spawn key or explicit cancel to qualify.
+    ///
+    /// # Ordering
+    ///
+    /// `scoped` is a boundary operation over lifecycle metadata already
+    /// present at the call site, not a persistent mode inherited by later
+    /// modifiers. `work.cancellable(id).scoped(scope)` scopes `id`, while
+    /// `work.scoped(scope).cancellable(id)` attaches `id` as a new,
+    /// unscoped, root-global key — see the ordering examples on
+    /// [`Command::cancellable`] and [`Command::cancellable_with`]. No
+    /// diagnostic is emitted when `cancellable` follows `scoped`, because a
+    /// later root-global key can be an intentional composition (a
+    /// pane-scoped effect participating in an application-wide slot), not
+    /// only a mistake.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    /// use tears::command::CommandId;
+    ///
+    /// let cmd: Command<i32> = Command::cancel(CommandId::new("load")).scoped("pane-1");
+    /// ```
+    #[must_use = "scoped returns a modified command and does not mutate in place"]
+    pub fn scoped<Scope>(mut self, scope: Scope) -> Self
+    where
+        Scope: Eq + Hash + Send + Sync + 'static,
+    {
+        let segment = StructuralKey::new(scope);
+
+        self.cancellation.key = self.cancellation.key.map(|cancellable| CancellableCommand {
+            id: cancellable.id.scoped_with(segment.clone()),
+            policy: cancellable.policy,
+        });
+
+        self.cancellation.cancels = self
+            .cancellation
+            .cancels
+            .into_iter()
+            .map(|id| id.scoped_with(segment.clone()))
+            .collect();
+
         self
     }
 
@@ -574,6 +680,156 @@ mod tests {
 
         assert_eq!(key.id, CommandId::new("second"));
         assert_eq!(key.policy, CancelPolicy::CancelInFlight);
+    }
+
+    #[test]
+    fn test_unscoped_tuple_local_id_does_not_alias_a_scoped_identity() {
+        let tupled = CommandId::new(("pane-1", "load"));
+        let scoped = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-1");
+        let scoped_id = scoped.cancellation.key.expect("key should be present").id;
+
+        assert_ne!(tupled, scoped_id);
+    }
+
+    #[test]
+    fn test_scoped_none_is_lifecycle_inert() {
+        let command = Command::<i32>::none().scoped("pane-1");
+
+        assert!(command.is_none());
+        assert!(command.cancellation.key.is_none());
+        assert!(command.cancellation.cancels.is_empty());
+    }
+
+    #[test]
+    fn test_scoped_qualifies_the_cancellable_key() {
+        let scoped = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-1");
+        let key = scoped.cancellation.key.expect("key should be present");
+
+        assert_ne!(key.id, CommandId::new("load"));
+        assert_eq!(key.policy, CancelPolicy::CancelInFlight);
+    }
+
+    #[test]
+    fn test_scoped_independent_child_instances_do_not_alias() {
+        let pane_a = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-a");
+        let pane_b = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-b");
+
+        assert_ne!(
+            pane_a.cancellation.key.expect("key should be present").id,
+            pane_b.cancellation.key.expect("key should be present").id
+        );
+    }
+
+    #[test]
+    fn test_scoped_with_equal_scope_produces_equal_ids() {
+        let first = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-1");
+        let second = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped("pane-1");
+
+        assert_eq!(
+            first.cancellation.key.expect("key should be present").id,
+            second.cancellation.key.expect("key should be present").id
+        );
+    }
+
+    #[test]
+    fn test_scoped_qualifies_explicit_cancels() {
+        let id = CommandId::new("load");
+        let scoped = Command::<i32>::cancel(id.clone()).scoped("pane-1");
+
+        assert_eq!(scoped.cancellation.cancels.len(), 1);
+        assert_ne!(scoped.cancellation.cancels[0], id);
+    }
+
+    #[test]
+    fn test_scoped_hash_collision_does_not_alias_scopes() {
+        #[derive(Eq, PartialEq)]
+        struct Collision(u8);
+
+        impl Hash for Collision {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                0_u8.hash(state);
+            }
+        }
+
+        let first = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped(Collision(1));
+        let second = Command::message(1)
+            .cancellable(CommandId::new("load"))
+            .scoped(Collision(2));
+
+        assert_ne!(
+            first.cancellation.key.expect("key should be present").id,
+            second.cancellation.key.expect("key should be present").id
+        );
+    }
+
+    #[test]
+    fn test_cancellable_after_scoped_installs_a_root_global_key() {
+        let command = Command::message(1)
+            .scoped("pane-1")
+            .cancellable(CommandId::new("load"));
+        let key = command.cancellation.key.expect("key should be present");
+
+        assert_eq!(key.id, CommandId::new("load"));
+    }
+
+    #[test]
+    fn test_mixed_scoped_cancels_stay_scoped_while_later_global_key_does_not() {
+        let cancel_id = CommandId::new("old");
+        let command = Command::<i32>::cancel(cancel_id.clone())
+            .scoped("pane-1")
+            .cancellable(CommandId::new("global"));
+        let key = command.cancellation.key.expect("key should be present");
+
+        // The explicit cancel present before `scoped` remains pane-scoped.
+        assert_ne!(command.cancellation.cancels[0], cancel_id);
+        // The spawn key attached after `scoped` is root-global.
+        assert_eq!(key.id, CommandId::new("global"));
+    }
+
+    #[test]
+    fn test_scoped_batch_preserves_scoped_cancels_and_still_ignores_child_keys() {
+        let left_cancel = CommandId::new("left");
+        let right_cancel = CommandId::new("right");
+
+        let batch = Command::batch([
+            Command::<i32>::cancel(left_cancel.clone()).scoped("left-pane"),
+            Command::cancel(right_cancel.clone())
+                .scoped("right-pane")
+                .cancellable(CommandId::new("ignored")),
+        ]);
+
+        assert_eq!(batch.cancellation.cancels.len(), 2);
+        assert!(batch.cancellation.key.is_none());
+        assert_ne!(batch.cancellation.cancels[0], left_cancel);
+        assert_ne!(batch.cancellation.cancels[1], right_cancel);
+    }
+
+    #[test]
+    fn test_scoped_after_batch_scopes_the_folded_cancels() {
+        let first = CommandId::new("first");
+        let second = CommandId::new("second");
+        let batch = Command::batch([
+            Command::<i32>::cancel(first.clone()),
+            Command::cancel(second.clone()),
+        ])
+        .scoped("outer");
+
+        assert_ne!(batch.cancellation.cancels[0], first);
+        assert_ne!(batch.cancellation.cancels[1], second);
     }
 
     #[test]

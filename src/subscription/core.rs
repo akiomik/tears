@@ -12,7 +12,7 @@ use std::panic::AssertUnwindSafe;
 
 use futures::{StreamExt, stream::BoxStream};
 
-use crate::structural_key::StructuralKey;
+use crate::structural_key::{ScopePath, StructuralKey};
 
 /// A subscription represents an ongoing source of messages.
 ///
@@ -101,6 +101,48 @@ impl<Msg: 'static> Subscription<Msg> {
             }),
         }
     }
+
+    /// Qualifies this subscription's identity with one structural scope
+    /// segment, expressing that this instance belongs to a distinct child
+    /// composition boundary (see RFC 0005 section 4.2).
+    ///
+    /// Chaining `scoped` calls nests segments in call order: the last call
+    /// becomes the outermost segment. Reversing the order of two unequal
+    /// scope values produces a different identity, so
+    /// `sub.scoped(a).scoped(b)` and `sub.scoped(b).scoped(a)` are distinct
+    /// subscriptions when `a != b`. `scoped` and [`Subscription::map`]
+    /// commute: applying them in either order around the same call produces
+    /// the same identity and output.
+    ///
+    /// Applying the same scope to two composed child instances that reuse
+    /// the same local source and key still aliases them; give each instance
+    /// its own scope value (for example a per-instance id) to keep them
+    /// independent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    /// use tears::Subscription;
+    /// use tears::subscription::time::Timer;
+    ///
+    /// enum Message {
+    ///     Tick(u32),
+    /// }
+    ///
+    /// let pane_id = 1;
+    /// let sub = Subscription::new(Timer::new(NonZeroU64::new(1000).expect("non-zero")))
+    ///     .map(move |_| Message::Tick(pane_id))
+    ///     .scoped(pane_id);
+    /// ```
+    #[must_use = "scoped returns a modified subscription and does not mutate in place"]
+    pub fn scoped<Scope>(mut self, scope: Scope) -> Self
+    where
+        Scope: Eq + Hash + Send + Sync + 'static,
+    {
+        self.id.scope = AssertUnwindSafe(self.id.scope.appended(scope));
+        self
+    }
 }
 
 impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscription<Msg> {
@@ -174,6 +216,7 @@ pub struct SubscriptionId {
     pub(super) source_type_id: TypeId,
     source_type_name: &'static str,
     key: AssertUnwindSafe<StructuralKey>,
+    scope: AssertUnwindSafe<ScopePath>,
 }
 
 impl Clone for SubscriptionId {
@@ -182,6 +225,7 @@ impl Clone for SubscriptionId {
             source_type_id: self.source_type_id,
             source_type_name: self.source_type_name,
             key: AssertUnwindSafe(self.key.0.clone()),
+            scope: AssertUnwindSafe(self.scope.0.clone()),
         }
     }
 }
@@ -195,6 +239,7 @@ impl SubscriptionId {
             source_type_id: TypeId::of::<Source>(),
             source_type_name: type_name::<Source>(),
             key: AssertUnwindSafe(StructuralKey::new(key)),
+            scope: AssertUnwindSafe(ScopePath::empty()),
         }
     }
 }
@@ -213,7 +258,9 @@ impl PartialEq for SubscriptionId {
     fn eq(&self, other: &Self) -> bool {
         // One concrete source type has exactly one associated `Key` type, so
         // the source namespace already fixes the erased key type.
-        self.source_type_id == other.source_type_id && self.key.0.value_eq(&other.key.0)
+        self.source_type_id == other.source_type_id
+            && self.key.0.value_eq(&other.key.0)
+            && self.scope.0 == other.scope.0
     }
 }
 
@@ -225,6 +272,7 @@ impl Hash for SubscriptionId {
         // need a second type namespace in this identity.
         self.source_type_id.hash(state);
         self.key.0.hash_value(state);
+        self.scope.0.hash(state);
     }
 }
 
@@ -332,5 +380,112 @@ mod tests {
     fn subscription_id_preserves_marker_traits() {
         fn assert_traits<T: Send + Sync + UnwindSafe + RefUnwindSafe>() {}
         assert_traits::<SubscriptionId>();
+    }
+
+    #[test]
+    fn unscoped_tuple_local_key_does_not_alias_a_scoped_identity() {
+        struct TupleKeyedSource;
+
+        impl SubscriptionSource for TupleKeyedSource {
+            type Output = ();
+            type Key = (&'static str, u8);
+
+            fn stream(&self) -> BoxStream<'static, Self::Output> {
+                stream::empty().boxed()
+            }
+
+            fn key(&self) -> Self::Key {
+                ("pane-1", 1)
+            }
+        }
+
+        let tupled = Subscription::new(TupleKeyedSource).id;
+        let scoped = Subscription::new(SourceA(1)).scoped("pane-1").id;
+
+        assert_ne!(tupled, scoped);
+    }
+
+    #[test]
+    fn scoped_makes_independent_child_instances_distinct() {
+        let first = Subscription::new(SourceA(1)).scoped("pane-1").id;
+        let second = Subscription::new(SourceA(1)).scoped("pane-2").id;
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn scoped_with_equal_scope_and_local_key_is_equal() {
+        let first = Subscription::new(SourceA(1)).scoped("pane-1").id;
+        let second = Subscription::new(SourceA(1)).scoped("pane-1").id;
+
+        assert_eq!(first, second);
+        assert_eq!(hash(&first), hash(&second));
+    }
+
+    #[test]
+    fn scoped_differs_from_unscoped() {
+        let unscoped = Subscription::new(SourceA(1)).id;
+        let scoped = Subscription::new(SourceA(1)).scoped("pane-1").id;
+
+        assert_ne!(unscoped, scoped);
+    }
+
+    #[test]
+    fn scope_segment_type_differences_affect_equality() {
+        let as_str = Subscription::new(SourceA(1)).scoped("1").id;
+        let as_u32 = Subscription::new(SourceA(1)).scoped(1_u32).id;
+
+        assert_ne!(as_str, as_u32);
+    }
+
+    #[test]
+    fn reversing_two_unequal_scope_segments_changes_identity() {
+        let forward = Subscription::new(SourceA(1))
+            .scoped("inner")
+            .scoped("outer")
+            .id;
+        let backward = Subscription::new(SourceA(1))
+            .scoped("outer")
+            .scoped("inner")
+            .id;
+
+        assert_ne!(forward, backward);
+    }
+
+    #[test]
+    fn reversing_two_equal_scope_segments_preserves_identity() {
+        let forward = Subscription::new(SourceA(1))
+            .scoped("pane")
+            .scoped("pane")
+            .id;
+        let backward = Subscription::new(SourceA(1))
+            .scoped("pane")
+            .scoped("pane")
+            .id;
+
+        assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn map_and_scoped_placement_are_equivalent() {
+        let before = Subscription::new(SourceA(1))
+            .map(|()| 1)
+            .scoped("pane-1")
+            .id;
+        let after = Subscription::new(SourceA(1))
+            .scoped("pane-1")
+            .map(|()| 1)
+            .id;
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn scope_hash_collisions_do_not_make_scoped_ids_equal() {
+        let first = Subscription::new(SourceA(1)).scoped(Collision(1)).id;
+        let second = Subscription::new(SourceA(1)).scoped(Collision(2)).id;
+
+        assert_eq!(hash(&first), hash(&second));
+        assert_ne!(first, second);
     }
 }

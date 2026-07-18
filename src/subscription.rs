@@ -935,6 +935,109 @@ mod tests {
         Ok(())
     }
 
+    // RFC 0005 Phase B: `Subscription::scoped` must make the same local
+    // source and key independent across composition boundaries, so two
+    // child instances that reuse one local id run as separate lifecycles.
+    #[tokio::test]
+    async fn same_local_id_in_two_scopes_starts_two_independent_streams() -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        manager.update(vec![
+            Subscription::new(ProbedCollidingSource::once(1, 10)).scoped("pane-a"),
+            Subscription::new(ProbedCollidingSource::once(1, 20)).scoped("pane-b"),
+        ]);
+
+        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let messages = [first, second];
+
+        assert!(messages.contains(&Some(10)));
+        assert!(messages.contains(&Some(20)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removing_one_pane_stops_only_its_scoped_stream() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let source = ProbedCollidingSource::pending(1);
+
+        manager.update(vec![
+            Subscription::new(source.clone()).scoped("pane-a"),
+            Subscription::new(source.clone()).scoped("pane-b"),
+        ]);
+        assert_eq!(source.probe.starts.load(Ordering::SeqCst), 2);
+
+        manager.update(vec![Subscription::new(source.clone()).scoped("pane-b")]);
+
+        wait_until(
+            || source.probe.drops.load(Ordering::SeqCst) == 1,
+            "removed pane's scoped stream should be dropped after abort",
+        )
+        .await;
+        assert_eq!(
+            source.probe.starts.load(Ordering::SeqCst),
+            2,
+            "the remaining pane's stream must not be restarted"
+        );
+    }
+
+    // RFC 0005 Phase B / section 6.4: "two unequal values of one scope type
+    // whose `Hash` implementation writes a constant value still start
+    // independent subscriptions." This exercises scope equality itself
+    // under collision, not just source/key collision as in
+    // `hash_colliding_subscriptions_start_and_map_independently` above.
+    #[tokio::test]
+    async fn same_local_id_with_hash_colliding_scopes_starts_two_independent_streams() -> Result<()>
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+
+        manager.update(vec![
+            Subscription::new(ProbedCollidingSource::once(1, 10)).scoped(ManagerCollisionKey(1)),
+            Subscription::new(ProbedCollidingSource::once(1, 20)).scoped(ManagerCollisionKey(2)),
+        ]);
+
+        let first = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let second = timeout(Duration::from_millis(100), rx.recv()).await?;
+        let messages = [first, second];
+
+        assert!(messages.contains(&Some(10)));
+        assert!(messages.contains(&Some(20)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removing_one_hash_colliding_scope_stops_only_its_own_stream() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = SubscriptionManager::new(tx);
+        let source = ProbedCollidingSource::pending(1);
+
+        manager.update(vec![
+            Subscription::new(source.clone()).scoped(ManagerCollisionKey(1)),
+            Subscription::new(source.clone()).scoped(ManagerCollisionKey(2)),
+        ]);
+        assert_eq!(source.probe.starts.load(Ordering::SeqCst), 2);
+
+        manager.update(vec![
+            Subscription::new(source.clone()).scoped(ManagerCollisionKey(2)),
+        ]);
+
+        wait_until(
+            || source.probe.drops.load(Ordering::SeqCst) == 1,
+            "removed hash-colliding scope's stream should be dropped after abort",
+        )
+        .await;
+        assert_eq!(
+            source.probe.starts.load(Ordering::SeqCst),
+            2,
+            "the remaining hash-colliding scope's stream must not be restarted"
+        );
+    }
+
     #[tokio::test]
     async fn test_subscription_manager_starts_new_subscriptions_in_input_order() {
         struct OrderedStart {
