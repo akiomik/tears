@@ -74,6 +74,13 @@ Prompts that have already paid off:
   happens to touch (from PR #215: an observability definition of done
   that asserted "each event fires with its required fields" — satisfied
   by emitting every event once with wrong values).
+- An acceptance criterion whose parameters the measured implementation
+  itself chooses: deferring a run's configuration, load, or trial counts
+  to implementation time lets the implementer pick the values their code
+  passes under, and an unscoped wall-clock threshold lets any
+  sufficiently fast machine pass it (from PR #217: the bounded
+  acceptance run deferred capacity/depth/trial count to implementation
+  time, and the p99 ≤ 1 ms condition named no machine).
 
 ## 3. Enforcement class, declared up front
 
@@ -90,8 +97,19 @@ using the established classes:
   needing private access; bench or integration scenarios for end-to-end
   runtime behavior and public-API contracts. Either way, with a stated
   pass/fail criterion.
-- **statistical** — trials with defined measurement conditions (count,
-  load profile, percentile threshold).
+- **statistical** — trials with defined measurement conditions: count,
+  load profile, percentile threshold, and the environment the numbers
+  are defined on — the reference machine, the status of runs on other
+  machines, and what CI does or does not gate. A wall-clock threshold
+  with no environment scope is not yet a criterion: it is trivially
+  passable on a fast machine and spuriously failable on a slow one.
+  When the run's remaining parameters (configuration under test, load
+  depths, trial counts) are not fixed in the same document, record who
+  fixes them and that the acceptance run waits — parameters chosen at
+  implementation time by the party being measured make the criterion
+  self-certifying (from PR #217, where the checklist's own list of
+  measurement conditions ended at "percentile threshold" and the text
+  satisfied it while remaining unreproducible).
 
 Ask explicitly: *can a behavioral test distinguish a compliant
 implementation from a non-compliant one?* If not, the primary check is
@@ -147,7 +165,8 @@ its normative sections. Three scans, all from the first review round of
 PR #215:
 
 - **Hedge scan.** Grep the normative sections for *should*, *may*, *or
-  similar*, *at least*, *for example*, *left to a separate task*. Each
+  similar*, *at least*, *for example*, *left to a separate task*, *when
+  the implementation lands*, *at implementation time*. Each
   hit is tightened into a requirement, moved into explicitly
   non-normative rationale, or delegated — and a delegation is recorded
   in the RFC body as a named prerequisite (which task owns it, what it
@@ -164,6 +183,17 @@ PR #215:
   hedge later in the same bullet usually is not — confirm it is doing
   rationale work, not smuggling an unresolved qualification into the claim,
   before waving it through.
+
+  Deferral-to-implementation vocabulary is exempt from that scoping:
+  *when the implementation lands*, *at implementation time*, and kin are
+  findings wherever they appear — a matrix row, a consequence bullet,
+  rationale — whenever what they defer is a parameter of an acceptance
+  criterion, because they hand the decision to the party the criterion
+  exists to judge. Distinguish deferring a *measured value* (filling a
+  cell later is fine) from deferring the *conditions it is measured
+  under* (a finding). (From PR #217: the deferrals sat in §5.1 rows and
+  a §4.7 consequence bullet, outside every opening claim the scoped
+  scan covers.)
 - **No pending choices inside invariants.** An invariant that still
   contains a decision to make — "resolving this needs either (a) … or
   (b) …", "the remaining step" — is not yet an invariant. Either resolve
