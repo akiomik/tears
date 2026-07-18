@@ -24,3 +24,4 @@ one or the other explicitly.
 | [0004](0004-command-timeout-retry.md) | Command timeout and retry |
 | [0005](0005-structural-lifecycle-identity.md) | Structural lifecycle identity and composition scope |
 | [0006](0006-runtime-load-control.md) | Runtime load control, backpressure, latency guarantees |
+| [0007](0007-runtime-config.md) | RuntimeConfig public API, load-control acceptance parameters |
