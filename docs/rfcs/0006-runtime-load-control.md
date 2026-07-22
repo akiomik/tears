@@ -64,7 +64,8 @@
   bounded-run parameter obligations now include redefining the bounded
   `quit_backlog_*` scenarios around blocked-producer count and
   channel-full churn rather than queue depth, since bounded depth caps
-  at `capacity + 1` (section 5.1); the capacity-wait event's per-send
+  at `capacity + concurrent producers` (`capacity + 1` only for a single
+  producer; section 5.1); the capacity-wait event's per-send
   firing granularity is pinned as a deliberate choice, with aggregation
   left to `tracing` filtering and any future aggregate event kept
   additive (section 4.4); and "active `CommandId`" in R1's `m` is
@@ -78,7 +79,16 @@
   channel-full churn; both now state explicitly that the four names are
   the unbounded scenario names and that the bounded rows the same
   criterion applies to are the `RuntimeConfig` RFC's redefined ones, not
-  these names reused unchanged
+  these names reused unchanged. 2026-07-22 — general depth-cap correction
+  (no contract change, RFC 0007 review follow-up): the 2026-07-18
+  changelog entry above and section 5.1's reproducibility-rule prose both
+  stated the bounded depth cap as `capacity + 1` in general; section
+  5.1's own depth-accounting note already gives the general bound as
+  `capacity + concurrent producers`, with `capacity + 1` holding only for
+  the single-producer scenarios measured there (a gap the `RuntimeConfig`
+  RFC's `quit_blocked_64` row, at `capacity + 64`, would otherwise
+  contradict) — both passages now state the general bound and scope
+  `capacity + 1` to the single-producer case explicitly
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -1238,8 +1248,10 @@ measurement rather than an implementation-time choice:
   already owns (open question 1) — which these test values need not
   equal. A bounded column measured under parameters chosen at
   implementation time would not be a reviewable acceptance run. Bounded
-  queue depth caps at `capacity + 1` (the depth-accounting note below),
-  so the unbounded `quit_backlog_50k` / `quit_backlog_300k` scenarios —
+  queue depth caps at `capacity + concurrent producers` (`capacity + 1`
+  for the single-flood-producer scenarios measured in this section; the
+  depth-accounting note below), so the unbounded `quit_backlog_50k` /
+  `quit_backlog_300k` scenarios —
   which reach those depths by flooding an unbounded channel before
   quitting — have no bounded-mode counterpart at the same depths: this
   prerequisite obligation includes redefining what the bounded quit

@@ -203,8 +203,19 @@ impl<App: Application> Runtime<App> {
 
 - Module: `src/runtime/config.rs` (`pub mod config` under `runtime`),
   matching `runtime::frame_rate`.
-- Re-exports: `tears::RuntimeConfig` at the crate root and
-  `tears::prelude::RuntimeConfig`, matching `FrameRate`'s pattern.
+- Re-exports: `tears::RuntimeConfig` at the crate root, as
+  `Runtime::with_config`'s companion type, but *not*
+  `tears::prelude::RuntimeConfig`. Crate-root placement and prelude
+  membership are different tests (`docs/api-guidelines.md`'s "Prelude
+  Membership"): the prelude asks whether a *minimal* skeleton app writes
+  the item out literally, and a minimal app calling
+  `Runtime::new(flags, frame_rate)` never names `RuntimeConfig` — only an
+  app that opts into `with_config` does. That is the same reasoning that
+  keeps `FrameRateError` out of the prelude despite its crate-root
+  re-export, not the reasoning that puts `FrameRate` in it (a minimal app
+  always writes `FrameRate::new(...)`, unconditionally). Should load
+  control become a minimal skeleton's default path in some future RFC,
+  adding `RuntimeConfig` to the prelude then is additive.
 - The bench harness (`benches/runtime_load.rs`) constructs its bounded runs
   through this public surface only; `bench-internals` gains no
   config-related items.
@@ -240,33 +251,76 @@ Documented starting values, each with its basis stated:
 
 - **`app_channel_capacity = 1024`.** A measurement-informed margin choice,
   not a value the measurements pin uniquely. The harness measurements give
-  a lower-bound signal — large enough that the in-capacity regime never
-  engages backpressure (`steady_200k` peaks at depth 400) — and a latency
-  estimate *at* 1024, not a demonstrated upper bound: a full queue at that
-  capacity adds ~27ms of estimated queueing latency (~1.6 frame periods at
-  60 FPS) at the harness's observed average drain rate under its heavy
-  25µs `update` cost (an estimate per the rule above, not an upper bound).
-  No stated maximum acceptable latency makes that figure a ceiling the
-  measurements rule out other values against — it is 1024's own cost, not
-  evidence that a larger capacity would be wrong. 1024 is the round number
-  chosen above the lower-bound signal, at a latency its own estimate shows
-  is a small number of frame periods (~1.6 at 60 FPS), not a large
-  multiple of one; 512 or 2048 would be defensible on the same
-  measurements. Applications with larger expected bursts scale up
-  by the same rule; `burst_200k` shows the cost of undersizing is producer
-  wait, not loss.
+  a lower-bound signal, not a proof of sufficiency: `steady_200k`'s queue
+  depth, sampled every 5ms by the harness's depth sampler
+  (`benches/runtime_load.rs`), reaches at most 400 among its samples — the
+  largest *sampled* depth, not a proven instantaneous maximum, since a
+  peak narrower than the 5ms sampling interval can fall between samples
+  unrecorded. 1024 carries roughly 2.5× headroom over that largest
+  sampled depth, not a demonstrated bound the in-capacity regime can never
+  cross. It also carries a latency estimate *at* 1024, not a demonstrated
+  upper bound: a full queue at that capacity adds ~27ms of estimated
+  queueing latency (~1.6 frame periods at 60 FPS) at the harness's
+  observed average drain rate under its heavy 25µs `update` cost (an
+  estimate per the rule above, not an upper bound). No stated maximum
+  acceptable latency makes that figure a ceiling the measurements rule out
+  other values against — it is 1024's own cost, not evidence that a
+  larger capacity would be wrong. 1024 is the round number chosen above
+  the sampled lower-bound signal, at a latency its own estimate shows is a
+  small number of frame periods (~1.6 at 60 FPS), not a large multiple of
+  one; 512 or 2048 would be defensible on the same measurements.
+  Applications with larger expected bursts scale up by the same rule;
+  `burst_200k` shows the cost of undersizing is producer wait, not loss.
 - **`keyed_channel_capacity = 16`.** A margin choice, stated as such —
-  not measurement-derived: in the measured workloads a keyed channel never
-  buffers more than one message (`keyed_steady`'s probe fires every 25ms
-  and its observed worst-case delivery is 5.2ms), so those measurements
-  cannot distinguish 16 from 1, and the harness has no keyed-burst
-  scenario that would size the value. What 16 fixes is the trade read
-  from both sides: a command can emit a burst of up to 16 outputs without
-  awaiting the consumer, and the per-command share of the application's
-  `m × capacity` buffer total (RFC 0006 R1) is bounded at 16 messages.
-  Applications whose keyed commands emit larger bursts size up by that
-  same absorption-versus-memory reading; adding a keyed-burst harness
-  scenario, should field experience demand a measured basis, is additive.
+  not measurement-derived. Two claims about it must stay separate: what
+  this scenario's own numbers show, and a further point RFC 0006 already
+  establishes at the mechanism level, independent of any run's length.
+  - What the numbers show. `keyed_steady`'s probe (firing every 25ms,
+    worst-case delivery 5.2ms) never leaves its keyed channel holding
+    more than one message, so that measurement cannot distinguish 16 from
+    1. `keyed_overload`'s same 25ms probe waits far longer instead — p50
+    9.2s, max 13.0s (RFC 0006 §2) — because shared-first pull leaves the
+    keyed channel undrained while the shared channel stays ready (RFC
+    0006 F4, §4.7). A 9.2s median wait against a 25ms tick spacing means
+    roughly 9.2s / 25ms ≈ 368 further ticks land before a typical probe
+    clears, most of them also undelivered under the same starvation —
+    enough to say a capacity as small as 16 would very likely have been
+    exceeded somewhere in this run. That is as far as this run's own
+    numbers reach: its own ticks over its ~13s length (13s / 25ms ≈ 520
+    total) never approach 1024, so the same run cannot show whether a
+    capacity that large would ever fill, and it does not pin 16 either —
+    several smaller capacities are equally consistent with the same data.
+  - A further point, independent of this run's own length, but weaker
+    than a certainty. RFC 0006's §4.3 refill argument establishes that
+    shared readiness — and with it keyed starvation — "can persist for as
+    long as overload lasts, independent of the configured capacity":
+    nothing bounds how long that persistence runs, so a long-enough
+    overload *can* hold any finite keyed capacity full, one probe tick at
+    a time, no matter how large. That licenses an existence claim only —
+    no finite capacity comes with a guarantee of staying safe — not the
+    stronger claim that every execution of sustained overload saturates
+    every capacity: bounded mode's admission windows (RFC 0006 §4.6) are
+    a real, scheduling-dependent chance for the shared channel to read
+    momentarily empty right after a pull and before the woken producer
+    refills it, letting a keyed output — and with it some keyed drain —
+    through. RFC 0006 §4.7 declines to guarantee a keyed-delivery bound
+    from those windows precisely because they are scheduling-dependent,
+    not because they cannot occur, and that same fact cuts both ways:
+    it is exactly why "eventually saturates" cannot be strengthened to
+    "always saturates" either. What follows from §4.3 is only that no
+    capacity is guaranteed safe against a long-enough overload, not that
+    saturation is certain — a reading of the 13.0s figure this
+    particular run happens to have measured would claim more than
+    either RFC establishes.
+
+  Absent a measured basis, 16 is fixed as a policy value from the trade
+  read on both sides: a command can emit a burst of up to 16 outputs into
+  an otherwise-empty channel without awaiting the consumer, and the
+  per-command share of the application's `m × capacity` buffer total (RFC
+  0006 R1) is bounded at 16 messages. Applications whose keyed commands
+  emit larger bursts size up by that same absorption-versus-memory
+  reading; adding a keyed-burst harness scenario, should field experience
+  demand a measured basis, is additive.
 - **`batch_max_messages`: unset.** This resolves the default-value half of
   RFC 0006 open question 2 as delegated: no non-`None` value is
   recommended. F5 is the evidence — the 100µs time cap alone held the frame
@@ -404,8 +458,12 @@ channel occupancy, per the note on that distinction below the table:
   single reading, because churn is a property of a time interval, not an
   instant: one capacity-wait event only shows the channel was full once,
   which a momentary fill also produces, while a second event within the
-  same short window shows a producer's send was accepted into the slot
-  the first event's completion freed — the refilling that "oscillate at
+  same short window shows that the channel filled again after draining —
+  a capacity-wait event fires at the moment its send is accepted, i.e.
+  once it has consumed a slot a consumer pull already freed (RFC 0006
+  §4.4), so the second event's send was accepted into a slot freed by a
+  pull that happened between the two events, not by the first event's
+  own completion. That intervening pull-then-refill is what "oscillate at
   capacity" names. Two is the minimum count that distinguishes the two
   cases; the 5ms window is two orders of magnitude longer than the
   harness's ~26µs per-message drain cost under this scenario's 25µs
@@ -431,6 +489,46 @@ channel occupancy, per the note on that distinction below the table:
   `quit_keyed_bounded`) is the whole predicate. The acceptance run
   reports each row's count as that many *valid* trials, not that many
   attempts.
+- Counting only valid trials means an implementation may need more
+  attempts than the row's required count whenever some attempts fail
+  their predicate, and nothing said so far bounds how many. Left
+  unbounded, a row whose predicate rarely holds — by scheduling
+  misfortune, or by an implementation defect that makes the precondition
+  rare or unreachable — could retry forever without ever timing out: a
+  per-attempt timeout (`max_wall`) only catches an attempt that itself
+  hangs, not a run of attempts that each complete normally but fail the
+  predicate. Every row with a non-`none` valid-trial predicate therefore
+  carries an attempt cap: at most `10 × trials` attempts, using the row's
+  own required trial count from the table above (2,000 for each of the
+  three 200-trial rows with a predicate — `quit_blocked_1`,
+  `quit_blocked_64`, `quit_overload`; 200 for `quit_keyed_bounded`'s 20).
+  `quit_idle`'s `none` predicate makes every attempt valid by definition,
+  so it carries no cap and none is needed. An attempt counts
+  against the cap whether it times out, misses its delivery event, or
+  completes but fails the predicate; attempts stop as soon as the row's
+  required valid-trial count is reached, whichever comes first. If the
+  cap is exhausted first, the row fails outright — reported distinctly
+  from a per-attempt timeout, and never reported as a shorter but still
+  valid sample. What the cap guarantees is termination, not a wall-clock
+  ceiling: it bounds the number of attempts to a fixed, finite count, so
+  a row can no longer retry forever waiting on a rare predicate — the
+  actual failure mode this rule exists to close. It is not itself a
+  bound on the row's total wall time, and `10 × trials × max_wall`
+  overstates what is guarded: `max_wall` (`benches/runtime_load.rs`)
+  times out only the `runtime.run(&mut terminal)` call inside a single
+  attempt (`run_quit_trial`), not the `Runtime`/`Terminal` construction
+  before it, the sample extraction after it, or the per-attempt loop
+  overhead in `run_quit_scenario` — so `10 × trials × max_wall` bounds
+  only the cumulative time those `runtime.run` calls can spend across
+  the capped attempts, not the row's actual wall time. A strict
+  wall-clock ceiling on the whole row would need a separate, row-level
+  aggregate timeout wrapping every attempt together, which this RFC does
+  not add: the un-guarded overhead per attempt is expected to be
+  negligible next to `max_wall`, and the attempt cap alone already rules
+  out the unbounded-retry failure mode. Adding an aggregate guard later,
+  should that overhead prove not negligible, is additive. The same
+  attempt-count cap applies unchanged to the §6 smoke profile's reduced
+  trial counts.
 
 ### 5.3 Remaining bounded rows
 
@@ -477,7 +575,13 @@ invocation is unchanged.
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
   shortened to 0.5s, a 20k-message bounded burst under the §5.1
-  configuration, `quit_idle` and `quit_blocked_1` at 5 trials each. CI
+  configuration, `quit_idle` and `quit_blocked_1` at 5 *valid* trials each
+  — `quit_idle`'s predicate is `none` (§5.2's table), so every attempt
+  counts toward its 5; `quit_blocked_1` counts only attempts whose §5.2
+  predicate (`blocked == 1` at the quit instant) held, under §5.2's
+  attempt cap scaled to this row's 5-trial count (a 50-attempt cap,
+  `10 × 5`), which fails the smoke run outright rather than retrying past
+  it. CI
   invokes it through a `just` recipe (`just bench-smoke`) in the existing
   Benchmarks job, so the local and CI invocations are identical.
 - **Pass/fail**: two assertion classes, split by what the observation
@@ -507,7 +611,13 @@ invocation is unchanged.
   hangs after processing its last scripted message times out with
   `processed` equal to the scripted total. The guard is the completion
   gate itself: a machine slow enough to exceed it fails on
-  non-completion, never on a latency criterion.
+  non-completion, never on a latency criterion. `quit_blocked_1` carries
+  a second, independent failure condition on top of that guard: §5.2's
+  attempt cap (50 attempts here, `10 × 5`), which fails the run if 5 valid
+  trials are not collected within it — reachable even when every
+  individual attempt completes well inside `max_wall`, which is exactly
+  the case a per-attempt timeout alone cannot catch (§5.2's rationale for
+  the cap).
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove the harness
   still builds (all scenarios compile in the one binary) and the smoke
@@ -546,11 +656,23 @@ Enforcement classes follow the pre-review checklist's definitions
   function bodies.
 - **INV-C4**: the public surface of `RuntimeConfig` consists of exactly the
   frame rate and the three RFC 0006 §4.1 controls — in particular, no
-  restart-rate field (§4). Structural: review of the type's public items.
-  The existing `api_surface` test does not check this (it enforces the
-  single-canonical-path and prelude-membership rules, not a surface
-  snapshot); it applies to this RFC only in that the §2.3 re-exports must
-  satisfy those two rules.
+  restart-rate field (§4) — and its re-export placement is exactly §2.3's:
+  reachable at `tears::RuntimeConfig` and *not* through
+  `tears::prelude::*`. Structural, in two parts: review of the type's
+  public items for the field/method surface, and review of `src/lib.rs`
+  (the root re-export exists) and `src/prelude.rs` (no `RuntimeConfig`
+  re-export and no mention in its "What's included" doc comment) for
+  placement. The existing `api_surface` test does not check either half:
+  `no_public_item_has_two_non_prelude_paths` and
+  `prelude_is_a_subset_of_root_level_items` (`tests/api_surface.rs`) both
+  check reachability *from* the prelude *toward* the root, never the
+  reverse. An item wrongly re-exported through the prelude while also
+  present at the root has exactly one non-prelude path (the root itself)
+  and is reachable at the root as its prelude membership requires, so it
+  satisfies both tests unchanged — a `RuntimeConfig` re-exported from both
+  modules would pass the test suite as written. This review step is
+  therefore the only check for §2.3's placement decision, not a
+  restatement of one the tests already perform.
 - **INV-C5**: `with_config` constructs its `FrameScheduler` from
   `config.frame_rate` — the frame rate that reaches the scheduler is
   exactly the value the caller supplied to `RuntimeConfig::new`, never a
@@ -581,10 +703,11 @@ Enforcement classes follow the pre-review checklist's definitions
 
 Surface–invariant coverage: the struct and `RuntimeConfig::new` map to
 INV-C2/C3/C6, each setter to INV-C2/C3/C4/C6, `with_config` and the
-unchanged `new` to INV-C1/C5/C6. The frame rate's runtime semantics are
-`FrameRate`'s, unchanged by relocation; the load controls' runtime
-*semantics* are covered by RFC 0006's invariants (INV-L1, INV-L3, INV-L6,
-INV-L12), not duplicated here.
+unchanged `new` to INV-C1/C5/C6, and the §2.3 re-export placement
+(crate-root only, no prelude) to INV-C4. The frame rate's runtime
+semantics are `FrameRate`'s, unchanged by relocation; the load controls'
+runtime *semantics* are covered by RFC 0006's invariants (INV-L1, INV-L3,
+INV-L6, INV-L12), not duplicated here.
 
 ## 8. Open questions
 
