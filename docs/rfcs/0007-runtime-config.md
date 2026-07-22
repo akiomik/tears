@@ -364,7 +364,7 @@ channel occupancy, per the note on that distinction below the table:
 | `quit_idle` | baseline | unchanged from RFC 0006 §2 | none — no blocked-producer precondition | 200 | quit→delivered p99 ≤ 1 ms |
 | `quit_blocked_1` | one blocked producer | one flood subscription is blocked in `send`, awaiting capacity on the shared channel; `update` returns `Command::quit()` while it remains blocked | the RFC 0006 §4.4 producer gauge reads `blocked == 1` | 200 | quit→delivered p99 ≤ 1 ms |
 | `quit_blocked_64` | many blocked producers | 64 flood subscriptions, all blocked in `send` awaiting capacity on the shared channel, at quit | the producer gauge reads `blocked == 64` | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_overload` | channel-full churn | unchanged from RFC 0006 §2 (producer at 100k/s): the producer rate is configured to exceed drain capacity, so the channel is intended to oscillate at or near capacity — the churn case | at least one shared-channel capacity-wait event recorded in each of the four 5ms windows immediately preceding the quit instant (20ms total, chosen to be several orders of magnitude longer than the harness's ~26µs per-message drain rate under this scenario's 25µs `update` cost — RFC 0006 §2 — so a single momentary fill cannot satisfy it by chance) | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_overload` | channel-full churn | unchanged from RFC 0006 §2 (producer at 100k/s): the producer rate is configured to exceed drain capacity, so the channel is intended to oscillate at or near capacity — the churn case | at least two shared-channel capacity-wait events recorded in the 5ms window immediately preceding the quit instant | 200 | quit→delivered p99 ≤ 1 ms |
 | `quit_keyed_bounded` | keyed control | the RFC 0006 §2 keyed-quit trial under the §5.1 configuration: a flood subscription is blocked in `send`, awaiting capacity on the shared channel, while a keyed command's stream emits `Action::Quit` | the producer gauge reads `blocked >= 1` | 20 | none — measurement recorded, no acceptance bound (RFC 0006 §§4.6, 5.1) |
 
 - The unbounded `quit_*` rows themselves (including `quit_backlog_50k` /
@@ -400,13 +400,18 @@ channel occupancy, per the note on that distinction below the table:
   scheduling step later. The predicate is therefore always checked by
   observing the gauges/events at the quit instant itself — a barrier may
   be used to make satisfying it likely, but never as a substitute for the
-  observation. `quit_overload`'s predicate is a windowed observation
-  rather than an instantaneous one because churn is a property of a time
-  interval, not a single instant: a channel observed full or non-full at
-  one instant does not by itself distinguish sustained churn from a
-  momentary fill, which is why its predicate is stated over the
-  four-window count above rather than a single `blocked` or occupancy
-  read. `quit_blocked_1`/`quit_blocked_64`/`quit_keyed_bounded` name only
+  observation. `quit_overload`'s predicate is a windowed count, not a
+  single reading, because churn is a property of a time interval, not an
+  instant: one capacity-wait event only shows the channel was full once,
+  which a momentary fill also produces, while a second event within the
+  same short window shows a producer's send was accepted into the slot
+  the first event's completion freed — the refilling that "oscillate at
+  capacity" names. Two is the minimum count that distinguishes the two
+  cases; the 5ms window is two orders of magnitude longer than the
+  harness's ~26µs per-message drain cost under this scenario's 25µs
+  `update` cost (RFC 0006 §2), long enough to contain both events without
+  being so short that scheduling jitter could suppress the second one by
+  chance. `quit_blocked_1`/`quit_blocked_64`/`quit_keyed_bounded` name only
   a blocked-producer count as their precondition, deliberately not raw
   channel occupancy: a `blocked` reading does not by itself establish
   that the shared channel held `app_channel_capacity` messages at the
