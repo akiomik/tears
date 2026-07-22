@@ -238,16 +238,21 @@ service time, not from this rule.
 Documented starting values, each with its basis stated:
 
 - **`app_channel_capacity = 1024`.** A measurement-informed margin choice,
-  not a value the measurements pin uniquely: the harness bounds the choice
-  at both ends — large enough that the in-capacity regime never engages
-  backpressure (`steady_200k` peaks at depth 400), and small enough that a
-  full queue adds ~27ms of estimated queueing latency (~1.6 frame periods
-  at 60 FPS) at the harness's observed average drain rate under its heavy
-  25µs `update` cost (an estimate per the rule above, not an upper bound)
-  — but neither bound distinguishes 1024 from other values in the same
-  range (512, 2048); 1024 is the round number chosen within it.
-  Applications with larger expected bursts scale up by the same rule;
-  `burst_200k` shows the cost of undersizing is producer wait, not loss.
+  not a value the measurements pin uniquely. The harness measurements give
+  a lower-bound signal — large enough that the in-capacity regime never
+  engages backpressure (`steady_200k` peaks at depth 400) — and a latency
+  estimate *at* 1024, not a demonstrated upper bound: a full queue at that
+  capacity adds ~27ms of estimated queueing latency (~1.6 frame periods at
+  60 FPS) at the harness's observed average drain rate under its heavy
+  25µs `update` cost (an estimate per the rule above, not an upper bound).
+  No stated maximum acceptable latency makes that figure a ceiling the
+  measurements rule out other values against — it is 1024's own cost, not
+  evidence that a larger capacity would be wrong. 1024 is the round number
+  chosen above the lower-bound signal, at a latency its own estimate shows
+  is small relative to a frame period; 512 or 2048 would be defensible on
+  the same measurements. Applications with larger expected bursts scale up
+  by the same rule; `burst_200k` shows the cost of undersizing is producer
+  wait, not loss.
 - **`keyed_channel_capacity = 16`.** A margin choice, stated as such —
   not measurement-derived: in the measured workloads a keyed channel never
   buffers more than one message (`keyed_steady`'s probe fires every 25ms
@@ -350,13 +355,13 @@ Either way, depth is capped near capacity, so the unbounded
 at their ~50k/~300k depths. Per the delegated obligation, the bounded
 quit rows vary blocked-producer count and channel-full churn instead:
 
-| Scenario (bounded run) | What it varies | Definition | Trials | Criterion (RFC 0006 INV-L4) |
-| --- | --- | --- | --- | --- |
-| `quit_idle` | baseline | unchanged from RFC 0006 §2 | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_blocked_1` | one blocked producer | one flood subscription holds the shared channel at capacity and is blocked in `send`; `update` returns `Command::quit()` while the channel is full | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_blocked_64` | many blocked producers | 64 flood subscriptions, all blocked in `send` on the full shared channel at quit | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_overload` | channel-full churn | unchanged from RFC 0006 §2 (producer at 100k/s): the producer rate is configured to exceed drain capacity, so the channel is intended to oscillate at or near capacity — the churn case, confirmed per-trial via the capacity-wait events below, not assumed from the configured rate | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_keyed_bounded` | keyed control | the RFC 0006 §2 keyed-quit trial under the §5.1 configuration: a flood subscription holds the shared channel at capacity while a keyed command's stream emits `Action::Quit` | 20 | none — measurement recorded, no acceptance bound (RFC 0006 §§4.6, 5.1) |
+| Scenario (bounded run) | What it varies | Definition | Valid-trial predicate (checked at the quit instant) | Trials | Criterion (RFC 0006 INV-L4) |
+| --- | --- | --- | --- | --- | --- |
+| `quit_idle` | baseline | unchanged from RFC 0006 §2 | none — no blocked-producer or channel-full precondition | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_blocked_1` | one blocked producer | one flood subscription holds the shared channel at capacity and is blocked in `send`; `update` returns `Command::quit()` while the channel is full | the RFC 0006 §4.4 producer gauge reads `blocked == 1` | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_blocked_64` | many blocked producers | 64 flood subscriptions, all blocked in `send` on the full shared channel at quit | the producer gauge reads `blocked == 64` | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_overload` | channel-full churn | unchanged from RFC 0006 §2 (producer at 100k/s): the producer rate is configured to exceed drain capacity, so the channel is intended to oscillate at or near capacity — the churn case | at least one shared-channel capacity-wait event recorded in each of the four 5ms windows immediately preceding the quit instant (20ms total, chosen to be several orders of magnitude longer than the harness's ~26µs per-message drain rate under this scenario's 25µs `update` cost — RFC 0006 §2 — so a single momentary fill cannot satisfy it by chance) | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_keyed_bounded` | keyed control | the RFC 0006 §2 keyed-quit trial under the §5.1 configuration: a flood subscription holds the shared channel at capacity while a keyed command's stream emits `Action::Quit` | the producer gauge reads `blocked >= 1` | 20 | none — measurement recorded, no acceptance bound (RFC 0006 §§4.6, 5.1) |
 
 - The unbounded `quit_*` rows themselves (including `quit_backlog_50k` /
   `quit_backlog_300k`) are unchanged and stay the unbounded-mode acceptance
@@ -372,21 +377,39 @@ quit rows vary blocked-producer count and channel-full churn instead:
   `capacity + 1`.
 - Trial counts are RFC 0006's normative floor for INV-L4 (≥ 200 per
   acceptance scenario; 20 for the keyed control, matching its unbounded
-  baseline row).
-- Each row's stated precondition (the blocked-producer count for
-  `quit_blocked_1`/`quit_blocked_64`, the channel-full churn for
-  `quit_overload`) is part of the scenario's definition, not merely
-  descriptive, and a trial does not count toward its 200 unless the
-  precondition held at the instant `update` returns `Command::quit()`.
-  This is an acceptance-run implementation obligation, checked against
-  the RFC 0006 §4.4 producer gauges (`blocked`) and capacity-wait events
-  already defined for this purpose — by either (a) a barrier that
-  structurally guarantees the stated blocked count before the quit is
-  issued, or (b) recording the observed `blocked` value (and, for
-  `quit_overload`, the observed capacity-wait pattern) at the quit
-  instant and excluding non-matching trials from the reported count.
-  Either satisfies this obligation; the acceptance run reports 200 valid
-  trials per scenario, not 200 attempts.
+  baseline row) — the per-row figures above are the same floor, restated
+  per row so no row is read against another's count.
+- Every row with a non-`none` valid-trial predicate is subject to the
+  same rule: a trial does not count toward the row's required trial count
+  unless its predicate holds at the instant `update` returns
+  `Command::quit()`, checked via the RFC 0006 §4.4 producer gauges
+  (`blocked`) and capacity-wait events — this applies to `quit_keyed_bounded`
+  and its 20 trials exactly as it does to the four 200-trial rows, not
+  only to the blocked-producer and churn rows named in earlier drafts of
+  this section. A barrier arranged before `update` returns
+  `Command::quit()` narrows the scheduling window a trial can land in,
+  but does not by itself guarantee the predicate holds at the quit
+  instant: RFC 0006 §4.6 already documents an admission window in which a
+  pull frees a slot that a woken producer has not yet refilled, so the
+  channel state (and with it the `blocked` count) can differ between "the
+  moment the barrier released" and "the moment `update` returns" a
+  scheduling step later. The predicate is therefore always checked by
+  observing the gauges/events at the quit instant itself — a barrier may
+  be used to make satisfying it likely, but never as a substitute for the
+  observation. `quit_overload`'s predicate is a windowed observation
+  rather than an instantaneous one because churn is a property of a time
+  interval, not a single instant: a channel observed full or non-full at
+  one instant does not by itself distinguish sustained churn from a
+  momentary fill, which is why its predicate is stated over the
+  four-window count above rather than a single `blocked` or occupancy
+  read. `quit_blocked_1`/`quit_blocked_64`'s `blocked` reading needs no
+  separate occupancy check alongside it: tokio's bounded `mpsc` blocks a
+  sender only when the channel holds no free permit, so `blocked >= 1` at
+  an instant is itself proof the channel was at `app_channel_capacity` at
+  that same instant — the two preconditions these rows name (channel-full,
+  blocked-producer count) collapse to the one gauge reading. The
+  acceptance run reports each row's count as that many *valid* trials,
+  not that many attempts.
 
 ### 5.3 Remaining bounded rows
 
@@ -512,11 +535,19 @@ Enforcement classes follow the pre-review checklist's definitions
   exactly the value the caller supplied to `RuntimeConfig::new`, never a
   hardcoded or unrelated one. Structural: review of the single
   scheduler-construction site `with_config` reaches, confirming the
-  `FrameScheduler::new` call reads `config.frame_rate`. Behavioral: an
-  integration test constructs runtimes via `with_config` at two different
-  frame rates (e.g. 30 FPS and 60 FPS) and asserts the resulting
-  frame-tick timing differs accordingly — a check INV-C1 and INV-C2 do
-  not provide on their own, since both hold for an implementation where
+  `FrameScheduler::new` call reads `config.frame_rate`. Behavioral, at the
+  runtime-module unit layer (not an integration test, and not measured
+  against wall-clock timing, which the existing
+  `test_runtime_frame_scheduler_period_is_accurate` (`src/runtime.rs`)
+  already establishes as the crate's pattern for this exact class of
+  claim): construct a `Runtime` via `with_config` at a given frame rate
+  and assert `runtime.scheduler.frame_period() ==
+  config_frame_rate.frame_duration()` for at least two distinct frame
+  rates (e.g. 30 and 144 FPS). This is a direct, deterministic value
+  comparison — no elapsed-time observation, no tolerance window, and
+  nothing for idle-wakeup elision or scheduler jitter to flake — and it
+  fails an implementation that ignores `config.frame_rate` in exactly the
+  way INV-C1 and INV-C2 cannot: both hold for an implementation where
   `RuntimeConfig` stores one frame rate while `with_config` builds a
   scheduler from a different, fixed one.
 - **INV-C6**: `RuntimeConfig::new` and its three setters, plus
