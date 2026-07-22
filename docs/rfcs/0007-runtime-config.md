@@ -39,10 +39,11 @@ RFC is that document. It decides:
 2. **Recommended defaults**: documentation-only guidance — the runtime's
    defaults stay unbounded (`None`); the documented starting point for
    applications that opt in is `app_channel_capacity = 1024` (a
-   measurement-informed margin choice bounded at both ends by the RFC 0006
-   section 2 measurements), `keyed_channel_capacity = 16` (a margin choice,
-   not measurement-derived), and `batch_max_messages` unset (evidenced by
-   F5), each basis stated in full in section 3.1.
+   measurement-informed margin choice: the RFC 0006 section 2 measurements
+   give a lower-bound signal and a latency estimate at that value, not a
+   uniquely pinned number), `keyed_channel_capacity = 16` (a margin
+   choice, not measurement-derived), and `batch_max_messages` unset
+   (evidenced by F5), each basis stated in full in section 3.1.
 3. **Restart-rate control**: stays subscription-level; `RuntimeConfig`
    carries no restart-rate field and reserves none.
 4. **Bounded acceptance-run parameters**: one configuration under test
@@ -249,8 +250,9 @@ Documented starting values, each with its basis stated:
   measurements rule out other values against — it is 1024's own cost, not
   evidence that a larger capacity would be wrong. 1024 is the round number
   chosen above the lower-bound signal, at a latency its own estimate shows
-  is small relative to a frame period; 512 or 2048 would be defensible on
-  the same measurements. Applications with larger expected bursts scale up
+  is a small number of frame periods (~1.6 at 60 FPS), not a large
+  multiple of one; 512 or 2048 would be defensible on the same
+  measurements. Applications with larger expected bursts scale up
   by the same rule; `burst_200k` shows the cost of undersizing is producer
   wait, not loss.
 - **`keyed_channel_capacity = 16`.** A margin choice, stated as such —
@@ -353,15 +355,17 @@ holds outside the channel) caps at `capacity + concurrent producers`.
 Either way, depth is capped near capacity, so the unbounded
 `quit_backlog_50k` / `quit_backlog_300k` rows have no bounded counterpart
 at their ~50k/~300k depths. Per the delegated obligation, the bounded
-quit rows vary blocked-producer count and channel-full churn instead:
+quit rows vary blocked-producer count and channel-full churn instead —
+the independent variable is the blocked-producer *count*, not raw
+channel occupancy, per the note on that distinction below the table:
 
 | Scenario (bounded run) | What it varies | Definition | Valid-trial predicate (checked at the quit instant) | Trials | Criterion (RFC 0006 INV-L4) |
 | --- | --- | --- | --- | --- | --- |
-| `quit_idle` | baseline | unchanged from RFC 0006 §2 | none — no blocked-producer or channel-full precondition | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_blocked_1` | one blocked producer | one flood subscription holds the shared channel at capacity and is blocked in `send`; `update` returns `Command::quit()` while the channel is full | the RFC 0006 §4.4 producer gauge reads `blocked == 1` | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_blocked_64` | many blocked producers | 64 flood subscriptions, all blocked in `send` on the full shared channel at quit | the producer gauge reads `blocked == 64` | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_idle` | baseline | unchanged from RFC 0006 §2 | none — no blocked-producer precondition | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_blocked_1` | one blocked producer | one flood subscription is blocked in `send`, awaiting capacity on the shared channel; `update` returns `Command::quit()` while it remains blocked | the RFC 0006 §4.4 producer gauge reads `blocked == 1` | 200 | quit→delivered p99 ≤ 1 ms |
+| `quit_blocked_64` | many blocked producers | 64 flood subscriptions, all blocked in `send` awaiting capacity on the shared channel, at quit | the producer gauge reads `blocked == 64` | 200 | quit→delivered p99 ≤ 1 ms |
 | `quit_overload` | channel-full churn | unchanged from RFC 0006 §2 (producer at 100k/s): the producer rate is configured to exceed drain capacity, so the channel is intended to oscillate at or near capacity — the churn case | at least one shared-channel capacity-wait event recorded in each of the four 5ms windows immediately preceding the quit instant (20ms total, chosen to be several orders of magnitude longer than the harness's ~26µs per-message drain rate under this scenario's 25µs `update` cost — RFC 0006 §2 — so a single momentary fill cannot satisfy it by chance) | 200 | quit→delivered p99 ≤ 1 ms |
-| `quit_keyed_bounded` | keyed control | the RFC 0006 §2 keyed-quit trial under the §5.1 configuration: a flood subscription holds the shared channel at capacity while a keyed command's stream emits `Action::Quit` | the producer gauge reads `blocked >= 1` | 20 | none — measurement recorded, no acceptance bound (RFC 0006 §§4.6, 5.1) |
+| `quit_keyed_bounded` | keyed control | the RFC 0006 §2 keyed-quit trial under the §5.1 configuration: a flood subscription is blocked in `send`, awaiting capacity on the shared channel, while a keyed command's stream emits `Action::Quit` | the producer gauge reads `blocked >= 1` | 20 | none — measurement recorded, no acceptance bound (RFC 0006 §§4.6, 5.1) |
 
 - The unbounded `quit_*` rows themselves (including `quit_backlog_50k` /
   `quit_backlog_300k`) are unchanged and stay the unbounded-mode acceptance
@@ -402,14 +406,26 @@ quit rows vary blocked-producer count and channel-full churn instead:
   one instant does not by itself distinguish sustained churn from a
   momentary fill, which is why its predicate is stated over the
   four-window count above rather than a single `blocked` or occupancy
-  read. `quit_blocked_1`/`quit_blocked_64`'s `blocked` reading needs no
-  separate occupancy check alongside it: tokio's bounded `mpsc` blocks a
-  sender only when the channel holds no free permit, so `blocked >= 1` at
-  an instant is itself proof the channel was at `app_channel_capacity` at
-  that same instant — the two preconditions these rows name (channel-full,
-  blocked-producer count) collapse to the one gauge reading. The
-  acceptance run reports each row's count as that many *valid* trials,
-  not that many attempts.
+  read. `quit_blocked_1`/`quit_blocked_64`/`quit_keyed_bounded` name only
+  a blocked-producer count as their precondition, deliberately not raw
+  channel occupancy: a `blocked` reading does not by itself establish
+  that the shared channel held `app_channel_capacity` messages at the
+  same instant, because the admission window (RFC 0006 §4.6) applies here
+  too, not only across a barrier boundary. Once a pull frees a slot, that
+  slot is handed to a woken producer whose own send may still be
+  in-flight — RFC 0006 §4.4 lowers `blocked` for that producer only when
+  its send is accepted, so `blocked` can still read the pre-pull count
+  for an instant in which occupancy has already dropped to `capacity -
+  1`. A predicate strong enough to rule this out would need the harness's
+  depth accounting (`produced - processed`) alongside the gauge —
+  `blocked == N && produced - processed == app_channel_capacity + N` —
+  but these rows do not require it: their independent variable is the
+  blocked-producer count (the mechanism F4/F7 already establish as what
+  drives keyed starvation and quit deferral), not a claim about
+  instantaneous raw occupancy, so `blocked == N` (or `>= 1` for
+  `quit_keyed_bounded`) is the whole predicate. The acceptance run
+  reports each row's count as that many *valid* trials, not that many
+  attempts.
 
 ### 5.3 Remaining bounded rows
 
