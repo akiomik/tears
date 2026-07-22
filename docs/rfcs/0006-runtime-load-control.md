@@ -69,7 +69,16 @@
   left to `tracing` filtering and any future aggregate event kept
   additive (section 4.4); and "active `CommandId`" in R1's `m` is
   defined as an entry existing in the keyed map, including a
-  finished-but-undrained run (section 1.2)
+  finished-but-undrained run (section 1.2). 2026-07-22 — cross-reference
+  fix (no contract change, RFC 0007 review follow-up): INV-L4's acceptance
+  conditions (section 5) and the section 5.1 matrix row both named
+  `quit_backlog_50k` / `quit_backlog_300k` as if those names applied
+  unchanged in bounded mode, which lagged the 2026-07-18 amendment above
+  redefining the bounded quit rows around blocked-producer count and
+  channel-full churn; both now state explicitly that the four names are
+  the unbounded scenario names and that the bounded rows the same
+  criterion applies to are the `RuntimeConfig` RFC's redefined ones, not
+  these names reused unchanged
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > draft that 0.10.0 depends on, and it is final unless the contract design in
@@ -1023,7 +1032,13 @@ To be finalized as contract tests before implementation:
   quit→delivered p99 ≤ 1 ms at every measured depth, in both
   delivery modes** — the unbounded default (already measured, section 2)
   and the bounded re-run of the section 5.1 matrix, where the same
-  criterion applies because the quit channel is never bounded (R4).
+  criterion applies because the quit channel is never bounded (R4). The
+  four names above are the unbounded scenario names; per this section's
+  own reproducibility rule (section 5.1), the bounded re-run does not
+  reuse `quit_backlog_50k` / `quit_backlog_300k` unchanged — the
+  `RuntimeConfig` RFC names and defines the bounded rows this same
+  criterion applies to, varying blocked-producer count and channel-full
+  churn instead of depth.
   `quit_keyed_backlog_50k` is outside these conditions: it is the keyed
   control — a keyed quit never enters the dedicated channel (sections
   4.2, 4.6) — and its full-drain latency is intended behavior, recorded
@@ -1251,7 +1266,7 @@ measurement rather than an implementation-time choice:
 | `overload` | update latency p99 | 7.9s, grows with overload duration (F3) | bounded by the drain time of one full queue plus admission wait (INV-L3, its producer-count premise given) |
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
-| `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
+| `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); named here are the unbounded rows, and the bounded rows this criterion applies to are the `RuntimeConfig` RFC's redefined ones (blocked-producer count and channel-full churn, not the `quit_backlog_*` depths — reproducibility rules above), not these names reused unchanged; the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement when the implementation lands, under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
