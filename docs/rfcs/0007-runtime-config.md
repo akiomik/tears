@@ -203,8 +203,19 @@ impl<App: Application> Runtime<App> {
 
 - Module: `src/runtime/config.rs` (`pub mod config` under `runtime`),
   matching `runtime::frame_rate`.
-- Re-exports: `tears::RuntimeConfig` at the crate root and
-  `tears::prelude::RuntimeConfig`, matching `FrameRate`'s pattern.
+- Re-exports: `tears::RuntimeConfig` at the crate root, as
+  `Runtime::with_config`'s companion type, but *not*
+  `tears::prelude::RuntimeConfig`. Crate-root placement and prelude
+  membership are different tests (`docs/api-guidelines.md`'s "Prelude
+  Membership"): the prelude asks whether a *minimal* skeleton app writes
+  the item out literally, and a minimal app calling
+  `Runtime::new(flags, frame_rate)` never names `RuntimeConfig` — only an
+  app that opts into `with_config` does. That is the same reasoning that
+  keeps `FrameRateError` out of the prelude despite its crate-root
+  re-export, not the reasoning that puts `FrameRate` in it (a minimal app
+  always writes `FrameRate::new(...)`, unconditionally). Should load
+  control become a minimal skeleton's default path in some future RFC,
+  adding `RuntimeConfig` to the prelude then is additive.
 - The bench harness (`benches/runtime_load.rs`) constructs its bounded runs
   through this public surface only; `bench-internals` gains no
   config-related items.
@@ -256,17 +267,28 @@ Documented starting values, each with its basis stated:
   by the same rule; `burst_200k` shows the cost of undersizing is producer
   wait, not loss.
 - **`keyed_channel_capacity = 16`.** A margin choice, stated as such —
-  not measurement-derived: in the measured workloads a keyed channel never
-  buffers more than one message (`keyed_steady`'s probe fires every 25ms
-  and its observed worst-case delivery is 5.2ms), so those measurements
-  cannot distinguish 16 from 1, and the harness has no keyed-burst
-  scenario that would size the value. What 16 fixes is the trade read
-  from both sides: a command can emit a burst of up to 16 outputs without
-  awaiting the consumer, and the per-command share of the application's
-  `m × capacity` buffer total (RFC 0006 R1) is bounded at 16 messages.
-  Applications whose keyed commands emit larger bursts size up by that
-  same absorption-versus-memory reading; adding a keyed-burst harness
-  scenario, should field experience demand a measured basis, is additive.
+  not measurement-derived, for two distinct reasons rather than one.
+  `keyed_steady`'s probe (firing every 25ms, observed worst-case delivery
+  5.2ms) never leaves its keyed channel holding more than one message, so
+  that measurement cannot distinguish 16 from 1 — a steady, low-delay
+  workload is silent on the question. `keyed_overload`'s same 25ms probe,
+  by contrast, is delayed 9.2–13.0s by shared-queue backlog (RFC 0006 §2)
+  because shared-first pull leaves the keyed channel undrained while the
+  always-ready shared channel stays non-empty (RFC 0006 §4.7); at that
+  delay a probe firing every 25ms would need to buffer on the order of
+  hundreds of messages before drain, so every finite capacity — 16
+  included — eventually fills and the probe's own producing stream
+  blocks in `send`. That measurement shows saturation under sustained
+  keyed overload is unavoidable at any bounded capacity, not that 16 is
+  the capacity that avoids it, so it derives no number either. Absent a
+  measured basis, 16 is fixed as a policy value from the trade read on
+  both sides: a command can emit a burst of up to 16 outputs into an
+  otherwise-empty channel without awaiting the consumer, and the
+  per-command share of the application's `m × capacity` buffer total (RFC
+  0006 R1) is bounded at 16 messages. Applications whose keyed commands
+  emit larger bursts size up by that same absorption-versus-memory
+  reading; adding a keyed-burst harness scenario, should field experience
+  demand a measured basis, is additive.
 - **`batch_max_messages`: unset.** This resolves the default-value half of
   RFC 0006 open question 2 as delegated: no non-`None` value is
   recommended. F5 is the evidence — the 100µs time cap alone held the frame
@@ -404,8 +426,12 @@ channel occupancy, per the note on that distinction below the table:
   single reading, because churn is a property of a time interval, not an
   instant: one capacity-wait event only shows the channel was full once,
   which a momentary fill also produces, while a second event within the
-  same short window shows a producer's send was accepted into the slot
-  the first event's completion freed — the refilling that "oscillate at
+  same short window shows that the channel filled again after draining —
+  a capacity-wait event fires at the moment its send is accepted, i.e.
+  once it has consumed a slot a consumer pull already freed (RFC 0006
+  §4.4), so the second event's send was accepted into a slot freed by a
+  pull that happened between the two events, not by the first event's
+  own completion. That intervening pull-then-refill is what "oscillate at
   capacity" names. Two is the minimum count that distinguishes the two
   cases; the 5ms window is two orders of magnitude longer than the
   harness's ~26µs per-message drain cost under this scenario's 25µs
@@ -477,7 +503,13 @@ invocation is unchanged.
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
   shortened to 0.5s, a 20k-message bounded burst under the §5.1
-  configuration, `quit_idle` and `quit_blocked_1` at 5 trials each. CI
+  configuration, `quit_idle` and `quit_blocked_1` at 5 *valid* trials each
+  — `quit_idle`'s predicate is `none` (§5.2's table), so every attempt
+  counts toward its 5, but `quit_blocked_1` counts only attempts whose
+  §5.2 valid-trial predicate (`blocked == 1` at the quit instant) held; an
+  attempt that fails to reach that state does not count toward the 5,
+  exactly as §5.2 defines trial counting for the full run, just at a
+  smaller trial count. CI
   invokes it through a `just` recipe (`just bench-smoke`) in the existing
   Benchmarks job, so the local and CI invocations are identical.
 - **Pass/fail**: two assertion classes, split by what the observation
