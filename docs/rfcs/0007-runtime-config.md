@@ -290,17 +290,28 @@ Documented starting values, each with its basis stated:
     total) never approach 1024, so the same run cannot show whether a
     capacity that large would ever fill, and it does not pin 16 either —
     several smaller capacities are equally consistent with the same data.
-  - A further point, independent of this run's own length. RFC 0006's F4
-    already establishes that keyed delivery is deferred until the shared
-    backlog *fully drains*, not for some duration this measurement
-    happens to bound. If overload persisted indefinitely, the shared
-    backlog would never drain, so by that same mechanism keyed delivery
-    would be deferred indefinitely too — and with the probe still ticking
-    every 25ms into a channel that never drains, its occupancy grows
-    without bound, so every finite keyed capacity eventually fills in
-    that hypothetical limit. This is a direct consequence of F4's own
-    mechanism (RFC 0006 §4.3's refill argument, §4.7), not a reading of
-    the 13.0s figure this particular run happens to have measured.
+  - A further point, independent of this run's own length, but weaker
+    than a certainty. RFC 0006's §4.3 refill argument establishes that
+    shared readiness — and with it keyed starvation — "can persist for as
+    long as overload lasts, independent of the configured capacity":
+    nothing bounds how long that persistence runs, so a long-enough
+    overload *can* hold any finite keyed capacity full, one probe tick at
+    a time, no matter how large. That licenses an existence claim only —
+    no finite capacity comes with a guarantee of staying safe — not the
+    stronger claim that every execution of sustained overload saturates
+    every capacity: bounded mode's admission windows (RFC 0006 §4.6) are
+    a real, scheduling-dependent chance for the shared channel to read
+    momentarily empty right after a pull and before the woken producer
+    refills it, letting a keyed output — and with it some keyed drain —
+    through. RFC 0006 §4.7 declines to guarantee a keyed-delivery bound
+    from those windows precisely because they are scheduling-dependent,
+    not because they cannot occur, and that same fact cuts both ways:
+    it is exactly why "eventually saturates" cannot be strengthened to
+    "always saturates" either. What follows from §4.3 is only that no
+    capacity is guaranteed safe against a long-enough overload, not that
+    saturation is certain — a reading of the 13.0s figure this
+    particular run happens to have measured would claim more than
+    either RFC establishes.
 
   Absent a measured basis, 16 is fixed as a policy value from the trade
   read on both sides: a command can emit a burst of up to 16 outputs into
@@ -498,14 +509,26 @@ channel occupancy, per the note on that distinction below the table:
   required valid-trial count is reached, whichever comes first. If the
   cap is exhausted first, the row fails outright — reported distinctly
   from a per-attempt timeout, and never reported as a shorter but still
-  valid sample. This bounds every row's worst-case wall time at
-  `10 × trials × max_wall` regardless of how rarely the predicate holds,
-  even though a compliant run finishes far faster in practice: the
-  predicate is expected to hold on nearly every attempt (the admission-
-  window discussion above scopes the narrow case where it does not), so
-  the 10× headroom is not spent attempt-for-attempt against the required
-  count on a working implementation. The same rule applies unchanged to
-  the §6 smoke profile's reduced trial counts.
+  valid sample. What the cap guarantees is termination, not a wall-clock
+  ceiling: it bounds the number of attempts to a fixed, finite count, so
+  a row can no longer retry forever waiting on a rare predicate — the
+  actual failure mode this rule exists to close. It is not itself a
+  bound on the row's total wall time, and `10 × trials × max_wall`
+  overstates what is guarded: `max_wall` (`benches/runtime_load.rs`)
+  times out only the `runtime.run(&mut terminal)` call inside a single
+  attempt (`run_quit_trial`), not the `Runtime`/`Terminal` construction
+  before it, the sample extraction after it, or the per-attempt loop
+  overhead in `run_quit_scenario` — so `10 × trials × max_wall` bounds
+  only the cumulative time those `runtime.run` calls can spend across
+  the capped attempts, not the row's actual wall time. A strict
+  wall-clock ceiling on the whole row would need a separate, row-level
+  aggregate timeout wrapping every attempt together, which this RFC does
+  not add: the un-guarded overhead per attempt is expected to be
+  negligible next to `max_wall`, and the attempt cap alone already rules
+  out the unbounded-retry failure mode. Adding an aggregate guard later,
+  should that overhead prove not negligible, is additive. The same
+  attempt-count cap applies unchanged to the §6 smoke profile's reduced
+  trial counts.
 
 ### 5.3 Remaining bounded rows
 
