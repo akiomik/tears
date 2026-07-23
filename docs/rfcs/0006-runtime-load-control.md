@@ -1154,13 +1154,20 @@ scenario (section 5.1), added with the implementation, is therefore a
 behavioral *regression* check, not a proof, and it is built to catch
 bounded pools rather than merely a second key: several keyed channels are
 held at capacity with their next sends pending — saturating any modest
-pool — while the two probe channels stay untouched until then. It checks
-send *admission* only, and exercises the invariant's two halves separately:
-(a) keyed→keyed — a previously idle key's first `keyed_channel_capacity`
-sends complete, and only its `capacity + 1`-th send is pending, on that
-key's own occupancy; (b) keyed→shared — the shared producer's first
-`app_channel_capacity` sends complete, with only its next send pending on
-the shared channel's own occupancy. Delivery is deliberately outside the
+pool. It checks send *admission* only, and exercises the invariant's two
+halves: (a) keyed→keyed — a previously idle probe key, started only after
+the others are held saturated, admits its own first `keyed_channel_capacity`
+sends with only its `capacity + 1`-th pending, on that key's own occupancy;
+(b) keyed→shared — the shared producer runs throughout as the saturation
+enabler (the shared channel must stay full to keep the keyed channels from
+draining under shared-first pull, so it cannot be idled and re-probed), and
+its admission is read as the shared occupancy *sampled only while every
+keyed channel is concurrently saturated*, which reaches `app_channel_capacity
++ 1` (the full channel plus its one pending send). The gate is that
+simultaneous value, not a whole-run maximum: a shared pool could reach the
+full shared occupancy before the keyed channels start and then shed capacity
+to hold them, passing a historical peak while never holding both at once.
+Delivery is deliberately outside the
 scenario: the event loop's keyed pull goes through one `StreamMap` over
 every keyed receiver and cannot drain a chosen key selectively — each poll
 returns one ready element from whichever key is picked, so waiting for the
@@ -1231,7 +1238,7 @@ measurement rather than an implementation-time choice:
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
 | `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); named here are the unbounded rows, and the bounded rows this criterion applies to are the `RuntimeConfig` RFC's redefined ones (blocked-producer count and channel-full churn, not the `quit_backlog_*` depths — reproducibility rules above), not these names reused unchanged; the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement when the implementation lands, under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
-| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), the two probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared) — the keyed probe is started only after the eight are held saturated, while the shared producer runs throughout as the saturation enabler (it cannot be idled and re-probed without letting the keyed channels drain under shared-first pull; RFC 0007 §5.3). The keyed→shared gate is the shared occupancy sampled only during the window when all nine keyed channels are concurrently saturated, which must reach `app_channel_capacity + 1` — the *simultaneous* value, not a whole-run maximum a shared pool could reach before the keyed channels start; admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
 Queue-depth cells use the harness's depth definition, `produced -

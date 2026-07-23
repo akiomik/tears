@@ -632,7 +632,28 @@ channel occupancy, per the note on that distinction below the table:
   16 messages with its next send pending — 128 buffered messages plus 8
   pending sends, exceeding any modest hypothetical pool), with the two
   probes exactly as RFC 0006 §5.1's row defines them (a previously idle
-  key's first 16 sends, and the shared producer's first 1024 sends). Eight
+  key's first 16 sends, and the shared producer's first 1024 sends). The
+  keyed probe is a ninth key started only *after* the eight are saturated,
+  so it is genuinely previously idle when probed; the shared producer,
+  however, runs throughout as the saturation enabler and cannot be staged
+  the same way — the shared channel must stay full to keep the keyed
+  channels from draining under shared-first pull, so it cannot be idled and
+  re-probed later. Its first `app_channel_capacity` sends are therefore
+  verified concurrently with the held keyed saturation: the gate is the
+  shared occupancy sampled *only while all nine keyed channels are
+  simultaneously saturated*, which must reach exactly `app_channel_capacity
+  + 1` (the full channel plus its one pending send). This simultaneous
+  value, not a whole-run maximum, is load-bearing — a shared pool could
+  drive the shared channel to its full occupancy *before* the keyed channels
+  start and then shed capacity to hold them, so a historical peak would pass
+  a pool that never held the full shared channel and all `9 × capacity`
+  keyed messages at once, which is exactly the violation the gate must
+  catch. The shared channel is untouched by any keyed producer, so this is
+  still the keyed→shared admission the row asks for. The measurement also
+  gates that no keyed message is ever delivered to `update` (the keyed
+  `StreamMap` never selectively drains a probe) and that every keyed
+  channel's yield count is exactly `capacity + 1`, so a drain would fail
+  rather than pass as extra admission. Eight
   saturated keys is the scale chosen to defeat a pooled implementation
   sized near per-channel capacity while keeping the row cheap to execute
   in the full acceptance and regression runs it belongs to.
