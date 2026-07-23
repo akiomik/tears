@@ -54,8 +54,9 @@ RFC is that document. It decides:
    `keyed_isolation` saturation parameters (8 keys).
 5. **CI smoke profile**: yes — a reduced, latency-assertion-free harness
    profile runs in CI and gates on completion (within the harness's
-   wall-clock guards) and lossless drain delivery, never on a latency
-   percentile; full runs leave CI and any machine may run them, with
+   wall-clock guards) and sequence-complete drain delivery (every scripted
+   message delivered once and in order), never on a latency percentile;
+   full runs leave CI and any machine may run them, with
    acceptance force reserved to the reference machine per RFC 0006.
 
 ## 1. Delegated obligations (inventory)
@@ -229,23 +230,58 @@ subject. This section fixes the *documented
 recommendation* for applications that opt in. The recommendation is
 guidance, not contract: no invariant tests these values, and changing the
 recommendation later is a documentation change, not an amendment — with the
-one exception that the sizing rule below must stay consistent with RFC
-0006's measurements as long as it is published.
+one exception that the app-channel sizing rule below (§3.1), which is the
+only measurement-derived rule here, must stay consistent with RFC 0006's
+measurements as long as it is published. The keyed-channel rule is a policy
+trade, not measurement-bound, and carries no such consistency obligation.
 
 ### 3.1 Sizing rule and starting values
 
-The documented rule: a bounded channel's capacity buys burst absorption and
-costs queueing latency — once the queue is full, a newly accepted message
-waits roughly `capacity × per-message drain cost` before reaching
-`update`, where the drain cost is the *observed average* service time of
-the application's own loop, application-dependent and measurable (RFC 0006
-§2: ~2.2µs/message average at 2µs `update` cost, ~26µs/message at 25µs —
-drain time tracks `update` cost, which the application controls). The
-product is an estimate on the measured workload, not a worst-case bound:
-an average cannot bound the tail, and neither RFC 0006 nor this RFC
-defines a per-message worst-case service time to build a hard bound on.
-An application that needs one derives it from its own measured tail
-service time, not from this rule.
+The two capacities size by different rules, because the two channels drain
+differently. The latency estimate below is the *shared* channel's alone;
+applying it to the keyed channel is a category error the keyed rule below
+names explicitly, and §3.2 keeps each rule on its own setter so neither
+reads as governing the other.
+
+**`app_channel_capacity` — the latency/burst trade.** A bounded shared
+channel's capacity buys burst absorption and costs queueing latency: once
+the queue is full, a newly accepted message waits behind at most one full
+queue of earlier messages before reaching `update`, so its wait is roughly
+`capacity × per-message drain cost`, where the drain cost is the *observed
+average* service time of the application's own loop, application-dependent
+and measurable (RFC 0006 §2: ~2.2µs/message average at 2µs `update` cost,
+~26µs/message at 25µs — drain time tracks `update` cost, which the
+application controls). The rule holds because the shared channel drains
+FIFO (RFC 0006 INV-L3): a newly accepted message's drain-side wait is
+bounded by the drain time of one full queue, independent of overload
+duration. The product is an estimate on the measured
+workload, not a worst-case bound: an average cannot bound the tail, and
+neither RFC 0006 nor this RFC defines a per-message worst-case service time
+to build a hard bound on. An application that needs one derives it from its
+own measured tail service time, not from this rule.
+
+**`keyed_channel_capacity` — burst absorption and memory, not a latency
+guarantee.** The `capacity × drain cost` estimate does *not* transfer to
+the keyed channel, and sizing it for a delivery-latency *guarantee* is a
+category error: while any shared input stays ready the keyed channel is not
+drained at all (shared-first pull, RFC 0006 §4.7), so keyed-delivery
+latency stays unbounded independent of the configured capacity (RFC 0006
+INV-L3 — "no such bound exists for keyed delivery ... keyed-delivery
+latency stays deliberately unbounded while ready shared inputs remain"). A
+larger keyed capacity therefore bounds no drain-side delivery latency and
+restores no keyed liveness — those stay governed by shared readiness, not
+by capacity. What it *can* do in a finite execution is reduce producer-side
+admission wait: a keyed command awaits capacity before each next send (RFC
+0006 §4.2), so a larger channel lets a burst of up to the channel's
+currently free capacity — the full `capacity` only when the channel is
+otherwise empty, less whatever it already holds — complete without the
+command blocking on admission, and once shared readiness later lapses those
+already-buffered outputs become deliverable sooner than ones still waiting
+behind a full channel. That is the burst
+absorption the capacity buys, and it costs memory (the per-command share of
+the `m × capacity` buffer total, RFC 0006 R1). Size the keyed channel for
+that absorption-versus-memory trade, never for a delivery-latency
+guarantee; the starting value below is chosen on that trade alone.
 
 Documented starting values, each with its basis stated:
 
@@ -329,9 +365,13 @@ Documented starting values, each with its basis stated:
 
 ### 3.2 Where the recommendation lives
 
-Rustdoc on `RuntimeConfig` and its three setters: the sizing rule on the
-type, each value recommendation on its setter. No separate guide document
-is added; crate-level docs link to the type.
+Rustdoc on `RuntimeConfig` and its three setters: each capacity's sizing
+rule and recommended value live on that capacity's own setter — the
+latency/burst rule on `app_channel_capacity`, the absorption-versus-memory
+rule on `keyed_channel_capacity` (§3.1) — so neither reads as governing the
+other channel. The type-level doc carries only the overview and links to
+the setters; it does not restate either rule as if it were shared. No
+separate guide document is added; crate-level docs link to the type.
 
 ### 3.3 Guidance notes carried from RFC 0006
 
@@ -490,26 +530,56 @@ channel occupancy, per the note on that distinction below the table:
   reports each row's count as that many *valid* trials, not that many
   attempts.
 - Counting only valid trials means an implementation may need more
-  attempts than the row's required count whenever some attempts fail
-  their predicate, and nothing said so far bounds how many. Left
-  unbounded, a row whose predicate rarely holds — by scheduling
-  misfortune, or by an implementation defect that makes the precondition
-  rare or unreachable — could retry forever without ever timing out: a
-  per-attempt timeout (`max_wall`) only catches an attempt that itself
-  hangs, not a run of attempts that each complete normally but fail the
-  predicate. Every row with a non-`none` valid-trial predicate therefore
-  carries an attempt cap: at most `10 × trials` attempts, using the row's
-  own required trial count from the table above (2,000 for each of the
-  three 200-trial rows with a predicate — `quit_blocked_1`,
-  `quit_blocked_64`, `quit_overload`; 200 for `quit_keyed_bounded`'s 20).
-  `quit_idle`'s `none` predicate makes every attempt valid by definition,
-  so it carries no cap and none is needed. An attempt counts
-  against the cap whether it times out, misses its delivery event, or
-  completes but fails the predicate; attempts stop as soon as the row's
-  required valid-trial count is reached, whichever comes first. If the
-  cap is exhausted first, the row fails outright — reported distinctly
-  from a per-attempt timeout, and never reported as a shorter but still
-  valid sample. What the cap guarantees is termination, not a wall-clock
+  attempts than the row's required count whenever some attempts fail their
+  predicate. To make the retry rule precise — which attempts are retried,
+  which fail the row, and how the retries are bounded — start from the
+  outcome of a single attempt. Each attempt has exactly one of three
+  outcomes, and only one of them is retried:
+  - **valid trial** — the run completed, its quit was delivered and timed,
+    and the valid-trial predicate held at the quit instant. Its measurement
+    enters the row's sample.
+  - **predicate miss** — the run completed and delivered its quit, but the
+    valid-trial predicate did *not* hold at the quit instant (the intended
+    contention did not materialize under this scheduling). This is the
+    *only* retryable outcome: the trial did not exercise the intended
+    precondition, so it is excluded from the sample and another attempt is
+    made. Retries are for predicate misses and nothing else.
+  - **quit-contract failure** — the run timed out (exceeded `max_wall`), or
+    completed with no recorded quit-delivery event. This is a failure of
+    the quit contract itself (RFC 0006 INV-L4: the quit was not delivered,
+    or not within the guard), not a benign precondition miss, so it fails
+    the row outright and is never retried away. Retrying past a timeout or
+    a missing delivery would let an implementation that intermittently
+    loses quit assemble a clean sample from the attempts that happened to
+    succeed and pass the row — the exact masking this outcome class exists
+    to forbid, and why timeout/delivery-loss cannot be folded into the
+    predicate-miss retry path.
+
+  Because only predicate misses are retried, and each one forces another
+  attempt, a row whose predicate rarely holds — by scheduling misfortune,
+  or by an implementation defect that makes the precondition rare or
+  unreachable — could retry forever without ever timing out: a per-attempt
+  timeout (`max_wall`) only catches an attempt that itself hangs, not a run
+  of predicate misses that each complete normally. Every row with a
+  non-`none` valid-trial predicate therefore carries an attempt cap: at
+  most `10 × trials` attempts, using the row's own required trial count
+  from the table above (2,000 for each of the three 200-trial rows with a
+  predicate — `quit_blocked_1`, `quit_blocked_64`, `quit_overload`; 200 for
+  `quit_keyed_bounded`'s 20). `quit_idle`'s `none` predicate makes every
+  *completed* attempt a valid trial by definition (it can still hit a
+  quit-contract failure like any row), so it needs no cap and carries none.
+  Every attempt counts against the cap, and attempts stop as soon as the
+  row's required valid-trial count is reached. The row's three terminating
+  outcomes are reported as three distinct classes, never conflated and
+  never reported as a shorter but still valid sample:
+  - a **quit-contract failure** on any attempt fails the row immediately,
+    reported as the timeout / missing-delivery class;
+  - **attempt-cap exhaustion** — the cap reached before the required
+    valid-trial count — fails the row as its own class, distinct from a
+    quit-contract failure;
+  - otherwise the row passes once its required valid trials are collected.
+
+  What the cap guarantees is termination, not a wall-clock
   ceiling: it bounds the number of attempts to a fixed, finite count, so
   a row can no longer retry forever waiting on a rare predicate — the
   actual failure mode this rule exists to close. It is not itself a
@@ -532,13 +602,32 @@ channel occupancy, per the note on that distinction below the table:
 
 ### 5.3 Remaining bounded rows
 
-- **`overload`, `burst_200k`, `keyed_overload`, `steady_20k`,
-  `steady_200k`**: re-run under the §5.1 configuration with their RFC 0006
-  §2 load parameters unchanged (rates, durations, `update`/`view` costs,
-  probe cadence). Their criteria are RFC 0006 §5.1's cells verbatim; the
-  depth-accounting bound (`capacity + concurrent producers`, §5.2's
-  observed-depth quantity) instantiates to `1024 + 1` for these
-  single-flood-producer rows.
+- **`overload`, `burst_200k`, `keyed_overload`**: re-run under the §5.1
+  configuration with their RFC 0006 §2 load parameters unchanged (rates,
+  durations, `update`/`view` costs, probe cadence). Their criteria are RFC
+  0006 §5.1's cells verbatim — `overload` and `burst_200k` carry bounded
+  acceptance criteria (depth/latency and backlog/no-drop respectively),
+  while `keyed_overload` is recorded as a measurement with *no* acceptance
+  bound (RFC 0006 §5.1's keyed-overload cell: open question 6 resolved
+  against a keyed-delivery bound, §4.7). The depth-accounting bound
+  (`capacity + concurrent producers`, §5.2's observed-depth quantity)
+  instantiates to `1024 + 1` for these single-flood-producer rows.
+- **`steady_20k`, `steady_200k`**: not bounded rows, and they carry no
+  bounded criterion. Their RFC 0006 §5.1 cell is the *default-config*
+  code-path check (INV-L6): the scenarios run under the default
+  (load-control-unset, unbounded) configuration and are verified by code
+  inspection that the default path stays "structurally identical" to the
+  legacy unbounded path, "checked by code inspection, not by diffing load
+  numbers" (RFC 0006 §5.1's steady-row cell). A bounded re-run measures
+  nothing that check asks for: both scenarios pace at or below drain
+  capacity, so their sampled shared-channel depth stays far under
+  `app_channel_capacity = 1024` (`steady_200k` reaches at most ~400
+  sampled, §3.1), and a bounded re-run exercises the same in-capacity
+  regime the default run does — no bounded behavior to gate. They are
+  therefore the default-path structural check, not members of the bounded
+  matrix. Treating them as bounded rows would assign them a "criteria
+  verbatim" that RFC 0006's steady cell cannot supply, because that cell is
+  a code-review row (INV-L6), not a bounded acceptance criterion.
 - **`keyed_isolation`**: 8 keyed channels are saturated (each holding
   16 messages with its next send pending — 128 buffered messages plus 8
   pending sends, exceeding any modest hypothetical pool), with the two
@@ -574,8 +663,11 @@ invocation is unchanged.
 
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
-  shortened to 0.5s, a 20k-message bounded burst under the §5.1
-  configuration, `quit_idle` and `quit_blocked_1` at 5 *valid* trials each
+  under the default (load-control-unset) configuration, shortened to 0.5s —
+  the same default-path role it has in §5.3, so the smoke run never forks
+  its config from its acceptance meaning — a 20k-message bounded burst under
+  the §5.1 configuration, `quit_idle` and `quit_blocked_1` at 5 *valid*
+  trials each
   — `quit_idle`'s predicate is `none` (§5.2's table), so every attempt
   counts toward its 5; `quit_blocked_1` counts only attempts whose §5.2
   predicate (`blocked == 1` at the quit instant) held, under §5.2's
@@ -585,18 +677,37 @@ invocation is unchanged.
   invokes it through a `just` recipe (`just bench-smoke`) in the existing
   Benchmarks job, so the local and CI invocations are identical.
 - **Pass/fail**: two assertion classes, split by what the observation
-  point can actually distinguish. The draining scenarios (`steady_20k`,
-  the bounded burst) assert `produced == processed == the scenario's
-  scripted total` after the drain — every scripted message delivered —
-  which is what makes an illegal bounded-mode drop (RFC 0006 INV-L2)
-  observable: a silently dropped message leaves `processed` short of the
-  scripted total. The quit scenarios assert completion only: after a
+  point can actually distinguish. The draining scenarios (`steady_20k`
+  under the default configuration, the bounded burst under §5.1) assert,
+  after the drain, that the processed messages are exactly the scripted
+  sequence — every `Msg::Load` sequence number in `0..total` observed once
+  and in order — not merely that `produced == processed == total`. The
+  sequence numbers already ride on `Msg::Load` (`benches/runtime_load.rs`),
+  and the single flood producer feeds the shared FIFO channel in seq order,
+  so a lossless drain's processed seqs must form the contiguous run
+  `0, 1, …, total − 1` (first `0`, each step `+1`, last `total − 1`); a
+  strictly-increasing-by-one check costs O(1) state and refutes any drop (a
+  gap), duplicate (a repeat), reorder (a step backward), or lost tail (a
+  short final seq). A total-only assertion is deliberately rejected: it
+  passes an implementation that drops one seq and duplicates another, so it
+  proves only that no *net* count was lost, never the "every scripted
+  message delivered" claim this gate makes (an illegal drop-plus-duplicate
+  is exactly the counterexample that motivates the sequence check). The two
+  draining scenarios differ in what a caught gap *means*, because they run
+  different configurations: on the bounded burst (§5.1) a gap is an illegal
+  bounded-mode drop (RFC 0006 INV-L2) made observable; on the
+  default-configuration `steady_20k` a gap is a break in the unbounded
+  path's delivery integrity, not an INV-L2 finding, since the default path
+  is not in bounded mode — the same check, serving INV-L2 on one row and
+  default-path completion-and-integrity on the other. The quit scenarios
+  assert completion only: after a
   quit, undelivered messages are legally discarded at shutdown (INV-L2's
-  shutdown carve-out), and at the harness's `produced - processed`
-  observation point a legal shutdown discard is indistinguishable from an
-  illegal drop — a lossless assertion there would either pass illegal
-  drops or fail legal discards — so the lossless gate lives on the
-  draining scenarios alone. No latency percentile is compared against
+  shutdown carve-out), and at the harness's observation point a legal
+  shutdown discard is indistinguishable from an illegal drop — the
+  sequence-integrity assertion there would read a legally discarded tail as
+  a gap or a short final seq, either passing illegal drops or failing legal
+  discards — so that gate lives on the draining scenarios alone. No latency
+  percentile is compared against
   anything — the profile carries no latency assertion. One wall-clock
   condition remains: every smoke scenario carries the harness's
   per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
@@ -607,9 +718,10 @@ invocation is unchanged.
   something the harness fully provides today: quit trials already fail
   the run on timeout, but a timed-out load scenario is currently
   report-only, so the smoke implementation promotes it to a failure —
-  the lossless assertion alone does not cover it, because a run that
-  hangs after processing its last scripted message times out with
-  `processed` equal to the scripted total. The guard is the completion
+  the sequence-integrity assertion alone does not cover it, because a run
+  that hangs after processing its last scripted message times out with the
+  full sequence `0..total` already delivered, so the assertion has nothing
+  left to flag. The guard is the completion
   gate itself: a machine slow enough to exceed it fails on
   non-completion, never on a latency criterion. `quit_blocked_1` carries
   a second, independent failure condition on top of that guard: §5.2's
@@ -617,7 +729,13 @@ invocation is unchanged.
   trials are not collected within it — reachable even when every
   individual attempt completes well inside `max_wall`, which is exactly
   the case a per-attempt timeout alone cannot catch (§5.2's rationale for
-  the cap).
+  the cap). Both quit scenarios also inherit §5.2's quit-contract-failure
+  class independent of the cap: any attempt that times out or completes
+  with no recorded quit-delivery event fails the run outright — the harness
+  already fails on either (`benches/runtime_load.rs`) — reported as the
+  timeout / missing-delivery class, never folded into a predicate-miss
+  retry or into attempt-cap exhaustion. The three failure classes stay
+  distinct in the smoke run exactly as §5.2 defines them.
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove the harness
   still builds (all scenarios compile in the one binary) and the smoke
