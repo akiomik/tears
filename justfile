@@ -48,6 +48,12 @@ test-loom:
 bench:
     cargo bench
 
+# Run the runtime-load harness smoke profile (RFC 0007 §6; the CI Benchmarks
+# profile). Latency-assertion-free: proves the harness builds and the reduced
+# scenarios terminate with their exact scripted sequences.
+bench-smoke:
+    cargo bench --bench runtime_load -- --smoke
+
 # Build the library
 build:
     cargo build

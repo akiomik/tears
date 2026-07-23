@@ -8,14 +8,13 @@
 //! throughput numbers alone hide:
 //!
 //! - **Queue depth**: pending messages (produced - processed), sampled while
-//!   the scenario runs; all runtime channels are unbounded today, so this is
-//!   the direct driver of memory growth under overload. `produced` counts a
-//!   message when the source stream yields it and `processed` counts it when
-//!   `update` begins (once it has left the channel), so under a future
-//!   bounded configuration the observable bound is `capacity + producers`:
-//!   each producer blocked in `send` holds one in-flight message outside the
-//!   channel, while the message currently inside `update` is already
-//!   excluded (RFC 0006 section 5.1).
+//!   the scenario runs; in the default (unbounded) mode this is the direct
+//!   driver of memory growth under overload. `produced` counts a message when
+//!   the source stream yields it and `processed` counts it when `update` begins
+//!   (once it has left the channel), so under the bounded configuration the
+//!   observable bound is `capacity + producers`: each producer blocked in
+//!   `send` holds one in-flight message outside the channel, while the message
+//!   currently inside `update` is already excluded (RFC 0006 section 5.1).
 //! - **Update latency**: message emission to `Application::update`.
 //! - **Render latency**: message emission to the first `Application::view`
 //!   call that observes it (input-to-screen staleness).
@@ -49,12 +48,20 @@
 //! channel instead of the dedicated quit channel, quantifying the INV-14
 //! shared-first bias for in-band quit (RFC 0006 open question 7).
 //!
-//! Run all scenarios, or name a subset:
+//! Scenarios come in the default (unbounded) mode and, for the rows RFC 0007
+//! §5 defines, bounded re-runs under the §5.1 configuration (the `*_bounded`
+//! scenarios and the `quit_blocked_*` / `quit_keyed_bounded` rows), built with
+//! `Runtime::with_config`. The bounded quit rows check a valid-trial predicate
+//! (a `blocked`-gauge or capacity-wait-churn reading) at the quit instant and
+//! retry predicate misses up to an attempt cap (RFC 0007 §5.2).
+//!
+//! Run all scenarios, name a subset, or run the CI smoke profile (RFC 0007 §6):
 //!
 //! ```bash
 //! cargo bench --bench runtime_load
 //! cargo bench --bench runtime_load -- overload keyed_overload
-//! cargo bench --bench runtime_load -- quit_idle quit_backlog_300k
+//! cargo bench --bench runtime_load -- quit_blocked_1 quit_keyed_bounded
+//! cargo bench --bench runtime_load -- --smoke   # or: just bench-smoke
 //! ```
 //!
 //! Peak RSS is process-wide and monotone, so for clean memory numbers run a
@@ -69,7 +76,7 @@
 )]
 
 use std::fmt::Debug;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -82,8 +89,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tears::command::CommandId;
 use tears::prelude::*;
-use tears::{BoxStream, SubscriptionSource};
-use tokio::runtime::Builder;
+use tears::{BoxStream, RuntimeConfig, SubscriptionSource};
+use tokio::runtime::{Builder, Runtime as TokioRuntime};
+use tokio::task::yield_now;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_stream::wrappers::IntervalStream;
 use tracing::field::{Field, Visit};
@@ -94,6 +102,39 @@ use tracing::{Event, Level, Metadata, Subscriber};
 
 /// Message rate for scenarios that emit their whole load in one burst.
 const BURST: u64 = 0;
+
+/// The 60 FPS frame rate every scenario runs at (RFC 0006 §2 harness target).
+fn frame_rate() -> FrameRate {
+    FrameRate::new(NonZeroU32::new(60).expect("non-zero fps"))
+        .expect("60 FPS is a valid frame rate")
+}
+
+/// The RFC 0007 §5.1 bounded configuration used for every bounded row:
+/// `app_channel_capacity = 1024`, `keyed_channel_capacity = 16`,
+/// `batch_max_messages = None`, at 60 FPS.
+fn bounded_config() -> RuntimeConfig {
+    RuntimeConfig::new(frame_rate())
+        .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
+        .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"))
+}
+
+/// Delivery mode a scenario's [`Runtime`] is built in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// `Runtime::new` — the load-control-unset (unbounded) default path.
+    Default,
+    /// `Runtime::with_config` under the RFC 0007 §5.1 bounded configuration.
+    Bounded,
+}
+
+impl Mode {
+    fn build_runtime(self, flags: (ScenarioCfg, Arc<Metrics>)) -> Runtime<LoadApp> {
+        match self {
+            Self::Default => Runtime::new(flags, frame_rate()),
+            Self::Bounded => Runtime::with_config(flags, bounded_config()),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ScenarioCfg {
@@ -116,17 +157,56 @@ struct ScenarioCfg {
     /// the command's private channel, instead of an unkeyed command's direct
     /// send to the dedicated quit channel.
     keyed_quit: bool,
+    /// Delivery mode the runtime is built in (default/unbounded vs the §5.1
+    /// bounded configuration).
+    mode: Mode,
+    /// Number of concurrent flood subscriptions. Several producers all flood
+    /// the shared channel, so in bounded mode several block on `send` at once
+    /// (the `quit_blocked_*` scenarios' contention, RFC 0007 §5.2).
+    producers: u32,
     /// Wall-clock guard; the scenario is aborted and reported as timed out.
     max_wall: Duration,
 }
 
-/// A quit-latency scenario: `base` is run `trials` times and per-trial quit
-/// latencies are aggregated into one report.
+/// The valid-trial predicate a bounded quit scenario checks at the quit
+/// instant (RFC 0007 §5.2). Only a predicate *miss* is retried; a quit-contract
+/// failure (timeout or missing delivery) fails the row outright.
+#[derive(Clone, Copy)]
+enum ValidTrial {
+    /// `none` — every completed attempt is a valid trial (`quit_idle`).
+    Always,
+    /// The `blocked` producer gauge reads exactly this at the quit instant
+    /// (`quit_blocked_1` = 1, `quit_blocked_64` = 64).
+    BlockedEq(u64),
+    /// The `blocked` gauge reads at least this (`quit_keyed_bounded` = 1).
+    BlockedAtLeast(u64),
+    /// At least two shared-channel capacity-wait events in the 5ms preceding
+    /// the quit — `quit_overload`'s churn predicate.
+    Churn,
+}
+
+impl ValidTrial {
+    fn holds(self, metrics: &Metrics) -> bool {
+        match self {
+            Self::Always => true,
+            Self::BlockedEq(n) => metrics.blocked_at_quit.load(Ordering::Relaxed) == n,
+            Self::BlockedAtLeast(n) => metrics.blocked_at_quit.load(Ordering::Relaxed) >= n,
+            Self::Churn => metrics.capacity_waits_before_quit.load(Ordering::Relaxed) >= 2,
+        }
+    }
+}
+
+/// A quit-latency scenario: `base` is run until `trials` *valid* trials are
+/// collected (predicate misses are retried up to the attempt cap), and
+/// per-trial quit latencies are aggregated into one report.
 struct QuitScenarioCfg {
     base: ScenarioCfg,
     trials: u32,
+    /// Valid-trial predicate; `Always` needs no attempt cap.
+    valid_trial: ValidTrial,
 }
 
+#[allow(clippy::too_many_lines, reason = "a flat table of scenario literals")]
 fn scenarios() -> Vec<ScenarioCfg> {
     vec![
         // Paced load well below consumer capacity: the baseline contract.
@@ -139,6 +219,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: false,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
             max_wall: Duration::from_secs(30),
         },
         // Paced load near consumer capacity.
@@ -151,6 +233,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: false,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
             max_wall: Duration::from_secs(30),
         },
         // One burst dumped into the unbounded channel at t=0; measures drain
@@ -164,6 +248,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: false,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
             max_wall: Duration::from_secs(30),
         },
         // Sustained producer faster than the consumer: queue depth and
@@ -177,6 +263,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: false,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
             max_wall: Duration::from_secs(60),
         },
         // Control: keyed command outputs while the shared channel is lightly
@@ -190,6 +278,8 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: true,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
             max_wall: Duration::from_secs(30),
         },
         // Keyed command outputs while the shared channel is overloaded; the
@@ -204,6 +294,51 @@ fn scenarios() -> Vec<ScenarioCfg> {
             keyed_probe: true,
             quit_at_seq: None,
             keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
+            max_wall: Duration::from_secs(60),
+        },
+        // Bounded re-runs under the §5.1 configuration (RFC 0007 §5.3): the
+        // same RFC 0006 §2 load parameters, but built with `Runtime::with_config`
+        // so the shared channel is bounded to 1024 and each keyed channel to 16.
+        // Compared cell-by-cell against the unbounded rows above.
+        ScenarioCfg {
+            name: "burst_200k_bounded",
+            rate: BURST,
+            total: 200_000,
+            update_cost: Duration::from_micros(2),
+            render_cost: Duration::from_micros(500),
+            keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
+            producers: 1,
+            mode: Mode::Bounded,
+            max_wall: Duration::from_secs(30),
+        },
+        ScenarioCfg {
+            name: "overload_bounded",
+            rate: 100_000,
+            total: 500_000,
+            update_cost: Duration::from_micros(25),
+            render_cost: Duration::from_micros(500),
+            keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
+            producers: 1,
+            mode: Mode::Bounded,
+            max_wall: Duration::from_secs(60),
+        },
+        ScenarioCfg {
+            name: "keyed_overload_bounded",
+            rate: 100_000,
+            total: 500_000,
+            update_cost: Duration::from_micros(25),
+            render_cost: Duration::from_micros(500),
+            keyed_probe: true,
+            quit_at_seq: None,
+            keyed_quit: false,
+            producers: 1,
+            mode: Mode::Bounded,
             max_wall: Duration::from_secs(60),
         },
     ]
@@ -218,6 +353,7 @@ const QUIT_TRIALS: u32 = 200;
 /// (latency ~ drain time) is orders of magnitude above trial noise.
 const KEYED_QUIT_TRIALS: u32 = 20;
 
+#[allow(clippy::too_many_lines, reason = "a flat table of scenario literals")]
 fn quit_scenarios() -> Vec<QuitScenarioCfg> {
     // All quit scenarios use the overload update cost (25µs) so the backlog
     // drains slowly (~38k msg/s on the reference machine) and the depth at
@@ -231,6 +367,8 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
         keyed_probe: false,
         quit_at_seq: Some(5_000),
         keyed_quit: false,
+        producers: 1,
+        mode: Mode::Default,
         max_wall: Duration::from_secs(30),
     };
     vec![
@@ -243,6 +381,7 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 ..base.clone()
             },
             trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
         },
         // Quit while ~50k messages are still queued.
         QuitScenarioCfg {
@@ -252,6 +391,7 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 ..base.clone()
             },
             trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
         },
         // Quit while ~300k messages are still queued; if quit latency were
         // backlog-dependent, it must separate from the 50k scenario here.
@@ -262,6 +402,7 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 ..base.clone()
             },
             trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
         },
         // Quit while the producer is still actively refilling the shared
         // channel (sustained overload rather than a draining burst).
@@ -273,6 +414,7 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 ..base.clone()
             },
             trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
         },
         // Keyed quit under the 50k backlog: delivered through the command's
         // private channel, so INV-14 shared-first pull defers it until the
@@ -282,9 +424,73 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 name: "quit_keyed_backlog_50k",
                 total: 55_000,
                 keyed_quit: true,
+                ..base.clone()
+            },
+            trials: KEYED_QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
+        },
+        // Bounded quit rows (RFC 0007 §5.2). Under the §5.1 configuration the
+        // shared channel caps at 1024, so these vary the blocked-producer count
+        // and channel-full churn instead of raw depth. A large `total` keeps the
+        // burst producers blocked well past the quit at seq 5000; the valid-trial
+        // predicate is checked at the quit instant and misses are retried.
+        //
+        // The bounded `quit_idle` baseline: INV-L4 covers both delivery modes,
+        // so quit→delivered is measured bounded as well as unbounded. Its `none`
+        // predicate needs no blocked producers, so it keeps the empty-queue load.
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_idle_bounded",
+                total: 1,
+                quit_at_seq: Some(0),
+                mode: Mode::Bounded,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Always,
+        },
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_blocked_1",
+                total: 500_000,
+                mode: Mode::Bounded,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::BlockedEq(1),
+        },
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_blocked_64",
+                total: 500_000,
+                producers: 64,
+                mode: Mode::Bounded,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::BlockedEq(64),
+        },
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_overload_bounded",
+                rate: 100_000,
+                total: 500_000,
+                mode: Mode::Bounded,
+                ..base.clone()
+            },
+            trials: QUIT_TRIALS,
+            valid_trial: ValidTrial::Churn,
+        },
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_keyed_bounded",
+                total: 500_000,
+                keyed_quit: true,
+                mode: Mode::Bounded,
                 ..base
             },
             trials: KEYED_QUIT_TRIALS,
+            valid_trial: ValidTrial::BlockedAtLeast(1),
         },
     ]
 }
@@ -309,9 +515,12 @@ struct QuitDeliverySubscriber;
 
 impl Subscriber for QuitDeliverySubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        // The quit-delivery message (`tears::runtime`) and the load gauges /
+        // capacity-wait events (`tears::runtime::load`) are all DEBUG; the
+        // batch event (TRACE) is not needed here.
         metadata.is_event()
-            && metadata.target() == "tears::runtime"
             && *metadata.level() == Level::DEBUG
+            && matches!(metadata.target(), "tears::runtime" | "tears::runtime::load")
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
@@ -327,16 +536,37 @@ impl Subscriber for QuitDeliverySubscriber {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        let mut visitor = QuitMessageVisitor { matched: false };
+        let is_load = event.metadata().target() == "tears::runtime::load";
+        let mut visitor = LoadVisitor::default();
         event.record(&mut visitor);
-        if !visitor.matched {
-            return;
-        }
-        if let Some(metrics) = TRIAL_METRICS
+
+        let Some(metrics) = TRIAL_METRICS
             .lock()
             .expect("trial metrics slot poisoned")
-            .as_ref()
-        {
+            .clone()
+        else {
+            return;
+        };
+
+        if is_load {
+            // Producer-gauge event: track the live `blocked` count and the sum
+            // of all four gauges (the quiescence signal). A gauge event always
+            // carries `blocked`, so its presence identifies one. Shared
+            // capacity-wait event: log its instant for the churn window.
+            if let Some(blocked) = visitor.blocked {
+                metrics.blocked_live.store(blocked, Ordering::Relaxed);
+                metrics
+                    .live_producers
+                    .store(visitor.gauge_sum(), Ordering::Relaxed);
+            }
+            if visitor.channel.as_deref() == Some("shared") {
+                metrics
+                    .capacity_wait_shared_ns
+                    .lock()
+                    .expect("capacity-wait log poisoned")
+                    .push(metrics.elapsed_ns());
+            }
+        } else if visitor.matched_quit {
             metrics
                 .quit_delivered_ns
                 .store(metrics.elapsed_ns(), Ordering::Relaxed);
@@ -348,16 +578,49 @@ impl Subscriber for QuitDeliverySubscriber {
     fn exit(&self, _span: &Id) {}
 }
 
-struct QuitMessageVisitor {
-    matched: bool,
+#[derive(Default)]
+struct LoadVisitor {
+    matched_quit: bool,
+    subscriptions: Option<u64>,
+    unkeyed_commands: Option<u64>,
+    keyed_commands: Option<u64>,
+    blocked: Option<u64>,
+    channel: Option<String>,
 }
 
-impl Visit for QuitMessageVisitor {
+impl LoadVisitor {
+    /// Sum of the four producer gauges on this event (all present together on a
+    /// gauge event); 0 for non-gauge events.
+    fn gauge_sum(&self) -> u64 {
+        self.subscriptions.unwrap_or(0)
+            + self.unkeyed_commands.unwrap_or(0)
+            + self.keyed_commands.unwrap_or(0)
+            + self.blocked.unwrap_or(0)
+    }
+}
+
+impl Visit for LoadVisitor {
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        match field.name() {
+            "subscriptions" => self.subscriptions = Some(value),
+            "unkeyed_commands" => self.unkeyed_commands = Some(value),
+            "keyed_commands" => self.keyed_commands = Some(value),
+            "blocked" => self.blocked = Some(value),
+            _ => {}
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "channel" {
+            self.channel = Some(value.to_owned());
+        }
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
         if field.name() == "message" {
             let text = format!("{value:?}");
             if text == "quit signal received" || text == "keyed quit signal received" {
-                self.matched = true;
+                self.matched_quit = true;
             }
         }
     }
@@ -385,6 +648,35 @@ struct Metrics {
     /// observed the quit, recorded by [`QuitDeliverySubscriber`] from the
     /// runtime's own tracing events; 0 while undelivered.
     quit_delivered_ns: AtomicU64,
+    /// Next flood seq `update` expects to process. A single flood producer
+    /// feeds the shared FIFO in seq order, so a lossless in-order drain sees
+    /// `0, 1, …`; the smoke profile's draining scenarios assert this exactly
+    /// (RFC 0007 §6). Also the count of processed flood messages.
+    seq_next: AtomicU64,
+    /// Set if a processed flood seq ever differs from the expected next seq —
+    /// a drop, duplicate, reorder, or lost tail (RFC 0007 §6).
+    seq_broken: AtomicBool,
+    /// The `blocked` producer-gauge value observed at the instant `update`
+    /// requested the quit, captured by [`QuitDeliverySubscriber`] from the
+    /// live gauge; the bounded quit scenarios' valid-trial predicate reads it
+    /// (RFC 0007 §5.2).
+    blocked_at_quit: AtomicU64,
+    /// Count of shared-channel capacity-wait events in the 5ms preceding the
+    /// quit request — `quit_overload`'s churn predicate (RFC 0007 §5.2).
+    capacity_waits_before_quit: AtomicU64,
+    /// The most recent `blocked` producer-gauge value, updated live by
+    /// [`QuitDeliverySubscriber`] from each `tears::runtime::load` gauge event.
+    blocked_live: AtomicU64,
+    /// The most recent sum of all four producer gauges
+    /// (`subscriptions + unkeyed_commands + keyed_commands + blocked`). Reaches
+    /// 0 only when this trial's runtime has fully torn its producers down; the
+    /// trial-boundary quiescence gate waits on it so a late gauge/capacity event
+    /// cannot leak into the next trial's slot (see [`run_quit_trial`]).
+    live_producers: AtomicU64,
+    /// Nanoseconds from `start` of each shared-channel capacity-wait event,
+    /// logged live by [`QuitDeliverySubscriber`]; the churn predicate counts
+    /// those inside its window.
+    capacity_wait_shared_ns: Mutex<Vec<u64>>,
 }
 
 impl Metrics {
@@ -402,6 +694,13 @@ impl Metrics {
             quit_requested_ns: AtomicU64::new(0),
             depth_at_quit: AtomicU64::new(0),
             quit_delivered_ns: AtomicU64::new(0),
+            seq_next: AtomicU64::new(0),
+            seq_broken: AtomicBool::new(false),
+            blocked_at_quit: AtomicU64::new(0),
+            capacity_waits_before_quit: AtomicU64::new(0),
+            blocked_live: AtomicU64::new(0),
+            live_producers: AtomicU64::new(0),
+            capacity_wait_shared_ns: Mutex::new(Vec::new()),
         }
     }
 
@@ -439,11 +738,15 @@ enum Msg {
 struct FloodSource {
     cfg: ScenarioCfg,
     metrics: Arc<Metrics>,
+    /// Distinct per producer so several flood subscriptions coexist (the
+    /// subscription manager dedupes by key). Seqs stay globally ordered via the
+    /// shared `produced` counter regardless of producer count.
+    index: u32,
 }
 
 impl SubscriptionSource for FloodSource {
     type Output = Msg;
-    type Key = &'static str;
+    type Key = u32;
 
     fn stream(&self) -> BoxStream<'static, Msg> {
         let metrics = Arc::clone(&self.metrics);
@@ -481,7 +784,7 @@ impl SubscriptionSource for FloodSource {
     }
 
     fn key(&self) -> Self::Key {
-        "flood"
+        self.index
     }
 }
 
@@ -536,6 +839,13 @@ impl Application for LoadApp {
                 self.metrics
                     .processed
                     .store(self.processed, Ordering::Relaxed);
+                // Seq-integrity: a single flood producer feeds the shared FIFO
+                // in seq order, so a lossless in-order drain sees 0, 1, …. Any
+                // mismatch is a drop/duplicate/reorder/lost-tail (RFC 0007 §6).
+                let expected = self.metrics.seq_next.fetch_add(1, Ordering::Relaxed);
+                if seq != expected {
+                    self.metrics.seq_broken.store(true, Ordering::Relaxed);
+                }
                 spin(self.cfg.update_cost);
                 if seq % self.sample_every == 0 {
                     Metrics::push_latency(&self.metrics.update_lat_ns, sent_at);
@@ -549,6 +859,17 @@ impl Application for LoadApp {
                     self.metrics
                         .depth_at_quit
                         .store(self.metrics.queue_depth(), Ordering::Relaxed);
+                    // Snapshot the predicate input and the latency reference in
+                    // O(1), as the last thing before returning the quit, so both
+                    // reflect the actual quit instant (RFC 0007 §5.2): the live
+                    // `blocked` gauge, then `quit_requested_ns` last. The churn
+                    // predicate's window count is computed post-run from the
+                    // logged capacity-wait timestamps, off this hot path, so no
+                    // history scan sits between the reference reads and the send.
+                    self.metrics.blocked_at_quit.store(
+                        self.metrics.blocked_live.load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
                     self.metrics
                         .quit_requested_ns
                         .store(self.metrics.elapsed_ns(), Ordering::Relaxed);
@@ -586,10 +907,15 @@ impl Application for LoadApp {
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
-        vec![Subscription::new(FloodSource {
-            cfg: self.cfg.clone(),
-            metrics: Arc::clone(&self.metrics),
-        })]
+        (0..self.cfg.producers)
+            .map(|index| {
+                Subscription::new(FloodSource {
+                    cfg: self.cfg.clone(),
+                    metrics: Arc::clone(&self.metrics),
+                    index,
+                })
+            })
+            .collect()
     }
 }
 
@@ -618,6 +944,9 @@ struct Report {
     render_lat_ns: Vec<u64>,
     keyed_lat_ns: Vec<u64>,
     peak_rss_delta: Option<u64>,
+    /// A processed flood seq differed from the expected contiguous run — a
+    /// drop/duplicate/reorder/lost-tail (RFC 0007 §6 smoke seq-integrity).
+    seq_broken: bool,
 }
 
 async fn run_scenario(cfg: ScenarioCfg) -> Report {
@@ -640,9 +969,7 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
         })
     };
 
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero fps"))
-        .expect("60 FPS is a valid frame rate");
-    let runtime = Runtime::<LoadApp>::new((cfg.clone(), Arc::clone(&metrics)), frame_rate);
+    let runtime = cfg.mode.build_runtime((cfg.clone(), Arc::clone(&metrics)));
     let mut terminal =
         Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
 
@@ -686,6 +1013,7 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
             (Some(before), Some(after)) => Some(after.saturating_sub(before)),
             _ => None,
         },
+        seq_broken: metrics.seq_broken.load(Ordering::Relaxed),
         cfg,
     }
 }
@@ -700,28 +1028,52 @@ struct QuitTrialSample {
 }
 
 enum QuitTrialFailure {
+    /// Quit-contract failure: the run timed out. Fails the row outright, never
+    /// retried (RFC 0007 §5.2).
     TimedOut,
-    /// The runtime never emitted its quit-delivery tracing event; see
-    /// [`QuitDeliverySubscriber`].
+    /// Quit-contract failure: the runtime never emitted its quit-delivery
+    /// tracing event (see [`QuitDeliverySubscriber`]). Fails the row outright.
     NoDeliveryEvent,
+    /// Predicate miss: the quit was delivered, but the valid-trial predicate did
+    /// not hold at the quit instant. The *only* retryable outcome (RFC 0007
+    /// §5.2).
+    PredicateMiss,
 }
 
 struct QuitReport {
     cfg: ScenarioCfg,
+    /// Required valid trials (the row's configured count).
     trials: u32,
+    /// Total attempts made (valid trials + predicate misses + the failing one).
+    attempts: u32,
     timeouts: u32,
     missing_delivery: u32,
-    /// Sorted per-trial values.
+    predicate_misses: u32,
+    /// The attempt cap was reached before enough valid trials were collected.
+    cap_exhausted: bool,
+    /// Sorted per-trial values (valid trials only).
     depths: Vec<u64>,
     to_delivered_ns: Vec<u64>,
     to_exit_ns: Vec<u64>,
 }
 
-async fn run_quit_trial(cfg: ScenarioCfg) -> Result<QuitTrialSample, QuitTrialFailure> {
+impl QuitReport {
+    /// The row failed: a quit-contract failure, attempt-cap exhaustion, or an
+    /// incomplete sample. Feeds the harness's non-zero exit (RFC 0007 §5.2/§6).
+    const fn failed(&self) -> bool {
+        self.timeouts > 0
+            || self.missing_delivery > 0
+            || self.cap_exhausted
+            || (self.depths.len() as u32) < self.trials
+    }
+}
+
+async fn run_quit_trial(
+    cfg: ScenarioCfg,
+    valid_trial: ValidTrial,
+) -> Result<QuitTrialSample, QuitTrialFailure> {
     let metrics = Arc::new(Metrics::new());
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero fps"))
-        .expect("60 FPS is a valid frame rate");
-    let runtime = Runtime::<LoadApp>::new((cfg.clone(), Arc::clone(&metrics)), frame_rate);
+    let runtime = cfg.mode.build_runtime((cfg.clone(), Arc::clone(&metrics)));
     let mut terminal =
         Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
 
@@ -730,6 +1082,21 @@ async fn run_quit_trial(cfg: ScenarioCfg) -> Result<QuitTrialSample, QuitTrialFa
         .await
         .is_err();
     let exit_ns = metrics.elapsed_ns();
+
+    // Trial-boundary quiescence: `Runtime::run` returning (or being dropped on
+    // timeout) does not join the aborted producer tasks, so a late gauge or
+    // capacity-wait event could still fire on a worker thread. Keep the shared
+    // slot pointed at this trial and wait until its producers have fully torn
+    // down — the gauge sum returns to 0, which is terminal once no producer
+    // remains — before releasing the slot, so no straggler event lands in the
+    // next trial's metrics and skews its predicate (RFC 0007 §5.2). Bounded by
+    // the same wall guard so a stuck teardown cannot hang the trial.
+    let _ = timeout(cfg.max_wall, async {
+        while metrics.live_producers.load(Ordering::Relaxed) != 0 {
+            yield_now().await;
+        }
+    })
+    .await;
     *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = None;
 
     if timed_out {
@@ -740,6 +1107,28 @@ async fn run_quit_trial(cfg: ScenarioCfg) -> Result<QuitTrialSample, QuitTrialFa
     if quit_ns == 0 || delivered_ns == 0 {
         return Err(QuitTrialFailure::NoDeliveryEvent);
     }
+    // Churn predicate: count shared capacity-wait events in the 5ms preceding
+    // the quit, from the logged timestamps. Computed here, off `update`'s hot
+    // path, so no history scan sits between the quit-instant snapshot and the
+    // quit send (RFC 0007 §5.2).
+    let window_start = quit_ns.saturating_sub(5_000_000);
+    let churn = metrics
+        .capacity_wait_shared_ns
+        .lock()
+        .expect("capacity-wait log poisoned")
+        .iter()
+        .filter(|&&at| at >= window_start && at <= quit_ns)
+        .count();
+    metrics
+        .capacity_waits_before_quit
+        .store(u64::try_from(churn).unwrap_or(u64::MAX), Ordering::Relaxed);
+
+    // Predicate checked at the quit instant, from the values `update` snapshot
+    // when it requested the quit plus the churn count just computed (RFC 0007
+    // §5.2).
+    if !valid_trial.holds(&metrics) {
+        return Err(QuitTrialFailure::PredicateMiss);
+    }
     Ok(QuitTrialSample {
         depth: metrics.depth_at_quit.load(Ordering::Relaxed),
         to_delivered_ns: delivered_ns.saturating_sub(quit_ns),
@@ -748,21 +1137,46 @@ async fn run_quit_trial(cfg: ScenarioCfg) -> Result<QuitTrialSample, QuitTrialFa
 }
 
 async fn run_quit_scenario(scenario: &QuitScenarioCfg) -> QuitReport {
+    // Only predicate misses are retried; a quit-contract failure fails the row
+    // immediately, and the attempt cap (10 × trials) bounds retries so a rarely
+    // held predicate terminates instead of looping forever (RFC 0007 §5.2). The
+    // `Always` predicate never misses, so it needs no cap.
+    let attempt_cap = match scenario.valid_trial {
+        ValidTrial::Always => u32::MAX,
+        _ => scenario.trials.saturating_mul(10),
+    };
+
+    let mut attempts = 0u32;
     let mut timeouts = 0;
     let mut missing_delivery = 0;
+    let mut predicate_misses = 0;
+    let mut cap_exhausted = false;
     let mut depths = Vec::new();
     let mut to_delivered_ns = Vec::new();
     let mut to_exit_ns = Vec::new();
 
-    for _ in 0..scenario.trials {
-        match run_quit_trial(scenario.base.clone()).await {
+    while (depths.len() as u32) < scenario.trials {
+        if attempts >= attempt_cap {
+            cap_exhausted = true;
+            break;
+        }
+        attempts += 1;
+        match run_quit_trial(scenario.base.clone(), scenario.valid_trial).await {
             Ok(sample) => {
                 depths.push(sample.depth);
                 to_delivered_ns.push(sample.to_delivered_ns);
                 to_exit_ns.push(sample.to_exit_ns);
             }
-            Err(QuitTrialFailure::TimedOut) => timeouts += 1,
-            Err(QuitTrialFailure::NoDeliveryEvent) => missing_delivery += 1,
+            Err(QuitTrialFailure::PredicateMiss) => predicate_misses += 1,
+            // Quit-contract failures fail the row outright — never retried.
+            Err(QuitTrialFailure::TimedOut) => {
+                timeouts += 1;
+                break;
+            }
+            Err(QuitTrialFailure::NoDeliveryEvent) => {
+                missing_delivery += 1;
+                break;
+            }
         }
     }
 
@@ -773,8 +1187,11 @@ async fn run_quit_scenario(scenario: &QuitScenarioCfg) -> QuitReport {
     QuitReport {
         cfg: scenario.base.clone(),
         trials: scenario.trials,
+        attempts,
         timeouts,
         missing_delivery,
+        predicate_misses,
+        cap_exhausted,
         depths,
         to_delivered_ns,
         to_exit_ns,
@@ -797,10 +1214,19 @@ fn print_quit_report(report: &QuitReport) {
         cfg.keyed_quit,
     );
     println!(
-        "   trials: {} ok, {} timed out, {} missing delivery event",
-        report.trials - report.timeouts - report.missing_delivery,
+        "   trials: {} valid / {} required ({} attempts, {} predicate misses, \
+         {} timed out, {} missing delivery){}",
+        report.depths.len(),
+        report.trials,
+        report.attempts,
+        report.predicate_misses,
         report.timeouts,
         report.missing_delivery,
+        if report.cap_exhausted {
+            ", ATTEMPT-CAP EXHAUSTED"
+        } else {
+            ""
+        },
     );
     if report.depths.is_empty() {
         return;
@@ -920,13 +1346,154 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+/// The RFC 0007 §6 smoke profile's draining scenarios: `steady_20k` under the
+/// default configuration, shortened to ~0.5s of load, and a 20k-message bounded
+/// burst under the §5.1 configuration.
+fn smoke_load_scenarios() -> Vec<ScenarioCfg> {
+    vec![
+        ScenarioCfg {
+            name: "steady_20k",
+            rate: 20_000,
+            total: 10_000,
+            update_cost: Duration::from_micros(2),
+            render_cost: Duration::from_micros(500),
+            keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
+            producers: 1,
+            mode: Mode::Default,
+            max_wall: Duration::from_secs(30),
+        },
+        ScenarioCfg {
+            name: "burst_20k_bounded",
+            rate: BURST,
+            total: 20_000,
+            update_cost: Duration::from_micros(2),
+            render_cost: Duration::from_micros(500),
+            keyed_probe: false,
+            quit_at_seq: None,
+            keyed_quit: false,
+            producers: 1,
+            mode: Mode::Bounded,
+            max_wall: Duration::from_secs(30),
+        },
+    ]
+}
+
+/// The RFC 0007 §6 smoke profile's quit scenarios: `quit_idle` and
+/// `quit_blocked_1` at 5 valid trials each (the attempt cap scales to 50).
+fn smoke_quit_scenarios() -> Vec<QuitScenarioCfg> {
+    vec![
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_idle",
+                rate: BURST,
+                total: 1,
+                update_cost: Duration::from_micros(25),
+                render_cost: Duration::from_micros(500),
+                keyed_probe: false,
+                quit_at_seq: Some(0),
+                keyed_quit: false,
+                producers: 1,
+                mode: Mode::Bounded,
+                max_wall: Duration::from_secs(30),
+            },
+            trials: 5,
+            valid_trial: ValidTrial::Always,
+        },
+        QuitScenarioCfg {
+            base: ScenarioCfg {
+                name: "quit_blocked_1",
+                rate: BURST,
+                total: 500_000,
+                update_cost: Duration::from_micros(25),
+                render_cost: Duration::from_micros(500),
+                keyed_probe: false,
+                quit_at_seq: Some(5_000),
+                keyed_quit: false,
+                producers: 1,
+                mode: Mode::Bounded,
+                max_wall: Duration::from_secs(30),
+            },
+            trials: 5,
+            valid_trial: ValidTrial::BlockedEq(1),
+        },
+    ]
+}
+
+/// Runs the smoke profile (RFC 0007 §6); returns whether it passed. Draining
+/// scenarios must complete with their exact scripted sequence `0..total`; quit
+/// scenarios must complete their required valid trials within the attempt cap.
+/// No latency is asserted.
+fn run_smoke(runtime: &TokioRuntime) -> bool {
+    println!("# tears runtime load harness — smoke profile\n");
+    let mut ok = true;
+
+    for cfg in smoke_load_scenarios() {
+        let report = runtime.block_on(run_scenario(cfg));
+        print_report(&report);
+        if report.timed_out {
+            eprintln!("smoke: draining scenario `{}` timed out", report.cfg.name);
+            ok = false;
+        }
+        // Seq-integrity: every scripted `Msg::Load` seq in `0..total`, once and
+        // in order — refutes any drop, duplicate, reorder, or lost tail. A
+        // total-only check would pass a drop-plus-duplicate (RFC 0007 §6).
+        if report.seq_broken || report.processed != report.cfg.total {
+            eprintln!(
+                "smoke: draining scenario `{}` did not deliver the exact sequence \
+                 0..{} (processed={}, seq_broken={})",
+                report.cfg.name, report.cfg.total, report.processed, report.seq_broken,
+            );
+            ok = false;
+        }
+    }
+
+    for scenario in smoke_quit_scenarios() {
+        let report = runtime.block_on(run_quit_scenario(&scenario));
+        print_quit_report(&report);
+        // Quit scenarios assert completion only: at the harness's observation
+        // point a legal shutdown discard is indistinguishable from an illegal
+        // drop, so no seq-integrity gate here (RFC 0007 §6).
+        if report.failed() {
+            eprintln!("smoke: quit scenario `{}` failed", report.cfg.name);
+            ok = false;
+        }
+    }
+
+    ok
+}
+
 fn main() -> ExitCode {
-    // Positional arguments select scenarios by name; flags (e.g. the
-    // `--bench` cargo passes) are ignored.
-    let selected: Vec<String> = env::args()
-        .skip(1)
+    // `--smoke` runs the reduced CI profile; otherwise positional arguments
+    // select full scenarios by name (other flags, e.g. cargo's `--bench`, are
+    // ignored).
+    let args: Vec<String> = env::args().skip(1).collect();
+    let smoke = args.iter().any(|arg| arg == "--smoke");
+    let selected: Vec<String> = args
+        .into_iter()
         .filter(|arg| !arg.starts_with('-'))
         .collect();
+
+    // Quit trials read delivery instants and the `blocked` gauge from the
+    // runtime's tracing events; installed unconditionally because its filter
+    // rejects everything but rare debug events on the runtime targets.
+    set_global_default(QuitDeliverySubscriber)
+        .expect("no other global tracing subscriber is installed");
+
+    let runtime = Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    if smoke {
+        return if run_smoke(&runtime) {
+            ExitCode::SUCCESS
+        } else {
+            eprintln!("error: smoke profile failed");
+            ExitCode::FAILURE
+        };
+    }
 
     let matches = |name: &str| selected.is_empty() || selected.iter().any(|s| s == name);
     let load_to_run: Vec<ScenarioCfg> = scenarios()
@@ -951,35 +1518,23 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Quit trials read delivery instants from the runtime's tracing events;
-    // installed unconditionally because its filter rejects everything but
-    // rare debug events on the `tears::runtime` target.
-    set_global_default(QuitDeliverySubscriber)
-        .expect("no other global tracing subscriber is installed");
-
-    let runtime = Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-
     println!("# tears runtime load harness\n");
     for cfg in load_to_run {
         let report = runtime.block_on(run_scenario(cfg));
         print_report(&report);
     }
-    let mut failed_trials = 0u32;
+    let mut any_failed = false;
     for scenario in quit_to_run {
         let report = runtime.block_on(run_quit_scenario(&scenario));
+        let failed = report.failed();
         print_quit_report(&report);
-        failed_trials += report.timeouts + report.missing_delivery;
+        any_failed |= failed;
     }
-    // Quit-trial statistics feed RFC 0006 acceptance criteria, so a partial
-    // sample must fail the run (and the CI Benchmarks check) instead of
-    // silently reporting percentiles over fewer trials than configured.
-    if failed_trials > 0 {
-        eprintln!(
-            "error: {failed_trials} quit trial(s) failed (timed out or missing delivery event)"
-        );
+    // Quit-trial statistics feed RFC 0006 acceptance criteria, so a row that
+    // failed its contract, exhausted its attempt cap, or collected a partial
+    // sample must fail the run (and the CI Benchmarks check).
+    if any_failed {
+        eprintln!("error: one or more quit scenarios failed");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
