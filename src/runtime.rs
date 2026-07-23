@@ -92,6 +92,10 @@ use tokio::time::{Duration, Instant};
 use crate::{application::Application, command::Command};
 
 mod app_input;
+// `pub` for the same reason as `frame_rate` below: `runtime` is already
+// `pub(crate)`, so `pub` only lets `lib.rs` re-export `RuntimeConfig` at the
+// crate root; it does not widen effective reachability.
+pub mod config;
 mod core;
 // `FrameRate` is a scheduling input, so it lives with the runtime. `pub`
 // (not `pub(crate)`) because `runtime` itself is already `pub(crate)`,
@@ -103,6 +107,7 @@ mod keyed_commands;
 mod pending_work;
 
 use app_input::AppInput;
+use config::RuntimeConfig;
 use frame_rate::FrameRate;
 use frame_scheduler::FrameScheduler;
 use keyed_commands::{CommandOutput, ReceiverEvent};
@@ -194,12 +199,59 @@ impl<App: Application> Runtime<App> {
     /// ```
     #[must_use]
     pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self {
-        let core = RuntimeCore::new(flags);
+        // Literal delegation to `with_config` (RFC 0007 INV-C1): exactly one
+        // construction path exists, and the load-control-unset configuration
+        // selects RFC 0006's unchanged unbounded path within it.
+        Self::with_config(flags, RuntimeConfig::new(frame_rate))
+    }
 
-        Self {
-            core,
-            scheduler: FrameScheduler::new(frame_rate),
-        }
+    /// Creates a new runtime from a [`RuntimeConfig`], which carries the frame
+    /// rate together with the opt-in load controls (RFC 0006).
+    ///
+    /// [`new`](Self::new) is equivalent to `with_config(flags,
+    /// RuntimeConfig::new(frame_rate))`: a default (load-control-unset)
+    /// configuration reproduces the unbounded delivery mode exactly. Use
+    /// `with_config` to opt into bounded delivery by setting one or more of the
+    /// [`RuntimeConfig`] capacities.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Configuration data passed to [`Application::new`]
+    /// * `config` - Frame rate and opt-in load controls
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use std::num::{NonZeroU32, NonZeroUsize};
+    /// # use tears::{FrameRate, Runtime, RuntimeConfig};
+    /// # use tears::prelude::*;
+    /// # use ratatui::Frame;
+    /// #
+    /// # struct MyApp;
+    /// # enum Message {}
+    /// # impl Application for MyApp {
+    /// #     type Message = Message;
+    /// #     type Flags = ();
+    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn update(&mut self, _: Message) -> Command<Message> { Command::none() }
+    /// #     fn view(&self, _: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// # }
+    /// let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))
+    ///     .expect("valid frame rate");
+    /// let config = RuntimeConfig::new(frame_rate)
+    ///     .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
+    ///     .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"));
+    /// let runtime = Runtime::<MyApp>::with_config((), config);
+    /// ```
+    #[must_use]
+    pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self {
+        let core = RuntimeCore::new(flags);
+        // INV-C5: the scheduler is paced by the frame rate the caller supplied
+        // to `RuntimeConfig::new`, never a hardcoded one.
+        let scheduler = FrameScheduler::new(config.frame_rate);
+
+        Self { core, scheduler }
     }
 
     #[cfg(test)]
@@ -531,6 +583,39 @@ mod tests {
         assert!(
             period >= Duration::from_micros(6_900) && period <= Duration::from_micros(6_950),
             "144 FPS period should be ~6.944ms, got {period:?}",
+        );
+    }
+
+    // INV-C5: `with_config` builds the frame scheduler from `config.frame_rate`
+    // — the value the caller supplied to `RuntimeConfig::new` — never a
+    // hardcoded one. A direct, deterministic value comparison (no elapsed-time
+    // observation) that fails an implementation which ignores `config.frame_rate`
+    // in exactly the way INV-C1/INV-C2 cannot.
+    #[tokio::test]
+    async fn test_with_config_scheduler_uses_config_frame_rate() {
+        for rate in [30, 144] {
+            let config = RuntimeConfig::new(frame_rate(rate));
+            let runtime = Runtime::<TestApp>::with_config(0, config);
+            assert_eq!(
+                runtime.scheduler.frame_period(),
+                frame_rate(rate).frame_duration(),
+                "with_config at {rate} FPS must pace the scheduler at that rate",
+            );
+        }
+    }
+
+    // INV-C1: `Runtime::new` is a literal delegation to `with_config` with a
+    // load-control-unset configuration, so the two construct an equivalently
+    // paced runtime. The behavioral witness of the single construction path.
+    #[tokio::test]
+    async fn test_new_delegates_to_with_config() {
+        let via_new = Runtime::<TestApp>::new(0, frame_rate(60));
+        let via_config = Runtime::<TestApp>::with_config(0, RuntimeConfig::new(frame_rate(60)));
+
+        assert_eq!(
+            via_new.scheduler.frame_period(),
+            via_config.scheduler.frame_period(),
+            "new(flags, fr) must construct the same runtime as with_config(flags, RuntimeConfig::new(fr))",
         );
     }
 
