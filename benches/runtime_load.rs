@@ -82,7 +82,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::{env, hint, mem};
+use std::{env, hint, iter, mem};
 
 use futures::stream::{self, StreamExt};
 use ratatui::Terminal;
@@ -1464,6 +1464,228 @@ fn run_smoke(runtime: &TokioRuntime) -> bool {
     ok
 }
 
+// ---- keyed_isolation scenario (RFC 0007 §5.3, INV-L9) ----------------------
+//
+// Eight keyed channels are saturated (each holding `keyed_channel_capacity`
+// messages with its next send pending) alongside a ninth probe key, all under
+// the §5.1 bounded configuration. A shared flood keeps the shared channel full
+// so the event loop stays shared-first and never drains the keyed channels, so
+// they hold saturated. The probe key admitting its full capacity while eight
+// others (128 messages) are held proves per-channel admission with no shared
+// pool — a behavioral regression check on INV-L9's structural pool-absence
+// proof. Delivery is excluded (the keyed `StreamMap` cannot drain a chosen key
+// selectively; no keyed-delivery bound exists, RFC 0006 §4.7). Compiled into
+// the harness but not part of the smoke profile (RFC 0007 §5.3).
+//
+// The shared-side probe RFC 0007 §5.3 also names — the shared producer's first
+// `app_channel_capacity` sends completing with only the next pending — is read
+// from the max sampled shared occupancy, `produced - processed`: since the one
+// shared flood producer's attempted sends are `produced` and `update`'s drains
+// are `processed`, this quantity is (in-channel + the one blocked send), so its
+// peak of `app_channel_capacity + 1` shows the shared channel admitted its full
+// `app_channel_capacity` with exactly the next send pending — independent of the
+// saturated keyed channels.
+
+/// Saturated keyed channels plus the probe (8 + 1).
+const ISO_KEYS: usize = 9;
+
+struct IsoMetrics {
+    /// Yields of each keyed command's stream; a saturated key reads
+    /// `keyed_channel_capacity + 1` (capacity admitted, the next send blocked).
+    /// Each is its own `Arc` so a `'static` keyed stream can own a clone.
+    key_yields: Vec<Arc<AtomicU64>>,
+    shared_produced: AtomicU64,
+    shared_processed: AtomicU64,
+    /// Max sampled shared occupancy (`produced - processed`) — the shared-side
+    /// isolation signal.
+    max_shared_depth: AtomicU64,
+}
+
+impl IsoMetrics {
+    fn new() -> Self {
+        Self {
+            key_yields: (0..ISO_KEYS).map(|_| Arc::new(AtomicU64::new(0))).collect(),
+            shared_produced: AtomicU64::new(0),
+            shared_processed: AtomicU64::new(0),
+            max_shared_depth: AtomicU64::new(0),
+        }
+    }
+
+    fn shared_depth(&self) -> u64 {
+        self.shared_produced
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.shared_processed.load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone)]
+enum IsoMsg {
+    Flood(u64),
+}
+
+/// Infinite shared flood keeping the shared channel saturated.
+struct IsoFloodSource {
+    iso: Arc<IsoMetrics>,
+}
+
+impl SubscriptionSource for IsoFloodSource {
+    type Output = IsoMsg;
+    type Key = u32;
+
+    fn stream(&self) -> BoxStream<'static, IsoMsg> {
+        let iso = Arc::clone(&self.iso);
+        stream::repeat(())
+            .map(move |()| IsoMsg::Flood(iso.shared_produced.fetch_add(1, Ordering::Relaxed)))
+            .boxed()
+    }
+
+    fn key(&self) -> Self::Key {
+        0
+    }
+}
+
+/// Infinite keyed-command stream: increments its yield counter per item, so its
+/// channel fills to capacity and the next send blocks (the counter then reads
+/// `capacity + 1`).
+fn iso_keyed_stream(
+    counter: Arc<AtomicU64>,
+) -> impl futures::Stream<Item = IsoMsg> + Send + 'static {
+    stream::repeat(()).map(move |()| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        IsoMsg::Flood(0)
+    })
+}
+
+struct KeyedIsolationApp {
+    iso: Arc<IsoMetrics>,
+    keyed_cap: u64,
+}
+
+impl Application for KeyedIsolationApp {
+    type Message = IsoMsg;
+    type Flags = (Arc<IsoMetrics>, u64);
+
+    fn new((iso, keyed_cap): Self::Flags) -> (Self, Command<IsoMsg>) {
+        (Self { iso, keyed_cap }, Command::none())
+    }
+
+    fn update(&mut self, msg: IsoMsg) -> Command<IsoMsg> {
+        let IsoMsg::Flood(seq) = msg;
+        // Keep the shared channel full so the event loop stays shared-first and
+        // never drains the keyed channels; they must hold saturated.
+        spin(Duration::from_micros(10));
+        self.iso.shared_processed.fetch_add(1, Ordering::Relaxed);
+        // Sample the shared occupancy peak here, on every shared message, so it
+        // is captured deterministically even if saturation completes between two
+        // external sampler ticks.
+        self.iso
+            .max_shared_depth
+            .fetch_max(self.iso.shared_depth(), Ordering::Relaxed);
+
+        let index = usize::try_from(seq).unwrap_or(usize::MAX);
+        if index < ISO_KEYS {
+            // Spawn keyed command `index` on its own key.
+            let counter = Arc::clone(&self.iso.key_yields[index]);
+            return Command::stream(iso_keyed_stream(counter)).cancellable(CommandId::new(seq));
+        }
+        // Every key spawned: quit once all keyed channels are saturated
+        // (yields reached capacity + 1 — capacity admitted, the next send
+        // blocked). A shared pool would keep some key below capacity, so
+        // saturation would never complete and the scenario would time out.
+        let saturated = self
+            .iso
+            .key_yields
+            .iter()
+            .all(|counter| counter.load(Ordering::Relaxed) > self.keyed_cap);
+        if saturated {
+            Command::quit()
+        } else {
+            Command::none()
+        }
+    }
+
+    fn view(&self, _frame: &mut ratatui::Frame<'_>) {}
+
+    fn subscriptions(&self) -> Vec<Subscription<IsoMsg>> {
+        vec![Subscription::new(IsoFloodSource {
+            iso: Arc::clone(&self.iso),
+        })]
+    }
+}
+
+struct IsoReport {
+    keyed_cap: u64,
+    app_cap: u64,
+    timed_out: bool,
+    /// Admitted per key (`capacity` when saturated).
+    admitted: Vec<u64>,
+    max_shared_depth: u64,
+}
+
+impl IsoReport {
+    /// Isolation held: every keyed channel admitted its full capacity and the
+    /// shared channel reached its own full occupancy — so no shared pool starved
+    /// any keyed key or the shared channel — and the scenario did not time out.
+    fn isolated(&self) -> bool {
+        !self.timed_out
+            && self.admitted.iter().all(|&a| a == self.keyed_cap)
+            && self.max_shared_depth >= self.app_cap
+    }
+}
+
+async fn run_keyed_isolation() -> IsoReport {
+    let keyed_cap: u64 = 16; // RFC 0007 §5.1 keyed_channel_capacity
+    let iso = Arc::new(IsoMetrics::new());
+    let runtime =
+        Runtime::<KeyedIsolationApp>::with_config((Arc::clone(&iso), keyed_cap), bounded_config());
+    let mut terminal =
+        Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
+
+    let timed_out = timeout(Duration::from_secs(10), runtime.run(&mut terminal))
+        .await
+        .is_err();
+
+    let admitted = iso
+        .key_yields
+        .iter()
+        .map(|counter| counter.load(Ordering::Relaxed).min(keyed_cap))
+        .collect();
+    IsoReport {
+        keyed_cap,
+        app_cap: 1024, // RFC 0007 §5.1 app_channel_capacity
+        timed_out,
+        admitted,
+        max_shared_depth: iso.max_shared_depth.load(Ordering::Relaxed),
+    }
+}
+
+fn print_iso_report(report: &IsoReport) {
+    println!("## keyed_isolation");
+    println!(
+        "   {} keyed channels, capacity {}",
+        report.admitted.len(),
+        report.keyed_cap,
+    );
+    println!(
+        "   status: {}",
+        if report.timed_out {
+            "TIMED OUT — channels never all saturated (possible shared pool)"
+        } else {
+            "ok"
+        },
+    );
+    println!("   per-key admitted: {:?}", report.admitted);
+    println!(
+        "   isolation: every key admitted its full capacity = {}",
+        report.isolated(),
+    );
+    println!(
+        "   max shared depth: {} (shared-side signal; ~app_channel_capacity)",
+        report.max_shared_depth,
+    );
+    println!();
+}
+
 fn main() -> ExitCode {
     // `--smoke` runs the reduced CI profile; otherwise positional arguments
     // select full scenarios by name (other flags, e.g. cargo's `--bench`, are
@@ -1504,7 +1726,8 @@ fn main() -> ExitCode {
         .into_iter()
         .filter(|scenario| matches(scenario.base.name))
         .collect();
-    if load_to_run.is_empty() && quit_to_run.is_empty() {
+    let run_iso = matches("keyed_isolation");
+    if load_to_run.is_empty() && quit_to_run.is_empty() && !run_iso {
         let names: Vec<&str> = scenarios()
             .into_iter()
             .map(|cfg| cfg.name)
@@ -1513,6 +1736,7 @@ fn main() -> ExitCode {
                     .into_iter()
                     .map(|scenario| scenario.base.name),
             )
+            .chain(iter::once("keyed_isolation"))
             .collect();
         println!("no matching scenario; available: {}", names.join(", "));
         return ExitCode::FAILURE;
@@ -1530,11 +1754,18 @@ fn main() -> ExitCode {
         print_quit_report(&report);
         any_failed |= failed;
     }
-    // Quit-trial statistics feed RFC 0006 acceptance criteria, so a row that
-    // failed its contract, exhausted its attempt cap, or collected a partial
-    // sample must fail the run (and the CI Benchmarks check).
+    if run_iso {
+        let report = runtime.block_on(run_keyed_isolation());
+        let failed = !report.isolated();
+        print_iso_report(&report);
+        any_failed |= failed;
+    }
+    // Quit-trial statistics and the keyed_isolation regression check feed RFC
+    // 0006/0007 acceptance criteria, so a row that failed its contract,
+    // exhausted its attempt cap, collected a partial sample, or lost isolation
+    // must fail the run (and the CI Benchmarks check).
     if any_failed {
-        eprintln!("error: one or more quit scenarios failed");
+        eprintln!("error: one or more scenarios failed");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
