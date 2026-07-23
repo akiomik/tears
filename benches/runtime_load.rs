@@ -500,6 +500,34 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
 /// ignored. Trials run sequentially, so a single slot suffices.
 static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
 
+/// The most recent producer-gauge sum
+/// (`subscriptions + unkeyed_commands + keyed_commands + blocked`), updated by
+/// [`QuitDeliverySubscriber`] on every gauge event regardless of the trial
+/// slot. Reaches 0 only when the *current* runtime has fully torn its producers
+/// down; scenarios run one runtime at a time, so [`await_quiescence`] can wait
+/// on it as a common teardown barrier before the next runtime starts, keeping a
+/// late gauge/capacity event from one scenario out of the next scenario's slot.
+static LIVE_PRODUCERS: AtomicU64 = AtomicU64::new(0);
+
+/// Waits until the current runtime's producers have fully torn down (the gauge
+/// sum returns to 0) before the caller starts the next runtime — the teardown
+/// barrier shared by every runtime scenario. A teardown that never quiesces is
+/// a harness fault: this aborts the whole run rather than proceeding on a slot
+/// a straggler event could still corrupt.
+async fn await_quiescence() {
+    let quiesced = timeout(Duration::from_secs(5), async {
+        while LIVE_PRODUCERS.load(Ordering::Relaxed) != 0 {
+            yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        quiesced.is_ok(),
+        "harness fault: a scenario's producers did not quiesce within 5s; \
+         refusing to reuse the trial slot with a teardown still in flight",
+    );
+}
+
 /// Records the instant the event loop's quit branch fires.
 ///
 /// The runtime logs `debug!(target: "tears::runtime", "quit signal
@@ -540,6 +568,13 @@ impl Subscriber for QuitDeliverySubscriber {
         let mut visitor = LoadVisitor::default();
         event.record(&mut visitor);
 
+        // The teardown barrier is global and slot-independent: update it on every
+        // gauge event (a gauge event always carries `blocked`), so a scenario
+        // with no active trial slot still drives its producers' quiescence.
+        if is_load && visitor.blocked.is_some() {
+            LIVE_PRODUCERS.store(visitor.gauge_sum(), Ordering::Relaxed);
+        }
+
         let Some(metrics) = TRIAL_METRICS
             .lock()
             .expect("trial metrics slot poisoned")
@@ -549,15 +584,11 @@ impl Subscriber for QuitDeliverySubscriber {
         };
 
         if is_load {
-            // Producer-gauge event: track the live `blocked` count and the sum
-            // of all four gauges (the quiescence signal). A gauge event always
-            // carries `blocked`, so its presence identifies one. Shared
-            // capacity-wait event: log its instant for the churn window.
+            // Per-trial recording (only while a slot is active): the live
+            // `blocked` count for the predicate, and shared capacity-wait instants
+            // for the churn window.
             if let Some(blocked) = visitor.blocked {
                 metrics.blocked_live.store(blocked, Ordering::Relaxed);
-                metrics
-                    .live_producers
-                    .store(visitor.gauge_sum(), Ordering::Relaxed);
             }
             if visitor.channel.as_deref() == Some("shared") {
                 metrics
@@ -667,12 +698,6 @@ struct Metrics {
     /// The most recent `blocked` producer-gauge value, updated live by
     /// [`QuitDeliverySubscriber`] from each `tears::runtime::load` gauge event.
     blocked_live: AtomicU64,
-    /// The most recent sum of all four producer gauges
-    /// (`subscriptions + unkeyed_commands + keyed_commands + blocked`). Reaches
-    /// 0 only when this trial's runtime has fully torn its producers down; the
-    /// trial-boundary quiescence gate waits on it so a late gauge/capacity event
-    /// cannot leak into the next trial's slot (see [`run_quit_trial`]).
-    live_producers: AtomicU64,
     /// Nanoseconds from `start` of each shared-channel capacity-wait event,
     /// logged live by [`QuitDeliverySubscriber`]; the churn predicate counts
     /// those inside its window.
@@ -699,7 +724,6 @@ impl Metrics {
             blocked_at_quit: AtomicU64::new(0),
             capacity_waits_before_quit: AtomicU64::new(0),
             blocked_live: AtomicU64::new(0),
-            live_producers: AtomicU64::new(0),
             capacity_wait_shared_ns: Mutex::new(Vec::new()),
         }
     }
@@ -979,6 +1003,13 @@ async fn run_scenario(cfg: ScenarioCfg) -> Report {
         .is_err();
     let wall = started.elapsed();
 
+    // Load scenarios also wait on the teardown barrier: this scenario's flood
+    // producer stays alive (its stream chains `pending()`) until shutdown aborts
+    // it, so its gauge decrements could otherwise attribute to the next
+    // scenario's trial slot (e.g. a quit trial that immediately follows in the
+    // smoke profile).
+    await_quiescence().await;
+
     stop.store(true, Ordering::Relaxed);
     let samples = sampler.await.expect("sampler task");
 
@@ -1083,21 +1114,15 @@ async fn run_quit_trial(
         .is_err();
     let exit_ns = metrics.elapsed_ns();
 
-    // Trial-boundary quiescence: `Runtime::run` returning (or being dropped on
-    // timeout) does not join the aborted producer tasks, so a late gauge or
-    // capacity-wait event could still fire on a worker thread. Keep the shared
-    // slot pointed at this trial and wait until its producers have fully torn
-    // down — the gauge sum returns to 0, which is terminal once no producer
-    // remains — before releasing the slot, so no straggler event lands in the
-    // next trial's metrics and skews its predicate (RFC 0007 §5.2). Bounded by
-    // the same wall guard so a stuck teardown cannot hang the trial.
-    let _ = timeout(cfg.max_wall, async {
-        while metrics.live_producers.load(Ordering::Relaxed) != 0 {
-            yield_now().await;
-        }
-    })
-    .await;
+    // Freeze this trial's slot, then wait on the shared teardown barrier so a
+    // late gauge/capacity event from this runtime cannot land in the next
+    // trial's slot and skew its predicate (RFC 0007 §5.2). Clearing the slot
+    // first stops late events from writing this trial's `blocked_live`/log; the
+    // barrier then confirms the producers are actually gone — and hard-fails the
+    // whole run if they are not, rather than releasing the slot to the next
+    // trial with a teardown still in flight.
     *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = None;
+    await_quiescence().await;
 
     if timed_out {
         return Err(QuitTrialFailure::TimedOut);
@@ -1466,48 +1491,73 @@ fn run_smoke(runtime: &TokioRuntime) -> bool {
 
 // ---- keyed_isolation scenario (RFC 0007 §5.3, INV-L9) ----------------------
 //
-// Eight keyed channels are saturated (each holding `keyed_channel_capacity`
-// messages with its next send pending) alongside a ninth probe key, all under
-// the §5.1 bounded configuration. A shared flood keeps the shared channel full
-// so the event loop stays shared-first and never drains the keyed channels, so
-// they hold saturated. The probe key admitting its full capacity while eight
-// others (128 messages) are held proves per-channel admission with no shared
-// pool — a behavioral regression check on INV-L9's structural pool-absence
-// proof. Delivery is excluded (the keyed `StreamMap` cannot drain a chosen key
-// selectively; no keyed-delivery bound exists, RFC 0006 §4.7). Compiled into
-// the harness but not part of the smoke profile (RFC 0007 §5.3).
+// Under the §5.1 bounded configuration, eight keyed channels are held saturated
+// (each with `keyed_channel_capacity` admitted and its next send blocked, so
+// the key's stream has yielded `capacity + 1`), and only *then* is a ninth,
+// previously idle probe key started. The probe admitting its own full capacity
+// while the eight others hold 128 messages is the keyed→keyed isolation check.
+// A shared flood keeps the shared channel full so the event loop stays
+// shared-first and never drains any keyed channel; its own admission — a peak
+// occupancy of `app_channel_capacity + 1` (the full channel plus one blocked
+// send) — is the keyed→shared side, verified while the keyed channels are held.
+// This is a behavioral regression check on INV-L9's structural pool-absence
+// proof: a shared pool sized near per-channel capacity could not admit all
+// `9 × capacity` keyed messages plus the shared channel's full capacity at once.
+// Compiled into the harness but not part of the §6 smoke profile.
 //
-// The shared-side probe RFC 0007 §5.3 also names — the shared producer's first
-// `app_channel_capacity` sends completing with only the next pending — is read
-// from the max sampled shared occupancy, `produced - processed`: since the one
-// shared flood producer's attempted sends are `produced` and `update`'s drains
-// are `processed`, this quantity is (in-channel + the one blocked send), so its
-// peak of `app_channel_capacity + 1` shows the shared channel admitted its full
-// `app_channel_capacity` with exactly the next send pending — independent of the
-// saturated keyed channels.
+// Delivery is excluded and gated at zero: the keyed `StreamMap` cannot drain a
+// chosen key selectively (no keyed-delivery bound exists, RFC 0006 §4.7), so a
+// drained keyed message would inflate a key's yield count past `capacity + 1`
+// and read as spurious extra admission — the run asserts no keyed message ever
+// reaches `update` and that every raw yield is exactly `capacity + 1`.
+//
+// One deviation from RFC 0007 §5.3's letter, noted for reconciliation: its
+// shared probe is worded as a producer started *after* the keyed saturation,
+// admitting its first `app_channel_capacity` sends into an empty shared channel.
+// That is not realizable here — the shared channel must stay full throughout to
+// keep the keyed channels from draining (shared-first), so it cannot be empty at
+// a later probe start. The shared producer therefore runs throughout as both the
+// saturation enabler and the shared probe, and its full-capacity admission is
+// verified concurrently with the held keyed saturation, which carries the same
+// isolation evidence.
 
-/// Saturated keyed channels plus the probe (8 + 1).
-const ISO_KEYS: usize = 9;
+/// Saturated keyed channels held before the probe starts.
+const ISO_SATURATED_KEYS: usize = 8;
+/// Total keyed channels: the saturated set plus the probe.
+const ISO_KEYS: usize = ISO_SATURATED_KEYS + 1;
 
 struct IsoMetrics {
-    /// Yields of each keyed command's stream; a saturated key reads
+    /// Yields of each keyed command's stream; a saturated key reads exactly
     /// `keyed_channel_capacity + 1` (capacity admitted, the next send blocked).
+    /// A value above that means the channel was drained — an isolation failure.
     /// Each is its own `Arc` so a `'static` keyed stream can own a clone.
     key_yields: Vec<Arc<AtomicU64>>,
+    /// Keyed outputs delivered to `update`; must stay 0 (no keyed delivery
+    /// during the measurement), else a key's yield count is not admission alone.
+    keyed_delivered: AtomicU64,
     shared_produced: AtomicU64,
     shared_processed: AtomicU64,
-    /// Max sampled shared occupancy (`produced - processed`) — the shared-side
-    /// isolation signal.
+    /// Max shared occupancy (`produced - processed`) over the whole run — a
+    /// display-only signal. Not the isolation gate: a global pool could reach it
+    /// before the keyed channels start and then shed capacity to hold them, so
+    /// a historical max says nothing about *simultaneous* occupancy.
     max_shared_depth: AtomicU64,
+    /// Max shared occupancy sampled *only while all keyed channels are
+    /// concurrently saturated* — the isolation gate. A shared pool cannot hold
+    /// the full shared channel and all `9 × capacity` keyed messages at once, so
+    /// its concurrent shared occupancy stays below `app_channel_capacity + 1`.
+    concurrent_shared_depth: AtomicU64,
 }
 
 impl IsoMetrics {
     fn new() -> Self {
         Self {
             key_yields: (0..ISO_KEYS).map(|_| Arc::new(AtomicU64::new(0))).collect(),
+            keyed_delivered: AtomicU64::new(0),
             shared_produced: AtomicU64::new(0),
             shared_processed: AtomicU64::new(0),
             max_shared_depth: AtomicU64::new(0),
+            concurrent_shared_depth: AtomicU64::new(0),
         }
     }
 
@@ -1516,11 +1566,21 @@ impl IsoMetrics {
             .load(Ordering::Relaxed)
             .saturating_sub(self.shared_processed.load(Ordering::Relaxed))
     }
+
+    /// A keyed channel is saturated once its stream has yielded more than
+    /// `capacity` — i.e. `capacity + 1`, capacity admitted with the next send
+    /// blocked (the final gate checks the count is *exactly* that).
+    fn saturated(&self, key: usize, keyed_cap: u64) -> bool {
+        self.key_yields[key].load(Ordering::Relaxed) > keyed_cap
+    }
 }
 
+/// Shared flood messages carry a seq; keyed outputs are a distinct variant so a
+/// keyed message reaching `update` (a delivery that must not happen) is caught.
 #[derive(Clone)]
 enum IsoMsg {
     Flood(u64),
+    KeyedOut,
 }
 
 /// Infinite shared flood keeping the shared channel saturated.
@@ -1546,62 +1606,106 @@ impl SubscriptionSource for IsoFloodSource {
 
 /// Infinite keyed-command stream: increments its yield counter per item, so its
 /// channel fills to capacity and the next send blocks (the counter then reads
-/// `capacity + 1`).
+/// `capacity + 1`). Yields the `KeyedOut` variant so any delivery to `update`
+/// is detectable.
 fn iso_keyed_stream(
     counter: Arc<AtomicU64>,
 ) -> impl futures::Stream<Item = IsoMsg> + Send + 'static {
     stream::repeat(()).map(move |()| {
         counter.fetch_add(1, Ordering::Relaxed);
-        IsoMsg::Flood(0)
+        IsoMsg::KeyedOut
     })
 }
 
 struct KeyedIsolationApp {
     iso: Arc<IsoMetrics>,
     keyed_cap: u64,
+    app_cap: u64,
+    /// How many of the eight saturating keys have been started.
+    saturators_started: usize,
+    /// The probe key has been started (only after all saturators saturated).
+    probe_started: bool,
+}
+
+impl KeyedIsolationApp {
+    fn spawn_key(&self, key: usize) -> Command<IsoMsg> {
+        let counter = Arc::clone(&self.iso.key_yields[key]);
+        Command::stream(iso_keyed_stream(counter)).cancellable(CommandId::new(key as u64))
+    }
 }
 
 impl Application for KeyedIsolationApp {
     type Message = IsoMsg;
-    type Flags = (Arc<IsoMetrics>, u64);
+    type Flags = (Arc<IsoMetrics>, u64, u64);
 
-    fn new((iso, keyed_cap): Self::Flags) -> (Self, Command<IsoMsg>) {
-        (Self { iso, keyed_cap }, Command::none())
+    fn new((iso, keyed_cap, app_cap): Self::Flags) -> (Self, Command<IsoMsg>) {
+        (
+            Self {
+                iso,
+                keyed_cap,
+                app_cap,
+                saturators_started: 0,
+                probe_started: false,
+            },
+            Command::none(),
+        )
     }
 
     fn update(&mut self, msg: IsoMsg) -> Command<IsoMsg> {
-        let IsoMsg::Flood(seq) = msg;
+        let seq = match msg {
+            // A keyed output reached `update`: keyed delivery occurred, which the
+            // scenario forbids during the measurement. Record it; the run fails.
+            IsoMsg::KeyedOut => {
+                self.iso.keyed_delivered.fetch_add(1, Ordering::Relaxed);
+                return Command::none();
+            }
+            IsoMsg::Flood(seq) => seq,
+        };
+        let _ = seq;
         // Keep the shared channel full so the event loop stays shared-first and
         // never drains the keyed channels; they must hold saturated.
         spin(Duration::from_micros(10));
         self.iso.shared_processed.fetch_add(1, Ordering::Relaxed);
-        // Sample the shared occupancy peak here, on every shared message, so it
-        // is captured deterministically even if saturation completes between two
-        // external sampler ticks.
+        // Sample the shared occupancy peak on every shared message.
         self.iso
             .max_shared_depth
             .fetch_max(self.iso.shared_depth(), Ordering::Relaxed);
 
-        let index = usize::try_from(seq).unwrap_or(usize::MAX);
-        if index < ISO_KEYS {
-            // Spawn keyed command `index` on its own key.
-            let counter = Arc::clone(&self.iso.key_yields[index]);
-            return Command::stream(iso_keyed_stream(counter)).cancellable(CommandId::new(seq));
+        // Stage 1: start the eight saturating keys, one per shared message.
+        if self.saturators_started < ISO_SATURATED_KEYS {
+            let key = self.saturators_started;
+            self.saturators_started += 1;
+            return self.spawn_key(key);
         }
-        // Every key spawned: quit once all keyed channels are saturated
-        // (yields reached capacity + 1 — capacity admitted, the next send
-        // blocked). A shared pool would keep some key below capacity, so
-        // saturation would never complete and the scenario would time out.
-        let saturated = self
-            .iso
-            .key_yields
-            .iter()
-            .all(|counter| counter.load(Ordering::Relaxed) > self.keyed_cap);
-        if saturated {
-            Command::quit()
-        } else {
-            Command::none()
+
+        // Stage 2: only once all eight are saturated, start the previously idle
+        // probe key (index ISO_SATURATED_KEYS).
+        let saturators_saturated =
+            (0..ISO_SATURATED_KEYS).all(|k| self.iso.saturated(k, self.keyed_cap));
+        if !self.probe_started {
+            if saturators_saturated {
+                self.probe_started = true;
+                return self.spawn_key(ISO_SATURATED_KEYS);
+            }
+            return Command::none();
         }
+
+        // Stage 3: sample the shared depth *only while every keyed channel is
+        // concurrently saturated*, and quit once that simultaneous value reaches
+        // `app_cap + 1` — the shared channel full at the same instant the nine
+        // keyed channels hold their `9 × capacity` messages. A shared pool can
+        // reach either alone but not both at once, so its concurrent shared
+        // depth never gets there and the scenario times out instead of passing.
+        let all_saturated = (0..ISO_KEYS).all(|k| self.iso.saturated(k, self.keyed_cap));
+        if all_saturated {
+            self.iso
+                .concurrent_shared_depth
+                .fetch_max(self.iso.shared_depth(), Ordering::Relaxed);
+            if self.iso.concurrent_shared_depth.load(Ordering::Relaxed) > self.app_cap {
+                return Command::quit();
+            }
+        }
+        Command::none()
     }
 
     fn view(&self, _frame: &mut ratatui::Frame<'_>) {}
@@ -1617,72 +1721,98 @@ struct IsoReport {
     keyed_cap: u64,
     app_cap: u64,
     timed_out: bool,
-    /// Admitted per key (`capacity` when saturated).
-    admitted: Vec<u64>,
+    /// Raw yield count per key (exactly `keyed_cap + 1` when cleanly saturated).
+    yields: Vec<u64>,
+    keyed_delivered: u64,
+    /// Whole-run peak shared occupancy — display only.
     max_shared_depth: u64,
+    /// Peak shared occupancy while all keyed channels were concurrently
+    /// saturated — the isolation gate.
+    concurrent_shared_depth: u64,
 }
 
 impl IsoReport {
-    /// Isolation held: every keyed channel admitted its full capacity and the
-    /// shared channel reached its own full occupancy — so no shared pool starved
-    /// any keyed key or the shared channel — and the scenario did not time out.
+    /// Isolation held, with every gate exact (RFC 0007 §5.3): the run did not
+    /// time out, every keyed channel yielded exactly `capacity + 1` (its full
+    /// capacity admitted and no drain past it), no keyed message was delivered,
+    /// and — the load-bearing gate — the shared channel reached exactly
+    /// `app_channel_capacity + 1` *while every keyed channel was concurrently
+    /// saturated*, which a shared pool cannot do (it lacks the permits for both
+    /// at once).
     fn isolated(&self) -> bool {
         !self.timed_out
-            && self.admitted.iter().all(|&a| a == self.keyed_cap)
-            && self.max_shared_depth >= self.app_cap
+            && self.keyed_delivered == 0
+            && self.yields.iter().all(|&y| y == self.keyed_cap + 1)
+            && self.concurrent_shared_depth == self.app_cap + 1
     }
 }
 
 async fn run_keyed_isolation() -> IsoReport {
     let keyed_cap: u64 = 16; // RFC 0007 §5.1 keyed_channel_capacity
+    let app_cap: u64 = 1024; // RFC 0007 §5.1 app_channel_capacity
     let iso = Arc::new(IsoMetrics::new());
-    let runtime =
-        Runtime::<KeyedIsolationApp>::with_config((Arc::clone(&iso), keyed_cap), bounded_config());
+    let runtime = Runtime::<KeyedIsolationApp>::with_config(
+        (Arc::clone(&iso), keyed_cap, app_cap),
+        bounded_config(),
+    );
     let mut terminal =
         Terminal::new(TestBackend::new(120, 40)).expect("test backend terminal creation");
 
     let timed_out = timeout(Duration::from_secs(10), runtime.run(&mut terminal))
         .await
         .is_err();
+    await_quiescence().await;
 
-    let admitted = iso
+    let yields = iso
         .key_yields
         .iter()
-        .map(|counter| counter.load(Ordering::Relaxed).min(keyed_cap))
+        .map(|counter| counter.load(Ordering::Relaxed))
         .collect();
     IsoReport {
         keyed_cap,
-        app_cap: 1024, // RFC 0007 §5.1 app_channel_capacity
+        app_cap,
         timed_out,
-        admitted,
+        yields,
+        keyed_delivered: iso.keyed_delivered.load(Ordering::Relaxed),
         max_shared_depth: iso.max_shared_depth.load(Ordering::Relaxed),
+        concurrent_shared_depth: iso.concurrent_shared_depth.load(Ordering::Relaxed),
     }
 }
 
 fn print_iso_report(report: &IsoReport) {
     println!("## keyed_isolation");
     println!(
-        "   {} keyed channels, capacity {}",
-        report.admitted.len(),
+        "   {} keyed channels ({} saturated + 1 probe), capacity {}",
+        report.yields.len(),
+        ISO_SATURATED_KEYS,
         report.keyed_cap,
     );
     println!(
         "   status: {}",
         if report.timed_out {
-            "TIMED OUT — channels never all saturated (possible shared pool)"
+            "TIMED OUT — full saturation never coincided with a full shared channel \
+             (possible shared pool)"
         } else {
             "ok"
         },
     );
-    println!("   per-key admitted: {:?}", report.admitted);
     println!(
-        "   isolation: every key admitted its full capacity = {}",
-        report.isolated(),
+        "   per-key raw yields: {:?} (each must equal capacity + 1 = {})",
+        report.yields,
+        report.keyed_cap + 1,
     );
     println!(
-        "   max shared depth: {} (shared-side signal; ~app_channel_capacity)",
+        "   keyed delivered to update: {} (must be 0)",
+        report.keyed_delivered,
+    );
+    println!(
+        "   concurrent shared depth: {} (must equal app_channel_capacity + 1 = {}; \
+         whole-run max {})",
+        report.concurrent_shared_depth,
+        report.app_cap + 1,
         report.max_shared_depth,
     );
+    println!("   isolation: {}", report.isolated());
     println!();
 }
 
