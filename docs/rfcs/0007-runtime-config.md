@@ -260,20 +260,26 @@ neither RFC 0006 nor this RFC defines a per-message worst-case service time
 to build a hard bound on. An application that needs one derives it from its
 own measured tail service time, not from this rule.
 
-**`keyed_channel_capacity` — burst absorption and memory, not latency.**
-The `capacity × drain cost` estimate does *not* transfer to the keyed
-channel, and sizing it for a latency target is a category error: while any
-shared input stays ready the keyed channel is not drained at all
-(shared-first pull, RFC 0006 §4.7), so keyed-delivery latency stays
-unbounded independent of the configured capacity (RFC 0006 INV-L3 — "no
-such bound exists for keyed delivery ... keyed-delivery latency stays
-deliberately unbounded while ready shared inputs remain"). A larger keyed
-capacity therefore shortens no delivery wait; it buys only burst absorption
-(a command emits up to `capacity` outputs into an otherwise-empty channel
-without awaiting the consumer) and costs memory (the per-command share of
-the `m × capacity` buffer total, RFC 0006 R1). The keyed starting value
-below is chosen on that absorption-versus-memory trade alone, never on a
-latency estimate.
+**`keyed_channel_capacity` — burst absorption and memory, not a latency
+guarantee.** The `capacity × drain cost` estimate does *not* transfer to
+the keyed channel, and sizing it for a delivery-latency *guarantee* is a
+category error: while any shared input stays ready the keyed channel is not
+drained at all (shared-first pull, RFC 0006 §4.7), so keyed-delivery
+latency stays unbounded independent of the configured capacity (RFC 0006
+INV-L3 — "no such bound exists for keyed delivery ... keyed-delivery
+latency stays deliberately unbounded while ready shared inputs remain"). A
+larger keyed capacity therefore bounds no drain-side delivery latency and
+restores no keyed liveness — those stay governed by shared readiness, not
+by capacity. What it *can* do in a finite execution is reduce producer-side
+admission wait: a keyed command awaits capacity before each next send (RFC
+0006 §4.2), so a larger channel lets a burst of up to `capacity` outputs
+complete without the command blocking on admission, and once shared
+readiness later lapses those already-buffered outputs become deliverable
+sooner than ones still waiting behind a full channel. That is the burst
+absorption the capacity buys, and it costs memory (the per-command share of
+the `m × capacity` buffer total, RFC 0006 R1). Size the keyed channel for
+that absorption-versus-memory trade, never for a delivery-latency
+guarantee; the starting value below is chosen on that trade alone.
 
 Documented starting values, each with its basis stated:
 
