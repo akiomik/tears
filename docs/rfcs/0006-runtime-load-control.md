@@ -1231,8 +1231,9 @@ bounded-run parameters (configuration under test, backlog depths, trial
 counts), and the CI smoke-profile decision. No open question remains as a
 prerequisite of the implementation PR (section 3.2).
 
-1. Default capacity values to recommend in documentation (measurement-driven;
-   the harness's burst scenario sizes the absorption/latency trade-off).
+1. Default capacity values to recommend in documentation (app capacity a
+   measurement-informed margin choice; keyed capacity sized from the
+   absorption-versus-memory trade, not measurement-derived).
    **Resolved by RFC 0007.** Recommended defaults are documentation of
    that RFC's surface: it sets the starting values (RFC 0007 §3.1), and
    the documentation-guidance notes of sections 4.5, 4.6, and 4.7 belong
@@ -1359,7 +1360,7 @@ prerequisite of the implementation PR (section 3.2).
    keyed-quit latency is capacity-dependent and carries no acceptance
    bound (section 5.1). Full rationale, including the adversarial
    variants considered, in section 4.6.
-8. Harness follow-up: add a quit-under-backlog scenario (F5) and a bounded
+8. Harness follow-up: add a quit-under-backlog scenario (F6/F7) and a bounded
    vs. unbounded comparison matrix before implementation.
    **Resolved.** `benches/runtime_load.rs` now runs the
    `quit_*` trial scenarios — unkeyed quit at three backlog depths plus an
