@@ -1,9 +1,10 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Draft
-- Target: sole remaining prerequisite of the RFC 0006 load-control
-  implementation PR (RFC 0006 sections 3.2, 6); implementation starts when
-  this RFC is Accepted
+- Status: Accepted (moves to Implemented when the RFC 0006 load-control
+  implementation lands)
+- Target: the prerequisite RFC 0006 delegated to a separate document
+  (RFC 0006 sections 3.2, 6); with this RFC Accepted, the load-control
+  implementation PR may start
 - Scope: the public `RuntimeConfig` surface (type, construction, constructor
   integration), the recommended-defaults documentation, the restart-rate
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
@@ -11,7 +12,6 @@
 - Feature flag: none
 - CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`) land
   at the load-control implementation release, not with this RFC
-- Amendments: none
 
 > **Decision scope.** This RFC fixes only what RFC 0006 delegated to it. The
 > load-control semantics themselves — what each control means, the
@@ -483,8 +483,8 @@ channel occupancy, per the note on that distinction below the table:
   `Command::quit()`, checked via the RFC 0006 §4.4 producer gauges
   (`blocked`) and capacity-wait events — this applies to `quit_keyed_bounded`
   and its 20 trials exactly as it does to the four 200-trial rows, not
-  only to the blocked-producer and churn rows named in earlier drafts of
-  this section. A barrier arranged before `update` returns
+  only to the blocked-producer and churn rows. A barrier arranged before
+  `update` returns
   `Command::quit()` narrows the scheduling window a trial can land in,
   but does not by itself guarantee the predicate holds at the quit
   instant: RFC 0006 §4.6 already documents an admission window in which a
