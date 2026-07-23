@@ -1,6 +1,7 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Draft
+- Status: Accepted (accepted on 2026-07-23; moves to Implemented when the
+  RFC 0006 load-control implementation lands)
 - Target: sole remaining prerequisite of the RFC 0006 load-control
   implementation PR (RFC 0006 sections 3.2, 6); implementation starts when
   this RFC is Accepted
