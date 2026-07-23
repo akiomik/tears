@@ -272,10 +272,12 @@ larger keyed capacity therefore bounds no drain-side delivery latency and
 restores no keyed liveness — those stay governed by shared readiness, not
 by capacity. What it *can* do in a finite execution is reduce producer-side
 admission wait: a keyed command awaits capacity before each next send (RFC
-0006 §4.2), so a larger channel lets a burst of up to `capacity` outputs
-complete without the command blocking on admission, and once shared
-readiness later lapses those already-buffered outputs become deliverable
-sooner than ones still waiting behind a full channel. That is the burst
+0006 §4.2), so a larger channel lets a burst of up to the channel's
+currently free capacity — the full `capacity` only when the channel is
+otherwise empty, less whatever it already holds — complete without the
+command blocking on admission, and once shared readiness later lapses those
+already-buffered outputs become deliverable sooner than ones still waiting
+behind a full channel. That is the burst
 absorption the capacity buys, and it costs memory (the per-command share of
 the `m × capacity` buffer total, RFC 0006 R1). Size the keyed channel for
 that absorption-versus-memory trade, never for a delivery-latency
