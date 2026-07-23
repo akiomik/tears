@@ -13,6 +13,9 @@ use std::task::{Context, Poll};
 
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::{SendError, TryRecvError};
+use tokio::time::Instant;
+
+use super::load::{self, Channel, LoadObserver};
 
 /// Sending half of a runtime-owned channel.
 ///
@@ -21,7 +24,22 @@ use tokio::sync::mpsc::error::{SendError, TryRecvError};
 /// reachability is capped at the crate regardless (see `frame_rate`).
 pub enum Sender<T> {
     Unbounded(mpsc::UnboundedSender<T>),
-    Bounded(mpsc::Sender<T>),
+    Bounded {
+        tx: mpsc::Sender<T>,
+        /// Observability context, present only on runtime-owned bounded
+        /// channels: the capacity-wait event and the `blocked` gauge (RFC 0006
+        /// §4.4). Absent on test/bench senders.
+        obs: Option<SendObs>,
+    },
+}
+
+/// The channel label and shared observer a bounded sender carries so it can
+/// emit the capacity-wait event and maintain the `blocked` gauge (RFC 0006
+/// §4.4).
+#[derive(Clone)]
+pub struct SendObs {
+    channel: Channel,
+    observer: LoadObserver,
 }
 
 /// Receiving half of a runtime-owned channel.
@@ -32,12 +50,31 @@ pub enum Receiver<T> {
     Bounded(mpsc::Receiver<T>),
 }
 
-/// Builds a channel pair from an optional capacity.
+/// Builds an unobserved channel pair from an optional capacity.
 ///
 /// `None` constructs the same `mpsc::unbounded_channel` as before, so the
 /// default delivery mode is structurally unchanged (INV-L6). `Some(n)`
-/// constructs a bounded channel of exactly `n` slots (INV-L1).
+/// constructs a bounded channel of exactly `n` slots (INV-L1). The sender emits
+/// no load-observability events, so this is test-only; every runtime-owned
+/// channel is built through [`channel_observed`].
+#[cfg(test)]
 pub fn channel<T>(capacity: Option<NonZeroUsize>) -> (Sender<T>, Receiver<T>) {
+    build(capacity, None)
+}
+
+/// Builds a channel pair whose bounded sender emits the capacity-wait event and
+/// maintains the `blocked` gauge under the given `channel` label (RFC 0006
+/// §4.4). An unbounded channel (`None` capacity) never blocks, so the observer
+/// is inert and dropped.
+pub fn channel_observed<T>(
+    capacity: Option<NonZeroUsize>,
+    channel: Channel,
+    observer: LoadObserver,
+) -> (Sender<T>, Receiver<T>) {
+    build(capacity, Some(SendObs { channel, observer }))
+}
+
+fn build<T>(capacity: Option<NonZeroUsize>, obs: Option<SendObs>) -> (Sender<T>, Receiver<T>) {
     capacity.map_or_else(
         || {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -45,7 +82,7 @@ pub fn channel<T>(capacity: Option<NonZeroUsize>) -> (Sender<T>, Receiver<T>) {
         },
         |capacity| {
             let (tx, rx) = mpsc::channel(capacity.get());
-            (Sender::Bounded(tx), Receiver::Bounded(rx))
+            (Sender::Bounded { tx, obs }, Receiver::Bounded(rx))
         },
     )
 }
@@ -54,7 +91,10 @@ impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         match self {
             Self::Unbounded(tx) => Self::Unbounded(tx.clone()),
-            Self::Bounded(tx) => Self::Bounded(tx.clone()),
+            Self::Bounded { tx, obs } => Self::Bounded {
+                tx: tx.clone(),
+                obs: obs.clone(),
+            },
         }
     }
 }
@@ -67,10 +107,31 @@ impl<T> Sender<T> {
     /// immediately, so the caller's `.await` resolves on the first poll and the
     /// producer task is never suspended (INV-L6). The bounded arm awaits a
     /// permit, so an overloaded producer waits rather than dropping (INV-L2).
+    ///
+    /// The bounded arm first attempts a non-blocking send; only when that finds
+    /// the channel full — the first unready attempt — does it wait, and it is
+    /// exactly that path that raises the `blocked` gauge for the wait's duration
+    /// and emits the capacity-wait event on acceptance (RFC 0006 §4.4). An
+    /// immediately accepted send stays silent. The `blocked` gauge is held by a
+    /// guard, so a send aborted mid-wait (cancellation) still lowers it.
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
         match self {
             Self::Unbounded(tx) => tx.send(value),
-            Self::Bounded(tx) => tx.send(value).await,
+            Self::Bounded { tx, obs } => match tx.try_send(value) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Closed(value)) => Err(SendError(value)),
+                Err(mpsc::error::TrySendError::Full(value)) => {
+                    let started = Instant::now();
+                    let _blocked = obs.as_ref().map(|obs| obs.observer.track_blocked());
+                    let accepted = tx.send(value).await;
+                    // Emit the capacity-wait event only on acceptance; a send
+                    // that failed (channel closed) was never accepted.
+                    if let (Ok(()), Some(obs)) = (accepted.as_ref(), obs) {
+                        load::capacity_wait(obs.channel, started.elapsed());
+                    }
+                    accepted
+                }
+            },
         }
     }
 
@@ -84,7 +145,7 @@ impl<T> Sender<T> {
             Self::Unbounded(tx) => tx
                 .send(value)
                 .map_err(|SendError(value)| mpsc::error::TrySendError::Closed(value)),
-            Self::Bounded(tx) => tx.try_send(value),
+            Self::Bounded { tx, .. } => tx.try_send(value),
         }
     }
 
@@ -236,5 +297,135 @@ mod tests {
         // B is unaffected by A's saturation.
         send_now(&tx_b, 10).expect("B has its own slot");
         assert_eq!(rx_b.try_recv(), Ok(10));
+    }
+
+    // Capacity-wait event (RFC 0006 §4.4, INV-L13): a bounded send that finds
+    // the channel full waits, and on acceptance emits exactly one capacity-wait
+    // event naming the blocking `channel` and a `wait_us` measured against the
+    // pausable clock. An immediately accepted send emits nothing. The clock is
+    // paused so the reported wait equals the scripted 5ms exactly.
+    #[tokio::test(start_paused = true)]
+    async fn bounded_send_emits_capacity_wait_on_acceptance() {
+        use tokio::task::yield_now;
+        use tokio::time::{Duration, advance};
+
+        use crate::test_support::TraceRecorder;
+
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let (tx, mut rx) =
+            channel_observed::<i32>(Some(cap(1)), Channel::Shared, LoadObserver::default());
+
+        // Fills the only slot; accepted immediately, so it fires no event.
+        tx.send(1).await.expect("first send fits the empty slot");
+
+        // The second send has no slot: it blocks. Let it reach the await, hold
+        // it blocked across a scripted 5ms, then free a slot so it is accepted.
+        let sender = tx.clone();
+        let blocked = tokio::spawn(async move { sender.send(2).await });
+        yield_now().await;
+        advance(Duration::from_millis(5)).await;
+        assert_eq!(rx.try_recv(), Ok(1), "freeing a slot unblocks the send");
+        blocked
+            .await
+            .expect("blocked send task joins")
+            .expect("the send is accepted once a slot frees");
+
+        assert_eq!(
+            recorder.str_values("channel"),
+            vec!["shared".to_owned()],
+            "exactly one capacity-wait event, naming the shared channel"
+        );
+        let waits = recorder.u64_values("wait_us");
+        assert_eq!(waits.len(), 1, "the immediate first send fired no event");
+        assert!(
+            waits[0] >= 5_000,
+            "wait_us reflects the ~5ms blocked interval, got {}",
+            waits[0]
+        );
+
+        // The `blocked` gauge rose while the send waited and fell once it was
+        // accepted (RFC 0006 §4.4) — the accepted-send counterpart to the
+        // abort-decrement below.
+        let blocked = recorder.u64_values("blocked");
+        assert!(
+            blocked.contains(&1),
+            "blocked rose while the send waited: {blocked:?}"
+        );
+        assert_eq!(
+            blocked.last(),
+            Some(&0),
+            "blocked fell once the send was accepted: {blocked:?}"
+        );
+    }
+
+    // INV-L13 (unbounded mode is silent): an unbounded channel never waits, so
+    // its observed sender emits no capacity-wait event and never touches the
+    // `blocked` gauge — `blocked` stays 0 in unbounded mode by construction (the
+    // observer is not even attached to an unbounded sender).
+    #[tokio::test]
+    async fn unbounded_observed_channel_emits_no_load_events() {
+        use crate::test_support::TraceRecorder;
+
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let (tx, _rx) = channel_observed::<i32>(None, Channel::Shared, LoadObserver::default());
+        for value in 0..1_000 {
+            tx.send(value)
+                .await
+                .expect("the unbounded receiver is open");
+        }
+
+        assert_eq!(
+            recorder.event_count(),
+            0,
+            "unbounded mode fires no capacity-wait and no blocked-gauge events"
+        );
+        assert!(recorder.str_values("channel").is_empty());
+        assert!(recorder.u64_values("blocked").is_empty());
+    }
+
+    // `blocked` gauge (RFC 0006 §4.4): a producer that begins awaiting capacity
+    // raises `blocked`, and aborting that producer mid-wait lowers it again —
+    // the decrement does not depend on the send ever being accepted, so no
+    // capacity-wait event fires. This is the cancellation-abort decrement the
+    // DoD requires.
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_gauge_falls_when_a_blocked_send_is_aborted() {
+        use tokio::task::yield_now;
+
+        use crate::test_support::TraceRecorder;
+
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let (tx, _rx) =
+            channel_observed::<i32>(Some(cap(1)), Channel::Keyed, LoadObserver::default());
+        tx.send(1).await.expect("first send fills the only slot");
+
+        // The second send blocks (no slot). Abort its task before any slot frees.
+        let sender = tx.clone();
+        let blocked = tokio::spawn(async move { sender.send(2).await });
+        yield_now().await;
+        blocked.abort();
+        let _ = blocked.await;
+        yield_now().await;
+
+        let blocked_values = recorder.u64_values("blocked");
+        assert!(
+            blocked_values.contains(&1),
+            "blocked rose while the send waited: {blocked_values:?}"
+        );
+        assert_eq!(
+            blocked_values.last(),
+            Some(&0),
+            "aborting the blocked send lowered blocked: {blocked_values:?}"
+        );
+        assert!(
+            recorder.str_values("channel").is_empty(),
+            "no capacity-wait event fires: the send was never accepted"
+        );
     }
 }

@@ -158,6 +158,7 @@ use tokio::sync::mpsc;
 pub(crate) use core::{Subscription, SubscriptionId, SubscriptionSource};
 
 use crate::runtime::channel;
+use crate::runtime::load::LoadObserver;
 
 struct RunningSubscription {
     handle: JoinHandle<()>,
@@ -169,15 +170,17 @@ struct RunningSubscription {
 pub(crate) struct SubscriptionManager<Msg> {
     running: HashMap<SubscriptionId, RunningSubscription>,
     msg_sender: channel::Sender<Msg>,
+    observer: LoadObserver,
 }
 
 impl<Msg: Send + 'static> SubscriptionManager<Msg> {
-    /// Create a new subscription manager.
+    /// Create a new subscription manager sharing the runtime's load observer.
     #[must_use]
-    pub(crate) fn new(msg_sender: channel::Sender<Msg>) -> Self {
+    pub(crate) fn new(msg_sender: channel::Sender<Msg>, observer: LoadObserver) -> Self {
         Self {
             running: HashMap::new(),
             msg_sender,
+            observer,
         }
     }
 
@@ -247,8 +250,12 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
 
     fn spawn_subscription(&self, mut stream: BoxStream<'static, Msg>) -> JoinHandle<()> {
         let sender = self.msg_sender.clone();
+        // Raise the `subscriptions` gauge for the forwarding task's lifetime;
+        // the guard lowers it on completion or abort (RFC 0006 §4.4).
+        let subscription_guard = self.observer.track_subscription();
 
         tokio::spawn(async move {
+            let _subscription_guard = subscription_guard;
             // Catch panics in the subscription's stream so a bug in a source is
             // logged instead of vanishing into a detached task.
             let result = AssertUnwindSafe(async move {
@@ -324,9 +331,12 @@ impl<Msg: Send + 'static> BenchSubscriptionManager<Msg> {
     pub fn new(msg_sender: mpsc::UnboundedSender<Msg>) -> Self {
         // The bench keeps measuring the unbounded reconciliation path; wrap the
         // caller's unbounded sender so the public bench signature is unchanged.
-        Self(SubscriptionManager::new(channel::Sender::from_unbounded(
-            msg_sender,
-        )))
+        // The bench does not assert gauges, so a fresh, unshared observer is
+        // sufficient.
+        Self(SubscriptionManager::new(
+            channel::Sender::from_unbounded(msg_sender),
+            LoadObserver::default(),
+        ))
     }
 
     pub fn update<I>(&mut self, subscriptions: I)
@@ -465,7 +475,8 @@ mod tests {
 
     async fn assert_completed_oneshot_subscription_restarts() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         // Start the first one-shot subscription.
         manager.update(vec![Subscription::new(OneshotSource { value: 1 })]);
@@ -623,7 +634,8 @@ mod tests {
     async fn test_subscription_manager_basic_update() -> Result<()> {
         // Test basic subscription update functionality
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock = MockSource::new();
         let sub = Subscription::new(mock.clone());
@@ -665,7 +677,8 @@ mod tests {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let sub = Subscription::new(InfiniteSub);
         manager.update(vec![sub]);
@@ -720,7 +733,10 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
 
         {
-            let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+            let mut manager = SubscriptionManager::new(
+                channel::Sender::from_unbounded(tx),
+                LoadObserver::default(),
+            );
             manager.update(vec![Subscription::new(ParkedSource {
                 started: started.clone(),
                 aborted: aborted.clone(),
@@ -748,7 +764,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_manager_multiple_subscriptions() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock1 = MockSource::new();
         let mock2 = MockSource::new();
@@ -785,7 +802,8 @@ mod tests {
         let _guard = recorder.set_default();
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let first = MockSource::<i32>::new();
         let duplicate = first.clone();
 
@@ -848,7 +866,8 @@ mod tests {
             .with_level(tracing::Level::WARN);
         let _guard = recorder.set_default();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         manager.update(vec![
             Subscription::new(CollidingSource {
@@ -881,7 +900,8 @@ mod tests {
     #[tokio::test]
     async fn removing_one_hash_colliding_subscription_aborts_only_its_stream() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let first = ProbedCollidingSource::pending(1);
         let second = ProbedCollidingSource::pending(2);
 
@@ -907,7 +927,8 @@ mod tests {
     async fn completed_hash_colliding_subscription_restarts_without_replacing_the_other()
     -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let completed = ProbedCollidingSource::once(1, 10);
         let continuing = ProbedCollidingSource::pending(2);
         let completed_subscription = Subscription::new(completed.clone());
@@ -954,7 +975,8 @@ mod tests {
     #[tokio::test]
     async fn same_local_id_in_two_scopes_starts_two_independent_streams() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         manager.update(vec![
             Subscription::new(ProbedCollidingSource::once(1, 10)).scoped("pane-a"),
@@ -974,7 +996,8 @@ mod tests {
     #[tokio::test]
     async fn removing_one_pane_stops_only_its_scoped_stream() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let source = ProbedCollidingSource::pending(1);
 
         manager.update(vec![
@@ -1006,7 +1029,8 @@ mod tests {
     async fn same_local_id_with_hash_colliding_scopes_starts_two_independent_streams() -> Result<()>
     {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         manager.update(vec![
             Subscription::new(ProbedCollidingSource::once(1, 10)).scoped(ManagerCollisionKey(1)),
@@ -1026,7 +1050,8 @@ mod tests {
     #[tokio::test]
     async fn removing_one_hash_colliding_scope_stops_only_its_own_stream() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let source = ProbedCollidingSource::pending(1);
 
         manager.update(vec![
@@ -1077,7 +1102,8 @@ mod tests {
         }
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
         let started = Arc::new(Mutex::new(Vec::new()));
 
         manager.update(vec![
@@ -1098,7 +1124,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_manager_subscription_starts_when_enabled() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock = MockSource::new();
 
@@ -1122,7 +1149,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_manager_subscription_stops_when_disabled() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock = MockSource::new();
 
@@ -1151,7 +1179,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_manager_subscription_changes_based_on_state() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock1 = MockSource::new();
         let mock2 = MockSource::new();
@@ -1219,7 +1248,8 @@ mod tests {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         // Start and let the task finish.
         manager.update(vec![Subscription::new(OneshotSource)]);
@@ -1250,7 +1280,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscription_manager_subscription_multiple_changes() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut manager = SubscriptionManager::new(channel::Sender::from_unbounded(tx));
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
 
         let mock = MockSource::new();
 

@@ -112,6 +112,10 @@ mod core;
 pub mod frame_rate;
 mod frame_scheduler;
 mod keyed_commands;
+// `pub` for the same crate-capping reason as `channel` above: crate-internal
+// load-observability types (`tears::runtime::load` schema, RFC 0006 §4.4) that
+// `subscription` and the channel/keyed producers share.
+pub mod load;
 mod pending_work;
 
 use app_input::AppInput;
@@ -336,7 +340,11 @@ impl<App: Application> Runtime<App> {
             }
         }
 
-        tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
+        // Batch event (RFC 0006 §4.4): `pulled` counts every input this batch
+        // took (INV-L12's counted unit), `processed` those that invoked
+        // `update`, and `shared_pending` the shared-channel occupancy now. A
+        // quit-terminated batch returns above and never reaches here.
+        load::batch(pulled, processed, self.core.app_inputs.shared_pending());
 
         // Mark that subscriptions may have changed even when redraw is suppressed.
         if processed > 0 {
@@ -718,17 +726,152 @@ mod tests {
         assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
-    #[tokio::test]
-    async fn test_process_message_batch_emits_tracing_event() {
-        let recorder = TraceRecorder::new().with_target("tears::runtime");
+    // Batch event (RFC 0006 §4.4, INV-L13) at the runtime batch layer: a batch
+    // that pulls the opening input plus one queued input reports `pulled = 2`,
+    // `updated = 2` (both invoked `update`), and `shared_pending = 0` (the
+    // shared channel drained). `pulled` is unique to the batch event, so the
+    // value assertions are unaffected by any gauge events on the same target.
+    #[tokio::test(start_paused = true)]
+    async fn batch_event_reports_pulled_updated_and_shared_pending() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
         let _guard = recorder.set_default();
 
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        runtime
+            .core
+            .msg_tx
+            .try_send(TestMessage::Increment)
+            .expect("receiver should be open");
         runtime.process_message_batch(TestMessage::Increment);
 
+        assert_eq!(
+            recorder.u64_values("pulled"),
+            vec![2],
+            "the opening input plus one batched input"
+        );
+        assert_eq!(
+            recorder.u64_values("updated"),
+            vec![2],
+            "both pulled inputs invoked update"
+        );
+        assert_eq!(
+            recorder.u64_values("shared_pending"),
+            vec![0],
+            "the shared channel drained by batch end"
+        );
+    }
+
+    // Batch event differing-value case (RFC 0006 §4.4 DoD): a batch whose
+    // opening input is a keyed `Closed` reports `pulled = 1`, `updated = 0` —
+    // the pulled input did not invoke `update`. This is the deterministic
+    // differ-value case the DoD places at the runtime batch layer; a queued
+    // `Closed` is not deterministically constructible (see INV-L12).
+    #[tokio::test]
+    async fn batch_event_reports_pulled_without_updated_for_a_closed_input() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        runtime.process_input_batch(AppInput::Keyed(ReceiverEvent::Closed));
+
+        assert_eq!(
+            recorder.u64_values("pulled"),
+            vec![1],
+            "the Closed input was pulled"
+        );
+        assert_eq!(
+            recorder.u64_values("updated"),
+            vec![0],
+            "a Closed input does not invoke update"
+        );
+        assert_eq!(recorder.u64_values("shared_pending"), vec![0]);
+    }
+
+    // Batch event `shared_pending` against a scripted leftover (RFC 0006 §4.4
+    // DoD): with `batch_max_messages = Some(n)` and `n + k` shared messages
+    // queued under the paused clock, the capped batch reports
+    // `shared_pending = k` — the inputs it left in the shared channel.
+    #[tokio::test(start_paused = true)]
+    async fn batch_event_reports_shared_pending_leftover_under_cap() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        // n = 2, k = 1: three queued shared inputs, capped at two per batch.
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<TestApp>::with_config(0, config);
+        for _ in 0..3 {
+            runtime
+                .core
+                .msg_tx
+                .try_send(TestMessage::Increment)
+                .expect("receiver should be open");
+        }
+
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+        runtime.process_input_batch(opener);
+
+        assert_eq!(recorder.u64_values("pulled"), vec![2], "the cap of two");
+        assert_eq!(
+            recorder.u64_values("shared_pending"),
+            vec![1],
+            "one input left queued after the capped batch"
+        );
+    }
+
+    // INV-L13: a quit-terminated batch emits no batch event — the loop exits
+    // instead (RFC 0006 §4.4). Opening `process_input_batch` on a keyed quit
+    // returns `Quit` before the batch event would fire, so no `pulled` is
+    // emitted.
+    #[tokio::test]
+    async fn quit_terminated_batch_emits_no_batch_event() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        let outcome = runtime
+            .process_input_batch(AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Quit)));
+
+        assert_eq!(outcome, BatchOutcome::Quit);
         assert!(
-            recorder.event_count() >= 1,
-            "processing a message batch should emit a tracing event"
+            recorder.u64_values("pulled").is_empty(),
+            "a quit-terminated batch must emit no batch event"
+        );
+    }
+
+    // The `keyed_commands` gauge is count-based, not guard-based, so a runtime
+    // dropped without a clean `shutdown()` — e.g. a render error propagating out
+    // of `run()` via `?` — must still reset it. `KeyedCommands`'s `Drop`
+    // publishes zero on that path.
+    #[tokio::test]
+    async fn dropping_a_runtime_with_a_pending_keyed_command_resets_the_keyed_gauge() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        {
+            let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+            runtime.core.enqueue_command(
+                Command::future(pending::<TestMessage>())
+                    .cancellable(CommandId::new("keyed"))
+                    .into_runtime_parts(),
+            );
+            assert_eq!(
+                recorder.u64_values("keyed_commands").last(),
+                Some(&1),
+                "spawning a keyed command raises the gauge"
+            );
+            // `runtime` is dropped here — no `run()`, no `shutdown()`.
+        }
+
+        assert_eq!(
+            recorder.u64_values("keyed_commands").last(),
+            Some(&0),
+            "dropping the runtime resets the keyed_commands gauge"
         );
     }
 

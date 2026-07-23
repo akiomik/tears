@@ -8,6 +8,7 @@ use crate::command::{Action, CancelPolicy, CommandId};
 
 use super::channel;
 use super::keyed_commands::{KeyedCommands, KeyedPoll, ReceiverEvent};
+use super::load::LoadObserver;
 
 /// Input events consumed by the runtime's application loop.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -25,16 +26,23 @@ pub(super) struct AppInputs<Msg: Send + 'static> {
 }
 
 impl<Msg: Send + 'static> AppInputs<Msg> {
-    /// Creates an input stream from the shared message receiver and the keyed
-    /// commands' per-command channel capacity.
+    /// Creates an input stream from the shared message receiver, the keyed
+    /// commands' per-command channel capacity, and the shared load observer.
     pub(super) fn new(
         shared: channel::Receiver<Msg>,
         keyed_capacity: Option<NonZeroUsize>,
+        observer: LoadObserver,
     ) -> Self {
         Self {
             shared,
-            keyed: KeyedCommands::new(keyed_capacity),
+            keyed: KeyedCommands::new(keyed_capacity, observer),
         }
+    }
+
+    /// Number of messages buffered in the shared channel — the batch event's
+    /// `shared_pending` field (RFC 0006 §4.4).
+    pub(super) fn shared_pending(&self) -> usize {
+        self.shared.len()
     }
 
     /// Returns the next queued input without waiting for new messages.
@@ -105,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_shared_after_send() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
 
         tx.try_send(42).expect("receiver should be open");
 
@@ -115,7 +123,7 @@ mod tests {
     #[test]
     fn test_app_inputs_try_next_ready_empty_returns_none() {
         let (_tx, rx) = channel::channel::<i32>(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
 
         assert_eq!(inputs.try_next_ready(), None);
     }
@@ -123,7 +131,7 @@ mod tests {
     #[test]
     fn test_app_inputs_try_next_ready_returns_queued_messages() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
 
         tx.try_send(1).expect("receiver should be open");
         tx.try_send(2).expect("receiver should be open");
@@ -136,7 +144,7 @@ mod tests {
     #[test]
     fn test_app_inputs_try_next_ready_preserves_fifo_order() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
 
         for msg in [1, 2, 3] {
             tx.try_send(msg).expect("receiver should be open");
@@ -150,7 +158,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_none_after_sender_closes() {
         let (tx, rx) = channel::channel::<i32>(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
 
         drop(tx);
 
@@ -160,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn shared_input_wins_when_keyed_output_is_also_ready() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         let id = CommandId::new("search");
         inputs.spawn_keyed(
             id.clone(),
@@ -185,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn shared_input_wins_the_nonwaiting_pull_when_keyed_output_is_also_ready() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         let id = CommandId::new("search");
         inputs.spawn_keyed(
             id.clone(),
@@ -211,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn shared_input_wins_when_keyed_quit_is_also_ready() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         let id = CommandId::new("quit");
         inputs.spawn_keyed(
             id.clone(),
@@ -235,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn shared_input_wins_the_blocking_pull_when_keyed_quit_is_also_ready() {
         let (tx, rx) = channel::channel(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         let id = CommandId::new("quit");
         inputs.spawn_keyed(
             id.clone(),
@@ -259,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn closed_shared_channel_and_same_poll_keyed_reconciliation_terminate_the_stream() {
         let (tx, rx) = channel::channel::<i32>(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         inputs.spawn_keyed(
             CommandId::new("empty"),
             CancelPolicy::CancelInFlight,
@@ -278,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn try_next_ready_does_not_wait_for_pending_keyed_streams() {
         let (_tx, rx) = channel::channel::<i32>(None);
-        let mut inputs = AppInputs::new(rx, None);
+        let mut inputs = AppInputs::new(rx, None, LoadObserver::default());
         inputs.spawn_keyed(
             CommandId::new("pending"),
             CancelPolicy::CancelInFlight,

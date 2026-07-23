@@ -1,0 +1,125 @@
+//! Integration test for the load-observability producer gauges (RFC 0006 §4.4,
+//! INV-L13). These verify end-to-end that starting a subscription, an unkeyed
+//! command, and a keyed command each raise the matching `tears::runtime::load`
+//! gauge, and that every gauge falls back to zero once the run tears down. The
+//! batch event, capacity-wait event, and the gauge/abort mechanics are covered
+//! at their narrower deterministic layers in `src/runtime`.
+
+mod common;
+#[path = "common/trace_recorder.rs"]
+mod trace_recorder;
+
+use std::future::pending;
+use std::num::{NonZeroU32, NonZeroU64};
+
+use color_eyre::eyre::Result;
+use ratatui::Frame;
+use tears::command::CommandId;
+use tears::prelude::*;
+use tears::subscription::time::Timer;
+use tokio::task::yield_now;
+use tokio::time::{Duration, timeout};
+use trace_recorder::TraceRecorder;
+
+fn frame_rate(value: u32) -> FrameRate {
+    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
+        .expect("frame rate must be valid")
+}
+
+#[derive(Clone)]
+enum Msg {
+    Tick,
+    Quit,
+}
+
+// The app keeps all three producer kinds active at once. `new` starts a
+// top-level *keyed* parked command (raising `keyed_commands`; a batch would
+// discard the key, so it must not be batched). Its subscription is a `Timer`
+// (raising `subscriptions`). The timer's first tick spawns a short *unkeyed*
+// command that emits `Quit` (raising `unkeyed_commands`, then lowering it on
+// completion), which ends the run.
+struct GaugeApp;
+
+impl Application for GaugeApp {
+    type Message = Msg;
+    type Flags = ();
+
+    fn new((): ()) -> (Self, Command<Self::Message>) {
+        (
+            Self,
+            Command::future(pending::<Msg>()).cancellable(CommandId::new("keyed")),
+        )
+    }
+
+    fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+        match msg {
+            Msg::Tick => Command::future(async { Msg::Quit }),
+            Msg::Quit => Command::quit(),
+        }
+    }
+
+    fn view(&self, _frame: &mut Frame<'_>) {}
+
+    fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+        vec![
+            Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero")))
+                .map(|_| Msg::Tick),
+        ]
+    }
+}
+
+// Producer gauges over a real run: each producer kind raises its field, and
+// every field returns to zero once the run tears its producers down. Under a
+// current-thread runtime the producers' gauge emissions land on the recorder's
+// thread; paused time jumps straight to the timer tick.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
+    let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+    let _guard = recorder.set_default();
+
+    let mut terminal = common::test_terminal()?;
+    let runtime = Runtime::<GaugeApp>::new((), frame_rate(60));
+    timeout(Duration::from_secs(5), runtime.run(&mut terminal))
+        .await
+        .expect("the timer tick should quit the run before the timeout")?;
+
+    // Let the aborted subscription task's future drop so its gauge guard lowers.
+    for _ in 0..4 {
+        yield_now().await;
+    }
+
+    let subscriptions = recorder.u64_values("subscriptions");
+    let unkeyed = recorder.u64_values("unkeyed_commands");
+    let keyed = recorder.u64_values("keyed_commands");
+
+    assert!(
+        subscriptions.contains(&1),
+        "starting a subscription must raise the subscriptions gauge: {subscriptions:?}"
+    );
+    assert!(
+        unkeyed.contains(&1),
+        "starting an unkeyed command must raise the unkeyed_commands gauge: {unkeyed:?}"
+    );
+    assert!(
+        keyed.contains(&1),
+        "starting a keyed command must raise the keyed_commands gauge: {keyed:?}"
+    );
+
+    assert_eq!(
+        subscriptions.last(),
+        Some(&0),
+        "the subscriptions gauge must fall back to zero: {subscriptions:?}"
+    );
+    assert_eq!(
+        unkeyed.last(),
+        Some(&0),
+        "the unkeyed_commands gauge must fall back to zero: {unkeyed:?}"
+    );
+    assert_eq!(
+        keyed.last(),
+        Some(&0),
+        "the keyed_commands gauge must fall back to zero: {keyed:?}"
+    );
+
+    Ok(())
+}

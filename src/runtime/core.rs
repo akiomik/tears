@@ -22,6 +22,7 @@ use crate::subscription::SubscriptionManager;
 
 use super::app_input::AppInputs;
 use super::channel;
+use super::load::{Channel, LoadObserver};
 
 /// The runtime's owned execution state for a single [`Application`] run.
 ///
@@ -57,6 +58,10 @@ pub(super) struct RuntimeCore<App: Application> {
     pub(super) quit_rx: mpsc::UnboundedReceiver<()>,
     /// Manages subscription lifecycle
     pub(super) subscription_manager: SubscriptionManager<App::Message>,
+    /// Shared producer-count gauges and event emitters (RFC 0006 §4.4). Cloned
+    /// into every producer (senders, subscriptions, keyed commands) so their
+    /// gauge updates aggregate; the batch event is emitted from here.
+    pub(super) observer: LoadObserver,
     /// Running command tasks.
     ///
     /// Kept so command tasks can be aborted on shutdown, and — because a
@@ -105,10 +110,12 @@ impl<App: Application> RuntimeCore<App> {
         app_channel_capacity: Option<NonZeroUsize>,
         keyed_channel_capacity: Option<NonZeroUsize>,
     ) -> Self {
-        let (msg_tx, msg_rx) = channel::channel(app_channel_capacity);
-        let app_inputs = AppInputs::new(msg_rx, keyed_channel_capacity);
+        let observer = LoadObserver::default();
+        let (msg_tx, msg_rx) =
+            channel::channel_observed(app_channel_capacity, Channel::Shared, observer.clone());
+        let app_inputs = AppInputs::new(msg_rx, keyed_channel_capacity, observer.clone());
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
-        let subscription_manager = SubscriptionManager::new(msg_tx.clone());
+        let subscription_manager = SubscriptionManager::new(msg_tx.clone(), observer.clone());
 
         // Initialize the application with flags
         let (app, init_cmd) = App::new(flags);
@@ -120,6 +127,7 @@ impl<App: Application> RuntimeCore<App> {
             quit_tx,
             quit_rx,
             subscription_manager,
+            observer,
             command_tasks: JoinSet::new(),
         };
 
@@ -157,6 +165,9 @@ impl<App: Application> RuntimeCore<App> {
 
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
+            // Raise the `unkeyed_commands` gauge for the task's lifetime; the
+            // guard lowers it on completion or abort (RFC 0006 §4.4).
+            let command_guard = self.observer.track_unkeyed_command();
 
             // Reap finished command tasks so the set stays bounded to the
             // commands that are actually still running.
@@ -165,6 +176,7 @@ impl<App: Application> RuntimeCore<App> {
             tracing::trace!(target: "tears::runtime", "command spawned");
 
             self.command_tasks.spawn(async move {
+                let _command_guard = command_guard;
                 // Catch panics in the command's stream so a bug in a fetcher or
                 // effect is logged instead of vanishing into a detached task.
                 let result = AssertUnwindSafe(async move {
