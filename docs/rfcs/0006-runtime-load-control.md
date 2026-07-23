@@ -283,15 +283,14 @@ release, made with migration notes — not a 0.10.0 gate.
 ### 3.2 Does the opt-in fit the existing public API additively?
 
 **Yes.** The opt-in surface is a new `RuntimeConfig` consumed by a new
-constructor (for example `Runtime::with_config(flags, frame_rate,
-config)`), with `Runtime::new` unchanged and equivalent to the default
-configuration. The exact public shape — constructor signature, field set,
-naming, and construction/validation style — is owned by the separate
-`RuntimeConfig` RFC, which is a prerequisite of the implementation: the
-load-control implementation PR starts only after that RFC has fixed the
-public API (section 6). The verdict here needs only the additivity
-argument, which holds for any shape that keeps `Runtime::new` unchanged.
-Bounded behavior activates only through that surface:
+constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
+unchanged and equivalent to the default configuration. The exact public
+shape — constructor signature, field set, naming, and
+construction/validation style — is fixed by the separate `RuntimeConfig`
+RFC (Accepted; section 6), so the load-control implementation PR can
+start. The verdict here needs only the additivity argument, which holds
+for any shape that keeps `Runtime::new` unchanged. Bounded behavior
+activates only through that surface:
 
 - Capacity limits replace the unbounded channels inside the runtime; no
   public channel type is exposed today, so this is internal. The one
@@ -322,10 +321,11 @@ load-control implementation (sections 4–6) lands after 0.10.0 behind
 
 ### 4.1 Configuration surface
 
-`RuntimeConfig` — public shape owned by the separate `RuntimeConfig` RFC,
-a prerequisite of the implementation (section 3.2) — must carry the three
-controls below. The names are this RFC's working names: the prerequisite
-RFC may rename or regroup them, but the semantics stated here are fixed.
+`RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
+(Accepted; section 3.2) — carries the three controls below. That RFC
+adopts these names unchanged and groups the frame rate into the same
+config, so `Runtime::with_config(flags, config)` takes the frame rate
+inside `config`; the semantics stated here are the contract.
 
 - `app_channel_capacity: Option<NonZeroUsize>` — `None` (default) keeps the
   unbounded shared channel; `Some(n)` bounds it.
@@ -1167,9 +1167,8 @@ measurement rather than an implementation-time choice:
   run's configuration under test (`app_channel_capacity`,
   `keyed_channel_capacity`, and whether `batch_max_messages` is set),
   the backlog depths of its statistical rows, and their trial counts
-  are fixed by the `RuntimeConfig` RFC as part of its prerequisite
-  obligations (section 6), alongside the recommended defaults it
-  already owns (open question 1) — which these test values need not
+  are fixed by RFC 0007 (section 6), alongside the recommended defaults
+  it sets (open question 1) — which these test values need not
   equal. A bounded column measured under parameters chosen at
   implementation time would not be a reviewable acceptance run. Bounded
   queue depth caps at `capacity + concurrent producers` (`capacity + 1`
@@ -1177,11 +1176,10 @@ measurement rather than an implementation-time choice:
   depth-accounting note below), so the unbounded `quit_backlog_50k` /
   `quit_backlog_300k` scenarios —
   which reach those depths by flooding an unbounded channel before
-  quitting — have no bounded-mode counterpart at the same depths: this
-  prerequisite obligation includes redefining what the bounded quit
-  scenarios vary, sized by blocked-producer count and channel-full churn
-  rather than queue depth, not reusing the unbounded scenario names or
-  depths unchanged.
+  quitting — have no bounded-mode counterpart at the same depths, so RFC
+  0007 accordingly redefines what the bounded quit scenarios vary, sizing
+  them by blocked-producer count and channel-full churn rather than queue
+  depth, not reusing the unbounded scenario names or depths unchanged.
 - **Every latency acceptance criterion is scoped to the reference
   machine of section 2.** The unbounded baseline column was measured
   there, so the cell-by-cell comparison — and with it INV-L4's
@@ -1224,7 +1222,7 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 (`capacity + 1` in these single-flood-producer scenarios); depth exceeding
 `capacity + producers` is the regression signal.
 
-## 6. Open questions (all resolved or delegated)
+## 6. Open questions (all resolved)
 
 Every question below is resolved — in this RFC, or by the now-Accepted
 `RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
@@ -1235,17 +1233,17 @@ prerequisite of the implementation PR (section 3.2).
 
 1. Default capacity values to recommend in documentation (measurement-driven;
    the harness's burst scenario sizes the absorption/latency trade-off).
-   **Delegated** to the `RuntimeConfig` RFC: recommended
-   defaults are documentation of that RFC's surface and land with it. The
-   documentation-guidance notes of sections 4.5, 4.6, and 4.7 land there
-   too.
+   **Resolved by RFC 0007.** Recommended defaults are documentation of
+   that RFC's surface: it sets the starting values (RFC 0007 §3.1), and
+   the documentation-guidance notes of sections 4.5, 4.6, and 4.7 belong
+   with them.
 2. Whether `batch_max_messages` needs a default even in unbounded mode (F5
    suggests the 100µs cap already protects the frame branch).
-   **Split.** The cap's semantics are no longer open —
-   pinned as INV-L12 (sections 4.1, 5). Whether a non-`None` default is
-   recommended is a default-value question like question 1 and is
-   delegated with it to the `RuntimeConfig` RFC; F5 stands as the
-   evidence that `None` is safe.
+   **Resolved.** The cap's semantics are pinned here as INV-L12 (sections
+   4.1, 5). The default-value half — whether a non-`None` default is
+   recommended — is a default-value question like question 1 and is
+   resolved by RFC 0007 with it: RFC 0007 recommends `batch_max_messages`
+   unset (RFC 0007 §3.1), and F5 is the evidence that `None` is safe.
 3. Producer-count bounding: whether and how to bound the number of
    concurrent producers (active subscriptions, running commands) that
    INV-L1's and INV-L3's per-producer accounting assumes is bounded — for
@@ -1279,10 +1277,11 @@ prerequisite of the implementation PR (section 3.2).
 5. Restart-rate-control interaction: whether a future restart-rate-control
    feature consumes the same `RuntimeConfig` surface or stays a
    subscription-level policy (current position: subscription-level).
-   **Delegated** to the `RuntimeConfig` RFC, which owns the
-   surface a future feature would or would not consume. This RFC keeps
-   the subscription-level position and adds no restart-rate control to
-   the section 4.1 requirements.
+   **Resolved by RFC 0007 §4.** Restart-rate control stays a
+   subscription-level policy; `RuntimeConfig` carries no restart-rate
+   field and reserves no name for one. This RFC keeps the
+   subscription-level position and adds no restart-rate control to the
+   section 4.1 requirements.
 6. Cross-channel fairness: whether bounded keyed-delivery latency is a goal
    at all and, if so, which scheduling policy (for example a shared-pull
    quota per batch window) relaxes INV-14 while preserving
