@@ -8,9 +8,13 @@ one or the other explicitly.
 
 - Each RFC carries its own `Status` in its header — it is not duplicated
   here, so the file is always the source of truth.
-- Resolutions of an RFC's open questions land as amendments to the RFC
-  body itself (recorded in the header's `Amendments` line), not as
-  separate documents.
+- An RFC's body states the current contract, not its history. Resolutions
+  of open questions and later amendments are edited into the body in
+  place; the change history lives in Git, not in a header log. Dates
+  appear in the body only where they aid reproducibility (the measurement
+  reference date), never as a changelog.
+- After an RFC is Accepted, any amendment to the contract it states is a
+  reviewed change — treat it like a new RFC for review purposes.
 - Before requesting review on a new RFC or an amendment, run the
   [pre-review checklist](pre-review-checklist.md).
 

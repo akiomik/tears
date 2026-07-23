@@ -1,7 +1,7 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Accepted (0.10.0 shipped on the section 3 verdict on 2026-07-17;
-  moves to Implemented when the sections 4–6 implementation lands)
+- Status: Accepted (moves to Implemented when the sections 4–6
+  implementation lands)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
@@ -10,101 +10,22 @@
 - CHANGELOG: `Added` entry lands at the load-control implementation release
   (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
   RFC (see section 3)
-- Amendments: 2026-07-17 — open question 8 resolved: quit-under-backlog
-  scenarios added and measured (section 2, F6/F7), bounded-vs-unbounded
-  acceptance matrix defined (section 5.1). 2026-07-17 — open question 3
-  resolved: no producer admission limit — R1 is scoped to per-channel
-  bounds with the active-`CommandId` count an application-owned contract
-  input, the producer-count premise is application-owned and observable,
-  and keyed channels are bounded per command, not by a shared pool
-  (INV-L8/L9; sections 1.2, 4.4, 4.5, 5, 5.1). 2026-07-17 — open question
-  7 resolved: keyed `Action::Quit` stays in its command's private channel,
-  with no reroute to the dedicated quit channel in either shape — a keyed
-  quit's delivery order is its cancellation semantics, and a reroute would
-  outrun the ready shared cancelling inputs INV-L11 orders ahead of a
-  keyed quit and defeat post-dispatch suppression (RFC 0003 INV-9); the
-  private-channel routing, keyed-quit ordering, and shared-first
-  precedence this rests on are pinned as INV-L10/INV-L11, and bounded-mode
-  keyed-quit latency is capacity-dependent, so F7's regression check is
-  scoped to the unbounded default (sections 4.2, 4.6, 5, 5.1). 2026-07-17
-  — open question 6 resolved: no cross-channel fairness policy — bounded
-  keyed-delivery latency is not a goal of this contract. Cancellation is
-  an `update` decision, so a pull point cannot know which ready shared
-  inputs are cancels; shared-first pull (INV-14) is therefore the
-  implementable form of cancel-before-delivery itself, and any policy
-  that guarantees a keyed-delivery bound (quota, aging, weighted
-  round-robin) must deliver keyed output past inputs that could still
-  cancel it — trading exactly what keying buys. Keyed liveness under
-  sustained shared readiness is explicitly forgone in both modes (bounded
-  capacity does not restore it — section 4.3's refill argument); INV-14
-  stays unrelaxed, the keyed-probe scenario stays measurement-only,
-  liveness-critical output is directed to the unkeyed path, and the
-  shared-wins unit tests now cover both pull paths for keyed messages
-  (sections 4.3, 4.7, 5, 5.1). 2026-07-18 — implementation gates settled:
-  INV-L4 is resolved to its statistical formulation (the unbiased select
-  stays; normative acceptance conditions pinned in section 5, with the
-  deterministic-priority option recorded as fallback only); the
-  `RuntimeConfig` public API is delegated to the separate `RuntimeConfig`
-  RFC as a prerequisite of the implementation PR (sections 3.2, 4.1, 6),
-  and open questions 1, 5, and the default-value half of 2 travel with
-  it; `batch_max_messages` semantics are pinned as INV-L12 (pulled-input
-  count per batch, opening input included, `ReceiverEvent::Closed`
-  included; sections 4.1, 5); open question 4 resolved — load
-  observability is `tracing`-only initially, with the normative minimal
-  event schema and its value-verifying definition of done fixed in
-  section 4.4 and pinned as INV-L13 (section 5). 2026-07-18 — acceptance
-  reproducibility pinned (review follow-up): every latency acceptance
-  criterion is scoped to the section 2 reference machine, CI gates on no
-  latency criterion, and the section 5.1 bounded-run parameters
-  (configuration under test, backlog depths, trial counts) move from
-  implementation-time choices to prerequisite obligations of the
-  `RuntimeConfig` RFC, which also owns the CI smoke-profile question
-  (sections 5, 5.1, 6). 2026-07-18 — three review-follow-up
-  clarifications (no contract change): the `RuntimeConfig` RFC's
-  bounded-run parameter obligations now include redefining the bounded
-  `quit_backlog_*` scenarios around blocked-producer count and
-  channel-full churn rather than queue depth, since bounded depth caps
-  at `capacity + concurrent producers` (`capacity + 1` only for a single
-  producer; section 5.1); the capacity-wait event's per-send
-  firing granularity is pinned as a deliberate choice, with aggregation
-  left to `tracing` filtering and any future aggregate event kept
-  additive (section 4.4); and "active `CommandId`" in R1's `m` is
-  defined as an entry existing in the keyed map, including a
-  finished-but-undrained run (section 1.2). 2026-07-22 — cross-reference
-  fix (no contract change, RFC 0007 review follow-up): INV-L4's acceptance
-  conditions (section 5) and the section 5.1 matrix row both named
-  `quit_backlog_50k` / `quit_backlog_300k` as if those names applied
-  unchanged in bounded mode, which lagged the 2026-07-18 amendment above
-  redefining the bounded quit rows around blocked-producer count and
-  channel-full churn; both now state explicitly that the four names are
-  the unbounded scenario names and that the bounded rows the same
-  criterion applies to are the `RuntimeConfig` RFC's redefined ones, not
-  these names reused unchanged. 2026-07-22 — general depth-cap correction
-  (no contract change, RFC 0007 review follow-up): the 2026-07-18
-  changelog entry above and section 5.1's reproducibility-rule prose both
-  stated the bounded depth cap as `capacity + 1` in general; section
-  5.1's own depth-accounting note already gives the general bound as
-  `capacity + concurrent producers`, with `capacity + 1` holding only for
-  the single-producer scenarios measured there (a gap the `RuntimeConfig`
-  RFC's `quit_blocked_64` row, at `capacity + 64`, would otherwise
-  contradict) — both passages now state the general bound and scope
-  `capacity + 1` to the single-producer case explicitly
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
-> draft that 0.10.0 depends on, and it is final unless the contract design in
+> RFC that 0.10.0 depends on, and it is final unless the contract design in
 > sections 4–6 turns out to be unimplementable without breaking the public
-> API. Sections 4–6 fix the direction of the load-control contract; the
-> details still open (capacity values, recommended defaults, and the
-> section 5.1 bounded-run parameters and CI smoke-profile question) are
-> owned by the separate `RuntimeConfig` RFC, whose acceptance is the sole
-> remaining prerequisite of the implementation PR (sections 3.2, 6). The
+> API. Sections 4–6 fix the load-control contract. The items this RFC
+> delegated to the separate `RuntimeConfig` RFC — capacity values,
+> recommended defaults, the section 5.1 bounded-run parameters, and the CI
+> smoke-profile question — are settled there; that RFC is Accepted, so no
+> prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
-> delivery path, and cross-channel fairness — are all now settled (open
+> delivery path, and cross-channel fairness — are settled (open
 > questions 3, 7, and 6; sections 4.5, 4.6, and 4.7), as are the INV-L4
 > acceptance formulation, the `batch_max_messages` semantics, and the
-> observability schema (2026-07-18 amendments; sections 4.1, 4.4, 5).
-> None of them gated the 0.10.0 release.
+> observability schema (sections 4.1, 4.4, 5). None of them gated the 0.10.0
+> release.
 
 ## Summary
 
@@ -124,7 +45,7 @@ This RFC defines the load-control contract in two steps:
    existing constructors do not change. This RFC therefore adds **no
    breaking change** to 0.10.0, and 0.10.0 does not wait for this RFC's
    implementation.
-2. **Post-0.10.0 implementation (direction fixed, details open).** A bounded
+2. **Post-0.10.0 implementation (direction fixed).** A bounded
    delivery mode with per-source-class capacity and backpressure contracts,
    configured through `RuntimeConfig`, plus load observability via `tracing`.
 
@@ -239,7 +160,9 @@ which drives the real `Runtime` through the public API: a subscription floods
 the shared channel at a configured rate; `update` and `view` simulate CPU cost
 (2–25µs and 500µs respectively); a keyed command emits probe messages every
 25ms in the `keyed_*` scenarios. Reference run: Apple M1 Max (10 cores),
-rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS target.
+rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS target; measured
+2026-07-17 — the reference date this section's measured results, and the
+section 5.1 baseline that reuses them, are defined on.
 
 | Scenario | Load | Max queue depth | Update latency p50 / p99 | Render latency p50 / p99 | Keyed latency p50 / max | FPS |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -251,7 +174,7 @@ rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS target.
 | `keyed_overload` | as `overload` + keyed probe | 308,733 | 4.0s / 7.9s | 4.0s / 7.9s | **9.2s / 13.0s** | 60 |
 
 Quit responsiveness under backlog is measured by the `quit_*` scenarios
-(added 2026-07-17 for open question 8). Each scenario runs many short trials
+(added for open question 8). Each scenario runs many short trials
 — the event loop's `select!` is unbiased, so quit latency is a distribution
 and only tail statistics across trials are meaningful. A trial floods the
 shared channel (burst or paced), then `update` returns `Command::quit()`
@@ -530,7 +453,7 @@ merged" are known.
 ### 4.4 Observability (open question 4 resolved)
 
 Load observability is delivered through `tracing` only in the initial
-implementation (open question 4, resolved 2026-07-18): tears already
+implementation (open question 4, resolved): tears already
 depends on `tracing` unconditionally, a subscriber can derive rates and
 high-water marks from raw events, and dedicated profiling-hook counters
 remain future additive work that this schema does not preclude. The
@@ -938,7 +861,7 @@ Consequences:
   shared-input-wins-the-pull unit tests are regression checks, not proofs
   (a quota with `q` larger than a test's pull count passes any finite
   test — section 5's bounded-test-against-unbounded-parameter argument).
-  With this amendment those tests cover both pull paths for keyed
+  Those tests cover both pull paths for keyed
   *messages*, as the INV-L11 tests already do for keyed quits, closing the
   seam-coverage gap the pre-review checklist flags. `batch_max_messages`
   (section 4.1) is not a fairness knob and does not become one: ending a
@@ -970,9 +893,11 @@ Consequences:
   debounce hot sources — and not from bounded mode, which bounds memory
   and shared latency but leaves keyed deferral intact (section 4.3).
 
-## 5. Invariants (draft)
+## 5. Invariants
 
-To be finalized as contract tests before implementation:
+The invariants below are the load-control implementation contract. Each
+states its enforcement class (structural, behavioral, or statistical) and
+the check that realizes it; the implementation realizes those checks.
 
 - **INV-L1**: With `app_channel_capacity = n`, the shared channel buffers at
   most `n` messages, and each configured keyed channel buffers at most its
@@ -1026,8 +951,8 @@ To be finalized as contract tests before implementation:
   `quit_rx` before entering the app-input branch — reconciled with F5's
   frame-branch fairness, or (b) a statistical formulation with defined
   measurement conditions, since a single harness run cannot validate a
-  claim of the form "always independent of backlog." **Resolved
-  (2026-07-18): formulation (b) is adopted.** F6 removed the empirical
+  claim of the form "always independent of backlog." **Resolved:
+  formulation (b) is adopted.** F6 removed the empirical
   uncertainty: quit→delivered shows no depth dependence from 0 to ~300k
   queued messages, so the unbiased select already provides what R4 asks
   for, while (a) would restructure the one event loop every configuration
@@ -1120,9 +1045,8 @@ To be finalized as contract tests before implementation:
   `Action::Quit` into that same private channel — checked by review of
   the keyed spawn/send site. The ordering half has a behavioral
   regression check at the keyed-manager layer, the narrowest layer with
-  the needed access (docs/testing.md): a unit test, added with this
-  amendment, in which a keyed stream emitting a message and then a quit
-  delivers the message first.
+  the needed access (docs/testing.md): a unit test in which a keyed stream
+  emitting a message and then a quit delivers the message first.
 - **INV-L11**: At every `AppInputs` pull point, a ready shared input is
   delivered before a ready keyed quit — keyed `Action::Quit` participates
   in INV-14's shared-first pull like any other keyed output, with no
@@ -1134,7 +1058,7 @@ To be finalized as contract tests before implementation:
   bounded-mode admission window, section 4.3), which is why bounded-mode
   keyed-quit latency is capacity-dependent and carries no acceptance
   bound (section 5.1). Behavioral check at the `AppInputs` layer: unit
-  tests, added with this amendment, in which a queued shared message
+  tests in which a queued shared message
   wins the pull over an already-buffered keyed quit on *each* pull point
   the invariant quantifies over — the blocking `poll_next` path and the
   non-waiting `try_next_ready` path — since a quit-specific bypass could
@@ -1231,7 +1155,7 @@ a reroute detector.
 
 The bounded mode's acceptance measurement is a re-run of the harness under a
 bounded `RuntimeConfig`, compared cell by cell against the unbounded
-baseline below (measured 2026-07-17, reference machine of section 2). The
+baseline below (measured on the section 2 reference machine). The
 unbounded column is fixed now so the implementation has a pinned before/after
 comparison; the bounded column states the acceptance criterion each cell
 must meet and is filled with measured values when the implementation lands.
@@ -1302,23 +1226,22 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 ## 6. Open questions (all resolved or delegated)
 
-Every question below is now resolved in this RFC or delegated to the
-separate `RuntimeConfig` RFC, which is thereby the sole remaining
-prerequisite of the implementation PR (section 3.2): it must fix the
-public `RuntimeConfig` API — and with it questions 1, 5, and the
-default-value half of 2 — and pin the section 5.1 bounded-run
-parameters (configuration under test, backlog depths, trial counts)
-and the CI smoke-profile decision, before code implementation starts.
+Every question below is resolved — in this RFC, or by the now-Accepted
+`RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
+it questions 1, 5, and the default-value half of 2), the section 5.1
+bounded-run parameters (configuration under test, backlog depths, trial
+counts), and the CI smoke-profile decision. No open question remains as a
+prerequisite of the implementation PR (section 3.2).
 
 1. Default capacity values to recommend in documentation (measurement-driven;
    the harness's burst scenario sizes the absorption/latency trade-off).
-   **Delegated (2026-07-18)** to the `RuntimeConfig` RFC: recommended
+   **Delegated** to the `RuntimeConfig` RFC: recommended
    defaults are documentation of that RFC's surface and land with it. The
    documentation-guidance notes of sections 4.5, 4.6, and 4.7 land there
    too.
 2. Whether `batch_max_messages` needs a default even in unbounded mode (F5
    suggests the 100µs cap already protects the frame branch).
-   **Split (2026-07-18).** The cap's semantics are no longer open —
+   **Split.** The cap's semantics are no longer open —
    pinned as INV-L12 (sections 4.1, 5). Whether a non-`None` default is
    recommended is a default-value question like question 1 and is
    delegated with it to the `RuntimeConfig` RFC; F5 stands as the
@@ -1332,7 +1255,7 @@ and the CI smoke-profile decision, before code implementation starts.
    FIFO; a pool bounds total memory more tightly). Without an answer, R1's
    and R3's boundable-memory and bounded-latency claims hold only for
    channel buffers, not total pending-work memory or latency.
-   **Resolved (2026-07-17).** No admission limit. Producer creation is
+   **Resolved.** No admission limit. Producer creation is
    synchronous on the event loop task, so a waiting limit is INV-L7's
    self-deadlock at the spawn site, and the non-waiting alternatives
    (reject, drop, defer) break the RFC 0005 reconciliation contract or
@@ -1347,7 +1270,7 @@ and the CI smoke-profile decision, before code implementation starts.
    no-admission-limit contract itself is INV-L8.
 4. Where backpressure-wait telemetry lives (`tracing` only, or counters
    exposed by future profiling-hook work).
-   **Resolved (2026-07-18).** `tracing` only for the initial
+   **Resolved.** `tracing` only for the initial
    implementation, with the normative minimal schema — target, levels,
    fields, firing conditions, and the value-verifying definition of
    done — fixed in section 4.4 and pinned as INV-L13 (section 5).
@@ -1356,7 +1279,7 @@ and the CI smoke-profile decision, before code implementation starts.
 5. Restart-rate-control interaction: whether a future restart-rate-control
    feature consumes the same `RuntimeConfig` surface or stays a
    subscription-level policy (current position: subscription-level).
-   **Delegated (2026-07-18)** to the `RuntimeConfig` RFC, which owns the
+   **Delegated** to the `RuntimeConfig` RFC, which owns the
    surface a future feature would or would not consume. This RFC keeps
    the subscription-level position and adds no restart-rate control to
    the section 4.1 requirements.
@@ -1364,7 +1287,7 @@ and the CI smoke-profile decision, before code implementation starts.
    at all and, if so, which scheduling policy (for example a shared-pull
    quota per batch window) relaxes INV-14 while preserving
    cancel-before-delivery (F4, section 4.3).
-   **Resolved (2026-07-17).** Not a goal — no fairness policy is added,
+   **Resolved.** Not a goal — no fairness policy is added,
    and INV-14 stays as RFC 0003 states it in both delivery modes. The
    question's constraint has no non-vacuous solution: cancellation is an
    `update` decision, so a pull point cannot know which ready shared
@@ -1410,7 +1333,7 @@ and the CI smoke-profile decision, before code implementation starts.
    describes (its keyed delivery-side form stated as an invariant only
    later, by INV-L10). Any resolution of this question should say which
    of the two shapes it delivers.
-   **Resolved (2026-07-17).** Neither shape: a keyed `Action::Quit` stays
+   **Resolved.** Neither shape: a keyed `Action::Quit` stays
    in its command's private channel. Keying a quit is a request for
    cancellability, which decomposes into post-dispatch suppression (RFC
    0003 INV-9) and precedence for the ready shared inputs that could
@@ -1439,7 +1362,7 @@ and the CI smoke-profile decision, before code implementation starts.
    variants considered, in section 4.6.
 8. Harness follow-up: add a quit-under-backlog scenario (F5) and a bounded
    vs. unbounded comparison matrix before implementation.
-   **Resolved (2026-07-17).** `benches/runtime_load.rs` now runs the
+   **Resolved.** `benches/runtime_load.rs` now runs the
    `quit_*` trial scenarios — unkeyed quit at three backlog depths plus an
    actively refilling overload, and a keyed-quit control — with per-trial
    tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
@@ -1447,7 +1370,7 @@ and the CI smoke-profile decision, before code implementation starts.
    bounded column is filled when the implementation lands, under the
    parameters the `RuntimeConfig` RFC pins (section 5.1). F6 is the
    measurement basis on which INV-L4 has since been resolved to its
-   statistical formulation (2026-07-18; section 5); F7 is the quantified
+   statistical formulation (section 5); F7 is the quantified
    status quo that open question 7 has since resolved to keep (section
    4.6).
 
