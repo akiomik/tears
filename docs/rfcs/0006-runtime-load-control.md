@@ -496,19 +496,30 @@ as INV-L13 (section 5):
   observable rather than enforced (section 4.5), including the
   blocked-producer anti-pattern named there.
 
-Definition of done for the observability slice: an integration test
-installs a `tracing` subscriber (the technique the `quit_*` harness
-already uses, section 2), drives a scripted load, and verifies values and
-firing conditions, not mere event presence — an implementation that emits
-each event once with wrong values must fail it:
+Definition of done for the observability slice: a runtime batch-layer
+test together with an integration test, each installing a `tracing`
+subscriber (the technique the `quit_*` harness already uses, section 2).
+The runtime batch-layer test drives `process_input_batch` directly to fix
+the batch event's `Closed` differing-value case deterministically (below);
+the integration test drives a scripted load for the remaining values —
+the equal-count batch case, `shared_pending`, the capacity-wait event, and
+the producer gauges. Both verify values and firing conditions, not mere
+event presence — an implementation that emits each event once with wrong
+values must fail:
 
 - **Batch event**: `pulled` and `updated` equal the scripted input
-  counts, including a batch where the two differ — a scenario with a
-  `ReceiverEvent::Closed` among the queued inputs must observe
-  `pulled = updated + 1`. `shared_pending` is verified against a
-  scripted leftover, not merely present: with `batch_max_messages =
-  Some(n)` and `n + k` shared messages queued under the paused clock,
-  the capped batch must report `shared_pending = k`.
+  counts, including a batch where the two differ. The differing case is
+  observed at the runtime batch layer rather than over the integration
+  load: a `tracing` subscriber over a `Some(1)` batch whose opening input
+  is a `ReceiverEvent::Closed` must observe `pulled = 1` and
+  `updated = 0`. This is the opening-`Closed` placement INV-L12 uses and
+  for the same reason — a queued `Closed` is not deterministically
+  constructible (section 4.7 shared-first pull; `StreamMap` order), so
+  requiring a real `Closed` mid-load would reintroduce that
+  non-determinism in the observability slice. `shared_pending` is
+  verified against a scripted leftover, not merely present: with
+  `batch_max_messages = Some(n)` and `n + k` shared messages queued under
+  the paused clock, the capped batch must report `shared_pending = k`.
 - **Capacity-wait event**: an immediately accepted send fires no event;
   a send that had to await capacity fires exactly one event, at
   acceptance, with `channel` naming the channel that blocked it.
@@ -1081,9 +1092,23 @@ the check that realizes it; the implementation realizes those checks.
   uses `tokio::time::Instant` for exactly this) queue `n` ready inputs
   and assert one batch pulls all `n`, then queue `n + 1` and assert the
   batch pulls exactly `n` with the remaining input delivered by the next
-  batch — the off-by-one pair — plus a variant that places a
-  `ReceiverEvent::Closed` among the queued inputs and asserts it
-  consumes a slot in the count.
+  batch — the off-by-one pair — plus a `Some(1)` variant whose *opening*
+  input is a `ReceiverEvent::Closed`, asserting that a ready shared input
+  is left for the next batch. The opening `Closed` invokes no `update`,
+  so a cap that counted `update` calls instead of pulled inputs would go
+  on to pull that shared input into the same batch; the leftover
+  discriminates the two. The `Closed` is placed in the opening position,
+  not among later queued inputs, because a queued `Closed` is not
+  deterministically constructible at this layer: `AppInputs` pulls shared
+  inputs before keyed (section 4.7), and a `Closed` is surfaced only by
+  an already-empty, sender-closed keyed receiver — a closed receiver
+  still holding buffered output is removed when its *last* buffered
+  output is pulled and it becomes empty, before any `Closed` — so no real
+  input is ever pull-ordered after a `Closed` from one source, and a
+  second keyed source makes the order non-deterministic because
+  `StreamMap` randomizes the poll-start position. `Closed` surfacing
+  itself is checked at the keyed-manager layer, where a receiver yields
+  `Closed` once its sender closes on an empty buffer.
 - **INV-L13**: The runtime emits the load-observability events exactly
   as the section 4.4 schema states — target `tears::runtime::load`, the
   three event kinds with their levels, required fields, and firing
@@ -1093,16 +1118,17 @@ the check that realizes it; the implementation realizes those checks.
   shared-channel occupancy at batch end, `wait_us` the blocked send's
   admission wait. The schema is contract surface: renaming, dropping, or
   repurposing any part of it is an amendment to this RFC, not an
-  implementation detail. Behavioral check at the integration layer: the
-  section 4.4 definition-of-done test — a `tracing` subscriber over a
-  scripted load whose value assertions (scripted counts for
-  `pulled`/`updated`, a known leftover for `shared_pending`, a
-  controlled wait for `wait_us`, and gauge transitions including the
-  cancellation-abort decrement) distinguish an implementation that
-  emits the right events with wrong values.
+  implementation detail. Behavioral check across the runtime batch layer
+  and the integration layer: the section 4.4 definition-of-done test —
+  the batch event's `Closed` differing-value case asserted at the runtime
+  batch layer, and a `tracing` subscriber over a scripted load whose value
+  assertions (scripted counts for `pulled`/`updated`, a known leftover for
+  `shared_pending`, a controlled wait for `wait_us`, and gauge transitions
+  including the cancellation-abort decrement) distinguish an
+  implementation that emits the right events with wrong values.
 
-Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
-integration test. The overload scenario is the acceptance measurement for
+Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
+unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
@@ -1144,9 +1170,9 @@ review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
 ordering half a unit-level test. INV-L11 and INV-L12 are behavioral at
-the unit layer, and INV-L13 at the integration layer (the section 4.4
-definition-of-done test); none of INV-L10 through INV-L13 needs a bench
-scenario, and in particular the
+the unit layer, and INV-L13 across the runtime batch layer and the
+integration layer (the section 4.4 definition-of-done test); none of
+INV-L10 through INV-L13 needs a bench scenario, and in particular the
 `quit_keyed_backlog_50k` latency numbers are not a check for either — see
 section 5.1's row for why bounded-mode keyed-quit latency cannot serve as
 a reroute detector.
