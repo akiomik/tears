@@ -496,45 +496,47 @@ as INV-L13 (section 5):
   observable rather than enforced (section 4.5), including the
   blocked-producer anti-pattern named there.
 
-Definition of done for the observability slice: a runtime batch-layer
-test together with an integration test, each installing a `tracing`
-subscriber (the technique the `quit_*` harness already uses, section 2).
-The runtime batch-layer test drives `process_input_batch` directly to fix
-the batch event's `Closed` differing-value case deterministically (below);
-the integration test drives a scripted load for the remaining values —
-the equal-count batch case, `shared_pending`, the capacity-wait event, and
-the producer gauges. Both verify values and firing conditions, not mere
-event presence — an implementation that emits each event once with wrong
-values must fail:
+Definition of done for the observability slice: layered tests, each
+installing a `tracing` subscriber (the technique the `quit_*` harness
+already uses, section 2) and asserting values and firing conditions, not
+mere event presence — an implementation that emits each event once with
+wrong values must fail. Each event is checked at the narrowest layer that
+makes its scripted inputs deterministic: the batch event's values at the
+runtime batch layer (driving `process_input_batch` directly), the
+capacity-wait event and the `blocked` gauge at the bounded-send layer
+(where a scripted wait and a scripted abort are deterministic), and the
+`subscriptions`/`unkeyed_commands`/`keyed_commands` gauges end-to-end over
+an integration run (where the real producers raise and lower them):
 
-- **Batch event**: `pulled` and `updated` equal the scripted input
-  counts, including a batch where the two differ. The differing case is
-  observed at the runtime batch layer rather than over the integration
-  load: a `tracing` subscriber over a `Some(1)` batch whose opening input
-  is a `ReceiverEvent::Closed` must observe `pulled = 1` and
-  `updated = 0`. This is the opening-`Closed` placement INV-L12 uses and
-  for the same reason — a queued `Closed` is not deterministically
-  constructible (section 4.7 shared-first pull; `StreamMap` order), so
-  requiring a real `Closed` mid-load would reintroduce that
-  non-determinism in the observability slice. `shared_pending` is
-  verified against a scripted leftover, not merely present: with
+- **Batch event** (runtime batch layer): `pulled` and `updated` equal the
+  scripted input counts, including a batch where the two differ — a
+  `Some(1)` batch whose opening input is a `ReceiverEvent::Closed` must
+  observe `pulled = 1` and `updated = 0`. This uses the opening-`Closed`
+  placement INV-L12 uses and for the same reason — a queued `Closed` is
+  not deterministically constructible (section 4.7 shared-first pull;
+  `StreamMap` order), which is also why the whole batch event is asserted
+  here rather than over the integration load. `shared_pending` is verified
+  against a scripted leftover, not merely present: with
   `batch_max_messages = Some(n)` and `n + k` shared messages queued under
   the paused clock, the capped batch must report `shared_pending = k`.
-- **Capacity-wait event**: an immediately accepted send fires no event;
-  a send that had to await capacity fires exactly one event, at
-  acceptance, with `channel` naming the channel that blocked it.
+- **Capacity-wait event** (bounded-send layer): an immediately accepted
+  send fires no event; a send that had to await capacity fires exactly one
+  event, at acceptance, with `channel` naming the channel that blocked it.
   `wait_us` is verified against a controlled wait: a send held blocked
   while the test advances the paused clock by a scripted duration
   before freeing capacity must report `wait_us` of at least that
   duration — which requires the wait to be measured with
   `tokio::time::Instant`, the pausable clock the batch deadline already
   uses — so an implementation that hardcodes `wait_us = 0` fails.
-- **Producer gauges**: starting a subscription, an unkeyed command, and
-  a keyed command each raise the matching field, and each completion
-  lowers it again; `blocked` rises when a producer begins awaiting
-  capacity, falls when the send is accepted, and also falls when a
-  blocked producer is aborted by cancellation (section 4.3) — the
-  decrement must not depend on the send ever completing.
+- **Producer gauges**: the `subscriptions`, `unkeyed_commands`, and
+  `keyed_commands` fields are checked end-to-end over an integration run —
+  starting a subscription, an unkeyed command, and a keyed command each
+  raises the matching field, and each falls back to zero as the run tears
+  its producers down. The `blocked` field is checked at the bounded-send
+  layer, where it rises when a producer begins awaiting capacity, falls
+  when the send is accepted, and also falls when a blocked producer is
+  aborted by cancellation (section 4.3) — the decrement must not depend on
+  the send ever completing.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -1118,14 +1120,15 @@ the check that realizes it; the implementation realizes those checks.
   shared-channel occupancy at batch end, `wait_us` the blocked send's
   admission wait. The schema is contract surface: renaming, dropping, or
   repurposing any part of it is an amendment to this RFC, not an
-  implementation detail. Behavioral check across the runtime batch layer
-  and the integration layer: the section 4.4 definition-of-done test —
-  the batch event's `Closed` differing-value case asserted at the runtime
-  batch layer, and a `tracing` subscriber over a scripted load whose value
-  assertions (scripted counts for `pulled`/`updated`, a known leftover for
-  `shared_pending`, a controlled wait for `wait_us`, and gauge transitions
-  including the cancellation-abort decrement) distinguish an
-  implementation that emits the right events with wrong values.
+  implementation detail. Behavioral check across the layered section 4.4
+  definition-of-done tests, each with a `tracing` subscriber and value
+  assertions that distinguish an implementation emitting the right events
+  with wrong values: the batch event's `pulled`/`updated` (including the
+  `Closed` differing-value case) and its `shared_pending` leftover at the
+  runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
+  the `blocked` gauge's cancellation-abort decrement at the bounded-send
+  layer; and the `subscriptions`/`unkeyed_commands`/`keyed_commands`
+  gauge transitions end-to-end over an integration run.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
 unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
@@ -1170,8 +1173,8 @@ review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
 ordering half a unit-level test. INV-L11 and INV-L12 are behavioral at
-the unit layer, and INV-L13 across the runtime batch layer and the
-integration layer (the section 4.4 definition-of-done test); none of
+the unit layer, and INV-L13 across the runtime batch, bounded-send, and
+integration layers (the section 4.4 definition-of-done tests); none of
 INV-L10 through INV-L13 needs a bench scenario, and in particular the
 `quit_keyed_backlog_50k` latency numbers are not a check for either — see
 section 5.1's row for why bounded-mode keyed-quit latency cannot serve as
