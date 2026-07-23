@@ -1,11 +1,12 @@
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::stream::BoxStream;
-use tokio::sync::mpsc;
 
 use crate::command::{Action, CancelPolicy, CommandId};
 
+use super::channel;
 use super::keyed_commands::{KeyedCommands, KeyedPoll, ReceiverEvent};
 
 /// Input events consumed by the runtime's application loop.
@@ -19,16 +20,20 @@ pub(super) enum AppInput<Msg> {
 
 /// Stream of application inputs backed by runtime message channels.
 pub(super) struct AppInputs<Msg: Send + 'static> {
-    shared: mpsc::UnboundedReceiver<Msg>,
+    shared: channel::Receiver<Msg>,
     keyed: KeyedCommands<Msg>,
 }
 
 impl<Msg: Send + 'static> AppInputs<Msg> {
-    /// Creates an input stream from the shared message receiver.
-    pub(super) fn new(shared: mpsc::UnboundedReceiver<Msg>) -> Self {
+    /// Creates an input stream from the shared message receiver and the keyed
+    /// commands' per-command channel capacity.
+    pub(super) fn new(
+        shared: channel::Receiver<Msg>,
+        keyed_capacity: Option<NonZeroUsize>,
+    ) -> Self {
         Self {
             shared,
-            keyed: KeyedCommands::new(),
+            keyed: KeyedCommands::new(keyed_capacity),
         }
     }
 
@@ -99,29 +104,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_shared_after_send() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
 
-        tx.send(42).expect("receiver should be open");
+        tx.try_send(42).expect("receiver should be open");
 
         assert_eq!(inputs.next().await, Some(AppInput::Shared(42)));
     }
 
     #[test]
     fn test_app_inputs_try_next_ready_empty_returns_none() {
-        let (_tx, rx) = mpsc::unbounded_channel::<i32>();
-        let mut inputs = AppInputs::new(rx);
+        let (_tx, rx) = channel::channel::<i32>(None);
+        let mut inputs = AppInputs::new(rx, None);
 
         assert_eq!(inputs.try_next_ready(), None);
     }
 
     #[test]
     fn test_app_inputs_try_next_ready_returns_queued_messages() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
 
-        tx.send(1).expect("receiver should be open");
-        tx.send(2).expect("receiver should be open");
+        tx.try_send(1).expect("receiver should be open");
+        tx.try_send(2).expect("receiver should be open");
 
         assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
         assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(2)));
@@ -130,11 +135,11 @@ mod tests {
 
     #[test]
     fn test_app_inputs_try_next_ready_preserves_fifo_order() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
 
         for msg in [1, 2, 3] {
-            tx.send(msg).expect("receiver should be open");
+            tx.try_send(msg).expect("receiver should be open");
         }
 
         assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
@@ -144,8 +149,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_app_inputs_poll_next_returns_none_after_sender_closes() {
-        let (tx, rx) = mpsc::unbounded_channel::<i32>();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel::<i32>(None);
+        let mut inputs = AppInputs::new(rx, None);
 
         drop(tx);
 
@@ -154,8 +159,8 @@ mod tests {
 
     #[tokio::test]
     async fn shared_input_wins_when_keyed_output_is_also_ready() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
         let id = CommandId::new("search");
         inputs.spawn_keyed(
             id.clone(),
@@ -163,7 +168,7 @@ mod tests {
             stream::iter([Action::Message(2)]).boxed(),
         );
         yield_now().await;
-        tx.send(1).expect("receiver should be open");
+        tx.try_send(1).expect("receiver should be open");
 
         assert_eq!(inputs.next().await, Some(AppInput::Shared(1)));
         inputs
@@ -179,8 +184,8 @@ mod tests {
 
     #[tokio::test]
     async fn shared_input_wins_the_nonwaiting_pull_when_keyed_output_is_also_ready() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
         let id = CommandId::new("search");
         inputs.spawn_keyed(
             id.clone(),
@@ -192,7 +197,7 @@ mod tests {
             "keyed output should be buffered before the pull",
         )
         .await;
-        tx.send(1).expect("receiver should be open");
+        tx.try_send(1).expect("receiver should be open");
 
         assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
         assert_eq!(
@@ -205,8 +210,8 @@ mod tests {
 
     #[tokio::test]
     async fn shared_input_wins_when_keyed_quit_is_also_ready() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
         let id = CommandId::new("quit");
         inputs.spawn_keyed(
             id.clone(),
@@ -218,7 +223,7 @@ mod tests {
             "keyed quit should be buffered before the pull",
         )
         .await;
-        tx.send(1).expect("receiver should be open");
+        tx.try_send(1).expect("receiver should be open");
 
         assert_eq!(inputs.try_next_ready(), Some(AppInput::Shared(1)));
         assert_eq!(
@@ -229,8 +234,8 @@ mod tests {
 
     #[tokio::test]
     async fn shared_input_wins_the_blocking_pull_when_keyed_quit_is_also_ready() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel(None);
+        let mut inputs = AppInputs::new(rx, None);
         let id = CommandId::new("quit");
         inputs.spawn_keyed(
             id.clone(),
@@ -242,7 +247,7 @@ mod tests {
             "keyed quit should be buffered before the pull",
         )
         .await;
-        tx.send(1).expect("receiver should be open");
+        tx.try_send(1).expect("receiver should be open");
 
         assert_eq!(inputs.next().await, Some(AppInput::Shared(1)));
         assert_eq!(
@@ -253,8 +258,8 @@ mod tests {
 
     #[tokio::test]
     async fn closed_shared_channel_and_same_poll_keyed_reconciliation_terminate_the_stream() {
-        let (tx, rx) = mpsc::unbounded_channel::<i32>();
-        let mut inputs = AppInputs::new(rx);
+        let (tx, rx) = channel::channel::<i32>(None);
+        let mut inputs = AppInputs::new(rx, None);
         inputs.spawn_keyed(
             CommandId::new("empty"),
             CancelPolicy::CancelInFlight,
@@ -272,8 +277,8 @@ mod tests {
 
     #[tokio::test]
     async fn try_next_ready_does_not_wait_for_pending_keyed_streams() {
-        let (_tx, rx) = mpsc::unbounded_channel::<i32>();
-        let mut inputs = AppInputs::new(rx);
+        let (_tx, rx) = channel::channel::<i32>(None);
+        let mut inputs = AppInputs::new(rx, None);
         inputs.spawn_keyed(
             CommandId::new("pending"),
             CancelPolicy::CancelInFlight,

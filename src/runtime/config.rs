@@ -58,21 +58,14 @@ use super::frame_rate::FrameRate;
 pub struct RuntimeConfig {
     /// Target frame rate for the runtime's frame scheduler.
     pub(crate) frame_rate: FrameRate,
-    // The three load-control capacities are carried by the public surface here
-    // but not yet consumed by the channels: bounded delivery wires them into the
-    // channel-construction seam in a follow-up commit, which removes these
-    // `allow`s. Until then they are read only by this module's tests.
     /// Capacity of the shared application-message channel; `None` keeps it
     /// unbounded (RFC 0006 §4.1).
-    #[allow(dead_code)]
     pub(crate) app_channel_capacity: Option<NonZeroUsize>,
     /// Capacity of each keyed command's private channel; `None` keeps it
     /// unbounded (RFC 0006 §4.1).
-    #[allow(dead_code)]
     pub(crate) keyed_channel_capacity: Option<NonZeroUsize>,
     /// Count cap for one micro-batch window; `None` keeps the time-capped-only
     /// loop (RFC 0006 §4.1, INV-L12).
-    #[allow(dead_code)]
     pub(crate) batch_max_messages: Option<NonZeroUsize>,
 }
 

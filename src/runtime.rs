@@ -84,6 +84,8 @@
 //! }
 //! ```
 
+use std::num::NonZeroUsize;
+
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
@@ -92,6 +94,12 @@ use tokio::time::{Duration, Instant};
 use crate::{application::Application, command::Command};
 
 mod app_input;
+// `pub` (not `pub(crate)`) so `subscription`'s forwarding task can name the
+// shared-channel `Sender` it feeds: `runtime` is already `pub(crate)`, so `pub`
+// caps this submodule's effective reachability at the crate the same way, while
+// avoiding the redundant-`pub(crate)` lint (see `frame_rate` below). The type
+// carries no public API.
+pub mod channel;
 // `pub` for the same reason as `frame_rate` below: `runtime` is already
 // `pub(crate)`, so `pub` only lets `lib.rs` re-export `RuntimeConfig` at the
 // crate root; it does not widen effective reachability.
@@ -142,6 +150,9 @@ pub struct Runtime<App: Application> {
     core: RuntimeCore<App>,
     /// Schedules frame work and gates idle wake-ups
     scheduler: FrameScheduler,
+    /// Count cap for one micro-batch window; `None` leaves the batch capped
+    /// only by the 100µs time window (RFC 0006 INV-L12).
+    batch_max_messages: Option<NonZeroUsize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,12 +257,23 @@ impl<App: Application> Runtime<App> {
     /// ```
     #[must_use]
     pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self {
-        let core = RuntimeCore::new(flags);
+        // The single channel-construction path (RFC 0006 INV-L6): unset
+        // capacities build the unchanged unbounded channels, `Some(n)` bound
+        // them.
+        let core = RuntimeCore::with_capacities(
+            flags,
+            config.app_channel_capacity,
+            config.keyed_channel_capacity,
+        );
         // INV-C5: the scheduler is paced by the frame rate the caller supplied
         // to `RuntimeConfig::new`, never a hardcoded one.
         let scheduler = FrameScheduler::new(config.frame_rate);
 
-        Self { core, scheduler }
+        Self {
+            core,
+            scheduler,
+            batch_max_messages: config.batch_max_messages,
+        }
     }
 
     #[cfg(test)]
@@ -275,22 +297,41 @@ impl<App: Application> Runtime<App> {
             InputOutcome::Quit => return BatchOutcome::Quit,
         };
 
+        // INV-L12: the opening input is the batch's first pulled input, so a
+        // configured `batch_max_messages` of `Some(n)` admits at most `n - 1`
+        // more. Every input the batch pulls counts — including inputs that do
+        // not invoke `update` (a keyed `Closed`) — so this counter is distinct
+        // from `processed`, which counts only `update` calls.
+        let mut pulled = 1usize;
+
         // Micro-batching: process additional messages that arrived during a short window.
         // Uses tokio::time::Instant (not std) so tests can pause the clock and avoid
         // flaking under CI scheduling jitter around this tight deadline.
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
+            // Stop once the batch has pulled its configured maximum number of
+            // inputs (INV-L12). Checked before the pull so `Some(1)` confines
+            // the batch to just the opening input.
+            if self
+                .batch_max_messages
+                .is_some_and(|max| pulled >= max.get())
+            {
+                break;
+            }
             match self.core.app_inputs.try_next_ready() {
-                Some(input) => match self.process_app_input(input) {
-                    InputOutcome::Updated => processed += 1,
-                    InputOutcome::NoUpdate => {}
-                    InputOutcome::Quit => {
-                        if processed > 0 {
-                            self.scheduler.mark_subscriptions_dirty();
+                Some(input) => {
+                    pulled += 1;
+                    match self.process_app_input(input) {
+                        InputOutcome::Updated => processed += 1,
+                        InputOutcome::NoUpdate => {}
+                        InputOutcome::Quit => {
+                            if processed > 0 {
+                                self.scheduler.mark_subscriptions_dirty();
+                            }
+                            return BatchOutcome::Quit;
                         }
-                        return BatchOutcome::Quit;
                     }
-                },
+                }
                 None => break, // No more inputs available
             }
         }
@@ -655,7 +696,7 @@ mod tests {
         runtime.scheduler.pending.needs_redraw = false;
         runtime.scheduler.pending.subscriptions_dirty = false;
 
-        let _ = runtime.core.msg_tx.send(RedrawControlMessage::Redraw);
+        let _ = runtime.core.msg_tx.try_send(RedrawControlMessage::Redraw);
         runtime.process_message_batch(RedrawControlMessage::Skip);
 
         assert!(runtime.scheduler.pending.needs_redraw);
@@ -696,9 +737,9 @@ mod tests {
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Send multiple messages to the queue
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
 
         // Process first message (should batch the others within the deadline)
         runtime.process_message_batch(TestMessage::Increment);
@@ -744,18 +785,173 @@ mod tests {
         runtime
             .core
             .msg_tx
-            .send(2)
+            .try_send(2)
             .expect("receiver should be open");
         runtime
             .core
             .msg_tx
-            .send(3)
+            .try_send(3)
             .expect("receiver should be open");
 
         runtime.process_input_batch(AppInput::Shared(1));
 
         assert_eq!(runtime.core.app.messages, vec![1, 2, 3]);
         assert!(runtime.scheduler.pending.subscriptions_dirty);
+    }
+
+    // App that records every message `update` receives, in order.
+    struct RecordingApp {
+        messages: Vec<i32>,
+    }
+
+    impl Application for RecordingApp {
+        type Message = i32;
+        type Flags = ();
+
+        fn new((): ()) -> (Self, Command<Self::Message>) {
+            (
+                Self {
+                    messages: Vec::new(),
+                },
+                Command::none(),
+            )
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            self.messages.push(msg);
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    // INV-L12 (exact-n, the lower half of the off-by-one pair): with exactly `n`
+    // inputs ready and `batch_max_messages = Some(n)`, one batch pulls all `n` —
+    // the opening input plus `n - 1` more — and nothing is left over. The clock
+    // is paused so the 100µs time cap never fires; the count cap alone bounds the
+    // batch (with the clock frozen the loop would otherwise drain everything
+    // ready). The opener is pulled from `app_inputs` exactly as `run()` does, so
+    // it is a genuine first pulled input, not a synthesized one.
+    #[tokio::test(start_paused = true)]
+    async fn batch_pulls_all_inputs_when_exactly_the_cap_are_ready() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<RecordingApp>::with_config((), config);
+
+        // Exactly n = 2 ready inputs.
+        for msg in [1, 2] {
+            runtime
+                .core
+                .msg_tx
+                .try_send(msg)
+                .expect("receiver should be open");
+        }
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+
+        assert_eq!(runtime.process_input_batch(opener), BatchOutcome::Continue);
+
+        // All n pulled in one batch; nothing left over.
+        assert_eq!(runtime.core.app.messages, vec![1, 2]);
+        assert_eq!(runtime.core.app_inputs.try_next_ready(), None);
+    }
+
+    // INV-L12 (exact-n+1, the upper half of the off-by-one pair): with `n + 1`
+    // inputs ready and `batch_max_messages = Some(n)`, one batch pulls exactly
+    // `n` and the single remaining input is delivered by the *next* batch. This
+    // is the boundary that a cap of `n + 1` (or a missing cap) would fail by
+    // draining the remainder into the first batch.
+    #[tokio::test(start_paused = true)]
+    async fn batch_pulls_exactly_the_cap_and_defers_the_remainder_to_the_next_batch() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<RecordingApp>::with_config((), config);
+
+        // n + 1 = 3 ready inputs.
+        for msg in [1, 2, 3] {
+            runtime
+                .core
+                .msg_tx
+                .try_send(msg)
+                .expect("receiver should be open");
+        }
+
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+        assert_eq!(runtime.process_input_batch(opener), BatchOutcome::Continue);
+
+        // The first batch pulls exactly n; the remainder waits.
+        assert_eq!(runtime.core.app.messages, vec![1, 2]);
+
+        // The next batch delivers the leftover, in FIFO order.
+        let next_opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the leftover input is ready for the next batch");
+        assert_eq!(
+            runtime.process_input_batch(next_opener),
+            BatchOutcome::Continue
+        );
+        assert_eq!(runtime.core.app.messages, vec![1, 2, 3]);
+        assert_eq!(runtime.core.app_inputs.try_next_ready(), None);
+    }
+
+    // INV-L12 (the `Closed`-counts case): the count is over *pulled inputs*, not
+    // over `update` calls — a keyed `Closed` is pulled but does not invoke
+    // `update`, yet it still consumes a slot. Under `Some(1)` an opening `Closed`
+    // ends the batch immediately, leaving a queued shared input untouched; if the
+    // cap counted only `update` calls, `pulled` would stay 0 across the `Closed`
+    // and the queued increment would be pulled into this batch (counter == 1).
+    //
+    // This uses `Closed` in the opening position deliberately. A `Closed` can
+    // only ever be pulled at the *tail* of a batch: `AppInputs` pulls shared
+    // inputs before keyed (shared-first, RFC §4.7), and a `Closed` is surfaced
+    // only by an already-empty, sender-closed keyed receiver (a receiver that
+    // still holds a buffered message is removed the moment that message is
+    // pulled, before any `Closed`). So no real input is ever pull-ordered after a
+    // `Closed` from a single source, and a second keyed source would make the
+    // order non-deterministic (`StreamMap` fairness). The opening position is
+    // therefore the only placement that deterministically distinguishes "counts
+    // pulled inputs" from "counts `update` calls"; `Closed` surfacing itself is
+    // locked separately in `keyed_commands` (`pending_keyed_poll_wakes_after_sender_closure`).
+    #[tokio::test(start_paused = true)]
+    async fn batch_max_of_one_stops_after_a_non_update_opening_closed() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(1).expect("non-zero"));
+        let mut runtime = Runtime::<TestApp>::with_config(0, config);
+
+        // A shared input the batch must NOT pull under a cap of 1.
+        runtime
+            .core
+            .msg_tx
+            .try_send(TestMessage::Increment)
+            .expect("receiver should be open");
+
+        // Open the batch with a keyed `Closed` (a pulled input that does not
+        // invoke `update`). With a cap of 1 it is the sole pulled input.
+        let outcome = runtime.process_input_batch(AppInput::Keyed(ReceiverEvent::Closed));
+        assert_eq!(outcome, BatchOutcome::Continue);
+
+        // The queued increment was left for the next batch, not consumed.
+        assert_eq!(runtime.core.app.counter, 0);
+        assert!(matches!(
+            runtime.core.app_inputs.try_next_ready(),
+            Some(AppInput::Shared(TestMessage::Increment))
+        ));
     }
 
     #[tokio::test]
@@ -805,7 +1001,7 @@ mod tests {
 
         // A `Quit` message routes to `Action::Quit`, which the loop's dedicated
         // quit branch receives.
-        let _ = runtime.core.msg_tx.send(TestMessage::Quit);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Quit);
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -875,7 +1071,7 @@ mod tests {
         runtime
             .core
             .msg_tx
-            .send(Message::Leave)
+            .try_send(Message::Leave)
             .expect("message receiver should be open");
 
         let first = runtime

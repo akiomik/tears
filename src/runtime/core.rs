@@ -6,6 +6,7 @@
 //! owns their lifecycle operations (construction, command spawning,
 //! subscription initialization, rendering, and shutdown).
 
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 
 use color_eyre::eyre::Result;
@@ -20,6 +21,7 @@ use crate::command::{Action, RuntimeCommandParts};
 use crate::subscription::SubscriptionManager;
 
 use super::app_input::AppInputs;
+use super::channel;
 
 /// The runtime's owned execution state for a single [`Application`] run.
 ///
@@ -44,8 +46,9 @@ use super::app_input::AppInputs;
 pub(super) struct RuntimeCore<App: Application> {
     /// The application instance
     pub(super) app: App,
-    /// Sender for application messages
-    pub(super) msg_tx: mpsc::UnboundedSender<App::Message>,
+    /// Sender for application messages (shared channel; bounded or unbounded per
+    /// `RuntimeConfig`)
+    pub(super) msg_tx: channel::Sender<App::Message>,
     /// Runtime-owned receiver for application inputs
     pub(super) app_inputs: AppInputs<App::Message>,
     /// Sender for quit signals
@@ -72,10 +75,38 @@ impl<App: Application> RuntimeCore<App> {
     /// # Arguments
     ///
     /// * `flags` - Configuration data passed to [`Application::new`]
+    ///
+    /// Constructs the default (unbounded) channels. Used only by this module's
+    /// tests; production construction goes through
+    /// [`with_capacities`](Self::with_capacities), which
+    /// [`Runtime::with_config`](super::Runtime::with_config) reaches.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn new(flags: App::Flags) -> Self {
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-        let app_inputs = AppInputs::new(msg_rx);
+        Self::with_capacities(flags, None, None)
+    }
+
+    /// Creates the runtime core with the given channel capacities.
+    ///
+    /// This is the single channel-construction site (RFC 0006 INV-L6): `None`
+    /// capacities build the same unbounded channels as before, `Some(n)` build
+    /// bounded ones. The shared channel takes `app_channel_capacity`; each keyed
+    /// command's private channel takes `keyed_channel_capacity` independently
+    /// (INV-L9). The dedicated quit channel is never bounded (R4).
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Configuration data passed to [`Application::new`]
+    /// * `app_channel_capacity` - Shared message channel capacity, or `None`
+    /// * `keyed_channel_capacity` - Per-keyed-command channel capacity, or `None`
+    #[must_use]
+    pub(super) fn with_capacities(
+        flags: App::Flags,
+        app_channel_capacity: Option<NonZeroUsize>,
+        keyed_channel_capacity: Option<NonZeroUsize>,
+    ) -> Self {
+        let (msg_tx, msg_rx) = channel::channel(app_channel_capacity);
+        let app_inputs = AppInputs::new(msg_rx, keyed_channel_capacity);
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
         let subscription_manager = SubscriptionManager::new(msg_tx.clone());
 
@@ -141,11 +172,16 @@ impl<App: Application> RuntimeCore<App> {
                     while let Some(action) = stream.next().await {
                         match action {
                             Action::Message(msg) => {
+                                // Awaiting applies backpressure in bounded mode (the
+                                // command task waits for shared-channel capacity;
+                                // INV-L2) and completes immediately in unbounded mode
+                                // (INV-L6).
+                                //
                                 // NOTE: Send errors are silently ignored. The channel is closed only
                                 // when the RuntimeCore is dropped, which means the application is shutting
                                 // down. In this case, dropping messages is the expected behavior.
                                 // This follows the same approach as iced and other Elm-like frameworks.
-                                let _ = msg_tx.send(msg);
+                                let _ = msg_tx.send(msg).await;
                             }
                             Action::Quit => {
                                 // NOTE: Same reasoning as above. If the quit channel is closed,
