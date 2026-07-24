@@ -94,6 +94,20 @@ Prompts that have already paid off:
   sufficiently fast machine pass it (from PR #217: the bounded
   acceptance run deferred capacity/depth/trial count to implementation
   time, and the p99 ≤ 1 ms condition named no machine).
+- A coincidental property of the current mechanism, silently depended on
+  by other components because the RFC never named it as contract: check
+  every consumer of the property under review, not only the ones the
+  invariant text already lists, by grepping for the thing a from-scratch
+  reimplementation would be free to drop. A change that satisfies every
+  stated invariant can still break such a consumer if the coincidence,
+  not the invariant, was what it actually relied on (from the RFC 0006
+  §4.4 gauge-event seq amendment: an earlier attempt to move gauge-event
+  emission off the lock satisfied the stated value-fidelity invariant but
+  broke `benches/runtime_load.rs`'s teardown barrier and RFC 0007 §5.2's
+  current-value read, both of which relied on arrival order coinciding
+  with lock-serialized dispatch — a coincidence the contract had never
+  pinned, undetected until grepped for and named explicitly as the `seq`
+  field).
 
 ## 3. Enforcement class, declared up front
 
