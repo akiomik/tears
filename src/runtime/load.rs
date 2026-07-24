@@ -8,12 +8,25 @@
 //! fields, firing conditions) is pinned as RFC 0006 INV-L13; changing it is a
 //! contract change.
 //!
-//! The gauge counters live behind one mutex, and each change updates a field,
-//! snapshots all four, and emits under the same lock. That serialization is the
-//! contract's "event per change" guarantee: were the update and the read
-//! separate (e.g. lone atomics), a value could be reached and superseded before
-//! its own emit re-read the counters, so a subscriber's high-water mark could
-//! miss it.
+//! The gauge counters live behind one mutex. Each change updates a field, bumps
+//! a monotone `seq`, and snapshots everything under the same lock. Two separate
+//! guarantees ride on that lock, and only one of them constrains the order
+//! events *arrive* in:
+//!
+//! - **Value fidelity** (every reached value gets its own event): capturing the
+//!   update and the snapshot together under the lock prevents a value from being
+//!   reached and superseded before its own emit re-reads the counters — a lone
+//!   atomic would let a subscriber's high-water mark miss a peak. This guarantee
+//!   is about the snapshot, not about arrival order.
+//! - **Ordering** is carried by `seq`, not by arrival: the current value of each
+//!   gauge is the value on the greatest-`seq` event (RFC 0006 §4.4, INV-L13).
+//!   The lock currently also serializes the `tracing` dispatch, so today arrival
+//!   order happens to match `seq` order — but the contract does not promise it,
+//!   and consumers must order by `seq`. That is deliberate: because the
+//!   snapshot-and-`seq` capture stays under the lock while only the dispatch
+//!   would move, a later change can emit the event out from under the lock (so a
+//!   slow or re-entrant subscriber can no longer stall or deadlock producers)
+//!   without breaking any `seq`-ordered consumer.
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
@@ -82,6 +95,12 @@ pub struct LoadObserver {
 
 #[derive(Clone, Copy, Default)]
 struct Gauges {
+    /// Monotone per-observer counter, bumped once per emitted gauge event and
+    /// carried on it as `seq`. Captured under the same lock as the four counts,
+    /// so a greater `seq` never carries an older value; a subscriber reads the
+    /// current value of each gauge from the greatest-`seq` event, so arrival
+    /// order is not load-bearing (RFC 0006 §4.4, INV-L13).
+    seq: u64,
     subscriptions: usize,
     unkeyed_commands: usize,
     keyed_commands: usize,
@@ -89,12 +108,17 @@ struct Gauges {
 }
 
 impl Gauges {
-    /// Emits the four-field producer-gauge event from this snapshot. Taking
-    /// `self` by value fixes the values at the caller's serialization point, so
-    /// the event reports the state that was reached rather than a later re-read.
-    fn emit(self) {
+    /// Bumps `seq` and emits the four-field producer-gauge event with it. Takes
+    /// `&mut self` so the bump lands in the shared state; the caller holds the
+    /// lock, fixing the counts and `seq` together at the serialization point, so
+    /// the event reports the state that was reached (never a later re-read) and
+    /// its `seq` orders it against every other gauge event without relying on
+    /// arrival order.
+    fn emit(&mut self) {
+        self.seq = self.seq.wrapping_add(1);
         tracing::debug!(
             target: "tears::runtime::load",
+            seq = self.seq,
             subscriptions = self.subscriptions,
             unkeyed_commands = self.unkeyed_commands,
             keyed_commands = self.keyed_commands,
@@ -233,6 +257,7 @@ mod tests {
         assert!(!gauge_events.is_empty(), "gauge events should have fired");
         for fields in gauge_events {
             for required in [
+                "seq",
                 "subscriptions",
                 "unkeyed_commands",
                 "keyed_commands",
@@ -244,6 +269,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    // INV-L13 (ordering): every gauge event carries a monotone `seq`, one per
+    // emission, so a subscriber orders the events by `seq` rather than by
+    // arrival — the current value of each gauge is the greatest-`seq` event's.
+    #[test]
+    fn each_gauge_change_carries_a_monotone_seq() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let observer = LoadObserver::default();
+        let first = observer.track_subscription();
+        let second = observer.track_subscription();
+        drop(second);
+        drop(first);
+
+        assert_eq!(
+            recorder.u64_values("seq"),
+            vec![1, 2, 3, 4],
+            "each of the four gauge changes emits one event with the next `seq`"
+        );
     }
 
     // INV-L13 (serialization, the value-loss guard): each change emits the value
