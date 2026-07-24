@@ -83,8 +83,18 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
         .await
         .expect("the timer tick should quit the run before the timeout")?;
 
-    // Let the aborted subscription task's future drop so its gauge guard lowers.
-    for _ in 0..4 {
+    // The aborted subscription task drops its gauge guard on a later scheduler
+    // pass. Poll for the gauges to settle to zero rather than assuming a fixed
+    // number of passes — that count is a tokio cooperative-budget detail, so a
+    // fixed wait would make this assertion flake on a scheduler change. The cap
+    // only bounds a pathological hang; the loop exits the moment they settle.
+    for _ in 0..1_000 {
+        let settled = recorder.u64_values("subscriptions").last() == Some(&0)
+            && recorder.u64_values("unkeyed_commands").last() == Some(&0)
+            && recorder.u64_values("keyed_commands").last() == Some(&0);
+        if settled {
+            break;
+        }
         yield_now().await;
     }
 
