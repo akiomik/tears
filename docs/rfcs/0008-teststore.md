@@ -211,7 +211,10 @@ generic) are implementation latitude.
 - **`send`** is one synchronous `update` call plus bookkeeping. It
   spawns no task, requires no executor, and returns only after the
   command's metadata (directives, cancellation) has been applied to the
-  store. It does not poll effects; polling happens in `receive*` calls.
+  store. Its polling is limited to §4.1's checks — the exhaustiveness
+  precondition before `update` and, when the returned command is keyed,
+  the intake reconciliation poll (§5.1); it never delivers output,
+  which happens only in `receive*` calls.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
   `update` — so the store advances exactly as the runtime would on that
@@ -283,11 +286,17 @@ keeping them apart. INV-T3 names this revised boundary.
 
 **Deliverability and the poll budget.** A leaf's output is
 **deliverable** at a given check when the leaf yields it on that
-check's poll. The poll contract is fixed, because INV-T4's determinism
-rests on it: polling happens only inside `receive*`,
-`send`-precondition, `finish`, and drop checks — except after an
-observed quit, when the `finish` and drop checks poll nothing (§5.3,
-§6) — and each check polls each leaf its scan reaches (§4.2) exactly
+check's poll, or when a keyed-intake reconciliation poll (§5.1) has
+already yielded it into the leaf's buffer — a buffered item is
+deliverable at every later check without a further poll. The poll
+contract is fixed, because INV-T4's determinism rests on it: polling
+happens only inside `receive*`, `send`-precondition, `finish`, and
+drop checks, plus the keyed-intake reconciliation of §5.1. The
+quit-state check precedes every one of these sites, so after an
+observed quit no store call polls at all: `send`/`receive*` fail on
+the quit state before reaching any leaf, and the `finish` and drop
+checks pass without polling (§5.3, §6). Each check polls each leaf its
+scan reaches (§4.2) exactly
 once, with a waker whose wake-ups are not honored within the call. A
 self-waking leaf is therefore re-polled no earlier than the next store
 call and cannot loop a check — if it does not yield on its one poll, it
@@ -306,8 +315,9 @@ reaches it. Between calls the store does nothing.
   leaves in `Command::batch`'s flattened declaration order. Two runs of
   the same test program therefore observe the same delivery sequence
   (INV-T4, INV-T6).
-- **Scan semantics**: a `receive*` check polls the pending leaves in
-  enqueue order and stops at the first leaf that yields; the `send`
+- **Scan semantics**: a `receive*` check walks the pending leaves in
+  enqueue order and stops at the first deliverable one (a buffered
+  head, or a yield on that leaf's one poll); the `send`
   precondition and the pre-quit `finish`/drop checks scan in the same
   order until they find a deliverable output (failing) or exhaust the
   set (establishing that nothing is deliverable). Either way, each
@@ -348,16 +358,40 @@ until it becomes deliverable, and only `finish` holds it to account
 
 ### 5.1 Cancellation parity (RFC 0003)
 
-The store applies RFC 0003's delivery semantics to its pending set, with
-occupancy defined on the store's own lifecycle: **an id is occupied
-while its current run's stream has not been driven to completion.**
+The store applies RFC 0003's delivery semantics to its pending set.
+Occupancy follows RFC 0003's own accounting (INV-6, INV-7): **an id is
+occupied while its current run may still deliver output, and is
+released once every one of the run's leaves has been observed
+exhausted.** Exhaustion is observable only by polling, so the store
+mirrors the runtime's pre-spawn reconciliation (before any
+`Spawn(policy)` decision the runtime reaps completed keyed tasks and
+samples the target receiver once — RFC 0003 §4.2) with **keyed-intake
+reconciliation**: when a keyed command arrives for an occupied id, the
+store reconciles before the admission decision. If the occupant already
+has buffered output, the id is occupied and nothing is polled;
+otherwise the store polls the occupant's remaining leaves in enqueue
+order, stopping at the first that shows the run still open — a yield
+(the item is buffered at that leaf's canonical position as its next
+deliverable output; buffered output occupies, INV-6, and §6's
+exhaustiveness counts it like any deliverable message) or a pending
+(INV-7: "a still-open stream remains occupied even after delivering
+one item"). The id is released exactly when every remaining leaf
+completes — the analogue of INV-7's sender-closed empty receiver.
 
 - A keyed command under `CancelPolicy::CancelInFlight` supersedes the
   same-id occupant: the occupant's undelivered output — buffered
   messages and quit requests alike — can no longer be delivered
   (RFC 0003 INV-3, INV-6, INV-9), and the new stream takes the id.
-- Under `CancelPolicy::KeepInFlight`, while the id is occupied the new
-  command's stream is discarded and the occupant is untouched (INV-5).
+- Under `CancelPolicy::KeepInFlight`, the admission decision reads the
+  reconciled state: while the id remains occupied the new command's
+  stream is discarded and the occupant is untouched (INV-5); when
+  reconciliation observes the occupant exhausted, the id is released
+  and the new command is admitted (INV-7). For
+  `CancelPolicy::CancelInFlight` the reconciled state changes no
+  admission outcome — superseding an exhausted occupant and spawning
+  into a released id are indistinguishable — so the reconciliation rule
+  is stated once for all keyed intake; its polls follow §4.1's budget
+  either way.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
 - Unkeyed commands are unaffected by any of the above (INV-1's default
@@ -368,22 +402,24 @@ while its current run's stream has not been driven to completion.**
   INV-11).
 
 These are the deterministic core of RFC 0003 — what may still be
-delivered — restated over the store's pending set. The runtime-side
-mechanics that exist only because the runtime is concurrent (task
-reaping, stale-exit tokens, INV-7/8/13) have no TestStore counterpart
-and are deliberately not modeled.
+delivered, and when an id releases — restated over the store's pending
+set, with keyed-intake reconciliation as the store's analogue of the
+runtime's pre-spawn reap-and-sample. The mechanics that exist only
+because the runtime is concurrent (stale-exit tokens, INV-8; bounded
+bookkeeping, INV-13) have no TestStore counterpart and are deliberately
+not modeled.
 
-Negative space, matching §4.2's: occupancy *timing* is the store's
-linearization, not the runtime's. A leaf that has yielded its last item
-but has not yet been driven to completion is occupied here, while the
-runtime's occupancy for the same command ends at task reap — so a
-`KeepInFlight` command landing in that window is deterministically
-discarded by the store while in the runtime the outcome depends on reap
-timing. Like §4.2's cross-leaf order, a test exercising that window
-asserts the store's linearization and is not evidence of runtime
-behavior. The stream-lifetime definition itself stays: it is the choice
-closest to the runtime's deliverable-output accounting (a
-finished-but-buffered run is still cancellable, RFC 0003 INV-6).
+The residual negative space is the reconciliation instrument itself:
+the store's proof of exhaustion is §4.1's single poll per leaf at
+intake. A leaf that needs further polls to complete (a self-waking
+future mid-completion) reads as still open and keeps the id occupied —
+deterministically — while at the runtime's decision point the same
+run's task may or may not have exited yet, a scheduling fact the
+runtime's reconciliation resolves whichever way it finds. In that
+window the store deterministically selects one of the runtime's legal
+outcomes; a test pinning a `KeepInFlight` discard there asserts the
+store's selection, not a runtime guarantee (§4.2's citation rule
+applies).
 
 ### 5.2 Redraw directive (RFC 0002)
 
@@ -520,12 +556,17 @@ Enforcement classes follow the pre-review checklist's definitions
   declaration order; a leaf made ready late delivers after an
   earlier-enqueued ready leaf but before a later one. The negative-space
   half is documentation, checked in review of the rustdoc (structural).
-- **INV-T7**: cancellation parity — the four behaviors of §5.1
-  (supersede, keep-in-flight discard, explicit cancel, unkeyed
-  unaffected) hold over the store's pending output as RFC 0003's INV-3,
-  INV-4, INV-5, INV-6, and INV-9 state them for deliverable output.
-  Behavioral: one test per behavior, including quit suppression
-  (a superseded keyed quit is never observable via `receive_quit`).
+- **INV-T7**: cancellation parity — the five behaviors of §5.1
+  (supersede, keep-in-flight discard, reconciliation release, explicit
+  cancel, unkeyed unaffected) hold over the store's pending output as
+  RFC 0003's INV-3, INV-4, INV-5, INV-6, INV-7, and INV-9 state them
+  for deliverable output. Behavioral: one test per behavior, including
+  quit suppression (a superseded keyed quit is never observable via
+  `receive_quit`) and the two reconciliation edges: a `KeepInFlight`
+  command arriving after the occupant's leaves are exhausted is
+  admitted, and one arriving while the reconciliation poll yields a
+  buffered item is discarded with that item still deliverable at its
+  canonical position.
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
@@ -537,11 +578,14 @@ Enforcement classes follow the pre-review checklist's definitions
   wrong-value adversary is exactly what the message-content assertion
   exists to fail.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
-  `send`/`receive*` fail, and the `finish` and drop checks poll
-  nothing and pass regardless of remaining output. Behavioral: a test
-  quits with output still pending — including a reactor-dependent leaf,
-  which the post-quit no-poll rule leaves untouched and which would
-  fail the run if polled (§4.3) — and asserts both halves.
+  `send`/`receive*` fail on the quit state without polling any leaf,
+  and the `finish` and drop checks poll nothing and pass regardless of
+  remaining output. Behavioral: a test quits with output still
+  pending — including a reactor-dependent leaf, which the post-quit
+  no-poll rule leaves untouched and which would fail the run if any
+  post-quit call polled it (§4.3) — and asserts the failing `send` and
+  `receive*` (whose failure is the quit-state diagnostic, not the
+  reactor panic polling would produce) and the passing `finish`.
 
 Surface–invariant coverage: `new`/`send`/`receive*`/`finish` map to
 INV-T2/T3/T4/T8; `state` is the pure accessor through which INV-T4's
@@ -573,8 +617,9 @@ change maps to INV-T1.
 
 - RFC 0002 — redraw suppression: the directive `redraw_requested`
   observes.
-- RFC 0003 — command cancellation: INV-1, INV-3, INV-4, INV-5, INV-6,
-  INV-9, INV-10, INV-11, INV-14 (cited in §§4.2, 5.1, 5.3).
+- RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation
+  and INV-1, INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10, INV-11,
+  INV-14 (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
 - RFC 0005 — structural lifecycle identity: `SubscriptionId`, the
   declared-set semantics `subscription_ids` observes.
 - RFC 0006 — runtime load control: the shutdown discard carve-out §5.3
