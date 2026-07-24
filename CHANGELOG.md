@@ -21,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `tears::runtime::load` target: a per-micro-batch event
     (`pulled`/`updated`/`shared_pending`), a bounded-mode capacity-wait event
     (`channel`/`wait_us`), and producer-count gauges (`subscriptions`,
-    `unkeyed_commands`, `keyed_commands`, `blocked`)
+    `unkeyed_commands`, `keyed_commands`, `blocked`); each gauge event also
+    carries a per-runtime monotone `seq` — not a gauge but an ordering counter
+    — that fixes the current gauge value as the greatest-`seq` event's, so
+    consumers order gauge events by `seq`, not by arrival
   - Additive and non-breaking: `Runtime::new` is unchanged, and a
     load-control-unset `RuntimeConfig` reproduces the previous unbounded
     delivery path exactly

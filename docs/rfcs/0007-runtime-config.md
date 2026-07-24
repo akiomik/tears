@@ -527,6 +527,24 @@ channel occupancy, per the note on that distinction below the table:
   `quit_keyed_bounded`) is the whole predicate. The acceptance run
   reports each row's count as that many *valid* trials, not that many
   attempts.
+- **This section depends on RFC 0006 §4.4's gauge current-value
+  contract.** Every predicate that reads `blocked` (the `quit_blocked_*`
+  and `quit_keyed_bounded` rows) reads the *current* value of the
+  `blocked` gauge at the quit instant, and the harness's teardown barrier
+  (`await_quiescence`, `benches/runtime_load.rs`) reads the current gauge
+  sum returning to zero. "Current value" is RFC 0006 §4.4's contract term:
+  the value on the gauge event with the greatest `seq`, not the value on
+  the most recently *arrived* event — the schema does not order gauge
+  events by arrival. The harness therefore consumes these gauges by
+  greatest `seq`, discarding any event whose `seq` does not advance, so a
+  reordered stale gauge event can corrupt neither a predicate reading nor
+  the barrier. This dependency is stated explicitly because it is
+  otherwise invisible: a consumer that instead trusted arrival order would
+  read correctly today — the initial implementation emits gauge events
+  under the runtime's gauge lock, so arrival and `seq` order coincide — yet
+  would silently break the moment that emit moved out from under the lock
+  (RFC 0006 §4.4's stated reason for the `seq` field), a change this
+  section must not be allowed to obstruct unknowingly.
 - Counting only valid trials means an implementation may need more
   attempts than the row's required count whenever some attempts fail their
   predicate. To make the retry rule precise — which attempts are retried,

@@ -487,13 +487,40 @@ as INV-L13 (section 5):
   this event's firing condition; adding a separate aggregate event
   alongside it is additive and does not require revisiting this choice.
 - **Producer gauges** — target `tears::runtime::load`, level `debug`,
-  fired whenever any counted value changes. Fields: `subscriptions`
-  (active forwarding tasks), `unkeyed_commands` (running unkeyed command
-  tasks), `keyed_commands` (active keyed entries), and `blocked`
-  (producers currently awaiting capacity; always 0 in unbounded mode).
-  These gauges are how the application-owned producer-count premise stays
-  observable rather than enforced (section 4.5), including the
-  blocked-producer anti-pattern named there.
+  fired whenever any counted value changes. Fields: `seq` (the ordering
+  counter defined below), `subscriptions` (active forwarding tasks),
+  `unkeyed_commands` (running unkeyed command tasks), `keyed_commands`
+  (active keyed entries), and `blocked` (producers currently awaiting
+  capacity; always 0 in unbounded mode). These gauges are how the
+  application-owned producer-count premise stays observable rather than
+  enforced (section 4.5), including the blocked-producer anti-pattern named
+  there. `seq` is a per-runtime counter incremented once per emitted gauge
+  event — a `u64`, monotone within a run; wraparound would take ~2^64
+  events and does not occur in practice — and captured with the same
+  snapshot as the four counts, so a greater `seq` always carries a gauge
+  state reached no earlier than any lesser `seq`. It fixes the *current*
+  value of each gauge as the value on the gauge event with the greatest
+  `seq` a subscriber has observed — **gauge-event arrival order is not part
+  of this contract**, so a consumer that reads "the value on the most
+  recently *arrived* event" is relying on an ordering the schema does not
+  provide. Ordering by an explicit `seq` rather than by arrival is
+  deliberate: because the snapshot-and-`seq` capture is atomic while only
+  the emit need move, it lets a later change emit gauge events without
+  holding the runtime's gauge lock across the `tracing` dispatch, so a slow
+  subscriber can no longer stall producers on that lock and a subscriber
+  that re-enters the runtime can no longer deadlock on it — without
+  breaking any `seq`-ordered consumer. That move does **not**, on its own,
+  make a subscriber that itself *causes* a gauge change safe: such a
+  subscriber re-enters the emit path, risking unbounded recursion under a
+  global `tracing` dispatcher, or — under a scoped one — a nested event
+  silently dropped by `tracing`'s re-entrancy guard, which breaks value
+  fidelity. Resolving that re-entrancy is a prerequisite of any future
+  off-lock change and is out of scope for the `seq` field, which secures
+  only the ordering; it is recorded here so the off-lock change cannot read
+  the stall/deadlock sentence as a claim that re-entrancy is already safe.
+  The initial implementation still emits under that lock, so `seq` and
+  arrival order coincide there; consumers must not depend on the
+  coincidence.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness
@@ -535,7 +562,13 @@ an integration run (where the real producers raise and lower them):
   layer, where it rises when a producer begins awaiting capacity, falls
   when the send is accepted, and also falls when a blocked producer is
   aborted by cancellation (section 4.3) — the decrement must not depend on
-  the send ever completing.
+  the send ever completing. The gauge event's `seq` is checked at the
+  gauge layer where the emitted sequence is deterministic: a scripted
+  series of gauge changes emits one event per change with a strictly
+  increasing `seq`, so a subscriber ordering by `seq` recovers each
+  gauge's current value without relying on arrival order — an
+  implementation that omits `seq`, repeats it, or lets it run backward
+  fails.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -1117,17 +1150,21 @@ the check that realizes it; the implementation realizes those checks.
   capacity-wait event — and the field values carry the stated meanings:
   `pulled` is INV-L12's counted unit, `shared_pending` the
   shared-channel occupancy at batch end, `wait_us` the blocked send's
-  admission wait. The schema is contract surface: renaming, dropping, or
-  repurposing any part of it is an amendment to this RFC, not an
-  implementation detail. Behavioral check across the layered section 4.4
+  admission wait, and the producer-gauge event's `seq` a per-runtime
+  monotone counter that fixes each gauge's current value as the
+  greatest-`seq` event's, so gauge-event arrival order is not part of the
+  contract (section 4.4). The schema is contract surface: renaming,
+  dropping, or repurposing any part of it is an amendment to this RFC, not
+  an implementation detail. Behavioral check across the layered section 4.4
   definition-of-done tests, each with a `tracing` subscriber and value
   assertions that distinguish an implementation emitting the right events
   with wrong values: the batch event's `pulled`/`updated` (including the
   `Closed` differing-value case) and its `shared_pending` leftover at the
   runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
   the `blocked` gauge's cancellation-abort decrement at the bounded-send
-  layer; and the `subscriptions`/`unkeyed_commands`/`keyed_commands`
-  gauge transitions end-to-end over an integration run.
+  layer; the `subscriptions`/`unkeyed_commands`/`keyed_commands`
+  gauge transitions end-to-end over an integration run; and the
+  gauge event's strictly increasing `seq` at the gauge layer.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
 unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
