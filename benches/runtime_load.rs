@@ -109,13 +109,20 @@ fn frame_rate() -> FrameRate {
         .expect("60 FPS is a valid frame rate")
 }
 
+/// RFC 0007 §5.1 bounded capacities. Shared by [`bounded_config`] and the
+/// `keyed_isolation` gates so a retune moves the runtime config and the gate
+/// expectations (`yields == keyed_cap + 1`, `concurrent_shared_depth ==
+/// app_cap + 1`) together rather than leaving one stale.
+const APP_CHANNEL_CAPACITY: usize = 1024;
+const KEYED_CHANNEL_CAPACITY: usize = 16;
+
 /// The RFC 0007 §5.1 bounded configuration used for every bounded row:
 /// `app_channel_capacity = 1024`, `keyed_channel_capacity = 16`,
 /// `batch_max_messages = None`, at 60 FPS.
 fn bounded_config() -> RuntimeConfig {
     RuntimeConfig::new(frame_rate())
-        .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
-        .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"))
+        .app_channel_capacity(NonZeroUsize::new(APP_CHANNEL_CAPACITY).expect("non-zero"))
+        .keyed_channel_capacity(NonZeroUsize::new(KEYED_CHANNEL_CAPACITY).expect("non-zero"))
 }
 
 /// Delivery mode a scenario's [`Runtime`] is built in.
@@ -1405,13 +1412,16 @@ fn smoke_load_scenarios() -> Vec<ScenarioCfg> {
     ]
 }
 
-/// The RFC 0007 §6 smoke profile's quit scenarios: `quit_idle` and
-/// `quit_blocked_1` at 5 valid trials each (the attempt cap scales to 50).
+/// The RFC 0007 §6 smoke profile's quit scenarios: `quit_idle_bounded` and
+/// `quit_blocked_1` at 5 valid trials each (the attempt cap scales to 50). The
+/// row name matches the full quit table's bounded row (the full table also has
+/// a separate Default-mode `quit_idle`), so smoke and full report the same
+/// configuration under the same name.
 fn smoke_quit_scenarios() -> Vec<QuitScenarioCfg> {
     vec![
         QuitScenarioCfg {
             base: ScenarioCfg {
-                name: "quit_idle",
+                name: "quit_idle_bounded",
                 rate: BURST,
                 total: 1,
                 update_cost: Duration::from_micros(25),
@@ -1748,8 +1758,8 @@ impl IsoReport {
 }
 
 async fn run_keyed_isolation() -> IsoReport {
-    let keyed_cap: u64 = 16; // RFC 0007 §5.1 keyed_channel_capacity
-    let app_cap: u64 = 1024; // RFC 0007 §5.1 app_channel_capacity
+    let keyed_cap = KEYED_CHANNEL_CAPACITY as u64;
+    let app_cap = APP_CHANNEL_CAPACITY as u64;
     let iso = Arc::new(IsoMetrics::new());
     let runtime = Runtime::<KeyedIsolationApp>::with_config(
         (Arc::clone(&iso), keyed_cap, app_cap),
