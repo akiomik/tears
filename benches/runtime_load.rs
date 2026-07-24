@@ -1429,36 +1429,44 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+/// Looks up a row of the canonical [`scenarios`] table by name so a smoke row
+/// can derive from it with `..` struct update. Panics if the name is absent —
+/// a rename in the canonical table must update the smoke profile too, and a
+/// silent fallback would let it drift back to a stale literal.
+fn scenario_named(name: &str) -> ScenarioCfg {
+    scenarios()
+        .into_iter()
+        .find(|cfg| cfg.name == name)
+        .expect("scenario name present in the canonical table")
+}
+
+/// Looks up a row of the canonical [`quit_scenarios`] table by name; see
+/// [`scenario_named`].
+fn quit_scenario_named(name: &str) -> QuitScenarioCfg {
+    quit_scenarios()
+        .into_iter()
+        .find(|cfg| cfg.base.name == name)
+        .expect("quit scenario name present in the canonical table")
+}
+
 /// The RFC 0007 §6 smoke profile's draining scenarios: `steady_20k` under the
 /// default configuration, shortened to ~0.5s of load, and a 20k-message bounded
-/// burst under the §5.1 configuration.
+/// burst under the §5.1 configuration. Derived from the canonical [`scenarios`]
+/// table by name lookup + struct update, so a retune of the shared fields
+/// (costs, mode, ...) carries over automatically; only the fields the smoke
+/// profile intentionally shortens are overridden here.
 fn smoke_load_scenarios() -> Vec<ScenarioCfg> {
     vec![
         ScenarioCfg {
-            name: "steady_20k",
-            rate: 20_000,
             total: 10_000,
-            update_cost: Duration::from_micros(2),
-            render_cost: Duration::from_micros(500),
-            keyed_probe: false,
-            quit_at_seq: None,
-            keyed_quit: false,
-            producers: 1,
-            mode: Mode::Default,
-            max_wall: Duration::from_secs(30),
+            ..scenario_named("steady_20k")
         },
+        // Shortened from `burst_200k_bounded`; the smoke profile uses its own
+        // name since `total` (and so the scenario) differs from the full row.
         ScenarioCfg {
             name: "burst_20k_bounded",
-            rate: BURST,
             total: 20_000,
-            update_cost: Duration::from_micros(2),
-            render_cost: Duration::from_micros(500),
-            keyed_probe: false,
-            quit_at_seq: None,
-            keyed_quit: false,
-            producers: 1,
-            mode: Mode::Bounded,
-            max_wall: Duration::from_secs(30),
+            ..scenario_named("burst_200k_bounded")
         },
     ]
 }
@@ -1467,42 +1475,18 @@ fn smoke_load_scenarios() -> Vec<ScenarioCfg> {
 /// `quit_blocked_1` at 5 valid trials each (the attempt cap scales to 50). The
 /// row name matches the full quit table's bounded row (the full table also has
 /// a separate Default-mode `quit_idle`), so smoke and full report the same
-/// configuration under the same name.
+/// configuration under the same name. Derived from the canonical
+/// [`quit_scenarios`] table by name lookup + struct update; only `trials`
+/// differs from the full row.
 fn smoke_quit_scenarios() -> Vec<QuitScenarioCfg> {
     vec![
         QuitScenarioCfg {
-            base: ScenarioCfg {
-                name: "quit_idle_bounded",
-                rate: BURST,
-                total: 1,
-                update_cost: Duration::from_micros(25),
-                render_cost: Duration::from_micros(500),
-                keyed_probe: false,
-                quit_at_seq: Some(0),
-                keyed_quit: false,
-                producers: 1,
-                mode: Mode::Bounded,
-                max_wall: Duration::from_secs(30),
-            },
             trials: 5,
-            valid_trial: ValidTrial::Always,
+            ..quit_scenario_named("quit_idle_bounded")
         },
         QuitScenarioCfg {
-            base: ScenarioCfg {
-                name: "quit_blocked_1",
-                rate: BURST,
-                total: 500_000,
-                update_cost: Duration::from_micros(25),
-                render_cost: Duration::from_micros(500),
-                keyed_probe: false,
-                quit_at_seq: Some(5_000),
-                keyed_quit: false,
-                producers: 1,
-                mode: Mode::Bounded,
-                max_wall: Duration::from_secs(30),
-            },
             trials: 5,
-            valid_trial: ValidTrial::BlockedEq(1),
+            ..quit_scenario_named("quit_blocked_1")
         },
     ]
 }
