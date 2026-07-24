@@ -685,10 +685,13 @@ invocation is unchanged.
   under the default (load-control-unset) configuration, shortened to 0.5s —
   the same default-path role it has in §5.3, so the smoke run never forks
   its config from its acceptance meaning — a 20k-message bounded burst under
-  the §5.1 configuration, `quit_idle` and `quit_blocked_1` at 5 *valid*
-  trials each
-  — `quit_idle`'s predicate is `none` (§5.2's table), so every attempt
-  counts toward its 5; `quit_blocked_1` counts only attempts whose §5.2
+  the §5.1 configuration, `quit_idle_bounded` and `quit_blocked_1` at 5
+  *valid* trials each
+  — `quit_idle_bounded`'s predicate is `none` (§5.2's `quit_idle` row —
+  the bounded-run table names its baseline row `quit_idle`, which the
+  harness emits as `quit_idle_bounded` to disambiguate it from the
+  default-mode `quit_idle`), so every attempt counts toward its 5;
+  `quit_blocked_1` counts only attempts whose §5.2
   predicate (`blocked == 1` at the quit instant) held, under §5.2's
   attempt cap scaled to this row's 5-trial count (a 50-attempt cap,
   `10 × 5`), which fails the smoke run outright rather than retrying past
@@ -730,8 +733,8 @@ invocation is unchanged.
   anything — the profile carries no latency assertion. One wall-clock
   condition remains: every smoke scenario carries the harness's
   per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
-  at 30 s — the existing `steady_20k` and `quit_idle` keep their current
-  value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
+  at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
+  current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
   same — and the smoke run fails when any scenario times out. That
   timeout-failure rule is part of the profile's definition, not
   something the harness fully provides today: quit trials already fail

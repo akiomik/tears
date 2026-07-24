@@ -28,8 +28,8 @@ pub enum Sender<T> {
         tx: mpsc::Sender<T>,
         /// Observability context every bounded sender carries: the
         /// capacity-wait event and the `blocked` gauge (RFC 0006 §4.4). Test
-        /// senders built via [`channel`] carry an inert [`LoadObserver`]
-        /// (no subscriber), so the type never expresses a "bounded but
+        /// senders built via [`channel`] carry a throwaway [`LoadObserver`]
+        /// shared with no runtime, so the type never expresses a "bounded but
         /// unobserved" state that INV-L13 forbids.
         obs: SendObs,
     },
@@ -52,14 +52,20 @@ pub enum Receiver<T> {
     Bounded(mpsc::Receiver<T>),
 }
 
-/// Builds a channel pair with an inert observer from an optional capacity.
+/// Builds a channel pair from an optional capacity, for tests.
 ///
 /// `None` constructs the same `mpsc::unbounded_channel` as before, so the
 /// default delivery mode is structurally unchanged (INV-L6). `Some(n)`
 /// constructs a bounded channel of exactly `n` slots (INV-L1). The bounded
-/// sender carries a default [`LoadObserver`], which — absent a subscriber —
-/// emits nothing, so this is test-only; every runtime-owned channel is built
-/// through [`channel_observed`] with the real observer.
+/// sender carries a throwaway [`LoadObserver`] shared with no runtime, so its
+/// `blocked` gauge and capacity-wait events reach no aggregate — but they still
+/// fire to an installed `tracing` subscriber (emission is gated by the
+/// subscriber, not the observer). Every runtime-owned channel is built through
+/// [`channel_observed`] with the real observer.
+///
+/// The bounded label is fixed to [`Channel::Shared`]; a test that asserts on
+/// the capacity-wait event's `channel` field (e.g. a keyed case) must use
+/// [`channel_observed`] with the intended label instead.
 #[cfg(test)]
 pub fn channel<T>(capacity: Option<NonZeroUsize>) -> (Sender<T>, Receiver<T>) {
     build(
