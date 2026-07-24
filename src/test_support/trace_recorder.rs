@@ -80,13 +80,7 @@ impl TraceRecorder {
     /// Installs this recorder as the default subscriber for the current thread.
     #[must_use]
     pub fn set_default(&self) -> TraceRecorderGuard {
-        let _registry = REGISTRY_LOCK
-            .lock()
-            .expect("trace recorder registry mutex should not be poisoned");
-        ensure_interest_keeper();
-        let guard = set_default(self.clone());
-        rebuild_interest_cache();
-        TraceRecorderGuard { guard: Some(guard) }
+        set_default_subscriber(self.clone())
     }
 
     /// Returns the number of events that matched this recorder's filter.
@@ -142,6 +136,26 @@ impl TraceRecorder {
             .expect("trace recorder field-set log mutex should not be poisoned")
             .clone()
     }
+}
+
+/// Installs an arbitrary subscriber as the current thread's default,
+/// cache-safely — the same process-wide callsite-interest handling
+/// [`TraceRecorder::set_default`] uses. For tests that need a bespoke subscriber
+/// rather than a [`TraceRecorder`], e.g. one that re-enters the code under test
+/// from inside `event()`. Returns a guard that restores the previous default on
+/// drop.
+#[must_use]
+pub fn set_default_subscriber<S>(subscriber: S) -> TraceRecorderGuard
+where
+    S: Subscriber + Send + Sync + 'static,
+{
+    let _registry = REGISTRY_LOCK
+        .lock()
+        .expect("trace recorder registry mutex should not be poisoned");
+    ensure_interest_keeper();
+    let guard = set_default(subscriber);
+    rebuild_interest_cache();
+    TraceRecorderGuard { guard: Some(guard) }
 }
 
 fn ensure_interest_keeper() {

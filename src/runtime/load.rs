@@ -9,34 +9,54 @@
 //! contract change.
 //!
 //! The gauge counters live behind one mutex. Each change updates a field, bumps
-//! a monotone `seq`, and snapshots everything under the same lock. Two separate
-//! guarantees ride on that lock, and only one of them constrains the order
-//! events *arrive* in:
+//! a monotone `seq`, and snapshots the field set together under that lock, then
+//! releases the lock before dispatching the snapshot to `tracing`. Two separate
+//! guarantees ride on the lock, and only one of them constrains the order events
+//! *arrive* in:
 //!
 //! - **Value fidelity** (every reached value gets its own event): capturing the
 //!   update and the snapshot together under the lock prevents a value from being
-//!   reached and superseded before its own emit re-reads the counters — a lone
-//!   atomic would let a subscriber's high-water mark miss a peak. This guarantee
-//!   is about the snapshot, not about arrival order.
+//!   reached and superseded before its own snapshot re-reads the counters — a
+//!   lone atomic would let a subscriber's high-water mark miss a peak. This
+//!   guarantee is about the snapshot, not about arrival order.
 //! - **Ordering** is carried by `seq`, not by arrival: the current value of each
 //!   gauge is the value on the greatest-`seq` event (RFC 0006 §4.4, INV-L13).
-//!   The lock currently also serializes the `tracing` dispatch, so today arrival
-//!   order happens to match `seq` order — but the contract does not promise it,
-//!   and consumers must order by `seq`. That is deliberate: because the
-//!   snapshot-and-`seq` capture stays under the lock while only the dispatch
-//!   would move, a later change can emit the event out from under the lock — so
-//!   a slow subscriber no longer stalls producers on that lock, and one that
-//!   re-enters the runtime no longer deadlocks on it — without breaking any
-//!   `seq`-ordered consumer. Moving the dispatch off the lock does not by itself
-//!   make a subscriber that *causes* a gauge change safe (it re-enters the emit
-//!   path); that is a separate re-entrancy hazard, out of scope here and tracked
-//!   against RFC 0006 §4.4.
+//!   Dispatch happens off the lock, so the contract does not promise arrival
+//!   order matches `seq` order — consumers must order by `seq`. The single-
+//!   drainer funnel below does in fact serialize dispatch in `seq` order today,
+//!   but that is an implementation coincidence, not a guarantee — just as it was
+//!   under the old under-lock dispatch — so no consumer may rely on it. Keeping
+//!   the snapshot-and-`seq` capture under the lock while moving only the dispatch
+//!   off it is what lets a slow subscriber no longer stall producers on the lock,
+//!   and one that re-enters the runtime no longer deadlock on it, without
+//!   breaking any `seq`-ordered consumer.
+//!
+//! Moving dispatch off the lock is only safe alongside a re-entrancy funnel. A
+//! subscriber can, while handling a gauge event, cause another gauge change
+//! (e.g. by spawning a subscription) — re-entering the emit path on the same
+//! thread. Dispatched inline that would recurse without bound under a global
+//! `tracing` dispatcher, or have the nested event silently dropped by a scoped
+//! dispatcher's re-entrancy guard (breaking value fidelity). So dispatch is
+//! funneled through a single drainer: the first producer to find no drainer
+//! running claims the role and dispatches snapshots in a loop, while every other
+//! producer — concurrent or re-entrant — only enqueues its snapshot (in `seq`
+//! order) under the lock and returns, leaving the running drainer to deliver it.
+//! Delivery is therefore iterative and never nested inside a `tracing` dispatch,
+//! so neither hazard can arise (`LoadObserver::emit`, RFC 0006 §4.4).
+//!
+//! One consequence of the funnel: a snapshot is dispatched by whichever thread
+//! is draining, which need not be the thread whose change produced it, so the
+//! event fires under that drainer's thread and current span context. A global
+//! subscriber sees only a schema-preserving change of span/thread attribution
+//! (INV-L13 is unaffected); a thread-scoped dispatcher can see another thread's
+//! gauge change delivered to it, or its own delivered on a different thread.
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
 //! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
 //! lint.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -97,13 +117,14 @@ pub struct LoadObserver {
     gauges: Arc<Mutex<Gauges>>,
 }
 
-// Deliberately not `Copy`/`Clone`: `emit` bumps `seq` through `&mut self`, so a
-// by-value copy (`let mut g = *guard; g.emit()`) would bump and emit a throwaway
+// Deliberately not `Copy`/`Clone`: `capture` bumps `seq` through `&mut self`, so
+// a by-value copy (`let mut g = *guard; g.capture()`) would bump a throwaway
 // while the shared `seq` stalled — the exact silently-dropped update this
-// ordering exists to prevent. Without the derives that pattern fails to compile.
+// ordering exists to prevent. The `pending` queue makes `Copy` impossible on its
+// own, but the rule is stated for `capture` regardless.
 #[derive(Default)]
 struct Gauges {
-    /// Monotone per-observer counter, bumped once per emitted gauge event and
+    /// Monotone per-observer counter, bumped once per captured gauge event and
     /// carried on it as `seq`. Captured under the same lock as the four counts,
     /// so a greater `seq` never carries an older value; a subscriber reads the
     /// current value of each gauge from the greatest-`seq` event, so arrival
@@ -113,18 +134,55 @@ struct Gauges {
     unkeyed_commands: usize,
     keyed_commands: usize,
     blocked: usize,
+    /// Snapshots captured but not yet dispatched, in `seq` order. Populated only
+    /// while a drainer is already running — a concurrent producer or a
+    /// re-entrant emit from within a subscriber; empty and unallocated on the
+    /// common path (`LoadObserver::emit`).
+    pending: VecDeque<GaugeSnapshot>,
+    /// Whether some thread is currently draining `pending` and dispatching
+    /// snapshots to `tracing` outside the lock. At most one drainer runs at a
+    /// time, so dispatch is serialized in `seq` order without the lock being
+    /// held across it (`LoadObserver::emit`).
+    draining: bool,
 }
 
 impl Gauges {
-    /// Bumps `seq` and emits the producer-gauge event — the four counts plus
-    /// their ordering `seq`. Takes `&mut self` so the bump lands in the shared
-    /// state; the caller holds the lock, fixing the counts and `seq` together
-    /// at the serialization point, so
-    /// the event reports the state that was reached (never a later re-read) and
-    /// its `seq` orders it against every other gauge event without relying on
-    /// arrival order.
-    fn emit(&mut self) {
+    /// Bumps `seq` and captures the four counts plus that `seq` as one snapshot.
+    /// Takes `&mut self` so the bump lands in the shared state; the caller holds
+    /// the lock, fixing the counts and `seq` together at the serialization
+    /// point, so the snapshot reports the state that was reached (never a later
+    /// re-read) and its `seq` orders it against every other gauge event without
+    /// relying on arrival order. Dispatch to `tracing` happens later, off the
+    /// lock (`GaugeSnapshot::dispatch`).
+    const fn capture(&mut self) -> GaugeSnapshot {
         self.seq = self.seq.wrapping_add(1);
+        GaugeSnapshot {
+            seq: self.seq,
+            subscriptions: self.subscriptions,
+            unkeyed_commands: self.unkeyed_commands,
+            keyed_commands: self.keyed_commands,
+            blocked: self.blocked,
+        }
+    }
+}
+
+/// One producer-gauge event's payload — the four counts and their ordering
+/// `seq` — captured under the lock and dispatched to `tracing` after the lock is
+/// released (RFC 0006 §4.4).
+#[derive(Clone, Copy)]
+struct GaugeSnapshot {
+    seq: u64,
+    subscriptions: usize,
+    unkeyed_commands: usize,
+    keyed_commands: usize,
+    blocked: usize,
+}
+
+impl GaugeSnapshot {
+    /// Emits the producer-gauge event for this snapshot. Called off the lock, so
+    /// a slow or re-entrant subscriber cannot stall or deadlock a producer on
+    /// the gauge lock.
+    fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
             seq = self.seq,
@@ -184,11 +242,13 @@ impl LoadObserver {
     /// via a guard) because an entry's lifetime is the runtime's, not a task's:
     /// a draining entry outlives its task.
     pub fn set_keyed_entries(&self, count: usize) {
-        let mut gauges = self.lock();
-        if gauges.keyed_commands != count {
+        self.emit(|gauges| {
+            if gauges.keyed_commands == count {
+                return false;
+            }
             gauges.keyed_commands = count;
-            gauges.emit();
-        }
+            true
+        });
     }
 
     fn enter(&self, field: Field) -> GaugeGuard {
@@ -199,14 +259,83 @@ impl LoadObserver {
         }
     }
 
-    /// Adds `delta` (`+1`/`-1`) to `field` and emits the resulting snapshot,
-    /// all under one lock so the update and its event cannot interleave with
-    /// another producer's (RFC 0006 §4.4 "event per change").
+    /// Adds `delta` (`+1`/`-1`) to `field` and dispatches the resulting
+    /// snapshot. The update and its `seq`/snapshot capture happen under one lock
+    /// so they cannot interleave with another producer's (RFC 0006 §4.4 "event
+    /// per change"); the dispatch itself runs off the lock (`emit`).
     fn step(&self, field: Field, delta: isize) {
-        let mut gauges = self.lock();
-        let counter = field.counter_mut(&mut gauges);
-        *counter = counter.wrapping_add_signed(delta);
-        gauges.emit();
+        self.emit(|gauges| {
+            let counter = field.counter_mut(gauges);
+            *counter = counter.wrapping_add_signed(delta);
+            true
+        });
+    }
+
+    /// Applies a gauge change and dispatches every resulting snapshot off the
+    /// lock.
+    ///
+    /// `mutate` runs under the lock and returns whether it changed a gauge; on
+    /// `false` nothing is emitted (e.g. `set_keyed_entries` with an unchanged
+    /// count). On `true` the new `seq`/snapshot is captured under the same lock,
+    /// then dispatched to `tracing` *after* the lock is released, so a slow
+    /// subscriber never stalls producers on the lock and one that re-enters the
+    /// runtime never deadlocks on it (RFC 0006 §4.4).
+    ///
+    /// Dispatch is funneled through a single drainer to stay safe under
+    /// re-entrancy. A subscriber can, while handling a gauge event, cause
+    /// another gauge change and re-enter here on the same thread; dispatched
+    /// inline that would recurse without bound under a global `tracing`
+    /// dispatcher, or have the nested event dropped by a scoped dispatcher's
+    /// re-entrancy guard. Instead, the first caller to find no drainer running
+    /// claims the role and dispatches in a loop, while every other caller —
+    /// concurrent or re-entrant — only enqueues its snapshot in `seq` order and
+    /// returns. Delivery is thus iterative and never nested inside a `tracing`
+    /// dispatch.
+    fn emit(&self, mutate: impl FnOnce(&mut Gauges) -> bool) {
+        let first = {
+            let mut gauges = self.lock();
+            if !mutate(&mut gauges) {
+                return;
+            }
+            let snapshot = gauges.capture();
+            if gauges.draining {
+                gauges.pending.push_back(snapshot);
+                return;
+            }
+            gauges.draining = true;
+            snapshot
+        };
+
+        // Release the drainer role if a subscriber panics mid-dispatch, so a
+        // panic cannot wedge the funnel shut and silence every later gauge event
+        // (the off-lock analogue of the poisoned-lock recovery in `lock`). The
+        // guard stays armed until the loop relinquishes the role normally, so a
+        // still-armed drop means and only means an unwinding `dispatch` — unlike
+        // `thread::panicking()`, this stays correct when `emit` itself runs
+        // during an unrelated unwind (`GaugeGuard::drop`).
+        let mut release = DrainGuard {
+            observer: self,
+            armed: true,
+        };
+        let mut next = first;
+        loop {
+            next.dispatch();
+            // Take the next snapshot, or relinquish the drainer role, under a
+            // brief lock — never held across `dispatch`.
+            let popped = {
+                let mut gauges = self.lock();
+                let snapshot = gauges.pending.pop_front();
+                if snapshot.is_none() {
+                    gauges.draining = false;
+                }
+                snapshot
+            };
+            let Some(snapshot) = popped else {
+                release.armed = false;
+                return;
+            };
+            next = snapshot;
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Gauges> {
@@ -237,12 +366,41 @@ impl Drop for GaugeGuard {
     }
 }
 
+/// Releases the gauge drainer role if a subscriber panics while
+/// `LoadObserver::emit` is dispatching. The drain loop disarms this guard the
+/// instant it relinquishes the role normally, so a drop while still armed means
+/// `dispatch` unwound: it clears `draining` (and abandons any queued snapshots)
+/// so later gauge changes can dispatch again instead of enqueuing forever behind
+/// a drainer that will never return. Arming rather than reading
+/// `thread::panicking()` is deliberate — `emit` also runs during unrelated
+/// unwinds (`GaugeGuard::drop`), where a normal drain must not trigger recovery.
+struct DrainGuard<'a> {
+    observer: &'a LoadObserver,
+    armed: bool,
+}
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut gauges = self.observer.lock();
+            gauges.draining = false;
+            gauges.pending.clear();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use tracing::Level;
+    use std::fmt::Debug;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
 
     use super::*;
-    use crate::test_support::TraceRecorder;
+    use crate::test_support::{TraceRecorder, set_default_subscriber, with_silent_panic_hook};
 
     // INV-L13: every producer-gauge event carries the full field set together —
     // the four gauges plus their ordering `seq` — so a subscriber reads a
@@ -386,5 +544,197 @@ mod tests {
             at_trace.u64_values("keyed_commands").is_empty(),
             "gauge event is not TRACE"
         );
+    }
+
+    // RFC 0006 §4.4 re-entrancy: a subscriber that causes a gauge change while
+    // handling a gauge event re-enters the emit path on the same thread. The
+    // dispatch funnel makes that safe — the nested change is enqueued and
+    // delivered iteratively by the running drainer. This is what the off-lock
+    // dispatch requires: under the old under-lock dispatch the re-entrant
+    // `set_keyed_entries` would deadlock re-locking the gauge mutex, and under a
+    // naive off-lock dispatch the nested event would be dropped by `tracing`'s
+    // re-entrancy guard (breaking value fidelity). Here the re-entrant event
+    // must be delivered as its own event, with a distinct `seq` and the value it
+    // reached.
+    #[test]
+    fn reentrant_gauge_change_from_a_subscriber_is_delivered_not_dropped() {
+        let observer = LoadObserver::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = ReentrantGaugeSubscriber {
+            observer: observer.clone(),
+            reentered: Arc::new(AtomicBool::new(false)),
+            seen: Arc::clone(&seen),
+        };
+        let _guard = set_default_subscriber(subscriber);
+
+        // Emits seq 1 (subscriptions=1); the subscriber re-enters on that first
+        // event and emits seq 2 (keyed_commands=1). Held so it does not drop and
+        // emit a third event before the assertion reads `seen`.
+        let _subscription = observer.track_subscription();
+
+        let seen = seen
+            .lock()
+            .expect("reentrancy seen log mutex should not be poisoned")
+            .clone();
+        assert_eq!(
+            seen,
+            vec![(1, 0), (2, 1)],
+            "the re-entrant gauge change must be delivered as its own event with \
+             a distinct seq and its reached value, neither dropped nor deadlocked"
+        );
+    }
+
+    /// Records every producer-gauge event's `(seq, keyed_commands)` and, the
+    /// first time it sees one, causes exactly one more gauge change on the same
+    /// observer — re-entering `LoadObserver::emit` from inside `event()`.
+    struct ReentrantGaugeSubscriber {
+        observer: LoadObserver,
+        reentered: Arc<AtomicBool>,
+        seen: Arc<Mutex<Vec<(u64, u64)>>>,
+    }
+
+    impl Subscriber for ReentrantGaugeSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if event.metadata().target() != "tears::runtime::load" {
+                return;
+            }
+            let mut visitor = GaugeVisitor::default();
+            event.record(&mut visitor);
+            let Some(seq) = visitor.seq else { return };
+            self.seen
+                .lock()
+                .expect("reentrancy seen log mutex should not be poisoned")
+                .push((seq, visitor.keyed_commands.unwrap_or_default()));
+
+            // Re-enter exactly once, from within the dispatch of the first gauge
+            // event, to exercise the funnel.
+            if !self.reentered.swap(true, Ordering::SeqCst) {
+                self.observer.set_keyed_entries(1);
+            }
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct GaugeVisitor {
+        seq: Option<u64>,
+        keyed_commands: Option<u64>,
+    }
+
+    impl Visit for GaugeVisitor {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            match field.name() {
+                "seq" => self.seq = Some(value),
+                "keyed_commands" => self.keyed_commands = Some(value),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
+    }
+
+    // A subscriber that panics while dispatching the first gauge event leaves the
+    // drainer loop unwinding before it can relinquish the role. The `DrainGuard`,
+    // still armed, must clear `draining` so the funnel is not wedged shut — every
+    // later gauge change would otherwise enqueue behind a drainer that never
+    // returns and never dispatch. This pins the recovery path that the arm/disarm
+    // `DrainGuard` (rather than `thread::panicking()`) exists to make correct.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_subscriber_panic_mid_dispatch_does_not_wedge_the_funnel() {
+        let observer = LoadObserver::default();
+        let seen_after = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = PanicOnceGaugeSubscriber {
+            panicked: Arc::new(AtomicBool::new(false)),
+            seen_after: Arc::clone(&seen_after),
+        };
+        let _guard = set_default_subscriber(subscriber);
+
+        let seen_after = with_silent_panic_hook(async {
+            // First change: the subscriber panics mid-dispatch. Caught here so
+            // the panic does not fail the test; the recovery is what is under
+            // test.
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                observer.set_keyed_entries(1);
+            }));
+            assert!(outcome.is_err(), "the subscriber panic must propagate");
+
+            // The funnel must have recovered: this change dispatches again
+            // instead of enqueuing forever behind the unwound drainer.
+            observer.set_keyed_entries(2);
+
+            seen_after
+                .lock()
+                .expect("panic-recovery seen log mutex should not be poisoned")
+                .clone()
+        })
+        .await;
+
+        assert_eq!(
+            seen_after,
+            vec![2],
+            "after a subscriber panics mid-dispatch, later gauge events must \
+             dispatch again rather than pile up behind a wedged drainer"
+        );
+    }
+
+    /// Panics the first time it sees a producer-gauge event — mid-dispatch,
+    /// inside the drainer loop — and records the `seq` of every one after.
+    struct PanicOnceGaugeSubscriber {
+        panicked: Arc<AtomicBool>,
+        seen_after: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Subscriber for PanicOnceGaugeSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        #[allow(
+            clippy::panic,
+            clippy::manual_assert,
+            reason = "the subscriber intentionally panics on its first event"
+        )]
+        fn event(&self, event: &Event<'_>) {
+            if event.metadata().target() != "tears::runtime::load" {
+                return;
+            }
+            let mut visitor = GaugeVisitor::default();
+            event.record(&mut visitor);
+            let Some(seq) = visitor.seq else { return };
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("subscriber panic mid-dispatch");
+            }
+            self.seen_after
+                .lock()
+                .expect("panic-recovery seen log mutex should not be poisoned")
+                .push(seq);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
     }
 }

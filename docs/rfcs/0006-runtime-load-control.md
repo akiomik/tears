@@ -504,23 +504,24 @@ as INV-L13 (section 5):
   of this contract**, so a consumer that reads "the value on the most
   recently *arrived* event" is relying on an ordering the schema does not
   provide. Ordering by an explicit `seq` rather than by arrival is
-  deliberate: because the snapshot-and-`seq` capture is atomic while only
-  the emit need move, it lets a later change emit gauge events without
-  holding the runtime's gauge lock across the `tracing` dispatch, so a slow
-  subscriber can no longer stall producers on that lock and a subscriber
-  that re-enters the runtime can no longer deadlock on it — without
-  breaking any `seq`-ordered consumer. That move does **not**, on its own,
-  make a subscriber that itself *causes* a gauge change safe: such a
-  subscriber re-enters the emit path, risking unbounded recursion under a
-  global `tracing` dispatcher, or — under a scoped one — a nested event
-  silently dropped by `tracing`'s re-entrancy guard, which breaks value
-  fidelity. Resolving that re-entrancy is a prerequisite of any future
-  off-lock change and is out of scope for the `seq` field, which secures
-  only the ordering; it is recorded here so the off-lock change cannot read
-  the stall/deadlock sentence as a claim that re-entrancy is already safe.
-  The initial implementation still emits under that lock, so `seq` and
-  arrival order coincide there; consumers must not depend on the
-  coincidence.
+  deliberate: it lets the runtime dispatch a gauge event without holding
+  the gauge lock across the `tracing` dispatch — the snapshot-and-`seq`
+  capture stays atomic under the lock while only the dispatch moves off
+  it — so a slow subscriber no longer stalls producers on that lock and a
+  subscriber that re-enters the runtime no longer deadlocks on it, without
+  breaking any `seq`-ordered consumer. Off-lock dispatch is
+  re-entrancy-safe by construction: a subscriber that itself *causes* a
+  gauge change re-enters the emit path, and dispatched inline that would
+  recurse without bound under a global `tracing` dispatcher, or have its
+  nested event silently dropped by a scoped dispatcher's re-entrancy guard
+  (breaking value fidelity); the runtime instead delivers a nested change
+  as its own `seq`-carrying event, never nested inside a `tracing`
+  dispatch, so value fidelity and `seq` ordering both hold across
+  re-entrancy. How that delivery is arranged is an implementation concern,
+  not part of this schema. Because dispatch is off the lock, the schema
+  does not guarantee arrival order matches `seq` order — a current-value
+  read must order gauge events by `seq`, never by arrival, even where an
+  implementation happens to deliver them in `seq` order.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness
