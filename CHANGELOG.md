@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RuntimeConfig` and `Runtime::with_config` add opt-in runtime load control
+  (RFC 0006, RFC 0007): a bounded delivery mode for the shared
+  application-message channel (`app_channel_capacity`) and each keyed command's
+  private channel (`keyed_channel_capacity`), plus a micro-batch count cap
+  (`batch_max_messages`), carried alongside the frame rate
+  - Bounded channels apply backpressure — a producer waits for capacity rather
+    than dropping — so memory and shared-input latency stay bounded under
+    overload; the dedicated quit channel is never bounded
+  - Load observability is emitted through `tracing` under the
+    `tears::runtime::load` target: a per-micro-batch event
+    (`pulled`/`updated`/`shared_pending`), a bounded-mode capacity-wait event
+    (`channel`/`wait_us`), and producer-count gauges (`subscriptions`,
+    `unkeyed_commands`, `keyed_commands`, `blocked`)
+  - Additive and non-breaking: `Runtime::new` is unchanged, and a
+    load-control-unset `RuntimeConfig` reproduces the previous unbounded
+    delivery path exactly
 - `Subscription::scoped` and `Command::scoped` qualify a subscription's or
   command's lifecycle identity with one structural scope segment, so composed
   child instances that reuse the same local source/key or `CommandId` no
@@ -20,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Command::cancellable`'s rustdoc
   - Scoping is additive: unscoped subscriptions and commands keep their
     existing 0.10.0 behavior unchanged
+
+### Changed
+
+- The per-micro-batch trace event moved off the `tears::runtime` target: the
+  old `tears::runtime` event with the `messages` field is removed, replaced by
+  the richer `tears::runtime::load` batch event (`pulled`/`updated`/
+  `shared_pending`). A consumer filtering `tears::runtime` on `messages` must
+  switch to the `tears::runtime::load` target
 
 ## [0.10.0] - 2026-07-17
 

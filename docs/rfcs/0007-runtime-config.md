@@ -1,10 +1,8 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Accepted (moves to Implemented when the RFC 0006 load-control
-  implementation lands)
+- Status: Implemented
 - Target: the prerequisite RFC 0006 delegated to a separate document
-  (RFC 0006 sections 3.2, 6); with this RFC Accepted, the load-control
-  implementation PR may start
+  (RFC 0006 sections 3.2, 6)
 - Scope: the public `RuntimeConfig` surface (type, construction, constructor
   integration), the recommended-defaults documentation, the restart-rate
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
@@ -632,7 +630,28 @@ channel occupancy, per the note on that distinction below the table:
   16 messages with its next send pending — 128 buffered messages plus 8
   pending sends, exceeding any modest hypothetical pool), with the two
   probes exactly as RFC 0006 §5.1's row defines them (a previously idle
-  key's first 16 sends, and the shared producer's first 1024 sends). Eight
+  key's first 16 sends, and the shared producer's first 1024 sends). The
+  keyed probe is a ninth key started only *after* the eight are saturated,
+  so it is genuinely previously idle when probed; the shared producer,
+  however, runs throughout as the saturation enabler and cannot be staged
+  the same way — the shared channel must stay full to keep the keyed
+  channels from draining under shared-first pull, so it cannot be idled and
+  re-probed later. Its first `app_channel_capacity` sends are therefore
+  verified concurrently with the held keyed saturation: the gate is the
+  shared occupancy sampled *only while all nine keyed channels are
+  simultaneously saturated*, which must reach exactly `app_channel_capacity
+  + 1` (the full channel plus its one pending send). This simultaneous
+  value, not a whole-run maximum, is load-bearing — a shared pool could
+  drive the shared channel to its full occupancy *before* the keyed channels
+  start and then shed capacity to hold them, so a historical peak would pass
+  a pool that never held the full shared channel and all `9 × capacity`
+  keyed messages at once, which is exactly the violation the gate must
+  catch. The shared channel is untouched by any keyed producer, so this is
+  still the keyed→shared admission the row asks for. The measurement also
+  gates that no keyed message is ever delivered to `update` (the keyed
+  `StreamMap` never selectively drains a probe) and that every keyed
+  channel's yield count is exactly `capacity + 1`, so a drain would fail
+  rather than pass as extra admission. Eight
   saturated keys is the scale chosen to defeat a pooled implementation
   sized near per-channel capacity while keeping the row cheap to execute
   in the full acceptance and regression runs it belongs to.
@@ -666,10 +685,13 @@ invocation is unchanged.
   under the default (load-control-unset) configuration, shortened to 0.5s —
   the same default-path role it has in §5.3, so the smoke run never forks
   its config from its acceptance meaning — a 20k-message bounded burst under
-  the §5.1 configuration, `quit_idle` and `quit_blocked_1` at 5 *valid*
-  trials each
-  — `quit_idle`'s predicate is `none` (§5.2's table), so every attempt
-  counts toward its 5; `quit_blocked_1` counts only attempts whose §5.2
+  the §5.1 configuration, `quit_idle_bounded` and `quit_blocked_1` at 5
+  *valid* trials each
+  — `quit_idle_bounded`'s predicate is `none` (§5.2's `quit_idle` row —
+  the bounded-run table names its baseline row `quit_idle`, which the
+  harness emits as `quit_idle_bounded` to disambiguate it from the
+  default-mode `quit_idle`), so every attempt counts toward its 5;
+  `quit_blocked_1` counts only attempts whose §5.2
   predicate (`blocked == 1` at the quit instant) held, under §5.2's
   attempt cap scaled to this row's 5-trial count (a 50-attempt cap,
   `10 × 5`), which fails the smoke run outright rather than retrying past
@@ -711,8 +733,8 @@ invocation is unchanged.
   anything — the profile carries no latency assertion. One wall-clock
   condition remains: every smoke scenario carries the harness's
   per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
-  at 30 s — the existing `steady_20k` and `quit_idle` keep their current
-  value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
+  at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
+  current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
   same — and the smoke run fails when any scenario times out. That
   timeout-failure rule is part of the profile's definition, not
   something the harness fully provides today: quit trials already fail

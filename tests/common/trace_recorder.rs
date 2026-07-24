@@ -36,6 +36,12 @@ pub struct TraceRecorder {
 struct TraceRecorderState {
     events: AtomicUsize,
     bool_fields: Mutex<HashMap<String, Vec<bool>>>,
+    u64_fields: Mutex<HashMap<String, Vec<u64>>>,
+    str_fields: Mutex<HashMap<String, Vec<String>>>,
+    // The sorted field-name set of each matching event, in arrival order, so a
+    // test can assert which fields co-occur on a single event (the per-field
+    // maps above flatten across events and cannot).
+    field_sets: Mutex<Vec<Vec<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -88,6 +94,7 @@ impl TraceRecorder {
     }
 
     /// Returns the number of events that matched this recorder's filter.
+    #[allow(dead_code)]
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.state.events.load(Ordering::SeqCst)
@@ -104,6 +111,45 @@ impl TraceRecorder {
             .get(field)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Returns all unsigned-integer values recorded for the named event field
+    /// (covers `u64` and `usize` fields).
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn u64_values(&self, field: &str) -> Vec<u64> {
+        self.state
+            .u64_fields
+            .lock()
+            .expect("trace recorder u64 field log mutex should not be poisoned")
+            .get(field)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Returns all string values recorded for the named event field.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn str_values(&self, field: &str) -> Vec<String> {
+        self.state
+            .str_fields
+            .lock()
+            .expect("trace recorder str field log mutex should not be poisoned")
+            .get(field)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Returns the sorted field-name set of every matching event, in arrival
+    /// order — for asserting which fields appear together on one event.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn field_name_sets(&self) -> Vec<Vec<String>> {
+        self.state
+            .field_sets
+            .lock()
+            .expect("trace recorder field-set log mutex should not be poisoned")
+            .clone()
     }
 }
 
@@ -184,19 +230,46 @@ impl Subscriber for TraceRecorder {
 
         self.state.events.fetch_add(1, Ordering::SeqCst);
 
-        let mut visitor = BoolFieldVisitor::default();
+        let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
-        if visitor.values.is_empty() {
-            return;
-        }
 
-        let mut fields = self
-            .state
-            .bool_fields
+        let mut names = visitor.names.clone();
+        names.sort();
+        self.state
+            .field_sets
             .lock()
-            .expect("trace recorder bool field log mutex should not be poisoned");
-        for (field, value) in visitor.values {
-            fields.entry(field).or_default().push(value);
+            .expect("trace recorder field-set log mutex should not be poisoned")
+            .push(names);
+
+        if !visitor.bools.is_empty() {
+            let mut fields = self
+                .state
+                .bool_fields
+                .lock()
+                .expect("trace recorder bool field log mutex should not be poisoned");
+            for (field, value) in visitor.bools {
+                fields.entry(field).or_default().push(value);
+            }
+        }
+        if !visitor.u64s.is_empty() {
+            let mut fields = self
+                .state
+                .u64_fields
+                .lock()
+                .expect("trace recorder u64 field log mutex should not be poisoned");
+            for (field, value) in visitor.u64s {
+                fields.entry(field).or_default().push(value);
+            }
+        }
+        if !visitor.strs.is_empty() {
+            let mut fields = self
+                .state
+                .str_fields
+                .lock()
+                .expect("trace recorder str field log mutex should not be poisoned");
+            for (field, value) in visitor.strs {
+                fields.entry(field).or_default().push(value);
+            }
         }
     }
 
@@ -206,14 +279,37 @@ impl Subscriber for TraceRecorder {
 }
 
 #[derive(Default)]
-struct BoolFieldVisitor {
-    values: Vec<(String, bool)>,
+struct FieldVisitor {
+    bools: Vec<(String, bool)>,
+    u64s: Vec<(String, u64)>,
+    strs: Vec<(String, String)>,
+    names: Vec<String>,
 }
 
-impl Visit for BoolFieldVisitor {
+impl Visit for FieldVisitor {
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.values.push((field.name().to_owned(), value));
+        self.names.push(field.name().to_owned());
+        self.bools.push((field.name().to_owned(), value));
     }
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.names.push(field.name().to_owned());
+        self.u64s.push((field.name().to_owned(), value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.names.push(field.name().to_owned());
+        if let Ok(value) = u64::try_from(value) {
+            self.u64s.push((field.name().to_owned(), value));
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.names.push(field.name().to_owned());
+        self.strs.push((field.name().to_owned(), value.to_owned()));
+    }
+
+    fn record_debug(&mut self, field: &Field, _value: &dyn Debug) {
+        self.names.push(field.name().to_owned());
+    }
 }

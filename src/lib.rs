@@ -108,6 +108,10 @@ pub use command::core::Command;
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
 pub use runtime::Runtime;
+// `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
+// crate root but deliberately *not* in the prelude, since a minimal skeleton app
+// calling `Runtime::new` never names it (RFC 0007 §2.3, INV-C4).
+pub use runtime::config::RuntimeConfig;
 // `FrameRate` lives under `runtime` (it is a scheduling input); re-exported here
 // as `tears::FrameRate` so it keeps a single canonical public path. See
 // docs/api-guidelines.md for the module visibility / root promotion rules

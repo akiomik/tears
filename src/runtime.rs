@@ -84,6 +84,8 @@
 //! }
 //! ```
 
+use std::num::NonZeroUsize;
+
 use color_eyre::eyre::Result;
 use futures::stream::StreamExt;
 use ratatui::prelude::Backend;
@@ -92,6 +94,16 @@ use tokio::time::{Duration, Instant};
 use crate::{application::Application, command::Command};
 
 mod app_input;
+// `pub` (not `pub(crate)`) so `subscription`'s forwarding task can name the
+// shared-channel `Sender` it feeds: `runtime` is already `pub(crate)`, so `pub`
+// caps this submodule's effective reachability at the crate the same way, while
+// avoiding the redundant-`pub(crate)` lint (see `frame_rate` below). The type
+// carries no public API.
+pub mod channel;
+// `pub` for the same reason as `frame_rate` below: `runtime` is already
+// `pub(crate)`, so `pub` only lets `lib.rs` re-export `RuntimeConfig` at the
+// crate root; it does not widen effective reachability.
+pub mod config;
 mod core;
 // `FrameRate` is a scheduling input, so it lives with the runtime. `pub`
 // (not `pub(crate)`) because `runtime` itself is already `pub(crate)`,
@@ -100,9 +112,14 @@ mod core;
 pub mod frame_rate;
 mod frame_scheduler;
 mod keyed_commands;
+// `pub` for the same crate-capping reason as `channel` above: crate-internal
+// load-observability types (`tears::runtime::load` schema, RFC 0006 §4.4) that
+// `subscription` and the channel/keyed producers share.
+pub mod load;
 mod pending_work;
 
 use app_input::AppInput;
+use config::RuntimeConfig;
 use frame_rate::FrameRate;
 use frame_scheduler::FrameScheduler;
 use keyed_commands::{CommandOutput, ReceiverEvent};
@@ -137,6 +154,9 @@ pub struct Runtime<App: Application> {
     core: RuntimeCore<App>,
     /// Schedules frame work and gates idle wake-ups
     scheduler: FrameScheduler,
+    /// Count cap for one micro-batch window; `None` leaves the batch capped
+    /// only by the 100µs time window (RFC 0006 INV-L12).
+    batch_max_messages: Option<NonZeroUsize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,11 +214,69 @@ impl<App: Application> Runtime<App> {
     /// ```
     #[must_use]
     pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self {
-        let core = RuntimeCore::new(flags);
+        // Literal delegation to `with_config` (RFC 0007 INV-C1): exactly one
+        // construction path exists, and the load-control-unset configuration
+        // selects RFC 0006's unchanged unbounded path within it.
+        Self::with_config(flags, RuntimeConfig::new(frame_rate))
+    }
+
+    /// Creates a new runtime from a [`RuntimeConfig`], which carries the frame
+    /// rate together with the opt-in load controls (RFC 0006).
+    ///
+    /// [`new`](Self::new) is equivalent to `with_config(flags,
+    /// RuntimeConfig::new(frame_rate))`: a default (load-control-unset)
+    /// configuration reproduces the unbounded delivery mode exactly. Use
+    /// `with_config` to opt into bounded delivery by setting one or more of the
+    /// [`RuntimeConfig`] capacities.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Configuration data passed to [`Application::new`]
+    /// * `config` - Frame rate and opt-in load controls
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use std::num::{NonZeroU32, NonZeroUsize};
+    /// # use tears::{FrameRate, Runtime, RuntimeConfig};
+    /// # use tears::prelude::*;
+    /// # use ratatui::Frame;
+    /// #
+    /// # struct MyApp;
+    /// # enum Message {}
+    /// # impl Application for MyApp {
+    /// #     type Message = Message;
+    /// #     type Flags = ();
+    /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
+    /// #     fn update(&mut self, _: Message) -> Command<Message> { Command::none() }
+    /// #     fn view(&self, _: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// # }
+    /// let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))
+    ///     .expect("valid frame rate");
+    /// let config = RuntimeConfig::new(frame_rate)
+    ///     .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
+    ///     .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"));
+    /// let runtime = Runtime::<MyApp>::with_config((), config);
+    /// ```
+    #[must_use]
+    pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self {
+        // The single channel-construction path (RFC 0006 INV-L6): unset
+        // capacities build the unchanged unbounded channels, `Some(n)` bound
+        // them.
+        let core = RuntimeCore::with_capacities(
+            flags,
+            config.app_channel_capacity,
+            config.keyed_channel_capacity,
+        );
+        // INV-C5: the scheduler is paced by the frame rate the caller supplied
+        // to `RuntimeConfig::new`, never a hardcoded one.
+        let scheduler = FrameScheduler::new(config.frame_rate);
 
         Self {
             core,
-            scheduler: FrameScheduler::new(frame_rate),
+            scheduler,
+            batch_max_messages: config.batch_max_messages,
         }
     }
 
@@ -223,27 +301,50 @@ impl<App: Application> Runtime<App> {
             InputOutcome::Quit => return BatchOutcome::Quit,
         };
 
+        // INV-L12: the opening input is the batch's first pulled input, so a
+        // configured `batch_max_messages` of `Some(n)` admits at most `n - 1`
+        // more. Every input the batch pulls counts — including inputs that do
+        // not invoke `update` (a keyed `Closed`) — so this counter is distinct
+        // from `processed`, which counts only `update` calls.
+        let mut pulled = 1usize;
+
         // Micro-batching: process additional messages that arrived during a short window.
         // Uses tokio::time::Instant (not std) so tests can pause the clock and avoid
         // flaking under CI scheduling jitter around this tight deadline.
         let batch_deadline = Instant::now() + Duration::from_micros(100);
         while Instant::now() < batch_deadline {
+            // Stop once the batch has pulled its configured maximum number of
+            // inputs (INV-L12). Checked before the pull so `Some(1)` confines
+            // the batch to just the opening input.
+            if self
+                .batch_max_messages
+                .is_some_and(|max| pulled >= max.get())
+            {
+                break;
+            }
             match self.core.app_inputs.try_next_ready() {
-                Some(input) => match self.process_app_input(input) {
-                    InputOutcome::Updated => processed += 1,
-                    InputOutcome::NoUpdate => {}
-                    InputOutcome::Quit => {
-                        if processed > 0 {
-                            self.scheduler.mark_subscriptions_dirty();
+                Some(input) => {
+                    pulled += 1;
+                    match self.process_app_input(input) {
+                        InputOutcome::Updated => processed += 1,
+                        InputOutcome::NoUpdate => {}
+                        InputOutcome::Quit => {
+                            if processed > 0 {
+                                self.scheduler.mark_subscriptions_dirty();
+                            }
+                            return BatchOutcome::Quit;
                         }
-                        return BatchOutcome::Quit;
                     }
-                },
+                }
                 None => break, // No more inputs available
             }
         }
 
-        tracing::trace!(target: "tears::runtime", messages = processed, "processed message batch");
+        // Batch event (RFC 0006 §4.4): `pulled` counts every input this batch
+        // took (INV-L12's counted unit), `processed` those that invoked
+        // `update`, and `shared_pending` the shared-channel occupancy now. A
+        // quit-terminated batch returns above and never reaches here.
+        load::batch(pulled, processed, self.core.app_inputs.shared_pending());
 
         // Mark that subscriptions may have changed even when redraw is suppressed.
         if processed > 0 {
@@ -534,6 +635,39 @@ mod tests {
         );
     }
 
+    // INV-C5: `with_config` builds the frame scheduler from `config.frame_rate`
+    // — the value the caller supplied to `RuntimeConfig::new` — never a
+    // hardcoded one. A direct, deterministic value comparison (no elapsed-time
+    // observation) that fails an implementation which ignores `config.frame_rate`
+    // in exactly the way INV-C1/INV-C2 cannot.
+    #[tokio::test]
+    async fn test_with_config_scheduler_uses_config_frame_rate() {
+        for rate in [30, 144] {
+            let config = RuntimeConfig::new(frame_rate(rate));
+            let runtime = Runtime::<TestApp>::with_config(0, config);
+            assert_eq!(
+                runtime.scheduler.frame_period(),
+                frame_rate(rate).frame_duration(),
+                "with_config at {rate} FPS must pace the scheduler at that rate",
+            );
+        }
+    }
+
+    // INV-C1: `Runtime::new` is a literal delegation to `with_config` with a
+    // load-control-unset configuration, so the two construct an equivalently
+    // paced runtime. The behavioral witness of the single construction path.
+    #[tokio::test]
+    async fn test_new_delegates_to_with_config() {
+        let via_new = Runtime::<TestApp>::new(0, frame_rate(60));
+        let via_config = Runtime::<TestApp>::with_config(0, RuntimeConfig::new(frame_rate(60)));
+
+        assert_eq!(
+            via_new.scheduler.frame_period(),
+            via_config.scheduler.frame_period(),
+            "new(flags, fr) must construct the same runtime as with_config(flags, RuntimeConfig::new(fr))",
+        );
+    }
+
     #[tokio::test]
     async fn test_event_loop_process_message_batch_single_message() {
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
@@ -570,7 +704,7 @@ mod tests {
         runtime.scheduler.pending.needs_redraw = false;
         runtime.scheduler.pending.subscriptions_dirty = false;
 
-        let _ = runtime.core.msg_tx.send(RedrawControlMessage::Redraw);
+        let _ = runtime.core.msg_tx.try_send(RedrawControlMessage::Redraw);
         runtime.process_message_batch(RedrawControlMessage::Skip);
 
         assert!(runtime.scheduler.pending.needs_redraw);
@@ -592,17 +726,152 @@ mod tests {
         assert!(runtime.scheduler.pending.subscriptions_dirty);
     }
 
-    #[tokio::test]
-    async fn test_process_message_batch_emits_tracing_event() {
-        let recorder = TraceRecorder::new().with_target("tears::runtime");
+    // Batch event (RFC 0006 §4.4, INV-L13) at the runtime batch layer: a batch
+    // that pulls the opening input plus one queued input reports `pulled = 2`,
+    // `updated = 2` (both invoked `update`), and `shared_pending = 0` (the
+    // shared channel drained). `pulled` is unique to the batch event, so the
+    // value assertions are unaffected by any gauge events on the same target.
+    #[tokio::test(start_paused = true)]
+    async fn batch_event_reports_pulled_updated_and_shared_pending() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
         let _guard = recorder.set_default();
 
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        runtime
+            .core
+            .msg_tx
+            .try_send(TestMessage::Increment)
+            .expect("receiver should be open");
         runtime.process_message_batch(TestMessage::Increment);
 
+        assert_eq!(
+            recorder.u64_values("pulled"),
+            vec![2],
+            "the opening input plus one batched input"
+        );
+        assert_eq!(
+            recorder.u64_values("updated"),
+            vec![2],
+            "both pulled inputs invoked update"
+        );
+        assert_eq!(
+            recorder.u64_values("shared_pending"),
+            vec![0],
+            "the shared channel drained by batch end"
+        );
+    }
+
+    // Batch event differing-value case (RFC 0006 §4.4 DoD): a batch whose
+    // opening input is a keyed `Closed` reports `pulled = 1`, `updated = 0` —
+    // the pulled input did not invoke `update`. This is the deterministic
+    // differ-value case the DoD places at the runtime batch layer; a queued
+    // `Closed` is not deterministically constructible (see INV-L12).
+    #[tokio::test]
+    async fn batch_event_reports_pulled_without_updated_for_a_closed_input() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        runtime.process_input_batch(AppInput::Keyed(ReceiverEvent::Closed));
+
+        assert_eq!(
+            recorder.u64_values("pulled"),
+            vec![1],
+            "the Closed input was pulled"
+        );
+        assert_eq!(
+            recorder.u64_values("updated"),
+            vec![0],
+            "a Closed input does not invoke update"
+        );
+        assert_eq!(recorder.u64_values("shared_pending"), vec![0]);
+    }
+
+    // Batch event `shared_pending` against a scripted leftover (RFC 0006 §4.4
+    // DoD): with `batch_max_messages = Some(n)` and `n + k` shared messages
+    // queued under the paused clock, the capped batch reports
+    // `shared_pending = k` — the inputs it left in the shared channel.
+    #[tokio::test(start_paused = true)]
+    async fn batch_event_reports_shared_pending_leftover_under_cap() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        // n = 2, k = 1: three queued shared inputs, capped at two per batch.
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<TestApp>::with_config(0, config);
+        for _ in 0..3 {
+            runtime
+                .core
+                .msg_tx
+                .try_send(TestMessage::Increment)
+                .expect("receiver should be open");
+        }
+
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+        runtime.process_input_batch(opener);
+
+        assert_eq!(recorder.u64_values("pulled"), vec![2], "the cap of two");
+        assert_eq!(
+            recorder.u64_values("shared_pending"),
+            vec![1],
+            "one input left queued after the capped batch"
+        );
+    }
+
+    // INV-L13: a quit-terminated batch emits no batch event — the loop exits
+    // instead (RFC 0006 §4.4). Opening `process_input_batch` on a keyed quit
+    // returns `Quit` before the batch event would fire, so no `pulled` is
+    // emitted.
+    #[tokio::test]
+    async fn quit_terminated_batch_emits_no_batch_event() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+        let outcome = runtime
+            .process_input_batch(AppInput::Keyed(ReceiverEvent::Output(CommandOutput::Quit)));
+
+        assert_eq!(outcome, BatchOutcome::Quit);
         assert!(
-            recorder.event_count() >= 1,
-            "processing a message batch should emit a tracing event"
+            recorder.u64_values("pulled").is_empty(),
+            "a quit-terminated batch must emit no batch event"
+        );
+    }
+
+    // The `keyed_commands` gauge is count-based, not guard-based, so a runtime
+    // dropped without a clean `shutdown()` — e.g. a render error propagating out
+    // of `run()` via `?` — must still reset it. `KeyedCommands`'s `Drop`
+    // publishes zero on that path.
+    #[tokio::test]
+    async fn dropping_a_runtime_with_a_pending_keyed_command_resets_the_keyed_gauge() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        {
+            let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
+            runtime.core.enqueue_command(
+                Command::future(pending::<TestMessage>())
+                    .cancellable(CommandId::new("keyed"))
+                    .into_runtime_parts(),
+            );
+            assert_eq!(
+                recorder.u64_values("keyed_commands").last(),
+                Some(&1),
+                "spawning a keyed command raises the gauge"
+            );
+            // `runtime` is dropped here — no `run()`, no `shutdown()`.
+        }
+
+        assert_eq!(
+            recorder.u64_values("keyed_commands").last(),
+            Some(&0),
+            "dropping the runtime resets the keyed_commands gauge"
         );
     }
 
@@ -611,9 +880,9 @@ mod tests {
         let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
 
         // Send multiple messages to the queue
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
-        let _ = runtime.core.msg_tx.send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Increment);
 
         // Process first message (should batch the others within the deadline)
         runtime.process_message_batch(TestMessage::Increment);
@@ -659,18 +928,173 @@ mod tests {
         runtime
             .core
             .msg_tx
-            .send(2)
+            .try_send(2)
             .expect("receiver should be open");
         runtime
             .core
             .msg_tx
-            .send(3)
+            .try_send(3)
             .expect("receiver should be open");
 
         runtime.process_input_batch(AppInput::Shared(1));
 
         assert_eq!(runtime.core.app.messages, vec![1, 2, 3]);
         assert!(runtime.scheduler.pending.subscriptions_dirty);
+    }
+
+    // App that records every message `update` receives, in order.
+    struct RecordingApp {
+        messages: Vec<i32>,
+    }
+
+    impl Application for RecordingApp {
+        type Message = i32;
+        type Flags = ();
+
+        fn new((): ()) -> (Self, Command<Self::Message>) {
+            (
+                Self {
+                    messages: Vec::new(),
+                },
+                Command::none(),
+            )
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            self.messages.push(msg);
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            vec![]
+        }
+    }
+
+    // INV-L12 (exact-n, the lower half of the off-by-one pair): with exactly `n`
+    // inputs ready and `batch_max_messages = Some(n)`, one batch pulls all `n` —
+    // the opening input plus `n - 1` more — and nothing is left over. The clock
+    // is paused so the 100µs time cap never fires; the count cap alone bounds the
+    // batch (with the clock frozen the loop would otherwise drain everything
+    // ready). The opener is pulled from `app_inputs` exactly as `run()` does, so
+    // it is a genuine first pulled input, not a synthesized one.
+    #[tokio::test(start_paused = true)]
+    async fn batch_pulls_all_inputs_when_exactly_the_cap_are_ready() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<RecordingApp>::with_config((), config);
+
+        // Exactly n = 2 ready inputs.
+        for msg in [1, 2] {
+            runtime
+                .core
+                .msg_tx
+                .try_send(msg)
+                .expect("receiver should be open");
+        }
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+
+        assert_eq!(runtime.process_input_batch(opener), BatchOutcome::Continue);
+
+        // All n pulled in one batch; nothing left over.
+        assert_eq!(runtime.core.app.messages, vec![1, 2]);
+        assert_eq!(runtime.core.app_inputs.try_next_ready(), None);
+    }
+
+    // INV-L12 (exact-n+1, the upper half of the off-by-one pair): with `n + 1`
+    // inputs ready and `batch_max_messages = Some(n)`, one batch pulls exactly
+    // `n` and the single remaining input is delivered by the *next* batch. This
+    // is the boundary that a cap of `n + 1` (or a missing cap) would fail by
+    // draining the remainder into the first batch.
+    #[tokio::test(start_paused = true)]
+    async fn batch_pulls_exactly_the_cap_and_defers_the_remainder_to_the_next_batch() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(2).expect("non-zero"));
+        let mut runtime = Runtime::<RecordingApp>::with_config((), config);
+
+        // n + 1 = 3 ready inputs.
+        for msg in [1, 2, 3] {
+            runtime
+                .core
+                .msg_tx
+                .try_send(msg)
+                .expect("receiver should be open");
+        }
+
+        let opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the first input is ready");
+        assert_eq!(runtime.process_input_batch(opener), BatchOutcome::Continue);
+
+        // The first batch pulls exactly n; the remainder waits.
+        assert_eq!(runtime.core.app.messages, vec![1, 2]);
+
+        // The next batch delivers the leftover, in FIFO order.
+        let next_opener = runtime
+            .core
+            .app_inputs
+            .next()
+            .await
+            .expect("the leftover input is ready for the next batch");
+        assert_eq!(
+            runtime.process_input_batch(next_opener),
+            BatchOutcome::Continue
+        );
+        assert_eq!(runtime.core.app.messages, vec![1, 2, 3]);
+        assert_eq!(runtime.core.app_inputs.try_next_ready(), None);
+    }
+
+    // INV-L12 (the `Closed`-counts case): the count is over *pulled inputs*, not
+    // over `update` calls — a keyed `Closed` is pulled but does not invoke
+    // `update`, yet it still consumes a slot. Under `Some(1)` an opening `Closed`
+    // ends the batch immediately, leaving a queued shared input untouched; if the
+    // cap counted only `update` calls, `pulled` would stay 0 across the `Closed`
+    // and the queued increment would be pulled into this batch (counter == 1).
+    //
+    // This uses `Closed` in the opening position deliberately. A `Closed` can
+    // only ever be pulled at the *tail* of a batch: `AppInputs` pulls shared
+    // inputs before keyed (shared-first, RFC §4.7), and a `Closed` is surfaced
+    // only by an already-empty, sender-closed keyed receiver (a receiver that
+    // still holds a buffered message is removed the moment that message is
+    // pulled, before any `Closed`). So no real input is ever pull-ordered after a
+    // `Closed` from a single source, and a second keyed source would make the
+    // order non-deterministic (`StreamMap` fairness). The opening position is
+    // therefore the only placement that deterministically distinguishes "counts
+    // pulled inputs" from "counts `update` calls"; `Closed` surfacing itself is
+    // locked separately in `keyed_commands` (`pending_keyed_poll_wakes_after_sender_closure`).
+    #[tokio::test(start_paused = true)]
+    async fn batch_max_of_one_stops_after_a_non_update_opening_closed() {
+        let config = RuntimeConfig::new(frame_rate(60))
+            .batch_max_messages(NonZeroUsize::new(1).expect("non-zero"));
+        let mut runtime = Runtime::<TestApp>::with_config(0, config);
+
+        // A shared input the batch must NOT pull under a cap of 1.
+        runtime
+            .core
+            .msg_tx
+            .try_send(TestMessage::Increment)
+            .expect("receiver should be open");
+
+        // Open the batch with a keyed `Closed` (a pulled input that does not
+        // invoke `update`). With a cap of 1 it is the sole pulled input.
+        let outcome = runtime.process_input_batch(AppInput::Keyed(ReceiverEvent::Closed));
+        assert_eq!(outcome, BatchOutcome::Continue);
+
+        // The queued increment was left for the next batch, not consumed.
+        assert_eq!(runtime.core.app.counter, 0);
+        assert!(matches!(
+            runtime.core.app_inputs.try_next_ready(),
+            Some(AppInput::Shared(TestMessage::Increment))
+        ));
     }
 
     #[tokio::test]
@@ -720,7 +1144,7 @@ mod tests {
 
         // A `Quit` message routes to `Action::Quit`, which the loop's dedicated
         // quit branch receives.
-        let _ = runtime.core.msg_tx.send(TestMessage::Quit);
+        let _ = runtime.core.msg_tx.try_send(TestMessage::Quit);
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
@@ -790,7 +1214,7 @@ mod tests {
         runtime
             .core
             .msg_tx
-            .send(Message::Leave)
+            .try_send(Message::Leave)
             .expect("message receiver should be open");
 
         let first = runtime

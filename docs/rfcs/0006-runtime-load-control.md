@@ -1,7 +1,6 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Accepted (moves to Implemented when the sections 4–6
-  implementation lands)
+- Status: Implemented (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
@@ -17,7 +16,7 @@
 > API. Sections 4–6 fix the load-control contract. The items this RFC
 > delegated to the separate `RuntimeConfig` RFC — capacity values,
 > recommended defaults, the section 5.1 bounded-run parameters, and the CI
-> smoke-profile question — are settled there; that RFC is Accepted, so no
+> smoke-profile question — are settled there; that RFC is Implemented, so no
 > prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
@@ -287,7 +286,7 @@ constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
 unchanged and equivalent to the default configuration. The exact public
 shape — constructor signature, field set, naming, and
 construction/validation style — is fixed by the separate `RuntimeConfig`
-RFC (Accepted; section 6), so the load-control implementation PR can
+RFC (Implemented; section 6), so the load-control implementation PR could
 start. The verdict here needs only the additivity argument, which holds
 for any shape that keeps `Runtime::new` unchanged. Bounded behavior
 activates only through that surface:
@@ -322,7 +321,7 @@ load-control implementation (sections 4–6) lands after 0.10.0 behind
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
-(Accepted; section 3.2) — carries the three controls below. That RFC
+(Implemented; section 3.2) — carries the three controls below. That RFC
 adopts these names unchanged and groups the frame rate into the same
 config, so `Runtime::with_config(flags, config)` takes the frame rate
 inside `config`; the semantics stated here are the contract.
@@ -496,34 +495,47 @@ as INV-L13 (section 5):
   observable rather than enforced (section 4.5), including the
   blocked-producer anti-pattern named there.
 
-Definition of done for the observability slice: an integration test
-installs a `tracing` subscriber (the technique the `quit_*` harness
-already uses, section 2), drives a scripted load, and verifies values and
-firing conditions, not mere event presence — an implementation that emits
-each event once with wrong values must fail it:
+Definition of done for the observability slice: layered tests, each
+installing a `tracing` subscriber (the technique the `quit_*` harness
+already uses, section 2) and asserting values and firing conditions, not
+mere event presence — an implementation that emits each event once with
+wrong values must fail. Each event is checked at the narrowest layer that
+makes its scripted inputs deterministic: the batch event's values at the
+runtime batch layer (driving `process_input_batch` directly), the
+capacity-wait event and the `blocked` gauge at the bounded-send layer
+(where a scripted wait and a scripted abort are deterministic), and the
+`subscriptions`/`unkeyed_commands`/`keyed_commands` gauges end-to-end over
+an integration run (where the real producers raise and lower them):
 
-- **Batch event**: `pulled` and `updated` equal the scripted input
-  counts, including a batch where the two differ — a scenario with a
-  `ReceiverEvent::Closed` among the queued inputs must observe
-  `pulled = updated + 1`. `shared_pending` is verified against a
-  scripted leftover, not merely present: with `batch_max_messages =
-  Some(n)` and `n + k` shared messages queued under the paused clock,
-  the capped batch must report `shared_pending = k`.
-- **Capacity-wait event**: an immediately accepted send fires no event;
-  a send that had to await capacity fires exactly one event, at
-  acceptance, with `channel` naming the channel that blocked it.
+- **Batch event** (runtime batch layer): `pulled` and `updated` equal the
+  scripted input counts, including a batch where the two differ — a
+  `Some(1)` batch whose opening input is a `ReceiverEvent::Closed` must
+  observe `pulled = 1` and `updated = 0`. This uses the opening-`Closed`
+  placement INV-L12 uses and for the same reason — a queued `Closed` is
+  not deterministically constructible (section 4.7 shared-first pull;
+  `StreamMap` order), which is also why the whole batch event is asserted
+  here rather than over the integration load. `shared_pending` is verified
+  against a scripted leftover, not merely present: with
+  `batch_max_messages = Some(n)` and `n + k` shared messages queued under
+  the paused clock, the capped batch must report `shared_pending = k`.
+- **Capacity-wait event** (bounded-send layer): an immediately accepted
+  send fires no event; a send that had to await capacity fires exactly one
+  event, at acceptance, with `channel` naming the channel that blocked it.
   `wait_us` is verified against a controlled wait: a send held blocked
   while the test advances the paused clock by a scripted duration
   before freeing capacity must report `wait_us` of at least that
   duration — which requires the wait to be measured with
   `tokio::time::Instant`, the pausable clock the batch deadline already
   uses — so an implementation that hardcodes `wait_us = 0` fails.
-- **Producer gauges**: starting a subscription, an unkeyed command, and
-  a keyed command each raise the matching field, and each completion
-  lowers it again; `blocked` rises when a producer begins awaiting
-  capacity, falls when the send is accepted, and also falls when a
-  blocked producer is aborted by cancellation (section 4.3) — the
-  decrement must not depend on the send ever completing.
+- **Producer gauges**: the `subscriptions`, `unkeyed_commands`, and
+  `keyed_commands` fields are checked end-to-end over an integration run —
+  starting a subscription, an unkeyed command, and a keyed command each
+  raises the matching field, and each falls back to zero as the run tears
+  its producers down. The `blocked` field is checked at the bounded-send
+  layer, where it rises when a producer begins awaiting capacity, falls
+  when the send is accepted, and also falls when a blocked producer is
+  aborted by cancellation (section 4.3) — the decrement must not depend on
+  the send ever completing.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -1081,9 +1093,23 @@ the check that realizes it; the implementation realizes those checks.
   uses `tokio::time::Instant` for exactly this) queue `n` ready inputs
   and assert one batch pulls all `n`, then queue `n + 1` and assert the
   batch pulls exactly `n` with the remaining input delivered by the next
-  batch — the off-by-one pair — plus a variant that places a
-  `ReceiverEvent::Closed` among the queued inputs and asserts it
-  consumes a slot in the count.
+  batch — the off-by-one pair — plus a `Some(1)` variant whose *opening*
+  input is a `ReceiverEvent::Closed`, asserting that a ready shared input
+  is left for the next batch. The opening `Closed` invokes no `update`,
+  so a cap that counted `update` calls instead of pulled inputs would go
+  on to pull that shared input into the same batch; the leftover
+  discriminates the two. The `Closed` is placed in the opening position,
+  not among later queued inputs, because a queued `Closed` is not
+  deterministically constructible at this layer: `AppInputs` pulls shared
+  inputs before keyed (section 4.7), and a `Closed` is surfaced only by
+  an already-empty, sender-closed keyed receiver — a closed receiver
+  still holding buffered output is removed when its *last* buffered
+  output is pulled and it becomes empty, before any `Closed` — so no real
+  input is ever pull-ordered after a `Closed` from one source, and a
+  second keyed source makes the order non-deterministic because
+  `StreamMap` randomizes the poll-start position. `Closed` surfacing
+  itself is checked at the keyed-manager layer, where a receiver yields
+  `Closed` once its sender closes on an empty buffer.
 - **INV-L13**: The runtime emits the load-observability events exactly
   as the section 4.4 schema states — target `tears::runtime::load`, the
   three event kinds with their levels, required fields, and firing
@@ -1093,16 +1119,18 @@ the check that realizes it; the implementation realizes those checks.
   shared-channel occupancy at batch end, `wait_us` the blocked send's
   admission wait. The schema is contract surface: renaming, dropping, or
   repurposing any part of it is an amendment to this RFC, not an
-  implementation detail. Behavioral check at the integration layer: the
-  section 4.4 definition-of-done test — a `tracing` subscriber over a
-  scripted load whose value assertions (scripted counts for
-  `pulled`/`updated`, a known leftover for `shared_pending`, a
-  controlled wait for `wait_us`, and gauge transitions including the
-  cancellation-abort decrement) distinguish an implementation that
-  emits the right events with wrong values.
+  implementation detail. Behavioral check across the layered section 4.4
+  definition-of-done tests, each with a `tracing` subscriber and value
+  assertions that distinguish an implementation emitting the right events
+  with wrong values: the batch event's `pulled`/`updated` (including the
+  `Closed` differing-value case) and its `shared_pending` leftover at the
+  runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
+  the `blocked` gauge's cancellation-abort decrement at the bounded-send
+  layer; and the `subscriptions`/`unkeyed_commands`/`keyed_commands`
+  gauge transitions end-to-end over an integration run.
 
-Each invariant gets a regression scenario in `benches/runtime_load.rs` or an
-integration test. The overload scenario is the acceptance measurement for
+Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
+unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
@@ -1125,13 +1153,20 @@ scenario (section 5.1), added with the implementation, is therefore a
 behavioral *regression* check, not a proof, and it is built to catch
 bounded pools rather than merely a second key: several keyed channels are
 held at capacity with their next sends pending — saturating any modest
-pool — while the two probe channels stay untouched until then. It checks
-send *admission* only, and exercises the invariant's two halves separately:
-(a) keyed→keyed — a previously idle key's first `keyed_channel_capacity`
-sends complete, and only its `capacity + 1`-th send is pending, on that
-key's own occupancy; (b) keyed→shared — the shared producer's first
-`app_channel_capacity` sends complete, with only its next send pending on
-the shared channel's own occupancy. Delivery is deliberately outside the
+pool. It checks send *admission* only, and exercises the invariant's two
+halves: (a) keyed→keyed — a previously idle probe key, started only after
+the others are held saturated, admits its own first `keyed_channel_capacity`
+sends with only its `capacity + 1`-th pending, on that key's own occupancy;
+(b) keyed→shared — the shared producer runs throughout as the saturation
+enabler (the shared channel must stay full to keep the keyed channels from
+draining under shared-first pull, so it cannot be idled and re-probed), and
+its admission is read as the shared occupancy *sampled only while every
+keyed channel is concurrently saturated*, which reaches `app_channel_capacity
++ 1` (the full channel plus its one pending send). The gate is that
+simultaneous value, not a whole-run maximum: a shared pool could reach the
+full shared occupancy before the keyed channels start and then shed capacity
+to hold them, passing a historical peak while never holding both at once.
+Delivery is deliberately outside the
 scenario: the event loop's keyed pull goes through one `StreamMap` over
 every keyed receiver and cannot drain a chosen key selectively — each poll
 returns one ready element from whichever key is picked, so waiting for the
@@ -1144,9 +1179,9 @@ review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
 ordering half a unit-level test. INV-L11 and INV-L12 are behavioral at
-the unit layer, and INV-L13 at the integration layer (the section 4.4
-definition-of-done test); none of INV-L10 through INV-L13 needs a bench
-scenario, and in particular the
+the unit layer, and INV-L13 across the runtime batch, bounded-send, and
+integration layers (the section 4.4 definition-of-done tests); none of
+INV-L10 through INV-L13 needs a bench scenario, and in particular the
 `quit_keyed_backlog_50k` latency numbers are not a check for either — see
 section 5.1's row for why bounded-mode keyed-quit latency cannot serve as
 a reroute detector.
@@ -1158,7 +1193,8 @@ bounded `RuntimeConfig`, compared cell by cell against the unbounded
 baseline below (measured on the section 2 reference machine). The
 unbounded column is fixed now so the implementation has a pinned before/after
 comparison; the bounded column states the acceptance criterion each cell
-must meet and is filled with measured values when the implementation lands.
+must meet, and the results measured against those criteria when the
+implementation landed are recorded below the matrix.
 
 Three reproducibility rules make the bounded run an acceptance
 measurement rather than an implementation-time choice:
@@ -1202,8 +1238,40 @@ measurement rather than an implementation-time choice:
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
 | `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); named here are the unbounded rows, and the bounded rows this criterion applies to are the `RuntimeConfig` RFC's redefined ones (blocked-producer count and channel-full churn, not the `quit_backlog_*` depths — reproducibility rules above), not these names reused unchanged; the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
 | `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement when the implementation lands, under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
-| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), two untouched probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared); admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
+| `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), the two probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared) — the keyed probe is started only after the eight are held saturated, while the shared producer runs throughout as the saturation enabler (it cannot be idled and re-probed without letting the keyed channels drain under shared-first pull; RFC 0007 §5.3). The keyed→shared gate is the shared occupancy sampled only during the window when all nine keyed channels are concurrently saturated, which must reach `app_channel_capacity + 1` — the *simultaneous* value, not a whole-run maximum a shared pool could reach before the keyed channels start; admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
+
+**Measured acceptance results.** The bounded column's criteria were met on the
+section 2 reference machine (Apple M1 Max, 10 cores, rustc 1.97.0) on
+2026-07-24, under the RFC 0007 section 5.1 configuration (`app_channel_capacity
+= 1024`, `keyed_channel_capacity = 16`, `batch_max_messages` unset):
+
+- **INV-L1 (`overload` / `burst_200k` depth).** Bounded max depth **1025**
+  (`capacity + 1`) versus the unbounded ~308k / ~191k that grow with the
+  overload — the cap holds. `burst_200k_bounded` drained all 200,000 messages
+  with none dropped (INV-L2), and `overload_bounded` all 500,000.
+- **INV-L3 (`overload` update latency).** Bounded p99 **28.0 ms** (p50
+  27.2 ms), flat at roughly one full queue's drain (`1024 × ~27µs`), versus the
+  unbounded 7.9 s that grows with the backlog.
+- **INV-L4 (quit→delivered p99 ≤ 1 ms, ≥ 200 valid trials).** All bounded rows
+  pass — `quit_idle_bounded` **0.61 ms**, `quit_blocked_1` **0.91 ms**,
+  `quit_blocked_64` **0.92 ms**, `quit_overload_bounded` **0.65 ms** — and p99
+  does not scale with blocked-producer count (1 → 64), the bounded analogue of
+  F6's depth-independence; the unbounded `quit_*` baselines stay ≤ 0.62 ms.
+  Observed depths matched `capacity + producers` (1025 for one producer, 1088
+  for 64). (Per-trial *max* exceeds 1 ms on the blocked rows — 1.03 / 1.17 ms —
+  but the criterion is p99, which holds.)
+- **Measurement-only rows (no criterion).** `keyed_overload` bounded keyed p50
+  **13.0 s**, and `quit_keyed_bounded` p50 **13.07 s** (≈ the full shared drain
+  the keyed quit waits behind); recorded, not gated (open questions 6/7,
+  sections 4.7 / 4.6).
+- **INV-L9 (`keyed_isolation`).** Every key admitted exactly `capacity + 1`
+  (17), no keyed message was delivered to `update`, and the shared occupancy
+  reached `app_channel_capacity + 1` (1025) while all nine keyed channels were
+  concurrently saturated — isolation held.
+
+Replacing the reference machine re-measures the unbounded baseline first and is
+recorded as a further amendment (reproducibility rules above).
 
 Queue-depth cells use the harness's depth definition, `produced -
 processed`. Raw channel occupancy is not observable through the public API,
@@ -1224,7 +1292,7 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 ## 6. Open questions (all resolved)
 
-Every question below is resolved — in this RFC, or by the now-Accepted
+Every question below is resolved — in this RFC, or by the now-Implemented
 `RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
 it questions 1, 5, and the default-value half of 2), the section 5.1
 bounded-run parameters (configuration under test, backlog depths, trial
