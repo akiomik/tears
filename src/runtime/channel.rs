@@ -26,10 +26,12 @@ pub enum Sender<T> {
     Unbounded(mpsc::UnboundedSender<T>),
     Bounded {
         tx: mpsc::Sender<T>,
-        /// Observability context, present only on runtime-owned bounded
-        /// channels: the capacity-wait event and the `blocked` gauge (RFC 0006
-        /// §4.4). Absent on test/bench senders.
-        obs: Option<SendObs>,
+        /// Observability context every bounded sender carries: the
+        /// capacity-wait event and the `blocked` gauge (RFC 0006 §4.4). Test
+        /// senders built via [`channel`] carry an inert [`LoadObserver`]
+        /// (no subscriber), so the type never expresses a "bounded but
+        /// unobserved" state that INV-L13 forbids.
+        obs: SendObs,
     },
 }
 
@@ -50,16 +52,23 @@ pub enum Receiver<T> {
     Bounded(mpsc::Receiver<T>),
 }
 
-/// Builds an unobserved channel pair from an optional capacity.
+/// Builds a channel pair with an inert observer from an optional capacity.
 ///
 /// `None` constructs the same `mpsc::unbounded_channel` as before, so the
 /// default delivery mode is structurally unchanged (INV-L6). `Some(n)`
-/// constructs a bounded channel of exactly `n` slots (INV-L1). The sender emits
-/// no load-observability events, so this is test-only; every runtime-owned
-/// channel is built through [`channel_observed`].
+/// constructs a bounded channel of exactly `n` slots (INV-L1). The bounded
+/// sender carries a default [`LoadObserver`], which — absent a subscriber —
+/// emits nothing, so this is test-only; every runtime-owned channel is built
+/// through [`channel_observed`] with the real observer.
 #[cfg(test)]
 pub fn channel<T>(capacity: Option<NonZeroUsize>) -> (Sender<T>, Receiver<T>) {
-    build(capacity, None)
+    build(
+        capacity,
+        SendObs {
+            channel: Channel::Shared,
+            observer: LoadObserver::default(),
+        },
+    )
 }
 
 /// Builds a channel pair whose bounded sender emits the capacity-wait event and
@@ -71,10 +80,10 @@ pub fn channel_observed<T>(
     channel: Channel,
     observer: LoadObserver,
 ) -> (Sender<T>, Receiver<T>) {
-    build(capacity, Some(SendObs { channel, observer }))
+    build(capacity, SendObs { channel, observer })
 }
 
-fn build<T>(capacity: Option<NonZeroUsize>, obs: Option<SendObs>) -> (Sender<T>, Receiver<T>) {
+fn build<T>(capacity: Option<NonZeroUsize>, obs: SendObs) -> (Sender<T>, Receiver<T>) {
     capacity.map_or_else(
         || {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -122,11 +131,11 @@ impl<T> Sender<T> {
                 Err(mpsc::error::TrySendError::Closed(value)) => Err(SendError(value)),
                 Err(mpsc::error::TrySendError::Full(value)) => {
                     let started = Instant::now();
-                    let _blocked = obs.as_ref().map(|obs| obs.observer.track_blocked());
+                    let _blocked = obs.observer.track_blocked();
                     let accepted = tx.send(value).await;
                     // Emit the capacity-wait event only on acceptance; a send
                     // that failed (channel closed) was never accepted.
-                    if let (Ok(()), Some(obs)) = (accepted.as_ref(), obs) {
+                    if accepted.is_ok() {
                         load::capacity_wait(obs.channel, started.elapsed());
                     }
                     accepted
