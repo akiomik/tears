@@ -87,6 +87,19 @@ Prompts that have already paid off:
   happens to touch (from PR #215: an observability definition of done
   that asserted "each event fires with its required fields" — satisfied
   by emitting every event once with wrong values).
+- A concurrency-only hazard behind a guarantee whose test is deterministic
+  only single-threaded: a value-fidelity or ordering guarantee can be
+  broken solely by a concurrent interleaving (a lone-atomic counter that is
+  re-read at emit time and returns a value a later change already
+  superseded), while every single-threaded drive of the emitted-sequence
+  test passes. The behavioral test proves only the no-concurrency case; the
+  concurrency component is structural — the seam that fixes the value, e.g.
+  a snapshot taken under the lock and reviewed at each emit site — so
+  classify it that way (item 3) instead of presenting the single-threaded
+  test as proof of the whole guarantee. (From the RFC 0006 §4.4 gauge
+  delivery amendment: value fidelity was first filed as behavioral-only,
+  but the single-threaded sequence test cannot refute a re-reading
+  implementation.)
 - An acceptance criterion whose parameters the measured implementation
   itself chooses: deferring a run's configuration, load, or trial counts
   to implementation time lets the implementer pick the values their code

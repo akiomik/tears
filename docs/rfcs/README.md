@@ -4,6 +4,34 @@ Design contracts, invariants, and decision records for tears. When code
 and an accepted RFC disagree, the RFC states the intended contract; fix
 one or the other explicitly.
 
+## What an RFC pins
+
+An RFC fixes the *observable contract* — the guarantees and properties a
+caller, subscriber, or composed feature can depend on — not the *mechanism*
+that implements it. A lock, a snapshot, a data structure, a task layout is
+out of scope; the property it exists to provide (a value is never lost, an
+emission cannot deadlock a handler, an order is or is not guaranteed) is in
+scope. The test for a candidate sentence: *could a conforming
+reimplementation, reading only the RFC, pick a different mechanism and still
+preserve everything a dependant relies on?* If yes, the sentence is
+mechanism — leave it to the code and its comments. If a from-scratch
+implementation could instead satisfy every stated word yet break something a
+dependant depends on, the missing property belongs in the RFC.
+
+Two corollaries:
+
+- Pin a property's negative space too. When a guarantee holds only under
+  conditions the current mechanism happens to cover — a value stays correct
+  only because a snapshot is taken under a lock — state both what is
+  guaranteed and what is not (e.g. per-event fidelity, but not cross-producer
+  ordering), so a later mechanism change is measured against the contract
+  rather than silently narrowing it.
+- A property and its mechanism can carry different enforcement classes. The
+  observable property may be behavioral where its scenarios are deterministic
+  and structural where they are not (a concurrency-only guarantee reviewed at
+  the seam that provides it); classify each part rather than the guarantee as
+  a whole. See the [pre-review checklist](pre-review-checklist.md) items 2–3.
+
 ## Process
 
 - Each RFC carries its own `Status` in its header — it is not duplicated
