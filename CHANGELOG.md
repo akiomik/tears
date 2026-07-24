@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`pulled`/`updated`/`shared_pending`), a bounded-mode capacity-wait event
     (`channel`/`wait_us`), and producer-count gauges (`subscriptions`,
     `unkeyed_commands`, `keyed_commands`, `blocked`)
+  - The producer-gauge events carry two subscriber-facing guarantees: value
+    fidelity (each change emits the value it reached, so high-water marks and
+    other order-insensitive aggregates are exact) and non-blocking emission (a
+    subscriber's handler may run long, or re-enter the runtime, without
+    stalling or deadlocking producers); cross-producer arrival order is not
+    guaranteed
   - Additive and non-breaking: `Runtime::new` is unchanged, and a
     load-control-unset `RuntimeConfig` reproduces the previous unbounded
     delivery path exactly

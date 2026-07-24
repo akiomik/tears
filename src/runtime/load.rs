@@ -8,12 +8,18 @@
 //! fields, firing conditions) is pinned as RFC 0006 INV-L13; changing it is a
 //! contract change.
 //!
-//! The gauge counters live behind one mutex, and each change updates a field,
-//! snapshots all four, and emits under the same lock. That serialization is the
-//! contract's "event per change" guarantee: were the update and the read
-//! separate (e.g. lone atomics), a value could be reached and superseded before
-//! its own emit re-read the counters, so a subscriber's high-water mark could
-//! miss it.
+//! The gauge counters live behind one mutex. Each change locks once to update a
+//! field and copy out all four values, then emits that snapshot after releasing
+//! the lock. Snapshotting under the lock is the value-fidelity guarantee (RFC
+//! 0006 §4.4, INV-L13): the event carries the value the change reached, not a
+//! later re-read, so were the update and the read separate (e.g. lone atomics)
+//! a value could be reached and superseded before its own emit re-read the
+//! counters, and a subscriber's high-water mark could miss it. Emitting after
+//! the lock is released keeps the subscriber's handler off the counter lock, so
+//! a slow or re-entrant handler neither stalls other producers nor deadlocks
+//! against the bookkeeping (INV-L13 non-blocking emission). Arrival order across
+//! concurrently updating producers is consequently not guaranteed — only
+//! per-event value fidelity is.
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
@@ -151,11 +157,15 @@ impl LoadObserver {
     /// via a guard) because an entry's lifetime is the runtime's, not a task's:
     /// a draining entry outlives its task.
     pub fn set_keyed_entries(&self, count: usize) {
-        let mut gauges = self.lock();
-        if gauges.keyed_commands != count {
+        let snapshot = {
+            let mut gauges = self.lock();
+            if gauges.keyed_commands == count {
+                return;
+            }
             gauges.keyed_commands = count;
-            gauges.emit();
-        }
+            *gauges
+        };
+        snapshot.emit();
     }
 
     fn enter(&self, field: Field) -> GaugeGuard {
@@ -166,24 +176,30 @@ impl LoadObserver {
         }
     }
 
-    /// Adds `delta` (`+1`/`-1`) to `field` and emits the resulting snapshot,
-    /// all under one lock so the update and its event cannot interleave with
-    /// another producer's (RFC 0006 §4.4 "event per change").
+    /// Adds `delta` (`+1`/`-1`) to `field`, copies the resulting four-field
+    /// snapshot out under the lock, then emits it after the lock is released
+    /// (RFC 0006 §4.4, INV-L13). Snapshotting under the lock fixes the value
+    /// the change reached (value fidelity); emitting outside it keeps the
+    /// subscriber's handler off the counter lock (non-blocking emission).
     fn step(&self, field: Field, delta: isize) {
-        let mut gauges = self.lock();
-        let counter = field.counter_mut(&mut gauges);
-        *counter = counter.wrapping_add_signed(delta);
-        gauges.emit();
+        let snapshot = {
+            let mut gauges = self.lock();
+            let counter = field.counter_mut(&mut gauges);
+            *counter = counter.wrapping_add_signed(delta);
+            *gauges
+        };
+        snapshot.emit();
     }
 
     fn lock(&self) -> MutexGuard<'_, Gauges> {
         // Recover rather than propagate a poisoned lock. The gauges are plain
         // counters with no cross-field invariant, so a producer that panicked
-        // mid-update leaves them merely off-by-one, not corrupt. Recovering
-        // matters most in `GaugeGuard::drop`, which runs during unwinding: an
-        // `expect` there would panic-during-unwind and abort the process (e.g.
-        // a subscriber panicking under the lock poisons it, then every
-        // unwinding producer's guard drop would double-panic).
+        // while holding the lock would leave them merely off-by-one, not
+        // corrupt. The lock is held only for the update and the snapshot copy —
+        // emission runs after it is released — so a subscriber's handler can no
+        // longer poison it; recovery remains as defense for a panic in the
+        // update itself and keeps `GaugeGuard::drop` (which locks during
+        // unwinding) from turning a poisoned lock into a double-panic abort.
         self.gauges.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -246,12 +262,14 @@ mod tests {
         }
     }
 
-    // INV-L13 (serialization, the value-loss guard): each change emits the value
-    // it reached, not a later re-read of the counter — so a peak is never
+    // INV-L13 (value fidelity, the value-loss guard): each change emits the
+    // value it reached, not a later re-read of the counter — so a peak is never
     // skipped. Driven single-threaded here, the emitted sequence is exact; the
-    // production guarantee under concurrency is the shared lock that brackets
-    // update-and-emit (a lone atomic would let a peak be superseded before its
-    // emit re-read it).
+    // production guarantee under concurrency is the snapshot taken under the
+    // lock, which fixes the reached value before emission (a lone atomic would
+    // let a peak be superseded before its emit re-read it). Cross-producer
+    // arrival order is deliberately not guaranteed, so this asserts values, not
+    // a cross-thread order.
     #[test]
     fn each_gauge_change_emits_the_value_it_reached() {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");

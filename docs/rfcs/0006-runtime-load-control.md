@@ -491,9 +491,24 @@ as INV-L13 (section 5):
   (active forwarding tasks), `unkeyed_commands` (running unkeyed command
   tasks), `keyed_commands` (active keyed entries), and `blocked`
   (producers currently awaiting capacity; always 0 in unbounded mode).
-  These gauges are how the application-owned producer-count premise stays
-  observable rather than enforced (section 4.5), including the
-  blocked-producer anti-pattern named there.
+  Two delivery guarantees hold for these events, so that an implementation
+  mistake in the emission cannot silently degrade a subscriber. *Value
+  fidelity*:
+  each change emits exactly one event carrying the value the changed gauge
+  holds immediately after that change — never a later re-read — so a
+  subscriber observes every value each gauge reaches and any
+  order-insensitive aggregate over the events (a high-water mark, whether a
+  threshold was ever crossed) is exact. What is deliberately *not*
+  guaranteed is the relative arrival order of events from producers
+  updating concurrently: only per-event value fidelity holds, so a
+  subscriber must not reconstruct a cross-producer serialization from
+  arrival order. *Non-blocking emission*: emitting an event neither blocks
+  other producers' updates nor constrains the subscriber's handler — a
+  handler may run arbitrarily long, or itself cause a gauge change, without
+  stalling or deadlocking runtime producers. These gauges are how the
+  application-owned producer-count premise stays observable rather than
+  enforced (section 4.5), including the blocked-producer anti-pattern named
+  there.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness
@@ -535,7 +550,21 @@ an integration run (where the real producers raise and lower them):
   layer, where it rises when a producer begins awaiting capacity, falls
   when the send is accepted, and also falls when a blocked producer is
   aborted by cancellation (section 4.3) — the decrement must not depend on
-  the send ever completing.
+  the send ever completing. Value fidelity splits by enforcement at this
+  layer. Its behavioral half is a scripted single-threaded sequence of
+  gauge changes that must emit exactly the values reached, in order
+  (deterministic only single-threaded) — refuting an implementation that
+  emits a *different* value than the change reached: the pre-change value,
+  a coalesced final value, a constant. Its concurrency half — that the
+  emitted value stays the reached value when other producers update between
+  the change and its emit — has no finite behavioral proof (a lone-atomic
+  re-read passes every single-threaded drive) and is structural, the same
+  emit-site review that establishes non-blocking emission. Non-blocking
+  emission likewise has no finite behavioral proof — a serializing or
+  deadlocking implementation hangs rather than fails a value assertion — so
+  it too is structural (section 5, INV-L13): review of the two emit sites
+  confirms each copies the four-field snapshot under the gauge lock and
+  emits the copy with no runtime lock held.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -1127,7 +1156,29 @@ the check that realizes it; the implementation realizes those checks.
   runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
   the `blocked` gauge's cancellation-abort decrement at the bounded-send
   layer; and the `subscriptions`/`unkeyed_commands`/`keyed_commands`
-  gauge transitions end-to-end over an integration run.
+  gauge transitions end-to-end over an integration run. The producer-gauge
+  events additionally carry two delivery guarantees (section 4.4), each with
+  its own enforcement class. *Value fidelity* — each change emits one event
+  carrying the value that change reached, not a later re-read, so every value
+  a gauge attains is observed and order-insensitive aggregates over the events
+  are exact — is checked in two classes. Behavioral: the single-threaded
+  emitted-sequence test asserts the exact values reached, refuting an
+  implementation that emits a value other than the change reached (the
+  pre-change value, a coalesced final value, a constant). Structural: that the
+  emitted value stays the reached value under concurrent updates has no finite
+  behavioral proof — a lone-atomic re-read passes every single-threaded drive —
+  so it rests on the same emit-site review as non-blocking emission. The
+  cross-producer arrival order is deliberately outside the claim (value
+  fidelity is per event, not a serialization), so no test asserts a
+  cross-producer order. *Non-blocking emission* — emitting a gauge event holds
+  nothing a subscriber's handler could contend for, so a handler may run
+  arbitrarily long or itself trigger a gauge change without stalling or
+  deadlocking producers — is structural, because a serializing or deadlocking
+  implementation hangs rather than fails a finite test. One review of the two
+  emit sites (`LoadObserver::step` and `set_keyed_entries`) discharges both
+  structural obligations: each copies the four-field snapshot while holding the
+  gauge lock (fixing the reached value) and emits that copy after releasing it,
+  with no runtime lock held across the emission.
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
 unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
