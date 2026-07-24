@@ -18,7 +18,7 @@ mechanism — leave it to the code and its comments. If a from-scratch
 implementation could instead satisfy every stated word yet break something a
 dependent depends on, the missing property belongs in the RFC.
 
-Two corollaries:
+Three corollaries:
 
 - Pin a property's negative space too. When a guarantee holds only under
   conditions the current mechanism happens to cover — a value stays correct
@@ -31,6 +31,13 @@ Two corollaries:
   and structural where they are not (a concurrency-only guarantee reviewed at
   the seam that provides it); classify each part rather than the guarantee as
   a whole. See the [pre-review checklist](pre-review-checklist.md) items 2–3.
+- A non-functional guarantee is pinned as an observable threshold, never as
+  the mechanism that meets it. Latency, throughput, and memory footprint are
+  mechanism-sensitive by nature, so state the bound a dependent may rely on —
+  an acceptance criterion such as quit→delivered p99 ≤ 1 ms (RFC 0006 INV-L4)
+  — and leave the channel capacity, queue shape, or task layout that reaches
+  it to the code. The reimplementation test is unchanged: the number is the
+  contract; the structure that meets it is not.
 
 ## Process
 
