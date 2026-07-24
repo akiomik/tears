@@ -20,7 +20,7 @@
 //! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
 //! lint.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
@@ -177,9 +177,14 @@ impl LoadObserver {
     }
 
     fn lock(&self) -> MutexGuard<'_, Gauges> {
-        self.gauges
-            .lock()
-            .expect("load gauges mutex should not be poisoned")
+        // Recover rather than propagate a poisoned lock. The gauges are plain
+        // counters with no cross-field invariant, so a producer that panicked
+        // mid-update leaves them merely off-by-one, not corrupt. Recovering
+        // matters most in `GaugeGuard::drop`, which runs during unwinding: an
+        // `expect` there would panic-during-unwind and abort the process (e.g.
+        // a subscriber panicking under the lock poisons it, then every
+        // unwinding producer's guard drop would double-panic).
+        self.gauges.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
