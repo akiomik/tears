@@ -65,3 +65,4 @@ Three corollaries:
 | [0006](0006-runtime-load-control.md) | Runtime load control, backpressure, latency guarantees |
 | [0007](0007-runtime-config.md) | RuntimeConfig public API, load-control acceptance parameters |
 | [0008](0008-teststore.md) | TestStore: deterministic update/effect testing, `Message` boundary |
+| [0009](0009-clock-di.md) | Clock DI: single-time-source rule, virtual-clock determinism contract |
