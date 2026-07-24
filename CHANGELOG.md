@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-24
+
 ### Added
 
 - `RuntimeConfig` and `Runtime::with_config` add opt-in runtime load control
@@ -760,7 +762,8 @@ The new name better clarifies the intent and reserves more generic verbs (`send`
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.10.0...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/akiomik/tears/releases/tag/v0.10.1
 [0.10.0]: https://github.com/akiomik/tears/releases/tag/v0.10.0
 [0.9.3]: https://github.com/akiomik/tears/releases/tag/v0.9.3
 [0.9.2]: https://github.com/akiomik/tears/releases/tag/v0.9.2
