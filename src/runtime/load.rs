@@ -24,12 +24,12 @@
 //!   Dispatch happens off the lock, so the contract does not promise arrival
 //!   order matches `seq` order — consumers must order by `seq`. The single-
 //!   drainer funnel below does in fact serialize dispatch in `seq` order today,
-//!   but that is an implementation coincidence, not a guarantee (as the old
-//!   under-lock dispatch was), so no consumer may rely on it. Keeping the
-//!   snapshot-and-`seq` capture under the lock while moving only the dispatch off
-//!   it is what lets a slow subscriber no longer stall producers on the lock, and
-//!   one that re-enters the runtime no longer deadlock on it, without breaking
-//!   any `seq`-ordered consumer.
+//!   but that is an implementation coincidence, not a guarantee — just as it was
+//!   under the old under-lock dispatch — so no consumer may rely on it. Keeping
+//!   the snapshot-and-`seq` capture under the lock while moving only the dispatch
+//!   off it is what lets a slow subscriber no longer stall producers on the lock,
+//!   and one that re-enters the runtime no longer deadlock on it, without
+//!   breaking any `seq`-ordered consumer.
 //!
 //! Moving dispatch off the lock is only safe alongside a re-entrancy funnel. A
 //! subscriber can, while handling a gauge event, cause another gauge change
