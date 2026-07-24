@@ -244,12 +244,12 @@ mod tests {
     use super::*;
     use crate::test_support::TraceRecorder;
 
-    // INV-L13: every producer-gauge event carries all four fields together, so
-    // a subscriber reads a complete snapshot from any one event. The per-field
-    // recorder views flatten across events and cannot see this; the field-set
-    // view can.
+    // INV-L13: every producer-gauge event carries the full field set together —
+    // the four gauges plus their ordering `seq` — so a subscriber reads a
+    // complete, ordered snapshot from any one event. The per-field recorder
+    // views flatten across events and cannot see this; the field-set view can.
     #[test]
-    fn gauge_event_carries_all_four_fields() {
+    fn gauge_event_carries_the_full_field_set() {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
         let _guard = recorder.set_default();
 
