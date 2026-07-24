@@ -1,6 +1,6 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
-- Status: Draft
+- Status: Accepted
 - Target: an additive, executor-free test harness for the current
   `Application` API (stage 1: pure `update` + immediately ready effects)
 - Scope: the `Message` trait-bound decision, the exhaustive-assertion
@@ -512,9 +512,14 @@ Enforcement classes follow the pre-review checklist's definitions
   item. Structural: review of `src/application.rs` against the pre-RFC
   definition. Behavioral: a compile test, added with the
   implementation, instantiates `Application` with a message type that
-  implements nothing beyond `Send + 'static` (no existing test does —
-  every current test app's message type also derives comparison and
-  formatting traits, so none would catch a smuggled bound).
+  implements nothing beyond `Send + 'static`. Two `src/application.rs`
+  doctests already do this incidentally — `new`'s `enum Message { Init
+  }` and `update`'s `enum Message { Save, Quit }` carry no derives at
+  all, so a smuggled bound would already break them — but neither is
+  written as a bound-check, and either could grow a derive for
+  unrelated doc-readability reasons without anyone noticing the
+  coverage had disappeared. The compile test above names the case
+  explicitly and does not depend on those two examples' current shape.
 - **INV-T2**: TestStore's bounds are exactly §2.1's — `Debug` on the
   store, `PartialEq` on equality-asserting methods only, `Clone` on
   nothing. Behavioral: a compile test drives `new` → `send` → `state` →
