@@ -118,6 +118,16 @@ pub use runtime::config::RuntimeConfig;
 // this follows.
 pub use runtime::frame_rate::{FrameRate, FrameRateError};
 pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
+// Bench-only re-export exposing the producer-gauge observer to
+// `benches/gauge.rs`, which compiles as a separate crate and only sees the
+// public API. `runtime` is `pub(crate)`, so without this re-export the bench
+// could not name `LoadObserver` at all. Gated behind `bench-internals`, which
+// is not part of the public API and carries no semver guarantees; do not
+// enable it for normal builds. See `BenchSubscriptionManager` for the same
+// pattern applied to the subscription reconciliation hot path.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use runtime::load::LoadObserver;
 
 #[cfg(test)]
 mod test_support;

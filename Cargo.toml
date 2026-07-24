@@ -88,6 +88,11 @@ required-features = ["bench-internals"]
 name = "runtime_load"
 harness = false
 
+[[bench]]
+name = "gauge"
+harness = false
+required-features = ["bench-internals"]
+
 [[example]]
 name = "websocket"
 required-features = ["ws", "rustls"]
