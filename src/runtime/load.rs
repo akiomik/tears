@@ -57,7 +57,7 @@
 //! lock, so the counts stay correct for whenever a subscriber does attach.
 //! Benchmarked in isolation (`benches/gauge.rs`), that fast path cuts an
 //! unsubscribed gauge change from roughly the cost of two locks plus a
-//! snapshot copy down to roughly one lock plus a `tracing::enabled!` check.
+//! snapshot copy down to roughly one lock plus a `tracing::event_enabled!` check.
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
@@ -192,8 +192,9 @@ impl GaugeSnapshot {
     /// the gauge lock.
     ///
     /// The `target`/level here must match [`LoadObserver::emit`]'s
-    /// `tracing::enabled!` gate, or the gate goes stale — silently skipping
-    /// (or failing to skip) dispatch for events it no longer describes.
+    /// `tracing::event_enabled!` gate, or the gate goes stale — silently
+    /// skipping (or failing to skip) dispatch for events it no longer
+    /// describes.
     fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
@@ -310,7 +311,7 @@ impl LoadObserver {
     /// while unobserved — in particular so a later decrement (e.g.
     /// `GaugeGuard::drop`, which cannot itself know whether the matching
     /// increment was captured) never sends a field negative. What the
-    /// `tracing::enabled!` check below skips is only the capture/dispatch
+    /// `tracing::event_enabled!` check below skips is only the capture/dispatch
     /// machinery — `seq`, `pending`, `draining` — which exists to serve a
     /// listener and costs a snapshot copy plus the drain funnel's second lock;
     /// with nothing listening that work has no observer to serve. Checking
@@ -323,11 +324,25 @@ impl LoadObserver {
     /// would stall every producer, and one that itself touches this
     /// observer's gauges would deadlock.
     ///
+    /// This uses `event_enabled!`, not the more general `enabled!`: the two
+    /// build different `Metadata` to query with — `enabled!`'s reports as
+    /// neither span nor event, while `event_enabled!` matches what
+    /// [`GaugeSnapshot::dispatch`]'s `tracing::debug!` will actually query
+    /// with. A subscriber that filters on `Metadata::is_event()` (a common
+    /// and reasonable thing to do — `benches/runtime_load.rs`'s own
+    /// `QuitDeliverySubscriber` does) sees `enabled!`'s query as neither, so
+    /// its `enabled()` returns `false` unconditionally regardless of target
+    /// or level, permanently silencing every gauge event even though a real
+    /// `tears::runtime::load` DEBUG event fired moments later would have been
+    /// accepted. Caught by that benchmark's CI run, not a unit test — every
+    /// test subscriber in this module answers `enabled()` unconditionally
+    /// `true`, so none of them distinguish the two.
+    ///
     /// The `enabled` value is consulted only when this observer has no
     /// drainer already running (`!gauges.draining`), never for a reentrant or
     /// concurrent call arriving while one is. A reentrant call — a subscriber
     /// causing this gauge change while handling an earlier one — runs from
-    /// inside that subscriber's `tracing` dispatch, where `tracing::enabled!`
+    /// inside that subscriber's `tracing` dispatch, where `event_enabled!`
     /// is unreliable regardless of where it is evaluated: `tracing`'s own
     /// re-entrancy guard shadows the real dispatcher for the duration (this
     /// shadowing is thread-local, not lock-scoped, so hoisting the check above
@@ -340,7 +355,10 @@ impl LoadObserver {
     fn emit(&self, mutate: impl FnOnce(&mut Gauges) -> bool) {
         // Must match `GaugeSnapshot::dispatch`'s target/level (see its doc
         // comment): this is what decides whether that event is worth building.
-        let enabled = tracing::enabled!(target: "tears::runtime::load", tracing::Level::DEBUG);
+        // `event_enabled!`, not `enabled!` — see the doc comment above for why
+        // that distinction is load-bearing here.
+        let enabled =
+            tracing::event_enabled!(target: "tears::runtime::load", tracing::Level::DEBUG);
         let first = {
             let mut gauges = self.lock();
             if !mutate(&mut gauges) {
@@ -552,6 +570,69 @@ mod tests {
             "every value reached while subscribed is still emitted, and the \
              count never wraps from an unmatched decrement"
         );
+    }
+
+    // The fast-path gate must use `tracing::event_enabled!`, not the more
+    // general `enabled!`: they build different `Metadata` to query with, and
+    // `enabled!`'s reports as neither span nor event. A subscriber that
+    // filters on `Metadata::is_event()` — a common, reasonable thing to do,
+    // and exactly what `benches/runtime_load.rs`'s `QuitDeliverySubscriber`
+    // does — would see `enabled!`'s query as neither and answer `enabled()`
+    // `false` unconditionally, permanently silencing every gauge event even
+    // though the real DEBUG event that follows would have been accepted.
+    // Every other subscriber in this module answers `enabled()`
+    // unconditionally `true`, so none of them can catch a regression here;
+    // this one exists specifically to.
+    #[test]
+    fn gauge_events_reach_a_subscriber_that_filters_on_is_event() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let subscriber = EventOnlySubscriber(recorder.clone());
+        let _guard = set_default_subscriber(subscriber);
+
+        let observer = LoadObserver::default();
+        drop(observer.track_subscription());
+
+        assert_eq!(
+            recorder.u64_values("subscriptions"),
+            vec![1, 0],
+            "a subscriber that only answers enabled() for genuine events must \
+             still see both gauge changes"
+        );
+    }
+
+    /// Delegates to a [`TraceRecorder`], but only after checking
+    /// `Metadata::is_event()` itself — unlike every other test subscriber in
+    /// this module, which answers `enabled()` unconditionally `true`.
+    struct EventOnlySubscriber(TraceRecorder);
+
+    impl Subscriber for EventOnlySubscriber {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.is_event() && self.0.enabled(metadata)
+        }
+
+        fn new_span(&self, span: &Attributes<'_>) -> Id {
+            self.0.new_span(span)
+        }
+
+        fn record(&self, span: &Id, values: &Record<'_>) {
+            self.0.record(span, values);
+        }
+
+        fn record_follows_from(&self, span: &Id, follows: &Id) {
+            self.0.record_follows_from(span, follows);
+        }
+
+        fn event(&self, event: &Event<'_>) {
+            self.0.event(event);
+        }
+
+        fn enter(&self, span: &Id) {
+            self.0.enter(span);
+        }
+
+        fn exit(&self, span: &Id) {
+            self.0.exit(span);
+        }
     }
 
     // INV-L13 (serialization, the value-loss guard): each change emits the value

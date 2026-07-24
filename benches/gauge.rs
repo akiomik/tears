@@ -1,5 +1,5 @@
 //! Isolates the cost of a producer-gauge change when `tears::runtime::load`
-//! has no subscriber, next to two references: the bare `tracing::enabled!`
+//! has no subscriber, next to two references: the bare `tracing::event_enabled!`
 //! check `LoadObserver::emit`'s fast path gates on, and a plain atomic
 //! increment/decrement as a cost floor.
 //!
@@ -9,9 +9,9 @@
 //! (~36ns locally) for no listener; skipping the capture, `seq` bump, and
 //! drain-funnel bookkeeping while keeping the counter mutation itself
 //! unconditional (needed so counts stay correct once a subscriber does
-//! attach) cut that to ~17ns. The gate can't reach the bare-`enabled!` floor
-//! (~0.3ns): the counter mutation is never optional, so the gauge mutex is
-//! always locked once regardless of where `enabled!` is checked. Re-run this
+//! attach) cut that to ~17ns. The gate can't reach the bare-`event_enabled!`
+//! floor (~0.3ns): the counter mutation is never optional, so the gauge mutex
+//! is always locked once regardless of where the check runs. Re-run this
 //! after touching `LoadObserver::emit` to confirm the fast path is still
 //! paying for itself.
 //!
@@ -39,7 +39,7 @@ fn bench_gauge_step_unsubscribed(c: &mut Criterion) {
 fn bench_enabled_check_only(c: &mut Criterion) {
     c.bench_function("enabled_check_only", |b| {
         b.iter(|| {
-            black_box(tracing::enabled!(
+            black_box(tracing::event_enabled!(
                 target: "tears::runtime::load",
                 tracing::Level::DEBUG
             ));
