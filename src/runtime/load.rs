@@ -51,6 +51,14 @@
 //! (INV-L13 is unaffected); a thread-scoped dispatcher can see another thread's
 //! gauge change delivered to it, or its own delivered on a different thread.
 //!
+//! When nothing is listening for `tears::runtime::load` at DEBUG, [`LoadObserver::emit`]
+//! skips the `seq`/snapshot capture and the drain funnel — there is no
+//! listener for either to serve — while still applying `mutate` under the
+//! lock, so the counts stay correct for whenever a subscriber does attach.
+//! Benchmarked in isolation (`benches/gauge.rs`), that fast path cuts an
+//! unsubscribed gauge change from roughly the cost of two locks plus a
+//! snapshot copy down to roughly one lock plus a `tracing::enabled!` check.
+//!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
 //! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
@@ -291,19 +299,46 @@ impl LoadObserver {
     /// concurrent or re-entrant — only enqueues its snapshot in `seq` order and
     /// returns. Delivery is thus iterative and never nested inside a `tracing`
     /// dispatch.
+    ///
+    /// `mutate` always runs, whether or not anything is listening: the counts
+    /// must stay correct so that whenever a subscriber does attach, the next
+    /// snapshot reflects the true state rather than one that silently drifted
+    /// while unobserved — in particular so a later decrement (e.g.
+    /// `GaugeGuard::drop`, which cannot itself know whether the matching
+    /// increment was captured) never sends a field negative. What the
+    /// `tracing::enabled!` check below skips is only the capture/dispatch
+    /// machinery — `seq`, `pending`, `draining` — which exists to serve a
+    /// listener and costs a snapshot copy plus the drain funnel's second lock;
+    /// with nothing listening that work has no observer to serve.
+    ///
+    /// The check runs only when this observer has no drainer already running
+    /// (`!gauges.draining`), never for a reentrant or concurrent call arriving
+    /// while one is. A reentrant call — a subscriber causing this gauge change
+    /// while handling an earlier one — runs from inside that subscriber's
+    /// `tracing` dispatch, where `tracing::enabled!` is unreliable: `tracing`'s
+    /// own re-entrancy guard shadows the real dispatcher for the duration, so
+    /// the check would report disabled even though a subscriber is verifiably
+    /// attached and mid-dispatch right now. `gauges.draining` already being
+    /// true is itself that proof, since it is only set once an earlier call
+    /// found the check enabled, so skipping the check and always
+    /// capturing/enqueuing in that branch is both necessary (correctness) and
+    /// sufficient (no re-check needed).
     fn emit(&self, mutate: impl FnOnce(&mut Gauges) -> bool) {
         let first = {
             let mut gauges = self.lock();
             if !mutate(&mut gauges) {
                 return;
             }
-            let snapshot = gauges.capture();
             if gauges.draining {
+                let snapshot = gauges.capture();
                 gauges.pending.push_back(snapshot);
                 return;
             }
+            if !tracing::enabled!(target: "tears::runtime::load", tracing::Level::DEBUG) {
+                return;
+            }
             gauges.draining = true;
-            snapshot
+            gauges.capture()
         };
 
         // Release the drainer role if a subscriber panics mid-dispatch, so a
@@ -456,6 +491,49 @@ mod tests {
             recorder.u64_values("seq"),
             vec![1, 2, 3, 4],
             "each of the four gauge changes emits one event with the next `seq`"
+        );
+    }
+
+    // Fast-path correctness: while nothing is listening for
+    // `tears::runtime::load`, `LoadObserver::emit` skips the capture/dispatch
+    // machinery but must still apply `mutate`, so the counts track true state
+    // rather than drifting. Changes made and reversed entirely while
+    // unsubscribed emit nothing (asserted first); once a subscriber attaches,
+    // the next event must report the accurate current value, not one that
+    // silently rotted while unobserved (which would show up as a `usize`
+    // wraparound from an unmatched decrement, RFC 0006 §4.4).
+    #[test]
+    fn gauge_changes_made_while_unsubscribed_are_not_lost() {
+        let observer = LoadObserver::default();
+
+        // No recorder installed: nothing is listening for
+        // `tears::runtime::load`, so the fast path applies.
+        let first = observer.track_subscription();
+        let second = observer.track_subscription();
+        drop(first);
+        let third = observer.track_subscription();
+
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+        let fourth = observer.track_subscription();
+
+        assert_eq!(
+            recorder.u64_values("subscriptions"),
+            vec![3],
+            "the first event after a subscriber attaches must report the true \
+             current count (second, third, fourth still held), not a count \
+             that missed the unobserved changes"
+        );
+
+        drop(second);
+        drop(third);
+        drop(fourth);
+
+        assert_eq!(
+            recorder.u64_values("subscriptions"),
+            vec![3, 2, 1, 0],
+            "every value reached while subscribed is still emitted, and the \
+             count never wraps from an unmatched decrement"
         );
     }
 
