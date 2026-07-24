@@ -77,6 +77,33 @@ and had to be re-scoped to "the store introduces no nondeterminism of
 its own", with transcript identity conditional on a deterministic
 application.
 
+An enforcement instrument's member list is an inventory too. A
+deny-list (a lint configuration, a grep pattern, a CI selector) that
+claims to close a definition is derived by walking the surface the
+definition quantifies over, never by listing the members the codebase
+happens to use today; scope the derivation claim to the sub-surfaces
+actually walked and name the delegated remainder. Closure is checked
+per obtainment route: banning a type's constructor does not close the
+type while a constant or a conversion still yields values whose reads
+bypass the list. *From PR #242:* a three-method disallowed list
+presented as enforcing "every time read" missed `UNIX_EPOCH.elapsed()`
+(a wall-clock now-read with no `now` call), the `std` timed waits
+(`park_timeout`, `Condvar::wait_timeout`, `recv_timeout`), and `std`
+`Instant`s obtained through the virtual clock's `into_std` conversion;
+the fix text then claimed the list was "derived by walking `std`'s
+surface" while `std::net`'s nameable timed I/O was still absent from
+it.
+
+A universal negative over a set that contains the rule's own
+instrument is checked against that member first. A contract that
+elevates one sanctioned channel and then states "no member of the set
+does X" quantifies over the sanctioned channel too, and either carves
+it out explicitly or is refuted by it. *From PR #242:* "the crate has
+no time-reading dependency" was refuted by the bench harness in
+dev-dependencies, and its replacement "no dependency serves library
+code as a time source" by the executor clock itself — the very
+dependency the RFC pins as the single time source.
+
 ## 2. Adversarial counterexample per invariant
 
 For each requirement and invariant, deliberately construct at least one
@@ -273,6 +300,14 @@ scenarios run only on the reference machine" narrowed RFC 0006's
 scoping, which admits full runs on any machine and reserves only
 acceptance force to the reference machine.
 
+A capability absolute about the enforcement tooling itself is the same
+class: *the lint cannot name X* is verified against the tool's actual
+expressiveness before X is delegated to a weaker check. *From
+PR #242:* socket timeout methods described as something "the lint
+cannot name" are ordinary `disallowed-methods` paths; only the
+platform-gated `std::os` siblings, whose paths do not resolve on every
+target, genuinely needed the review half.
+
 ## 5. Normative force and readiness
 
 An RFC or amendment that gates implementation carries no soft spots in
@@ -387,5 +422,20 @@ changed-claims list.
   fixes removed from the RFC do not survive in the body. Re-read the
   description at the end of each review round, not only when opening
   the PR.
+- A present-tense claim about repository state — a lint entry, an
+  allow attribute, a CI job — is checked against the repository as it
+  exists; an artifact a named prerequisite will create is stated as
+  landing with that prerequisite (from PR #242: "it carries an
+  explicit lint allow at its measurement sites" described an allow the
+  RFC's own migration prerequisite had yet to add, inside an inventory
+  framed as "at this RFC's writing").
+- Superseding another document's recorded expectation is a corrected
+  claim even when the expectation was non-normative: when a decision
+  replaces a sketch or shape another RFC recorded, name the
+  supersession where the decision lands, so the later amendment
+  reconciles against the decision rather than against two silently
+  divergent texts (from PR #242: the no-clock-handle design
+  contradicted RFC 0008 §7's "store-held clock handle" sketch until
+  §5.1 named the supersession).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
