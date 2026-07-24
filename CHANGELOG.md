@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Scoping is additive: unscoped subscriptions and commands keep their
     existing 0.10.0 behavior unchanged
 
+### Changed
+
+- The per-micro-batch trace event moved off the `tears::runtime` target: the
+  old `tears::runtime` event with the `messages` field is removed, replaced by
+  the richer `tears::runtime::load` batch event (`pulled`/`updated`/
+  `shared_pending`). A consumer filtering `tears::runtime` on `messages` must
+  switch to the `tears::runtime::load` target
+
 ## [0.10.0] - 2026-07-17
 
 ### Changed
