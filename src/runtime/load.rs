@@ -24,9 +24,13 @@
 //!   order happens to match `seq` order — but the contract does not promise it,
 //!   and consumers must order by `seq`. That is deliberate: because the
 //!   snapshot-and-`seq` capture stays under the lock while only the dispatch
-//!   would move, a later change can emit the event out from under the lock (so a
-//!   slow or re-entrant subscriber can no longer stall or deadlock producers)
-//!   without breaking any `seq`-ordered consumer.
+//!   would move, a later change can emit the event out from under the lock — so
+//!   a slow subscriber no longer stalls producers on that lock, and one that
+//!   re-enters the runtime no longer deadlocks on it — without breaking any
+//!   `seq`-ordered consumer. Moving the dispatch off the lock does not by itself
+//!   make a subscriber that *causes* a gauge change safe (it re-enters the emit
+//!   path); that is a separate re-entrancy hazard, out of scope here and tracked
+//!   against RFC 0006 §4.4.
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
@@ -93,7 +97,11 @@ pub struct LoadObserver {
     gauges: Arc<Mutex<Gauges>>,
 }
 
-#[derive(Clone, Copy, Default)]
+// Deliberately not `Copy`/`Clone`: `emit` bumps `seq` through `&mut self`, so a
+// by-value copy (`let mut g = *guard; g.emit()`) would bump and emit a throwaway
+// while the shared `seq` stalled — the exact silently-dropped update this
+// ordering exists to prevent. Without the derives that pattern fails to compile.
+#[derive(Default)]
 struct Gauges {
     /// Monotone per-observer counter, bumped once per emitted gauge event and
     /// carried on it as `seq`. Captured under the same lock as the four counts,
@@ -108,9 +116,10 @@ struct Gauges {
 }
 
 impl Gauges {
-    /// Bumps `seq` and emits the four-field producer-gauge event with it. Takes
-    /// `&mut self` so the bump lands in the shared state; the caller holds the
-    /// lock, fixing the counts and `seq` together at the serialization point, so
+    /// Bumps `seq` and emits the producer-gauge event — the four counts plus
+    /// their ordering `seq`. Takes `&mut self` so the bump lands in the shared
+    /// state; the caller holds the lock, fixing the counts and `seq` together
+    /// at the serialization point, so
     /// the event reports the state that was reached (never a later re-read) and
     /// its `seq` orders it against every other gauge event without relying on
     /// arrival order.

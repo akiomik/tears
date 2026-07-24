@@ -598,17 +598,20 @@ impl Subscriber for QuitDeliverySubscriber {
         let mut visitor = LoadVisitor::default();
         event.record(&mut visitor);
 
-        // A producer-gauge event carries `seq` (and `blocked`). Order these by
-        // `seq`, not by arrival: apply the event's values only when its `seq`
-        // advances the high-water mark, so a reordered stale gauge event never
-        // supersedes the current value (RFC 0006 §4.4). Holding the high-water
-        // lock across the value stores makes "advance and apply" one step, so
-        // concurrent dispatch cannot interleave a stale store between the check
-        // and the apply. This gates both the slot-independent teardown barrier
-        // and the per-trial `blocked` reading. The trial slot is cloned out
-        // first, before the high-water lock, so the two locks are never held at
-        // once.
-        if let Some(seq) = visitor.seq {
+        // A producer-gauge event is a load-target event carrying `seq` (and
+        // `blocked`). Match on the target too, not on `seq` alone: were a `seq`
+        // field ever added to a `tears::runtime` DEBUG event, matching on `seq`
+        // alone would swallow it here and skip the quit-delivery match below.
+        // Order these by `seq`, not by arrival: apply the event's values only
+        // when its `seq` advances the high-water mark, so a reordered stale
+        // gauge event never supersedes the current value (RFC 0006 §4.4).
+        // Holding the high-water lock across the value stores makes "advance and
+        // apply" one step, so concurrent dispatch cannot interleave a stale
+        // store between the check and the apply. This gates both the
+        // slot-independent teardown barrier and the per-trial `blocked` reading.
+        // The trial slot is cloned out first, before the high-water lock, so the
+        // two locks are never held at once.
+        if is_load && let Some(seq) = visitor.seq {
             let slot = TRIAL_METRICS
                 .lock()
                 .expect("trial metrics slot poisoned")
