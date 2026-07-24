@@ -549,7 +549,9 @@ async fn await_quiescence() {
     // at 0, so clear the high-water mark; the barrier above guarantees the
     // drained runtime emits no further gauge event that this reset could let a
     // stale reading through.
-    *GAUGE_SEQ_SEEN.lock().expect("gauge seq high-water mark poisoned") = 0;
+    *GAUGE_SEQ_SEEN
+        .lock()
+        .expect("gauge seq high-water mark poisoned") = 0;
 }
 
 /// Records the instant the event loop's quit branch fires.
@@ -616,7 +618,9 @@ impl Subscriber for QuitDeliverySubscriber {
                 .lock()
                 .expect("trial metrics slot poisoned")
                 .clone();
-            let mut seen = GAUGE_SEQ_SEEN.lock().expect("gauge seq high-water mark poisoned");
+            let mut seen = GAUGE_SEQ_SEEN
+                .lock()
+                .expect("gauge seq high-water mark poisoned");
             if seq <= *seen {
                 return;
             }
