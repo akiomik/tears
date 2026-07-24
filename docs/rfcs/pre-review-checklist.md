@@ -56,6 +56,27 @@ enough for the smoke profile's build check" while the `--smoke`
 selector's set never contained the scenario — and if the appeal was to
 compilation instead, key count never affected build cost at all.
 
+A definition by cases is an inventory too: enumerate the space the
+definition partitions and check that the named cases cover it, and
+treat an exception clause as quantified over every member of the
+inventory it exempts. *From PR #240:* "deliverable — either
+immediately, or because a test-controlled source has made it ready"
+had no case for a self-waking future (neither immediate nor
+externally completed), and a post-quit no-poll exception named only
+the finish/drop checks while send/receive were also polling sites
+that could reach a leaf on their way to failing.
+
+A universal claim about executions quantifies over the behavior other
+parties supply. A harness, runtime, or wrapper cannot promise a
+property of the whole execution when part of the execution is the
+caller's own code; scope the claim to what the mechanism itself
+contributes. *From PR #240:* a determinism invariant promised
+identical transcripts across "two executions of one test program" —
+refuted by any application whose own `update` is nondeterministic —
+and had to be re-scoped to "the store introduces no nondeterminism of
+its own", with transcript identity conditional on a deterministic
+application.
+
 ## 2. Adversarial counterexample per invariant
 
 For each requirement and invariant, deliberately construct at least one
@@ -108,6 +129,27 @@ Prompts that have already paid off:
   with lock-serialized dispatch — a coincidence the contract had never
   pinned, undetected until grepped for and named explicitly as the `seq`
   field).
+- A joint-satisfiability walk, dual to the per-invariant adversary:
+  sketch one implementation that satisfies every invariant
+  *simultaneously*, against the production seams as they exist in the
+  code today. Two invariants can each be individually checkable while
+  no implementation can honor both; and when the only satisfying
+  implementation requires changing existing code first, that change is
+  recorded as a named prerequisite under item 5's delegation rule, not
+  assumed (from PR #240: one invariant required consuming the runtime's
+  decomposition boundary while another required a per-leaf delivery
+  order that boundary had already folded away into an unordered
+  select — jointly unimplementable until a parts-type refactor was
+  named as a prerequisite in the RFC body).
+- A repeat-until check without a budget: any check that re-runs an
+  operation until a condition holds needs its budget stated, or an
+  adversarial input that never satisfies the condition (an
+  always-self-waking, never-ready stream) runs it forever — and even
+  when every real input terminates, an unstated budget lets two
+  compliant implementations disagree on observable outcomes (from PR
+  #240: the deliverability check had no poll budget until "each check
+  polls each leaf its scan reaches exactly once, with wake-ups not
+  honored within the call" was pinned).
 
 ## 3. Enforcement class, declared up front
 
@@ -184,6 +226,19 @@ states. *From PR #213:* a resolution leaned on "INV-L5 carries RFC 0003"
 for delivery-FIFO and quit precedence, but RFC 0003's INV-9 defines only
 post-dispatch suppression and INV-14 only same-pull-point ordering — the
 properties had to be pinned as new invariants with their own checks.
+
+Negative citations are code claims too. A sentence claiming another
+document *leaves a behavior open* — "RFC N does not guarantee X", "the
+outcome is scheduling-dependent", "this depends on reap timing" — is
+verified by searching that document for the passage that would pin the
+behavior, never by failing to recall one; and re-reading an invariant's
+*title* is not a fresh read of its statement. *From PR #240:*
+review-fix text described a keyed-admission window as
+reap-timing-dependent in the runtime, while RFC 0003's pre-spawn
+reconciliation and the exact wording of INV-6/INV-7 pin a deterministic
+release — the citation pass behind the patch had verified the invariant
+labels, not the release semantics the paragraph leaned on, so the
+document contradicted the contract it claimed parity with.
 
 Measurement citations are code claims too, and they prove only what they
 measured. Two classes from PR #220:
@@ -313,6 +368,13 @@ changed-claims list.
   (from PR #213: "RFC 0003's FIFO" survived in R5, §4.3, the
   open-question text, and the references after the body had already
   conceded RFC 0003 states no FIFO invariant).
+- A corrected claim's stale restatements rarely share its wording: grep
+  for the claim's *subject* vocabulary across the whole document, not
+  only for the sentence that was rewritten (from PR #240: rewriting the
+  polling-site inventory left "It does not poll effects; polling
+  happens in `receive*` calls" standing in the API-semantics section —
+  found by grepping "poll", invisible to a grep for the rewritten
+  sentence).
 - Resolving a decision is a corrected claim: grep for the decision's own
   vocabulary — its option labels ("(a)/(b)"), *pending*, *remaining
   step*, *the input for the choice* — across the findings, every open
