@@ -171,8 +171,10 @@ Inventory of production time reads at this RFC's writing:
 | `src/subscription/http/query.rs` | `std::time::Instant` | `elapsed_ms` tracing field | **no — §4 migration** |
 
 The rule's mechanical floor is an inventory of the `std` entry points
-whose call reads the current time or blocks on its passage, derived by
-walking `std`'s surface for both classes rather than by listing the
+whose call reads the current time, blocks on its passage, or configures
+a timed block, derived by walking `std`'s time (`std::time`), thread
+and synchronization (`std::thread`, `std::sync`), and portable network
+I/O (`std::net`) surface for those three classes — not by listing the
 calls the crate happens to use today:
 
 | Banned entry point | Class |
@@ -187,24 +189,32 @@ calls the crate happens to use today:
 | `std::sync::Condvar::wait_timeout_while` | real-time wait |
 | `std::sync::mpsc::Receiver::recv_timeout` | real-time wait |
 | `std::sync::mpsc::Receiver::recv_deadline` | real-time wait |
+| `std::net::TcpStream::connect_timeout` | real-time wait |
+| `std::net::TcpStream::set_read_timeout`, `set_write_timeout` | timed-wait configuration; banning the setters closes the only route to a timed socket wait while the blocking `read`/`write` sites stay unbanned |
+| `std::net::UdpSocket::set_read_timeout`, `set_write_timeout` | timed-wait configuration |
 
 The deprecated `_ms` spellings (`std::thread::sleep_ms`,
 `std::thread::park_timeout_ms`, `std::sync::Condvar::wait_timeout_ms`)
 carry their own lint entries. Pure arithmetic between existing time
 values (`duration_since`, `checked_add`, comparisons) reads nothing and
 stays allowed; untimed blocking (`std::thread::park`, `Condvar::wait`)
-waits on events, not on time, and stays allowed. What the lint cannot
-name — a timed wait routed through an API outside the table (an
-OS-level I/O timeout on a socket), a direct syscall, or a dependency
-used as a time source — falls to INV-C1's review half.
+waits on events, not on time, and stays allowed. Platform-gated
+siblings of the table's rows — the `std::os` socket types' timeout
+setters (`std::os::unix::net::UnixStream`, `UnixDatagram`) — do not
+resolve on every compilation target, so they ride INV-C1's review half
+instead of per-target lint entries; the review half likewise covers
+what the lint does not name at all — a direct syscall, or a dependency
+other than the executor used as a time source (next paragraph).
 
-Dependencies are scoped the same way: no dependency serves *library
-code* as a time source, and adding one is a reviewable event. Time
-spent inside dependencies on the crate's behalf — the bench harness
-measuring elapsed time (`criterion`), the terminal backend's internal
-event polling — is measurement or external-input timing, not a time
-read issued by the crate's code, and sits outside the axis this rule
-governs (like network latency, it was never virtual).
+Dependencies are scoped the same way: the executor clock itself
+(`tokio::time`) is the crate's one sanctioned time source, and no
+*other* dependency serves library code as a time source — adding one
+is a reviewable event. Time spent inside dependencies on the crate's
+behalf — the bench harness measuring elapsed time (`criterion`), the
+terminal backend's internal event polling — is measurement or
+external-input timing, not a time read issued by the crate's code, and
+sits outside the axis this rule governs (like network latency, it was
+never virtual).
 
 Outside library code, exactly one deliberate exception exists:
 `benches/runtime_load.rs` measures real wall-clock latency because
@@ -381,18 +391,19 @@ Enforcement classes follow the pre-review checklist's definitions.
   carries exactly §3.1's banned-entry-point inventory (landing with the
   §4 migration, which removes the last violations), failing the
   workspace lint gate on any reintroduction. Structural-review for time
-  reads the lint does not name — inside `std` (a timed wait routed
-  through an API outside the table, such as an OS-level I/O timeout) as
-  well as outside it (a direct syscall, or a dependency used by library
-  code as a time source, §3.1's dependency scoping) — checked at code
-  and dependency review. (Adversarial models: virtual sleeps combined
+  reads the lint does not name — inside `std` (the platform-gated
+  `std::os` socket timeout setters, which do not resolve on every
+  target) as well as outside it (a direct syscall, or a dependency
+  other than the executor used by library code as a time source, §3.1's
+  dependency scoping) — checked at code and dependency review.
+  (Adversarial models: virtual sleeps combined
   with `std` now-reads for comparisons — the table's now-read rows;
   wall-clock time reached without `SystemTime::now` via
   `UNIX_EPOCH.elapsed()` — the `SystemTime::elapsed` row exists for it;
   a `std` `Instant` smuggled out of the virtual clock via `into_std`
   and then read — the `Instant::elapsed` row; a libc/syscall clock or a
-  time-source dependency — the review half, which is why the class is
-  structural rather than purely mechanical.)
+  time-source dependency beyond the executor — the review half, which
+  is why the class is structural rather than purely mechanical.)
 - **INV-C2**: in a controlled context, §3.2's advancement rule holds —
   under a non-idling controller, a gated behavior stays pending across
   arbitrarily many polls until an explicit advance reaches its
