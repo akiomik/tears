@@ -5,7 +5,8 @@
   `Application` API (stage 1: pure `update` + immediately ready effects)
 - Scope: the `Message` trait-bound decision, the exhaustive-assertion
   decision, the `TestStore` public surface, its delivery-order and
-  cancellation-parity contracts, and the staging split with Clock DI
+  cancellation-parity contracts, the per-leaf `RuntimeCommandParts`
+  prerequisite (§4.1), and the staging split with Clock DI
 - Feature flag: none (precedent: `subscription::mock` ships
   unconditionally)
 - CHANGELOG: `Added` entry lands at the implementation release, not with
@@ -43,7 +44,9 @@ Three decisions, ordered by urgency:
 The harness itself: `tears::testing::TestStore<App>` wraps an
 `Application`, applies messages synchronously through `update`, consumes
 the returned `Command` through the same decomposition boundary the
-runtime uses, and lets the test assert state, delivered messages, quit,
+runtime uses (§4.1 records the named prerequisite refactor that makes
+that boundary carry per-leaf streams), and lets the test assert state,
+delivered messages, quit,
 declared subscription identity, and the redraw directive — with RFC 0003
 cancellation semantics honored on the pending output (§5).
 
@@ -102,9 +105,11 @@ cancellation semantics honored on the pending output (§5).
   change with a migration path, and cannot present it as implied by
   TestStore.
 - TestStore's bounds, in full:
-  - `App::Message: Debug` on the store itself. Every exhaustiveness and
-    mismatch failure names the offending messages; a diagnostic that
-    cannot print what leaked is not worth the harness.
+  - `App::Message: Debug` on the store itself. Exhaustiveness and
+    mismatch failures name the offending messages wherever a value
+    exists to name (§6's unfinished-leaf class has none and reports
+    count and enqueue position instead); a diagnostic that cannot print
+    what leaked is not worth the harness.
   - `App::Message: PartialEq` on the equality-asserting methods only
     (`receive`, and any future `receive_*` that compares values).
   - `Clone` nowhere. A delivered message is asserted once and then moved
@@ -179,7 +184,8 @@ where
     pub fn receive_quit(&mut self);
 
     /// Whether the command returned by the most recent `send`/`receive`
-    /// step requested a redraw (RFC 0002).
+    /// step requested a redraw (RFC 0002). `receive_quit` is not a
+    /// step (§5.2).
     pub fn redraw_requested(&self) -> bool;
 
     /// The `SubscriptionId`s the application currently declares. Pure
@@ -246,20 +252,49 @@ generic) are implementation latitude.
 
 ## 4. Determinism and delivery contract
 
-### 4.1 Deliverable output
+### 4.1 Command intake, deliverability, and the poll budget
 
 TestStore holds the effects of every command it has accepted (init
-command, then each step's command) as a pending set of leaf streams,
-consumed through `Command`'s runtime decomposition boundary — the same
-`into_runtime_parts` lowering the runtime uses — so what the store
-observes (directives, cancellation metadata, effect stream) is what the
-runtime observes (INV-T3). A leaf's output is **deliverable** when the
-leaf yields it under polling with no executor, no timer, and no external
-wake — either immediately, or because a test-controlled source (a
-oneshot the test completed, a `MockSource`-style seam) has made it ready
-since the last call. Polling happens only inside `receive*`,
-`send`-precondition, and `finish` checks; between calls the store does
-nothing.
+command, then each step's command) as a pending set of leaf streams in
+enqueue order, consumed through `Command`'s runtime decomposition
+boundary (`into_runtime_parts`) so that what the store observes —
+directives, cancellation metadata, effects — is what the runtime
+observes (INV-T3).
+
+**Named prerequisite — per-leaf parts.** Today that boundary folds a
+multi-leaf effect into one stream before the parts exist:
+`into_runtime_parts` calls `Effect::into_stream()`, which merges the
+leaves through an unordered select (`src/command/core.rs`,
+`src/command/effect.rs`). A store built on the current parts type
+therefore could not implement §4.2's per-leaf canonical order without
+re-deriving the leaves in parallel — exactly what INV-T3 forbids — and
+relying on the merged stream happening to yield in declaration order
+would rest on a coincidental property of the select combinator, not on
+any contract. Stage-1 implementation is therefore gated on a
+prerequisite refactor, owned by this RFC's implementation task:
+`RuntimeCommandParts` carries the effect's leaves unfolded, in
+`Command::batch`'s flattened declaration order, and each consumer folds
+or drives them at its own consumption site — the runtime merging them
+at its spawn site exactly as `into_stream()` merges them today (a
+behavior-preserving relocation of the existing fold; `Effect` already
+keeps its leaves apart to preserve leaf identity for future per-leaf
+consumers, per its own comment in `src/command/effect.rs`), the store
+keeping them apart. INV-T3 names this revised boundary.
+
+**Deliverability and the poll budget.** A leaf's output is
+**deliverable** at a given check when the leaf yields it on that
+check's poll. The poll contract is fixed, because INV-T4's determinism
+rests on it: polling happens only inside `receive*`,
+`send`-precondition, `finish`, and drop checks — except after an
+observed quit, when the `finish` and drop checks poll nothing (§5.3,
+§6) — and each check polls each leaf its scan reaches (§4.2) exactly
+once, with a waker whose wake-ups are not honored within the call. A
+self-waking leaf is therefore re-polled no earlier than the next store
+call and cannot loop a check — if it does not yield on its one poll, it
+is not deliverable at that check; a leaf made ready between calls by a
+test-controlled source (a oneshot the test completed, a
+`MockSource`-style seam) is observed at the next check whose scan
+reaches it. Between calls the store does nothing.
 
 ### 4.2 Ordering
 
@@ -271,6 +306,12 @@ nothing.
   leaves in `Command::batch`'s flattened declaration order. Two runs of
   the same test program therefore observe the same delivery sequence
   (INV-T4, INV-T6).
+- **Scan semantics**: a `receive*` check polls the pending leaves in
+  enqueue order and stops at the first leaf that yields; the `send`
+  precondition and the pre-quit `finish`/drop checks scan in the same
+  order until they find a deliverable output (failing) or exhaust the
+  set (establishing that nothing is deliverable). Either way, each
+  reached leaf gets exactly one poll (§4.1).
 - **Negative space, stated deliberately**: the canonical cross-leaf
   order is *TestStore's* contract, not the runtime's. The runtime folds
   a command's leaves through an unordered select and pins no cross-leaf
@@ -289,10 +330,16 @@ A leaf that requires a timer or reactor (`Command::timeout` wraps every
 leaf in a deadline; a backoff retry sleeps; `Timer` is
 `tokio::time::interval`-backed) cannot be driven without an executor.
 Stage 1's contract is honest about this rather than silently lenient:
-polling such a leaf fails the test. The failure today surfaces as the
-underlying missing-reactor panic, which is a poor diagnostic; the
-documentation on `TestStore` names the limitation and points at the
-stage-2 plan (§7). A leaf that is merely *pending* on a test-controlled
+polling such a leaf fails the test. Note what that means under §4.2's
+scan semantics: the failure fires at the *first store call whose scan
+polls the leaf* — a `send`'s exhaustiveness precondition or a
+`receive` aimed at a different message, not only a call targeting the
+leaf itself — so from its enqueue onward the store is effectively
+poisoned, unless every scan stops at an earlier-enqueued yielding leaf
+first or cancellation removes the leaf (§5.1) before a scan reaches
+it. The failure today surfaces as the underlying missing-reactor
+panic, which is a poor diagnostic; the documentation on `TestStore`
+names the limitation and points at the stage-2 plan (§7). A leaf that is merely *pending* on a test-controlled
 source does not fail anything: it is skipped by the canonical order
 until it becomes deliverable, and only `finish` holds it to account
 (§6).
@@ -326,12 +373,26 @@ mechanics that exist only because the runtime is concurrent (task
 reaping, stale-exit tokens, INV-7/8/13) have no TestStore counterpart
 and are deliberately not modeled.
 
+Negative space, matching §4.2's: occupancy *timing* is the store's
+linearization, not the runtime's. A leaf that has yielded its last item
+but has not yet been driven to completion is occupied here, while the
+runtime's occupancy for the same command ends at task reap — so a
+`KeepInFlight` command landing in that window is deterministically
+discarded by the store while in the runtime the outcome depends on reap
+timing. Like §4.2's cross-leaf order, a test exercising that window
+asserts the store's linearization and is not evidence of runtime
+behavior. The stream-lifetime definition itself stays: it is the choice
+closest to the runtime's deliverable-output accounting (a
+finished-but-buffered run is still cancellable, RFC 0003 INV-6).
+
 ### 5.2 Redraw directive (RFC 0002)
 
 `redraw_requested()` reports the folded redraw directive of the command
 returned by the most recent step (a `send`, or the `update` call inside
-a `receive*`). Before any step completes it reports the init command's
-directive. This makes `without_redraw` decisions assertable per
+a `receive` / `receive_matching`). Before any step completes it reports
+the init command's directive. `receive_quit` applies no message and is
+not a step: after it, `redraw_requested` keeps reporting the previous
+step's directive. This makes `without_redraw` decisions assertable per
 transition, which is the granularity RFC 0002 defines them at.
 
 ### 5.3 Quit
@@ -339,10 +400,10 @@ transition, which is the granularity RFC 0002 defines them at.
 Quit is a deliverable output like any message and is asserted explicitly
 via `receive_quit` (§3.2). After quit is observed the store mirrors the
 runtime's shutdown contract: remaining undelivered output is legally
-discarded — `finish` passes regardless of what remains (the analogue of
-the shutdown discard carve-out in RFC 0006's INV-L2), and further
-`send`/`receive*` calls fail because the application would no longer be
-running. A quit that is *suppressed* by cancellation (§5.1) is not
+discarded — the `finish` and drop checks poll nothing and pass
+regardless of what remains (the analogue of the shutdown discard
+carve-out in RFC 0006's INV-L2), and further `send`/`receive*` calls
+fail because the application would no longer be running. A quit that is *suppressed* by cancellation (§5.1) is not
 "observed" and triggers none of this — exactly RFC 0003 INV-9.
 
 ## 6. Exhaustiveness
@@ -362,8 +423,10 @@ Exhaustive assertion is the only stage-1 mode. The rules, by call site:
   observed and either (a) a deliverable message or quit request remains,
   or (b) any pending leaf has not been driven to completion — an
   in-flight effect the test never accounted for is a leak even if it
-  never produced a message. After an observed quit, `finish` passes
-  unconditionally (§5.3).
+  never produced a message. After an observed quit, `finish` and the
+  drop check poll nothing and pass unconditionally (§5.3) — a
+  reactor-dependent leaf legally discarded at quit cannot fail them,
+  because §4.3's failure requires a poll.
 - Every exhaustiveness failure names the leaked messages via `Debug`;
   unfinished leaves that have produced no value are reported by count
   and enqueue position (there is no value to print).
@@ -423,17 +486,30 @@ Enforcement classes follow the pre-review checklist's definitions
   but neither `PartialEq` nor `Clone`. Structural: review of every
   public TestStore signature for stray bounds.
 - **INV-T3**: TestStore consumes each command through the same
-  decomposition boundary the runtime consumes
-  (`Command::into_runtime_parts`), never a parallel re-derivation of
-  directives, cancellation, or effects. Structural: review of the
-  store's single command-intake site. This is what makes TestStore
+  decomposition boundary the runtime consumes — after the §4.1
+  prerequisite refactor, a `RuntimeCommandParts` that carries the
+  effect's leaves unfolded in declaration order, folded or driven only
+  at each consumer's own site — never a parallel re-derivation of
+  directives, cancellation, or effects. Structural, in two parts:
+  review of the store's single command-intake site (it accepts the
+  parts type and touches no `Command` or `Effect` internals), and
+  review of the runtime's spawn site for the prerequisite's
+  behavior-preservation half (the relocated fold merges the leaves
+  exactly as `into_stream()` does today). This is what makes TestStore
   results evidence about real commands rather than about a test-only
   model.
-- **INV-T4**: `send` and `receive*` are synchronous — no task spawn, no
-  executor requirement — and two executions of one test program observe
+- **INV-T4**: the store introduces no nondeterminism of its own —
+  `send` and `receive*` are synchronous (no task spawn, no executor
+  requirement) and polling follows §4.1's fixed budget — so for an
+  application whose `update` is deterministic (the store cannot
+  contract this for the application; `subscriptions` alone carries a
+  purity contract), two executions of one test program observe
   identical state transitions and delivery sequences. Behavioral: a
-  repeated-run test asserts equal delivery transcripts across runs of a
-  multi-leaf, cancellation-exercising program.
+  repeated-run test over a deterministic application asserts equal
+  delivery transcripts across runs of a multi-leaf,
+  cancellation-exercising program, and a poll-counting leaf asserts
+  §4.1's one-poll-per-reached-leaf budget (a double-polling
+  implementation fails it).
 - **INV-T5**: one leaf's messages are delivered in stream order.
   Behavioral: a multi-message `Command::stream` test.
 - **INV-T6**: across leaves, delivery follows §4.2's canonical order
@@ -461,12 +537,16 @@ Enforcement classes follow the pre-review checklist's definitions
   wrong-value adversary is exactly what the message-content assertion
   exists to fail.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
-  `send`/`receive*` fail and `finish` passes regardless of remaining
-  output. Behavioral: a test quits with output still pending and
-  asserts both halves.
+  `send`/`receive*` fail, and the `finish` and drop checks poll
+  nothing and pass regardless of remaining output. Behavioral: a test
+  quits with output still pending — including a reactor-dependent leaf,
+  which the post-quit no-poll rule leaves untouched and which would
+  fail the run if polled (§4.3) — and asserts both halves.
 
 Surface–invariant coverage: `new`/`send`/`receive*`/`finish` map to
-INV-T2/T3/T4/T8; delivery order to INV-T5/T6; cancellation metadata to
+INV-T2/T3/T4/T8; `state` is the pure accessor through which INV-T4's
+state-transition transcript is read, covered there; delivery order maps
+to INV-T5/T6; cancellation metadata to
 INV-T7; `receive_quit` and the quit state to INV-T9;
 `redraw_requested` and `subscription_ids` are pure observations of
 contracts owned elsewhere (RFC 0002's directive; RFC 0005's declared
