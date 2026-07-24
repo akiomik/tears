@@ -1,7 +1,6 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Accepted (moves to Implemented when the sections 4–6
-  implementation lands)
+- Status: Implemented (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
@@ -17,7 +16,7 @@
 > API. Sections 4–6 fix the load-control contract. The items this RFC
 > delegated to the separate `RuntimeConfig` RFC — capacity values,
 > recommended defaults, the section 5.1 bounded-run parameters, and the CI
-> smoke-profile question — are settled there; that RFC is Accepted, so no
+> smoke-profile question — are settled there; that RFC is Implemented, so no
 > prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
@@ -287,7 +286,7 @@ constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
 unchanged and equivalent to the default configuration. The exact public
 shape — constructor signature, field set, naming, and
 construction/validation style — is fixed by the separate `RuntimeConfig`
-RFC (Accepted; section 6), so the load-control implementation PR can
+RFC (Implemented; section 6), so the load-control implementation PR could
 start. The verdict here needs only the additivity argument, which holds
 for any shape that keeps `Runtime::new` unchanged. Bounded behavior
 activates only through that surface:
@@ -322,7 +321,7 @@ load-control implementation (sections 4–6) lands after 0.10.0 behind
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
-(Accepted; section 3.2) — carries the three controls below. That RFC
+(Implemented; section 3.2) — carries the three controls below. That RFC
 adopts these names unchanged and groups the frame rate into the same
 config, so `Runtime::with_config(flags, config)` takes the frame rate
 inside `config`; the semantics stated here are the contract.
@@ -1194,7 +1193,8 @@ bounded `RuntimeConfig`, compared cell by cell against the unbounded
 baseline below (measured on the section 2 reference machine). The
 unbounded column is fixed now so the implementation has a pinned before/after
 comparison; the bounded column states the acceptance criterion each cell
-must meet and is filled with measured values when the implementation lands.
+must meet, and the results measured against those criteria when the
+implementation landed are recorded below the matrix.
 
 Three reproducibility rules make the bounded run an acceptance
 measurement rather than an implementation-time choice:
@@ -1241,6 +1241,38 @@ measurement rather than an implementation-time choice:
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), the two probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared) — the keyed probe is started only after the eight are held saturated, while the shared producer runs throughout as the saturation enabler (it cannot be idled and re-probed without letting the keyed channels drain under shared-first pull; RFC 0007 §5.3). The keyed→shared gate is the shared occupancy sampled only during the window when all nine keyed channels are concurrently saturated, which must reach `app_channel_capacity + 1` — the *simultaneous* value, not a whole-run maximum a shared pool could reach before the keyed channels start; admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
+**Measured acceptance results.** The bounded column's criteria were met on the
+section 2 reference machine (Apple M1 Max, 10 cores, rustc 1.97.0) on
+2026-07-24, under the RFC 0007 section 5.1 configuration (`app_channel_capacity
+= 1024`, `keyed_channel_capacity = 16`, `batch_max_messages` unset):
+
+- **INV-L1 (`overload` / `burst_200k` depth).** Bounded max depth **1025**
+  (`capacity + 1`) versus the unbounded ~308k / ~191k that grow with the
+  overload — the cap holds. `burst_200k_bounded` drained all 200,000 messages
+  with none dropped (INV-L2), and `overload_bounded` all 500,000.
+- **INV-L3 (`overload` update latency).** Bounded p99 **28.0 ms** (p50
+  27.2 ms), flat at roughly one full queue's drain (`1024 × ~27µs`), versus the
+  unbounded 7.9 s that grows with the backlog.
+- **INV-L4 (quit→delivered p99 ≤ 1 ms, ≥ 200 valid trials).** All bounded rows
+  pass — `quit_idle_bounded` **0.61 ms**, `quit_blocked_1` **0.91 ms**,
+  `quit_blocked_64` **0.92 ms**, `quit_overload_bounded` **0.65 ms** — and p99
+  does not scale with blocked-producer count (1 → 64), the bounded analogue of
+  F6's depth-independence; the unbounded `quit_*` baselines stay ≤ 0.62 ms.
+  Observed depths matched `capacity + producers` (1025 for one producer, 1088
+  for 64). (Per-trial *max* exceeds 1 ms on the blocked rows — 1.03 / 1.17 ms —
+  but the criterion is p99, which holds.)
+- **Measurement-only rows (no criterion).** `keyed_overload` bounded keyed p50
+  **13.0 s**, and `quit_keyed_bounded` p50 **13.07 s** (≈ the full shared drain
+  the keyed quit waits behind); recorded, not gated (open questions 6/7,
+  sections 4.7 / 4.6).
+- **INV-L9 (`keyed_isolation`).** Every key admitted exactly `capacity + 1`
+  (17), no keyed message was delivered to `update`, and the shared occupancy
+  reached `app_channel_capacity + 1` (1025) while all nine keyed channels were
+  concurrently saturated — isolation held.
+
+Replacing the reference machine re-measures the unbounded baseline first and is
+recorded as a further amendment (reproducibility rules above).
+
 Queue-depth cells use the harness's depth definition, `produced -
 processed`. Raw channel occupancy is not observable through the public API,
 so two in-flight positions outside the channel had to be settled
@@ -1260,7 +1292,7 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 ## 6. Open questions (all resolved)
 
-Every question below is resolved — in this RFC, or by the now-Accepted
+Every question below is resolved — in this RFC, or by the now-Implemented
 `RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
 it questions 1, 5, and the default-value half of 2), the section 5.1
 bounded-run parameters (configuration under test, backlog depths, trial

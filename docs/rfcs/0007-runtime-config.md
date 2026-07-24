@@ -1,10 +1,8 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Accepted (moves to Implemented when the RFC 0006 load-control
-  implementation lands)
+- Status: Implemented
 - Target: the prerequisite RFC 0006 delegated to a separate document
-  (RFC 0006 sections 3.2, 6); with this RFC Accepted, the load-control
-  implementation PR may start
+  (RFC 0006 sections 3.2, 6)
 - Scope: the public `RuntimeConfig` surface (type, construction, constructor
   integration), the recommended-defaults documentation, the restart-rate
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
