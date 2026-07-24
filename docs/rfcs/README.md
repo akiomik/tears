@@ -13,10 +13,10 @@ out of scope; the property it exists to provide (a value is never lost, an
 emission cannot deadlock a handler, an order is or is not guaranteed) is in
 scope. The test for a candidate sentence: *could a conforming
 reimplementation, reading only the RFC, pick a different mechanism and still
-preserve everything a dependant relies on?* If yes, the sentence is
+preserve everything a dependent relies on?* If yes, the sentence is
 mechanism — leave it to the code and its comments. If a from-scratch
 implementation could instead satisfy every stated word yet break something a
-dependant depends on, the missing property belongs in the RFC.
+dependent depends on, the missing property belongs in the RFC.
 
 Two corollaries:
 
