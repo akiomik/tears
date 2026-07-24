@@ -9,10 +9,11 @@
 //! (~36ns locally) for no listener; skipping the capture, `seq` bump, and
 //! drain-funnel bookkeeping while keeping the counter mutation itself
 //! unconditional (needed so counts stay correct once a subscriber does
-//! attach) cut that to ~17ns — the gate can't reach the bare-`enabled!` floor
-//! (~0.3ns) because the counter mutation still needs the same lock the gate
-//! itself checks under. Re-run this after touching `LoadObserver::emit` to
-//! confirm the fast path is still paying for itself.
+//! attach) cut that to ~17ns. The gate can't reach the bare-`enabled!` floor
+//! (~0.3ns): the counter mutation is never optional, so the gauge mutex is
+//! always locked once regardless of where `enabled!` is checked. Re-run this
+//! after touching `LoadObserver::emit` to confirm the fast path is still
+//! paying for itself.
 //!
 //! `benches/runtime_load.rs`'s full-loop harness would bury this cost under
 //! update/render work, so it is not a substitute for this isolated measurement.
@@ -50,8 +51,12 @@ fn bench_atomic_baseline(c: &mut Criterion) {
     let counter = AtomicUsize::new(0);
     c.bench_function("atomic_increment_decrement", |b| {
         b.iter(|| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            counter.fetch_sub(1, Ordering::SeqCst);
+            // `Relaxed`, not `SeqCst`: this is a cost floor, and nothing here
+            // needs cross-thread ordering, so `SeqCst` would overstate the
+            // floor on architectures where the two aren't equally cheap (e.g.
+            // ARM, unlike x86).
+            counter.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_sub(1, Ordering::Relaxed);
         });
     });
 }

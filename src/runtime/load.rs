@@ -190,6 +190,10 @@ impl GaugeSnapshot {
     /// Emits the producer-gauge event for this snapshot. Called off the lock, so
     /// a slow or re-entrant subscriber cannot stall or deadlock a producer on
     /// the gauge lock.
+    ///
+    /// The `target`/level here must match [`LoadObserver::emit`]'s
+    /// `tracing::enabled!` gate, or the gate goes stale — silently skipping
+    /// (or failing to skip) dispatch for events it no longer describes.
     fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
@@ -309,21 +313,34 @@ impl LoadObserver {
     /// `tracing::enabled!` check below skips is only the capture/dispatch
     /// machinery — `seq`, `pending`, `draining` — which exists to serve a
     /// listener and costs a snapshot copy plus the drain funnel's second lock;
-    /// with nothing listening that work has no observer to serve.
+    /// with nothing listening that work has no observer to serve. Checking
+    /// `enabled` *before* taking the lock, rather than under it, matters
+    /// beyond the obvious "don't hold a lock longer than needed": a
+    /// subscriber's `enabled()` is arbitrary external code (e.g. a reload
+    /// layer re-evaluating an `EnvFilter`), and running that under the gauge
+    /// mutex would reintroduce exactly the "external code under the lock"
+    /// hazard the off-lock dispatch above exists to avoid — a slow `enabled()`
+    /// would stall every producer, and one that itself touches this
+    /// observer's gauges would deadlock.
     ///
-    /// The check runs only when this observer has no drainer already running
-    /// (`!gauges.draining`), never for a reentrant or concurrent call arriving
-    /// while one is. A reentrant call — a subscriber causing this gauge change
-    /// while handling an earlier one — runs from inside that subscriber's
-    /// `tracing` dispatch, where `tracing::enabled!` is unreliable: `tracing`'s
-    /// own re-entrancy guard shadows the real dispatcher for the duration, so
-    /// the check would report disabled even though a subscriber is verifiably
-    /// attached and mid-dispatch right now. `gauges.draining` already being
-    /// true is itself that proof, since it is only set once an earlier call
-    /// found the check enabled, so skipping the check and always
-    /// capturing/enqueuing in that branch is both necessary (correctness) and
-    /// sufficient (no re-check needed).
+    /// The `enabled` value is consulted only when this observer has no
+    /// drainer already running (`!gauges.draining`), never for a reentrant or
+    /// concurrent call arriving while one is. A reentrant call — a subscriber
+    /// causing this gauge change while handling an earlier one — runs from
+    /// inside that subscriber's `tracing` dispatch, where `tracing::enabled!`
+    /// is unreliable regardless of where it is evaluated: `tracing`'s own
+    /// re-entrancy guard shadows the real dispatcher for the duration (this
+    /// shadowing is thread-local, not lock-scoped, so hoisting the check above
+    /// the lock does not change it), so the check would report disabled even
+    /// though a subscriber is verifiably attached and mid-dispatch right now.
+    /// `gauges.draining` already being true is itself that proof, since it is
+    /// only set once an earlier call found `enabled` true, so skipping the
+    /// check and always capturing/enqueuing in that branch is both necessary
+    /// (correctness) and sufficient (no re-check needed).
     fn emit(&self, mutate: impl FnOnce(&mut Gauges) -> bool) {
+        // Must match `GaugeSnapshot::dispatch`'s target/level (see its doc
+        // comment): this is what decides whether that event is worth building.
+        let enabled = tracing::enabled!(target: "tears::runtime::load", tracing::Level::DEBUG);
         let first = {
             let mut gauges = self.lock();
             if !mutate(&mut gauges) {
@@ -334,7 +351,7 @@ impl LoadObserver {
                 gauges.pending.push_back(snapshot);
                 return;
             }
-            if !tracing::enabled!(target: "tears::runtime::load", tracing::Level::DEBUG) {
+            if !enabled {
                 return;
             }
             gauges.draining = true;
