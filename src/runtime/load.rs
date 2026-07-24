@@ -21,12 +21,15 @@
 //!   guarantee is about the snapshot, not about arrival order.
 //! - **Ordering** is carried by `seq`, not by arrival: the current value of each
 //!   gauge is the value on the greatest-`seq` event (RFC 0006 §4.4, INV-L13).
-//!   Dispatch happens off the lock, so under concurrency arrival order no longer
-//!   matches `seq` order — the contract never promised it did, and consumers
-//!   must order by `seq`. Keeping the snapshot-and-`seq` capture under the lock
-//!   while moving only the dispatch off it is what lets a slow subscriber no
-//!   longer stall producers on the lock, and one that re-enters the runtime no
-//!   longer deadlock on it, without breaking any `seq`-ordered consumer.
+//!   Dispatch happens off the lock, so the contract does not promise arrival
+//!   order matches `seq` order — consumers must order by `seq`. The single-
+//!   drainer funnel below does in fact serialize dispatch in `seq` order today,
+//!   but that is an implementation coincidence, not a guarantee (as the old
+//!   under-lock dispatch was), so no consumer may rely on it. Keeping the
+//!   snapshot-and-`seq` capture under the lock while moving only the dispatch off
+//!   it is what lets a slow subscriber no longer stall producers on the lock, and
+//!   one that re-enters the runtime no longer deadlock on it, without breaking
+//!   any `seq`-ordered consumer.
 //!
 //! Moving dispatch off the lock is only safe alongside a re-entrancy funnel. A
 //! subscriber can, while handling a gauge event, cause another gauge change
@@ -41,6 +44,13 @@
 //! Delivery is therefore iterative and never nested inside a `tracing` dispatch,
 //! so neither hazard can arise (`LoadObserver::emit`, RFC 0006 §4.4).
 //!
+//! One consequence of the funnel: a snapshot is dispatched by whichever thread
+//! is draining, which need not be the thread whose change produced it, so the
+//! event fires under that drainer's thread and current span context. A global
+//! subscriber sees only a schema-preserving change of span/thread attribution
+//! (INV-L13 is unaffected); a thread-scoped dispatcher can see another thread's
+//! gauge change delivered to it, or its own delivered on a different thread.
+//!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
 //! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
@@ -48,7 +58,6 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread;
 use std::time::Duration;
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
@@ -297,11 +306,17 @@ impl LoadObserver {
             snapshot
         };
 
-        // Release the drainer role even if a subscriber panics mid-dispatch, so
-        // a panic cannot wedge the funnel shut and silence every later gauge
-        // event (the off-lock analogue of the poisoned-lock recovery in
-        // `lock`).
-        let _release = DrainGuard { observer: self };
+        // Release the drainer role if a subscriber panics mid-dispatch, so a
+        // panic cannot wedge the funnel shut and silence every later gauge event
+        // (the off-lock analogue of the poisoned-lock recovery in `lock`). The
+        // guard stays armed until the loop relinquishes the role normally, so a
+        // still-armed drop means and only means an unwinding `dispatch` — unlike
+        // `thread::panicking()`, this stays correct when `emit` itself runs
+        // during an unrelated unwind (`GaugeGuard::drop`).
+        let mut release = DrainGuard {
+            observer: self,
+            armed: true,
+        };
         let mut next = first;
         loop {
             next.dispatch();
@@ -315,10 +330,11 @@ impl LoadObserver {
                 }
                 snapshot
             };
-            match popped {
-                Some(snapshot) => next = snapshot,
-                None => return,
-            }
+            let Some(snapshot) = popped else {
+                release.armed = false;
+                return;
+            };
+            next = snapshot;
         }
     }
 
@@ -351,18 +367,21 @@ impl Drop for GaugeGuard {
 }
 
 /// Releases the gauge drainer role if a subscriber panics while
-/// `LoadObserver::emit` is dispatching. On a normal drain the loop clears
-/// `draining` under the lock and this guard's drop is a no-op; on an unwinding
-/// panic it clears `draining` (and abandons any queued snapshots) so later gauge
-/// changes can dispatch again instead of enqueuing forever behind a drainer that
-/// will never return.
+/// `LoadObserver::emit` is dispatching. The drain loop disarms this guard the
+/// instant it relinquishes the role normally, so a drop while still armed means
+/// `dispatch` unwound: it clears `draining` (and abandons any queued snapshots)
+/// so later gauge changes can dispatch again instead of enqueuing forever behind
+/// a drainer that will never return. Arming rather than reading
+/// `thread::panicking()` is deliberate — `emit` also runs during unrelated
+/// unwinds (`GaugeGuard::drop`), where a normal drain must not trigger recovery.
 struct DrainGuard<'a> {
     observer: &'a LoadObserver,
+    armed: bool,
 }
 
 impl Drop for DrainGuard<'_> {
     fn drop(&mut self) {
-        if thread::panicking() {
+        if self.armed {
             let mut gauges = self.observer.lock();
             gauges.draining = false;
             gauges.pending.clear();
@@ -373,6 +392,7 @@ impl Drop for DrainGuard<'_> {
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
+    use std::panic::{self, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tracing::field::{Field, Visit};
@@ -380,7 +400,7 @@ mod tests {
     use tracing::{Event, Level, Metadata, Subscriber};
 
     use super::*;
-    use crate::test_support::{TraceRecorder, set_default_subscriber};
+    use crate::test_support::{TraceRecorder, set_default_subscriber, with_silent_panic_hook};
 
     // INV-L13: every producer-gauge event carries the full field set together —
     // the four gauges plus their ordering `seq` — so a subscriber reads a
@@ -626,5 +646,95 @@ mod tests {
         }
 
         fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
+    }
+
+    // A subscriber that panics while dispatching the first gauge event leaves the
+    // drainer loop unwinding before it can relinquish the role. The `DrainGuard`,
+    // still armed, must clear `draining` so the funnel is not wedged shut — every
+    // later gauge change would otherwise enqueue behind a drainer that never
+    // returns and never dispatch. This pins the recovery path that the arm/disarm
+    // `DrainGuard` (rather than `thread::panicking()`) exists to make correct.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_subscriber_panic_mid_dispatch_does_not_wedge_the_funnel() {
+        let observer = LoadObserver::default();
+        let seen_after = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = PanicOnceGaugeSubscriber {
+            panicked: Arc::new(AtomicBool::new(false)),
+            seen_after: Arc::clone(&seen_after),
+        };
+        let _guard = set_default_subscriber(subscriber);
+
+        let seen_after = with_silent_panic_hook(async {
+            // First change: the subscriber panics mid-dispatch. Caught here so
+            // the panic does not fail the test; the recovery is what is under
+            // test.
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                observer.set_keyed_entries(1);
+            }));
+            assert!(outcome.is_err(), "the subscriber panic must propagate");
+
+            // The funnel must have recovered: this change dispatches again
+            // instead of enqueuing forever behind the unwound drainer.
+            observer.set_keyed_entries(2);
+
+            seen_after
+                .lock()
+                .expect("panic-recovery seen log mutex should not be poisoned")
+                .clone()
+        })
+        .await;
+
+        assert_eq!(
+            seen_after,
+            vec![2],
+            "after a subscriber panics mid-dispatch, later gauge events must \
+             dispatch again rather than pile up behind a wedged drainer"
+        );
+    }
+
+    /// Panics the first time it sees a producer-gauge event — mid-dispatch,
+    /// inside the drainer loop — and records the `seq` of every one after.
+    struct PanicOnceGaugeSubscriber {
+        panicked: Arc<AtomicBool>,
+        seen_after: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Subscriber for PanicOnceGaugeSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        #[allow(
+            clippy::panic,
+            clippy::manual_assert,
+            reason = "the subscriber intentionally panics on its first event"
+        )]
+        fn event(&self, event: &Event<'_>) {
+            if event.metadata().target() != "tears::runtime::load" {
+                return;
+            }
+            let mut visitor = GaugeVisitor::default();
+            event.record(&mut visitor);
+            let Some(seq) = visitor.seq else { return };
+            if !self.panicked.swap(true, Ordering::SeqCst) {
+                panic!("subscriber panic mid-dispatch");
+            }
+            self.seen_after
+                .lock()
+                .expect("panic-recovery seen log mutex should not be poisoned")
+                .push(seq);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
     }
 }

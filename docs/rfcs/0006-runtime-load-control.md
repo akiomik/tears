@@ -518,9 +518,10 @@ as INV-L13 (section 5):
   as its own `seq`-carrying event, never nested inside a `tracing`
   dispatch, so value fidelity and `seq` ordering both hold across
   re-entrancy. How that delivery is arranged is an implementation concern,
-  not part of this schema. Because dispatch is off the lock, `seq` and
-  arrival order do not coincide under concurrency — consumers must order
-  gauge events by `seq`, never by arrival.
+  not part of this schema. Because dispatch is off the lock, the schema
+  does not guarantee arrival order matches `seq` order — a current-value
+  read must order gauge events by `seq`, never by arrival, even where an
+  implementation happens to deliver them in `seq` order.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness

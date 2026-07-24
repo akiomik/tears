@@ -540,10 +540,11 @@ channel occupancy, per the note on that distinction below the table:
   reordered stale gauge event can corrupt neither a predicate reading nor
   the barrier. This dependency is stated explicitly because it is
   otherwise easy to miss: gauge events are dispatched off the runtime's
-  gauge lock (RFC 0006 §4.4), so under concurrent producers their arrival
-  order does not coincide with `seq` order, and a consumer that trusted
-  arrival order could read a stale gauge value. Reading by greatest `seq`
-  is what keeps this section correct regardless of dispatch order.
+  gauge lock (RFC 0006 §4.4), so the schema does not guarantee their
+  arrival order matches `seq` order, and a consumer that trusted arrival
+  order could read a stale gauge value even if the current implementation
+  happens to deliver them in `seq` order. Reading by greatest `seq` is what
+  keeps this section correct regardless of dispatch order.
 - Counting only valid trials means an implementation may need more
   attempts than the row's required count whenever some attempts fail their
   predicate. To make the retry rule precise — which attempts are retried,
