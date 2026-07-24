@@ -24,11 +24,11 @@ Four decisions:
    RFC resolves — lands as a source discipline plus a citable
    determinism contract, not as an injection surface.
 2. **Single time source** (§3.1, INV-C1). Every time read in library
-   code goes through the virtualizable clock. `std::time::Instant::now`,
-   `std::time::SystemTime::now`, and `std::thread::sleep` are banned
-   mechanically via clippy's `disallowed-methods`. Two HTTP-module files
-   violate the rule today; migrating them is this RFC's named
-   prerequisite (§4).
+   code goes through the virtualizable clock. The `std` entry points
+   that read the current time or wait on its passage are banned
+   mechanically via clippy's `disallowed-methods`, whose entries are
+   derived as an inventory in §3.1. Two HTTP-module files violate the
+   rule today; migrating them is this RFC's named prerequisite (§4).
 3. **Controlled-context contract** (§3.2, INV-C2, INV-C3). A consumer
    that controls the clock may rely on: virtual time advances only under
    the controller's action (plus the executor's idle auto-advance, which
@@ -39,8 +39,8 @@ Four decisions:
    about production behavior.
 4. **Production neutrality** (§3.3, INV-C4). No production surface
    changes: the runtime never pauses or configures the clock, no public
-   type or config field mentions time control, and unpaused behavior is
-   byte-for-byte the platform monotonic clock.
+   type or config field mentions time control, and unpaused time reads
+   are observably identical to the platform monotonic clock.
 
 The dependency direction fixed by RFC 0008 §7 is honored: TestStore
 stage 2 consumes this contract; nothing here gates on TestStore.
@@ -170,12 +170,49 @@ Inventory of production time reads at this RFC's writing:
 | `src/subscription/http/cell.rs` | `std::time::Instant` | `stale_time` / `cache_time` decisions, `time_since_data` | **no — §4 migration** |
 | `src/subscription/http/query.rs` | `std::time::Instant` | `elapsed_ms` tracing field | **no — §4 migration** |
 
+The rule's mechanical floor is an inventory of the `std` entry points
+whose call reads the current time or blocks on its passage, derived by
+walking `std`'s surface for both classes rather than by listing the
+calls the crate happens to use today:
+
+| Banned entry point | Class |
+| --- | --- |
+| `std::time::Instant::now` | now-read |
+| `std::time::Instant::elapsed` | now-read; reachable on a value converted out of the virtual clock (`tokio::time::Instant::into_std`), so banning `now` alone does not close the type |
+| `std::time::SystemTime::now` | now-read |
+| `std::time::SystemTime::elapsed` | now-read; callable on the `UNIX_EPOCH` constant without any prior `now` |
+| `std::thread::sleep` | real-time wait |
+| `std::thread::park_timeout` | real-time wait |
+| `std::sync::Condvar::wait_timeout` | real-time wait |
+| `std::sync::Condvar::wait_timeout_while` | real-time wait |
+| `std::sync::mpsc::Receiver::recv_timeout` | real-time wait |
+| `std::sync::mpsc::Receiver::recv_deadline` | real-time wait |
+
+The deprecated `_ms` spellings (`std::thread::sleep_ms`,
+`std::thread::park_timeout_ms`, `std::sync::Condvar::wait_timeout_ms`)
+carry their own lint entries. Pure arithmetic between existing time
+values (`duration_since`, `checked_add`, comparisons) reads nothing and
+stays allowed; untimed blocking (`std::thread::park`, `Condvar::wait`)
+waits on events, not on time, and stays allowed. What the lint cannot
+name — a timed wait routed through an API outside the table (an
+OS-level I/O timeout on a socket), a direct syscall, or a dependency
+used as a time source — falls to INV-C1's review half.
+
+Dependencies are scoped the same way: no dependency serves *library
+code* as a time source, and adding one is a reviewable event. Time
+spent inside dependencies on the crate's behalf — the bench harness
+measuring elapsed time (`criterion`), the terminal backend's internal
+event polling — is measurement or external-input timing, not a time
+read issued by the crate's code, and sits outside the axis this rule
+governs (like network latency, it was never virtual).
+
 Outside library code, exactly one deliberate exception exists:
 `benches/runtime_load.rs` measures real wall-clock latency because
-RFC 0006's statistical acceptance criteria are defined on real time; it
-carries an explicit lint allow at its measurement sites. Unit and
-integration tests contain no `std::time` reads today and fall under the
-same rule.
+RFC 0006's statistical acceptance criteria are defined on real time.
+The §4 migration, which lands the lint configuration, adds an explicit
+lint allow at the bench's measurement sites in the same change. Unit
+and integration tests contain no `std::time` reads today and fall under
+the same rule.
 
 Observability-only reads (tracing durations, load-event fields) follow
 the same rule as contract-bearing reads. A uniform rule keeps the
@@ -227,9 +264,12 @@ controlled context, the contract a consumer may cite:
 
 The production runtime never pauses, constructs, or configures the
 clock. No public type, method, or `RuntimeConfig` field mentions time
-control. In an unpaused context every time read above is the platform
-monotonic clock, exactly as before this RFC. There is nothing to
-migrate, configure, or opt into for any existing application.
+control. In an unpaused context every time read above returns what the
+platform monotonic clock returns — observably unchanged from before
+this RFC, and still observably unchanged after the §5.1 feature flip,
+which adds a clock-context check on the read path but no observable
+difference. There is nothing to migrate, configure, or opt into for
+any existing application.
 
 ### 3.4 Negative space
 
@@ -272,7 +312,12 @@ the rule. They migrate to the virtualizable clock's `Instant`.
 
 The stage-2 amendment gives the store a controlled time context and an
 advance operation, making §4.3-class leaves (timeout, backoff, timer)
-deliverable through ordinary `receive` flow. What it cites here:
+deliverable through ordinary `receive` flow. RFC 0008 §7's
+non-normative sketch pictured "a store-held clock handle"; this RFC's
+design supersedes that shape — there is no clock value to hold. The
+store holds a controlled time context (§3.2) and `advance` acts on that
+context's clock; the amendment specifies its API against this RFC, not
+against the sketch. What it cites here:
 INV-C2's explicit-advance determinism (the store's poll budget never
 idles the executor, so the auto-advance clause never applies) and
 INV-C3's transparency (store results are evidence about production time
@@ -329,21 +374,25 @@ Documentation, not contract surface.
 Enforcement classes follow the pre-review checklist's definitions.
 
 - **INV-C1**: every time read in library code goes through the
-  virtualizable clock (`tokio::time`), and `std::time::Instant::now`,
-  `std::time::SystemTime::now`, and `std::thread::sleep` appear nowhere
-  in the repository's Rust targets except the named bench exception
-  (§3.1) at its explicitly allowed measurement sites.
-  Structural-mechanical: clippy `disallowed-methods` entries for the
-  three named calls in `clippy.toml`, failing the workspace lint gate
-  on any reintroduction, with the bench allow visible at its use sites.
-  Structural-review for what a lint cannot name: a time source that
-  bypasses `std` (a direct syscall, or a new dependency reading OS
-  time) is checked at dependency and code review — the crate currently
-  has no time-reading dependency, and adding one is a reviewable event.
-  (Adversarial models: virtualized sleeps combined with `std` now-reads
-  for comparisons — caught by the lint; a libc/syscall clock — caught
-  only by the review half, which is why the class is structural rather
-  than purely mechanical.)
+  virtualizable clock (`tokio::time`), and none of §3.1's banned entry
+  points appears in the repository's Rust targets except the named
+  bench exception (§3.1) at its explicitly allowed measurement sites.
+  Structural-mechanical: clippy `disallowed-methods` in `clippy.toml`
+  carries exactly §3.1's banned-entry-point inventory (landing with the
+  §4 migration, which removes the last violations), failing the
+  workspace lint gate on any reintroduction. Structural-review for time
+  reads the lint does not name — inside `std` (a timed wait routed
+  through an API outside the table, such as an OS-level I/O timeout) as
+  well as outside it (a direct syscall, or a dependency used by library
+  code as a time source, §3.1's dependency scoping) — checked at code
+  and dependency review. (Adversarial models: virtual sleeps combined
+  with `std` now-reads for comparisons — the table's now-read rows;
+  wall-clock time reached without `SystemTime::now` via
+  `UNIX_EPOCH.elapsed()` — the `SystemTime::elapsed` row exists for it;
+  a `std` `Instant` smuggled out of the virtual clock via `into_std`
+  and then read — the `Instant::elapsed` row; a libc/syscall clock or a
+  time-source dependency — the review half, which is why the class is
+  structural rather than purely mechanical.)
 - **INV-C2**: in a controlled context, §3.2's advancement rule holds —
   under a non-idling controller, a gated behavior stays pending across
   arbitrarily many polls until an explicit advance reaches its
