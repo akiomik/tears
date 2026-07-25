@@ -163,7 +163,7 @@ Inventory of production time reads at this RFC's writing:
 | --- | --- | --- | --- |
 | `src/command/effect.rs` (timeout leaf) | `tokio::time::sleep` | `Command::timeout` deadline (RFC 0004; anchored at the leaf's first poll) | yes |
 | `src/command/retry.rs` (`run_retry`) | `tokio::time::sleep` | retry backoff delay (RFC 0004) | yes |
-| `src/subscription/time.rs` (`Timer`) | `tokio::time::interval` | periodic ticks, missed ticks skipped | yes |
+| `src/subscription/time.rs` (`Timer`) | `tokio::time::interval` | periodic ticks; first-tick and non-catch-up semantics (INV-C3) | yes |
 | `src/runtime.rs` (event loop) | `tokio::time::Instant` | micro-batch window deadline (RFC 0006 mechanism) | yes |
 | `src/runtime/frame_scheduler.rs` | `tokio::time::interval` | frame cadence | yes |
 | `src/runtime/channel.rs` (bounded send) | `tokio::time::Instant` | capacity-wait duration in load events (RFC 0006 observability) | yes |
@@ -275,20 +275,33 @@ controlled context, the contract a consumer may cite:
   the controller itself contributes).
 - **No early firing.** No time-gated behavior in the crate fires while
   virtual now is earlier than its deadline.
-- **Readiness without waiting.** Once an advance moves virtual now to
-  or past a deadline, the gated behavior is ready on its next poll with
-  no real-time waiting.
+- **Readiness without waiting.** Once virtual now is at or past a
+  deadline, the gated behavior becomes ready with no real-time
+  (wall-clock) waiting — the executor need only be driven to make
+  progress (process the elapsed timers), not to sleep. This RFC does
+  not pin *which* poll observes readiness, nor whether an `advance` call
+  itself carries a timer-driver barrier: Tokio's `advance` documents
+  that it does not wait for the sleeps it moves past to complete, so the
+  exact readiness point is an executor-progress question, not a
+  wall-clock one. TestStore stage 2's advance semantics fix it (§5.1);
+  the guarantee this RFC pins is only that readiness costs no wall-clock
+  time.
 - **Transparency.** Every time-dependent contract the crate pins
   elsewhere holds identically under the virtual clock: RFC 0004's
   timeout semantics (deadline anchored at the leaf's first poll, one
   timeout message per modifier) and retry-backoff semantics, and
-  `Timer`'s semantics (no tick before one full interval; missed ticks
-  skipped, so for a timer already polled once to pending a single
-  advance spanning multiple intervals yields one tick, not a replay
-  burst — a timer whose stream is advanced past several intervals
-  *before* its first poll yields zero, since `Timer::stream`'s
-  construction-time anchor plus its `.skip(1)` absorb the one elapsed
-  deadline). The contracts are inequality-shaped (never
+  `Timer`'s semantics (no tick before one full interval after its
+  construction-time anchor, and no catch-up burst: a single advance
+  spanning several intervals yields exactly one tick, and an advance
+  shorter than one full interval yields none, whether the advance falls
+  before or after the timer's first poll — `.skip(1)` absorbs only the
+  construction-instant tick, so at most one elapsed tick is ever
+  deliverable). This non-catch-up property is a contract the `Timer`
+  implementation provides directly; Tokio's `MissedTickBehavior::Skip`
+  does not supply it, because its skip engages only once a tick is late
+  by more than a fixed margin, so for sub-margin intervals it replays
+  one tick per elapsed interval (INV-C3). The contracts are
+  inequality-shaped (never
   early; at-or-after), so the virtual clock's perfect granularity and
   the real clock's scheduler-dependent lateness both satisfy them; a
   paused-clock run is therefore evidence for the contract itself — the
@@ -345,8 +358,19 @@ the rule. They migrate to the virtualizable clock's `Instant`.
 ### 5.1 TestStore stage 2 (RFC 0008 §7 amendment)
 
 The stage-2 amendment gives the store a controlled time context and an
-advance operation, making RFC 0008 §4.3-class leaves (timeout, backoff,
-timer) deliverable through ordinary `receive` flow. RFC 0008 §7's
+advance operation, making RFC 0008 §4.3-class *command* time leaves
+(`timeout`, retry backoff) deliverable through ordinary `receive` flow.
+`Timer` is deliberately excluded: it is a subscription source, not a
+command leaf, and TestStore never executes subscription sources
+(RFC 0008 §1.2), so a `Timer` leaf never enters the store's pending
+command set at all. Delivering it would require a subscription-execution
+design — source spawn, ID reconciliation, restart, and source
+cancellation, everything the runtime's `SubscriptionManager` provides —
+which is out of scope for both RFCs; if a future need arises it is a
+separate, explicitly-designed amendment, not this stage-2 one.
+`Timer`'s own determinism under the virtual clock is still pinned here
+(INV-C3), exercised directly against its stream rather than through
+TestStore. RFC 0008 §7's
 non-normative sketch pictured "a store-held clock handle"; this RFC's
 design supersedes that shape — there is no clock value to hold. The
 store holds a controlled time context (§3.2) and `advance` acts on that
@@ -363,12 +387,19 @@ Two design inputs recorded for that amendment:
   leaf's *first poll*, and the store's scans decide when that first
   poll happens; the amendment's advance semantics must account for
   scan-order-dependent anchoring rather than assuming
-  construction-time anchoring. `Timer` anchors differently — at
-  stream-construction time, not first poll (`interval()` in
-  `src/subscription/time.rs`) — so an advance issued before a timer's
-  stream is first polled counts against the construction anchor; the
-  amendment records both anchors since stage 2 delivers `Timer` leaves
-  too.
+  construction-time anchoring. (`Timer`'s construction-time anchor
+  (§3.2) is not a stage-2 concern: stage 2 delivers command time leaves
+  only, never `Timer`.)
+- **Advance semantics and executor context.** Tokio's `advance` does
+  not wait for the sleeps it moves past to complete (§3.2), so the
+  amendment must fix whether the store's advance carries a timer-driver
+  barrier or whether "ready after advance" means "ready once the
+  executor is driven to progress, with no wall-clock wait". It must also
+  fix the executor context the store owns or borrows — whether the store
+  holds its own current-thread paused runtime or runs inside the
+  caller's `#[tokio::test]` paused runtime — and how a user effect that
+  itself spawns (`tokio::spawn`) or nests a runtime is handled. Recorded
+  here as stage-2 design inputs, not resolved by this RFC.
 - **Feature availability.** The executor's pause-and-advance facilities
   sit behind the `tokio` `test-util` feature, today a dev-dependency
   only. **Decision:** when the first in-crate controlled-context
@@ -450,29 +481,41 @@ Enforcement classes follow the pre-review checklist's definitions.
   Behavioral: a paused-clock test polls a pending `Command::timeout`
   leaf repeatedly without advancing and asserts it remains pending
   (this is the check a compliant implementation passes and an
-  implicitly-advancing clock fails), then advances exactly to the
-  deadline and asserts readiness without real-time waiting.
+  implicitly-advancing clock fails), then advances to the deadline and
+  asserts the behavior becomes ready, with no wall-clock waiting, once
+  the executor is driven to progress (§3.2's readiness guarantee).
 - **INV-C3**: the time-dependent contracts pinned by RFC 0004 and by
   `Timer`'s semantics hold identically under the virtual clock.
   `Timer`'s current rustdoc documents only the missed-tick Skip
-  behavior, not the first-tick timing (no tick before one full
-  interval) — the `.skip(1)` in `Timer::stream` is the sole source of
-  that behavior today. The §4 implementation task pins it: it adds a
-  first-tick sentence to `Timer`'s rustdoc citing this RFC as the
-  semantics of record, so INV-C3 references a written contract rather
-  than an implementation accident. Behavioral: the existing paused-clock
-  timeout/retry suites
+  behavior, and the current implementation does not in fact provide the
+  non-catch-up contract at short intervals: it composes
+  `MissedTickBehavior::Skip` with `.skip(1)`, but Tokio's Skip engages
+  only once a tick is late by more than a fixed margin (5 ms in
+  tokio 1.50.0's `interval.rs`), so a paused-clock advance spanning
+  several sub-margin intervals replays one tick per interval — a
+  catch-up burst this contract forbids. `.skip(1)` supplies only the
+  first-tick timing (no tick at the construction instant); it does not
+  suppress catch-up. The §4 implementation task pins the contract on
+  both ends: it makes `Timer` provide the non-catch-up property
+  directly (rather than leaning on Tokio's lateness-margin Skip) and
+  adds a first-tick and non-catch-up sentence to `Timer`'s rustdoc
+  citing this RFC as the semantics of record, so INV-C3 references a
+  written contract the code actually satisfies rather than an
+  implementation accident it does not. Behavioral: the existing
+  paused-clock timeout/retry suites
   (`src/command/effect.rs`, `src/command/retry.rs`, `src/runtime.rs`)
   are the timeout/retry half; new paused-clock `Timer` tests pin the
-  timer half — no tick ready before an advance of one full interval,
-  the first tick ready after exactly one interval, and, for a stream
-  already polled once to pending, a single advance spanning several
-  intervals yielding exactly one tick (the skipped-not-replayed
-  contract; the poll-once precondition is the §3.2 construction-anchor
-  caveat — an advance before the first poll yields zero). The existing
-  wide-margin real-time
-  `Timer` tests remain as non-normative smoke checks; the paused tests
-  are the contract's proof.
+  timer half at short intervals (1 ms and 2 ms, chosen to fall inside
+  Tokio's lateness margin so a Skip-dependent implementation fails
+  them) — no tick ready before an advance of one full interval, the
+  first tick ready after exactly one interval, and a single advance
+  spanning several intervals yielding exactly one tick, not a burst,
+  whether the advance falls before or after the timer's first poll (an
+  advance shorter than one full interval yields no tick; `.skip(1)`
+  absorbs only the construction-instant tick, so at most one elapsed
+  tick is ever deliverable). The existing wide-margin real-time `Timer`
+  tests remain as non-normative smoke checks; the paused tests are the
+  contract's proof.
 - **INV-C4**: production neutrality — the crate exposes no time-control
   surface and the production runtime never pauses or configures the
   clock, before and after the §5.1 feature flip. Structural: review of

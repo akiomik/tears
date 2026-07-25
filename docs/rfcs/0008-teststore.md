@@ -14,10 +14,12 @@
 
 > **Staging.** This RFC specifies stage 1 only: driving pure `update`
 > transitions and effects that become ready without an executor, a timer,
-> or wall-clock time. Time-dependent effects (`Command::timeout`, retry
-> backoff, `Timer`-based subscriptions) are stage 2, which waits on a
-> separate Clock DI RFC (§7) and lands as a reviewed amendment to this
-> document.
+> or wall-clock time. Time-dependent *command* effects (`Command::timeout`,
+> retry backoff) are stage 2, which waits on a separate Clock DI RFC (§7)
+> and lands as a reviewed amendment to this document. `Timer`-based
+> subscriptions are not staged here at all: TestStore never executes
+> subscription sources (§1.2), so lifting that is a separate
+> subscription-execution design, not stage 2.
 
 ## Summary
 
@@ -33,10 +35,13 @@ Three decisions, ordered by urgency:
 2. **Exhaustive assertions** (§6): exhaustive is the only mode in
    stage 1. Undelivered deliverable output — a ready message never
    received, an effect stream never driven to completion — fails the
-   test. The one carve-out mirrors the runtime's shutdown contract:
-   output remaining after an observed quit is legally discarded. A
-   non-exhaustive mode is deliberately not designed here (open
-   question 2).
+   test at `receive`, `finish`, or drop; `send` does not block on
+   pending output, so a scripted `send` can supersede or cancel an
+   earlier step's not-yet-received output the way the runtime's
+   shared-first schedule does (§6). The one carve-out mirrors the
+   runtime's shutdown contract: output remaining after an observed quit
+   is legally discarded. A non-exhaustive mode is deliberately not
+   designed here (open question 2).
 3. **Clock DI split** (§7): Clock injection is a separate RFC. This RFC
    does not gate on it, and stage 2 of TestStore gates on that RFC, not
    the reverse.
@@ -82,7 +87,11 @@ cancellation semantics honored on the pending output (§5).
 - **Subscription source execution**: TestStore never starts, polls, or
   restarts a subscription source. It observes the *declared* set only.
   Lifecycle behavior (keyed restart, RFC 0005) stays covered by the
-  runtime's own tests.
+  runtime's own tests. This covers `Timer` and every other
+  `SubscriptionSource`: subscription execution is out of scope in
+  stage 1 and stage 2 alike — lifting it would be a separate
+  subscription-execution design, not the Clock DI stage-2 amendment
+  (RFC 0009 §5.1), which delivers command time leaves only.
 - **Runtime integration contracts**: channel capacities, backpressure,
   batching, and scheduling (RFC 0006/0007) are properties of the runtime
   event loop, which TestStore replaces. A TestStore run exercises none of
@@ -165,8 +174,9 @@ where
     pub fn state(&self) -> &App;
 
     /// Applies `msg` through `update` and enqueues the returned
-    /// command's effects. Fails the test if a deliverable message is
-    /// pending (§6) or quit has been observed (§5.3).
+    /// command's effects. Does not deliver or poll pending output;
+    /// undelivered output stays caught by `receive*`/`finish`/drop (§6).
+    /// Fails the test only if quit has been observed (§5.3).
     pub fn send(&mut self, msg: App::Message);
 
     /// Asserts that the next deliverable output is a message equal to
@@ -211,10 +221,15 @@ generic) are implementation latitude.
 - **`send`** is one synchronous `update` call plus bookkeeping. It
   spawns no task, requires no executor, and returns only after the
   command's metadata (directives, cancellation) has been applied to the
-  store. Its polling is limited to §4.1's checks — the exhaustiveness
-  precondition before `update` and, when the returned command is keyed,
-  the intake reconciliation poll (§5.1); it never delivers output,
-  which happens only in `receive*` calls.
+  store. It runs no deliverable-output exhaustiveness precondition and
+  polls no pending leaf for output; pending deliverable output is left
+  in place for a later `receive*` (or caught by `finish`/drop, §6),
+  which lets a scripted `send` supersede or cancel an earlier step's
+  not-yet-received output exactly as the runtime's shared-first schedule
+  does (§6). Its only poll is the keyed-intake reconciliation of §5.1,
+  and only when the returned command is keyed under
+  `CancelPolicy::KeepInFlight`; it never delivers output, which happens
+  only in `receive*` calls.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
   `update` — so the store advances exactly as the runtime would on that
@@ -290,8 +305,9 @@ check's poll, or when a keyed-intake reconciliation poll (§5.1) has
 already yielded it into the leaf's buffer — a buffered item is
 deliverable at every later check without a further poll. The poll
 contract is fixed, because INV-T4's determinism rests on it: polling
-happens only inside `receive*`, `send`-precondition, `finish`, and
-drop checks, plus the keyed-intake reconciliation of §5.1. The
+happens only inside `receive*`, `finish`, and drop checks, plus the
+keyed-intake reconciliation of §5.1 (a keyed `send`'s only poll, and
+only under `KeepInFlight`). A bare `send` polls no leaf (§6). The
 quit-state check precedes every one of these sites, so after an
 observed quit no store call polls at all: `send`/`receive*` fail on
 the quit state before reaching any leaf, and the `finish` and drop
@@ -317,10 +333,10 @@ reaches it. Between calls the store does nothing.
   (INV-T4, INV-T6).
 - **Scan semantics**: a `receive*` check walks the pending leaves in
   enqueue order and stops at the first deliverable one (a buffered
-  head, or a yield on that leaf's one poll); the `send`
-  precondition and the pre-quit `finish`/drop checks scan in the same
-  order until they find a deliverable output (failing) or exhaust the
-  set (establishing that nothing is deliverable). Either way, each
+  head, or a yield on that leaf's one poll); the pre-quit `finish`/drop
+  checks scan in the same order until they find a deliverable output or
+  an unfinished leaf (failing) or exhaust the set (establishing nothing
+  is outstanding). `send` runs no such scan (§6). Either way, each
   reached leaf gets exactly one poll (§4.1).
 - **Negative space, stated deliberately**: the canonical cross-leaf
   order is *TestStore's* contract, not the runtime's. The runtime folds
@@ -336,21 +352,27 @@ reaches it. Between calls the store does nothing.
 
 ### 4.3 Leaves that cannot become ready
 
-A leaf that requires a timer or reactor (`Command::timeout` wraps every
-leaf in a deadline; a backoff retry sleeps; `Timer` is
-`tokio::time::interval`-backed) cannot be driven without an executor.
-Stage 1's contract is honest about this rather than silently lenient:
-polling such a leaf fails the test. Note what that means under §4.2's
-scan semantics: the failure fires at the *first store call whose scan
-polls the leaf* — a `send`'s exhaustiveness precondition or a
-`receive` aimed at a different message, not only a call targeting the
-leaf itself — so from its enqueue onward the store is effectively
-poisoned, unless every scan stops at an earlier-enqueued yielding leaf
-first or cancellation removes the leaf (§5.1) before a scan reaches
-it. The failure today surfaces as the underlying missing-reactor
-panic, which is a poor diagnostic; the documentation on `TestStore`
-names the limitation and points at the stage-2 plan (§7). A leaf that is merely *pending* on a test-controlled
-source does not fail anything: it is skipped by the canonical order
+A command leaf that requires a timer or reactor (`Command::timeout`
+wraps every leaf in a deadline; a backoff retry sleeps) cannot be
+driven without an executor. (`Timer` is not in this set: it is a
+subscription source, not a command leaf, so it never enters the store's
+pending command set — §1.2.) Stage 1's contract is honest about this
+rather than silently lenient: polling such a leaf fails the test. Note
+what that means under §4.2's scan semantics: the failure fires at the
+*first store call whose scan polls the leaf* — a `receive` aimed at a
+different message, a `finish`/drop check, or a keyed-intake
+reconciliation poll (§5.1) that reaches it, not only a call targeting
+the leaf itself; a bare `send` never triggers it, because `send` polls
+no leaf (§6). So from its enqueue onward the store is effectively
+poisoned for those calls, unless every scan stops at an
+earlier-enqueued yielding leaf first, or a `send`-issued cancellation
+removes the leaf (§5.1) before a scan reaches it — the latter is now
+expressible precisely because `send` itself does not poll. The failure
+today surfaces as the underlying missing-reactor panic, which is a poor
+diagnostic; the documentation on `TestStore` names the limitation and
+points at the stage-2 plan (§7). A leaf that is merely *pending* on a
+test-controlled source does not fail anything: it is skipped by the
+canonical order
 until it becomes deliverable, and only `finish` holds it to account
 (§6).
 
@@ -366,12 +388,15 @@ exhausted.** Exhaustion is observable only by polling, so the store
 mirrors the runtime's pre-spawn reconciliation (before any
 `Spawn(policy)` decision the runtime reaps completed keyed tasks and
 samples the target receiver once — RFC 0003 §4.2) with **keyed-intake
-reconciliation**: when a keyed command arrives for an occupied id, the
-store reconciles before the admission decision. If the occupant already
-has buffered output, the id is occupied and nothing is polled;
-otherwise the store polls the occupant's remaining leaves in enqueue
-order, stopping at the first that shows the run still open — a yield
-(the item is buffered at that leaf's canonical position as its next
+reconciliation**: when a keyed command arrives for an occupied id and
+its policy's admission decision depends on the occupant's state
+(`CancelPolicy::KeepInFlight`), the store reconciles before that
+decision. (`CancelInFlight`'s outcome does not depend on the occupant's
+state, so it reconciles nothing — see the per-policy bullets below.) If
+the occupant already has buffered output, the id is occupied and nothing
+is polled; otherwise the store polls the occupant's remaining leaves in
+enqueue order, stopping at the first that shows the run still open — a
+yield (the item is buffered at that leaf's canonical position as its next
 deliverable output; buffered output occupies, INV-6, and §6's
 exhaustiveness counts it like any deliverable message) or a pending
 (INV-7: "a still-open stream remains occupied even after delivering
@@ -386,12 +411,18 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   reconciled state: while the id remains occupied the new command's
   stream is discarded and the occupant is untouched (INV-5); when
   reconciliation observes the occupant exhausted, the id is released
-  and the new command is admitted (INV-7). For
-  `CancelPolicy::CancelInFlight` the reconciled state changes no
-  admission outcome — superseding an exhausted occupant and spawning
-  into a released id are indistinguishable — so the reconciliation rule
-  is stated once for all keyed intake; its polls follow §4.1's budget
-  either way.
+  and the new command is admitted (INV-7). The reconciliation poll is
+  issued only for `KeepInFlight`, whose admission outcome depends on
+  whether the occupant is still open. For `CancelPolicy::CancelInFlight`
+  the outcome is fixed — the occupant is superseded and its undelivered
+  output discarded regardless of its state — so no reconciliation poll
+  is issued: superseding an exhausted occupant and spawning into a
+  released id are indistinguishable, and this matches the runtime, which
+  aborts the in-flight keyed task without sampling it. Not polling also
+  lets a `CancelInFlight` command supersede a reactor-dependent occupant
+  (a `timeout` or backoff leaf) without polling it, so cancellation of a
+  time-dependent keyed leaf is expressible in stage 1 (§4.3). Any poll
+  that is issued follows §4.1's budget.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
 - Unkeyed commands are unaffected by any of the above (INV-1's default
@@ -431,6 +462,17 @@ not a step: after it, `redraw_requested` keeps reporting the previous
 step's directive. This makes `without_redraw` decisions assertable per
 transition, which is the granularity RFC 0002 defines them at.
 
+The init-command reading is TestStore-specific introspection and does
+*not* predict the production runtime's first render. The runtime
+enqueues the init command directly and never consults its redraw
+directive; its first frame always renders regardless
+(`src/runtime/core.rs`, `src/runtime/pending_work.rs`). So
+`redraw_requested()` before the first step exposes the init command's
+folded directive as a `Command` property, not as a claim about whether
+the runtime would redraw its first frame — the only production redraw
+decisions it mirrors are the per-step ones, which are what INV-T3's
+"runtime would read" covers (§8).
+
 ### 5.3 Quit
 
 Quit is a deliverable output like any message and is asserted explicitly
@@ -446,10 +488,18 @@ fail because the application would no longer be running. A quit that is *suppres
 
 Exhaustive assertion is the only stage-1 mode. The rules, by call site:
 
-- **`send`** fails if any deliverable message or quit request is
-  pending. Effects that are pending but not deliverable (§4.1) do not
-  block `send` — they may be waiting on a test-controlled source the
-  test will feed later.
+- **`send`** performs no exhaustiveness check: pending deliverable
+  output does not block a `send`, and neither do effects that are
+  pending but not deliverable. Leaving deliverable output in place lets
+  a test script a `send` that supersedes or cancels an earlier step's
+  not-yet-received output — the sequence `send(Start); send(Cancel)`
+  cancels a keyed effect before its output is received — which mirrors
+  the runtime's shared-first schedule, where a shared input (the next
+  message) is processed ahead of a keyed effect's already-ready output
+  (RFC 0003 §4.2; `src/runtime/app_input.rs`). Undelivered output is
+  not lost track of: it stays subject to the `receive*`, `finish`, and
+  drop checks below, which remain exhaustive. `send` still fails after
+  an observed quit (§5.3).
 - **`receive` / `receive_matching` / `receive_quit`** fail on a
   mismatch, on quit-versus-message confusion, or when nothing is
   deliverable — each with a diagnostic that names the actual value
@@ -478,9 +528,12 @@ smuggled in half-specified (open question 2).
 ## 7. Clock DI split
 
 **Decision: Clock injection is its own RFC; this RFC does not contain
-it.** Stage 2 of TestStore — deterministic driving of `timeout`, retry
-backoff, debounce/throttle, and `Timer` — lands as an amendment to this
-document after that RFC is accepted.
+it.** Stage 2 of TestStore — deterministic driving of the
+time-dependent *command* effects (`timeout`, retry backoff, and future
+command-side coalescing timers such as debounce/throttle) — lands as an
+amendment to this document after that RFC is accepted. `Timer` and other
+subscription sources are not part of stage 2 (§1.2): they are not
+command leaves and TestStore never executes subscription sources.
 
 Rationale:
 
@@ -497,10 +550,14 @@ Rationale:
   it behind the larger design.
 
 Non-normative sketch of what the amendment adds, recorded so stage-1 API
-shapes are chosen with it in mind: a store-held clock handle, an
-`advance(duration)` call that makes time-gated leaves deliverable, and
-the §4.3 limitation dissolving into ordinary `receive` flow. Nothing in
-the stage-1 surface above assumes otherwise or blocks that shape.
+shapes are chosen with it in mind: a store-held controlled time context
+(RFC 0009 §3.2 supersedes the earlier "clock handle" phrasing — there
+is no clock value to hold), an `advance(duration)` call that makes
+time-gated *command* leaves (`timeout`, retry backoff) deliverable, and
+the §4.3 limitation for those leaves dissolving into ordinary `receive`
+flow. `Timer` and other subscription sources stay out of scope in
+stage 2 as in stage 1 (§1.2; RFC 0009 §5.1). Nothing in the stage-1
+surface above assumes otherwise or blocks that shape.
 
 ## 8. Invariants
 
@@ -575,13 +632,16 @@ Enforcement classes follow the pre-review checklist's definitions
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
-  unfinished-leaf class (§6). Behavioral: one test per class (ready
-  message at `send`; ready message at `finish`; unfinished leaf at
-  `finish`; drop-without-finish), each asserting the failure fires
-  *and* its message contains the class's required content — the leaked
-  value's `Debug` rendering for the message classes — because the
-  wrong-value adversary is exactly what the message-content assertion
-  exists to fail.
+  unfinished-leaf class (§6). `send` is not a leak-check site: it never
+  fails on pending deliverable output (§6). Behavioral: one test per
+  leak class (ready message at `finish`; unfinished leaf at `finish`;
+  drop-without-finish), each asserting the failure fires *and* its
+  message contains the class's required content — the leaked value's
+  `Debug` rendering for the message classes — because the wrong-value
+  adversary is exactly what the message-content assertion exists to
+  fail; plus one negative test that a `send` issued while a deliverable
+  message is still pending does *not* fail and leaves that message
+  assertable by a later `receive` (the shared-first script of §6).
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
   `send`/`receive*` fail on the quit state without polling any leaf,
   and the `finish` and drop checks poll nothing and pass regardless of
@@ -600,8 +660,13 @@ INV-T7; `receive_quit` and the quit state to INV-T9;
 `redraw_requested` and `subscription_ids` are pure observations of
 contracts owned elsewhere (RFC 0002's directive; RFC 0005's declared
 identity) and are covered by INV-T3 (they read what the runtime would
-read) plus one behavioral test each; the absence of an `Application`
-change maps to INV-T1.
+read) plus one behavioral test each — with one carve-out: the
+init-command directive `redraw_requested` reports before the first step
+is TestStore-specific `Command` introspection and is *not* a prediction
+of the runtime's first render (§5.2), so it falls outside INV-T3's
+"runtime would read" umbrella; the behavioral test for it asserts the
+init command's folded directive, not a runtime first-frame outcome. The
+absence of an `Application` change maps to INV-T1.
 
 ## 9. Open questions
 
