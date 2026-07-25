@@ -143,6 +143,12 @@ impl<Msg: 'static> Subscription<Msg> {
         self.id.scope = AssertUnwindSafe(self.id.scope.appended(scope));
         self
     }
+
+    /// The subscription's declared identity, read without starting its source.
+    /// Used by [`TestStore::subscription_ids`](crate::testing::TestStore::subscription_ids).
+    pub(crate) const fn id(&self) -> &SubscriptionId {
+        &self.id
+    }
 }
 
 impl<A: SubscriptionSource<Output = Msg> + 'static, Msg> From<A> for Subscription<Msg> {

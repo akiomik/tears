@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tears::testing::TestStore`, a deterministic, executor-free test harness
+  that drives an `Application`'s `update` transitions and immediately ready
+  effects synchronously (RFC 0008, stage 1)
+  - `send` applies one message through `update`; `receive`, `receive_matching`,
+    and `receive_quit` assert the next deliverable effect output — under a
+    canonical per-leaf delivery order that is the store's own contract, not a
+    runtime ordering guarantee — and apply it; `state`, `redraw_requested`,
+    and `subscription_ids` observe the application state, the per-step redraw
+    directive (RFC 0002), and the declared subscription set — deduplicated
+    first-occurrence-stable — without starting any source
+  - Assertions are exhaustive: deliverable output never received or an effect
+    stream never driven to completion fails the test at `receive`, `finish`,
+    or drop; output remaining after an observed quit is legally discarded,
+    mirroring the runtime's shutdown contract
+  - RFC 0003 cancellation semantics apply to the store's pending output:
+    same-id supersede, keep-in-flight discard and release, explicit cancel,
+    and quit suppression
+  - `Application::Message`'s bounds stay exactly `Send + 'static`: the store
+    carries its own bounds (`Debug` on the store, `PartialEq` only on
+    `receive`) and requires `Clone` nowhere
+  - Stage-1 scope: the store is executor-free — `TestStore::new` panics
+    inside an entered Tokio runtime, so tests run on a plain `#[test]` —
+    time-dependent command effects (`Command::timeout`, retry backoff) wait
+    on the Clock DI RFC (RFC 0009), and subscription sources are never
+    executed
+
 ## [0.10.1] - 2026-07-24
 
 ### Added
