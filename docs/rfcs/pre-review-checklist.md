@@ -407,7 +407,16 @@ ambiguous between `Timer::new` (which only stores the interval) and
 `Timer::stream()` (which builds the `interval()`); advancing time between
 them changes the first deadline, so the text was fixed to
 "stream-construction anchor" and given a test that advances time across
-the gap.
+the gap. Pinning the site is not yet pinning its execution context: a
+read anchored at a site that need not run under the facility the
+contract measures against reads the wrong instrument, so check which
+ambient facility (clock, reactor) each candidate site provably runs
+under, not only which site it is. *From PR #252:* the
+stream-construction anchor PR #246 had just pinned was itself the
+defect — `stream()` can legally run outside the polling runtime's
+clock context, anchoring against the wrong clock — and the anchor
+moved to the stream's first poll, the one moment guaranteed to run on
+the measuring clock.
 
 "Behavior-preserving", "no-op", or "internal only" is an operational
 absolute about the whole change: one observable difference refutes it,

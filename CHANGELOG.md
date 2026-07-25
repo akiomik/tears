@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Short-interval `Timer` subscriptions no longer replay a catch-up burst of
+  missed ticks after a delay: however many interval boundaries elapse while a
+  tick goes untaken, exactly one tick becomes deliverable, and the cadence
+  resumes on the timer's original phase (first anchor-phase boundary strictly
+  after the late tick). The timer's anchor is fixed at its stream's first
+  poll — read from the clock of the runtime that polls it — and the first
+  tick arrives one full interval after that anchor (RFC 0009 §4.2)
+
 ### Added
 
 - `tears::testing::TestStore`, a deterministic, executor-free test harness

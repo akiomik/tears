@@ -1,6 +1,10 @@
 # RFC 0009: Clock DI — deterministic time via the virtual clock
 
 - Status: Accepted
+- Amended: 2026-07-25 — §4.2/INV-C3: `Timer`'s anchor moved from stream
+  construction to the stream's first poll (review finding: a stream
+  built outside the polling runtime's clock context anchored against
+  the wrong clock and ticked immediately or never)
 - Target: a crate-wide determinism contract for time-dependent behavior,
   with no new public API
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
@@ -111,7 +115,7 @@ Rationale:
 - **An injected clock cannot reach the sites that need it without
   breaking the API.** `Command::timeout`, `Command::retry`'s backoff,
   and `Timer` (constructed via `Timer::new` in `subscriptions`, its time
-  anchored when its stream is built, §4.2) declare time-gated behavior
+  anchored at its stream's first poll, §4.2) declare time-gated behavior
   inside `update` and `subscriptions`, which receive no environment.
   Serving them with an
   injected clock requires either a clock parameter on every such
@@ -298,7 +302,7 @@ controlled context, the contract a consumer may cite:
   timeout semantics (deadline anchored at the leaf's first poll, one
   timeout message per modifier) and retry-backoff semantics, and
   `Timer`'s semantics, stated over a running `next_deadline` that starts
-  one full interval after the timer's stream-construction anchor: while
+  one full interval after the timer's first-poll anchor: while
   virtual now `<` `next_deadline` no tick is deliverable; once now `>=`
   `next_deadline` exactly one tick becomes deliverable, never a burst,
   however many deadlines have elapsed, and after it is taken nothing more
@@ -389,18 +393,27 @@ behavior-preserving.
   tick per missed interval. This is a user-visible behavior change for
   short-interval timers under load, so it lands with a `CHANGELOG: Fixed`
   entry, not as a mere rustdoc adjustment.
-- **Anchor.** The time anchor is fixed at **stream construction** — the
-  moment `Timer::stream()` is called (`interval()` in
-  `src/subscription/time.rs`), not `Timer::new`, which only stores the
-  interval value. Time that passes between `Timer::new` and `stream()`
-  does not count against the timer; the first `next_deadline` is one
-  full interval after the `stream()` call.
+- **Anchor** (amended 2026-07-25; originally "stream construction").
+  The time anchor is fixed at the stream's **first poll** — not
+  `Timer::new`, which only stores the interval value, and not the
+  `stream()` call, which only builds the stream. `stream()` may legally
+  run outside the runtime that will poll the stream (on another thread,
+  or in setup code outside a paused test runtime), and an anchor read
+  there comes from the ambient clock, which can disagree with the
+  virtualizable clock the timer's sleeping measures against — a
+  construction-time anchor then delivers a tick at the first poll or
+  never becomes ready at all. The first poll, by definition, happens on
+  the polling runtime's clock, so the mismatch is structurally
+  impossible. Time that passes before the first poll counts against
+  nothing; the first `next_deadline` is one full interval after the
+  first poll.
 - **Pinned observable properties**, stated over a running `next_deadline`
   (independent of the implementation mechanism, so a from-scratch
   reimplementation that drops `.skip(1)` or `interval` altogether still
   conforms):
-  - `next_deadline` starts one full interval after the stream-construction
-    anchor. The construction-instant tick is never delivered.
+  - `next_deadline` starts one full interval after the first-poll
+    anchor. No tick is ever deliverable at or before the anchor
+    instant.
   - While virtual now `<` `next_deadline`, no tick is deliverable. Once
     now `>=` `next_deadline`, **exactly one** tick becomes deliverable —
     however many interval boundaries lie between the old `next_deadline`
@@ -420,7 +433,7 @@ behavior-preserving.
     rustdoc describes.
 - **rustdoc.** `Timer` gains a first-tick, non-catch-up, and post-miss
   cadence sentence citing this RFC as the semantics of record, and names
-  the stream-construction anchor.
+  the first-poll anchor.
 - **Tests.** INV-C3's paused-clock tests at 1 ms and 2 ms intervals are
   the proof; a Skip-margin-dependent implementation fails them.
 
@@ -458,7 +471,7 @@ Three design inputs recorded for that amendment:
   leaf's *first poll*, and the store's scans decide when that first
   poll happens; the amendment's advance semantics must account for
   scan-order-dependent anchoring rather than assuming
-  construction-time anchoring. (`Timer`'s stream-construction anchor
+  construction-time anchoring. (`Timer`'s first-poll anchor
   (§4.2) is not a stage-2 concern: stage 2 delivers command time leaves
   only, never `Timer`.)
 - **Advance semantics and executor context.** Tokio's `advance` does
@@ -585,7 +598,7 @@ Enforcement classes follow the pre-review checklist's definitions.
   Tokio's lateness margin so a Skip-dependent implementation fails them),
   covering the §4.2 observable properties:
   (a) no tick ready while now is before the first `next_deadline` (one
-  interval after the stream-construction anchor);
+  interval after the first-poll anchor);
   (b) the first tick becoming ready once now reaches that deadline;
   (c) a single advance past several interval boundaries making exactly
   one tick ready, not a burst, followed by Pending until the new
@@ -598,11 +611,17 @@ Enforcement classes follow the pre-review checklist's definitions.
   4.5 ms; a Delay-style "now + interval" reset fails this, and a
   gap-length rule that suppressed the sub-interval boundary would too;
   and
-  (e) **anchor** — advancing virtual time before `stream()` is called
-  does not consume the first interval: the first deadline is
-  `stream_time + interval` (later in absolute time for a later `stream()`
-  call), because the anchor is the `stream()` call, not `Timer::new`,
-  which stores only the interval. The
+  (e) **anchor** — virtual time advanced before the stream's first
+  poll, whether before or after `Timer::new` and `stream()`, does not
+  consume the first interval: the first deadline is
+  `first_poll_time + interval`, because the anchor is the first poll —
+  an implementation anchoring at `Timer::new` or at the `stream()` call
+  already has a tick ready at that first poll and fails; and, the
+  cross-context half, a stream built outside the polling runtime's
+  clock context (constructed on a plain thread, polled under a paused
+  runtime) still delivers its first tick exactly one interval after its
+  first poll — a construction-time anchor reads the ambient clock there
+  and, against the virtual clock, fires immediately or never. The
   existing wide-margin real-time `Timer` tests remain as non-normative
   smoke checks; the paused tests are the contract's proof.
 - **INV-C4**: production neutrality — the crate exposes no time-control
