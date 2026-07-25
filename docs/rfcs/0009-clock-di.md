@@ -172,10 +172,10 @@ Inventory of production time reads at this RFC's writing:
 
 The rule's mechanical floor is an inventory of the `std` entry points
 whose call reads the current time, blocks on its passage, or configures
-a timed block, derived by walking `std`'s time (`std::time`), thread
-and synchronization (`std::thread`, `std::sync`), and portable network
-I/O (`std::net`) surface for those three classes — not by listing the
-calls the crate happens to use today:
+a timed block, derived by walking the stable surface of `std`'s time
+(`std::time`), thread and synchronization (`std::thread`, `std::sync`),
+and portable network I/O (`std::net`) families for those three
+classes — not by listing the calls the crate happens to use today:
 
 | Banned entry point | Class |
 | --- | --- |
@@ -205,6 +205,12 @@ resolve on every compilation target, so they ride INV-C1's review half
 instead of per-target lint entries; the review half likewise covers
 what the lint does not name at all — a direct syscall, or a dependency
 other than the executor used as a time source (next paragraph).
+Unstable members of the same classes — `std::thread::sleep_until`, the
+`std::sync::mpsc`-style timed receives of `std::sync::mpmc` — are
+uncallable on the crate's stable toolchain and join the table on
+stabilization; `recv_deadline`, equally unstable, is listed ahead of
+that defensively because it completes a family already present, and
+the §4 implementation task confirms the lint accepts its path.
 
 Dependencies are scoped the same way: the executor clock itself
 (`tokio::time`) is the crate's one sanctioned time source, and no
