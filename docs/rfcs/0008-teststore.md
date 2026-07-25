@@ -639,7 +639,15 @@ Enforcement classes follow the pre-review checklist's definitions
   command arriving after the occupant's leaves are exhausted is
   admitted, and one arriving while the reconciliation poll yields a
   buffered item is discarded with that item still deliverable at its
-  canonical position.
+  canonical position. The supersede and explicit-cancel tests use the
+  `send`-scripted form the §6 non-blocking `send` enables — a `send`
+  carrying a same-id `CancelInFlight` command or a `Command::cancel(id)`
+  over a keyed occupant whose output is still pending: the `send` does
+  not fail (§6), and the occupant's undelivered output is thereafter
+  unobservable via any `receive*` (INV-3, INV-9). This is the
+  cancel-before-receive scenario the §6 rationale motivates; INV-T8's
+  retention tests deliberately do *not* cancel, since a cancelled
+  output cannot be retained.
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
@@ -653,14 +661,17 @@ Enforcement classes follow the pre-review checklist's definitions
   fail; plus two negative tests that a `send` issued while a deliverable
   message is still pending does *not* fail and leaves that message
   assertable by a later `receive` — one over a **keyed** occupant's
-  output (the `send(Start); send(Cancel)` shared-first script of §6,
-  whose ordering is runtime parity, RFC 0003 INV-14) and one over
-  **unkeyed** output (which asserts only that `send` does not block on
-  it; the ordering is TestStore's linearization, not runtime parity,
-  §6). The keyed-only test would pass an implementation that wrongly
-  fails `send` on unkeyed pending output; the unkeyed-only test would
-  miss a broken keyed cancellation/shared-first path — so both are
-  required.
+  output using a *non-cancelling* `send` (a message that does not target
+  the occupant's id, e.g. `send(Start); send(Unrelated)`) so the keyed
+  output survives: the shared-first ordering is runtime parity (RFC 0003
+  INV-14), and the output is then `receive`d — and one over **unkeyed**
+  output (which asserts only that `send` does not block on it; the
+  ordering is TestStore's linearization, not runtime parity, §6). The
+  keyed-only test would pass an implementation that wrongly fails `send`
+  on unkeyed pending output; the unkeyed-only test would miss a broken
+  keyed shared-first path — so both are required. The `send`-carried
+  supersede/cancel case (where the pending output is *removed*, not
+  retained) is INV-T7's, not a retention test.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
   `send`/`receive*` fail on the quit state without polling any leaf,
   and the `finish` and drop checks poll nothing and pass regardless of
