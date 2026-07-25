@@ -3,9 +3,10 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::config::QueryConfig;
 use super::query::QueryError;
