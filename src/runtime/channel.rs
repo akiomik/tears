@@ -217,16 +217,11 @@ mod tests {
     use std::future::Future;
     use std::num::NonZeroUsize;
 
-    use futures::task::noop_waker_ref;
-
     use super::*;
+    use crate::poll_util::noop_context;
 
     fn cap(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("capacity must be non-zero")
-    }
-
-    fn noop_context() -> Context<'static> {
-        Context::from_waker(noop_waker_ref())
     }
 
     /// Polls a fresh `send` future exactly once and asserts it resolved without

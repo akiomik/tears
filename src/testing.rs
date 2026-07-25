@@ -46,15 +46,15 @@
 //! [`Command::timeout`]: crate::Command::timeout
 
 use std::fmt::Debug;
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::thread;
 
 use futures::stream::BoxStream;
-use futures::task::noop_waker_ref;
 use tokio::runtime::Handle;
 
 use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts};
+use crate::poll_util::noop_context;
 use crate::subscription::core::SubscriptionId;
 
 /// One undelivered effect leaf, held at its enqueue position.
@@ -82,7 +82,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
         let Some(stream) = self.stream.as_mut() else {
             return Poll::Ready(None);
         };
-        let mut context = Context::from_waker(noop_waker_ref());
+        let mut context = noop_context();
         let poll = stream.as_mut().poll_next(&mut context);
         if matches!(poll, Poll::Ready(None)) {
             self.stream = None;
