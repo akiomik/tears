@@ -192,25 +192,39 @@ classes — not by listing the calls the crate happens to use today:
 | `std::net::TcpStream::connect_timeout` | real-time wait |
 | `std::net::TcpStream::set_read_timeout`, `set_write_timeout` | timed-wait configuration; banning the setters closes the only route to a timed socket wait while the blocking `read`/`write` sites stay unbanned |
 | `std::net::UdpSocket::set_read_timeout`, `set_write_timeout` | timed-wait configuration |
+| `std::os::unix::net::UnixStream::set_read_timeout`, `set_write_timeout` | timed-wait configuration; `allow-invalid = true` (unresolvable on non-unix targets), enforced by the Linux CI lint |
+| `std::os::unix::net::UnixDatagram::set_read_timeout`, `set_write_timeout` | timed-wait configuration; `allow-invalid = true`, enforced by the Linux CI lint |
 
 The deprecated `_ms` spellings (`std::thread::sleep_ms`,
 `std::thread::park_timeout_ms`, `std::sync::Condvar::wait_timeout_ms`)
 carry their own lint entries. Pure arithmetic between existing time
 values (`duration_since`, `checked_add`, comparisons) reads nothing and
 stays allowed; untimed blocking (`std::thread::park`, `Condvar::wait`)
-waits on events, not on time, and stays allowed. Platform-gated
-siblings of the table's rows — the `std::os` socket types' timeout
-setters (`std::os::unix::net::UnixStream`, `UnixDatagram`) — do not
-resolve on every compilation target, so they ride INV-C1's review half
-instead of per-target lint entries; the review half likewise covers
-what the lint does not name at all — a direct syscall, or a dependency
-other than the executor used as a time source (next paragraph).
+waits on events, not on time, and stays allowed. The platform-gated
+rows (`std::os::unix::net::UnixStream`, `UnixDatagram` timeout setters)
+do not resolve on every compilation target, but `disallowed-methods`
+accepts a per-entry `allow-invalid = true` that suppresses the "does not
+refer to a reachable function" diagnostic clippy otherwise raises (and
+itself suggests) for an unresolvable path, so they are mechanical lint
+entries like every other row, and the CI lint gate — which runs on
+Linux, where `std::os::unix` resolves — actually enforces them. The
+review-half fallback for a platform-gated row would catch a target CI
+never lints; that set is empty today (`std` exposes no Windows-only
+socket timeout setter — `std::os::windows` adds no such type — so every
+current row resolves and is enforced on the Linux gate), and the clause
+stands as headroom for a future platform-gated member. The review half
+likewise covers what the lint does not name at all — a direct syscall,
+or a dependency other than the executor used as a time source (next
+paragraph).
 Unstable members of the same classes — `std::thread::sleep_until`, the
-`std::sync::mpsc`-style timed receives of `std::sync::mpmc` — are
-uncallable on the crate's stable toolchain and join the table on
-stabilization; `recv_deadline`, equally unstable, is listed ahead of
-that defensively because it completes a family already present, and
-the §4 implementation task confirms the lint accepts its path.
+`std::sync::mpsc`-style timed receives of `std::sync::mpmc`, and
+`std::net::TcpStream::set_linger` (`tcp_linger`), which time-bounds the
+blocking of `close` and so falls in the timed-wait-configuration
+class — are uncallable on the crate's stable toolchain and join the
+table on stabilization; `recv_deadline`, equally unstable, is listed
+ahead of that defensively because it completes a family already
+present, and the §4 implementation task confirms the lint accepts its
+path.
 
 Dependencies are scoped the same way: the executor clock itself
 (`tokio::time`) is the crate's one sanctioned time source, and no
@@ -269,8 +283,12 @@ controlled context, the contract a consumer may cite:
   timeout semantics (deadline anchored at the leaf's first poll, one
   timeout message per modifier) and retry-backoff semantics, and
   `Timer`'s semantics (no tick before one full interval; missed ticks
-  skipped, so a single advance spanning multiple intervals yields one
-  tick, not a replay burst). The contracts are inequality-shaped (never
+  skipped, so for a timer already polled once to pending a single
+  advance spanning multiple intervals yields one tick, not a replay
+  burst — a timer whose stream is advanced past several intervals
+  *before* its first poll yields zero, since `Timer::stream`'s
+  construction-time anchor plus its `.skip(1)` absorb the one elapsed
+  deadline). The contracts are inequality-shaped (never
   early; at-or-after), so the virtual clock's perfect granularity and
   the real clock's scheduler-dependent lateness both satisfy them; a
   paused-clock run is therefore evidence for the contract itself — the
@@ -327,8 +345,8 @@ the rule. They migrate to the virtualizable clock's `Instant`.
 ### 5.1 TestStore stage 2 (RFC 0008 §7 amendment)
 
 The stage-2 amendment gives the store a controlled time context and an
-advance operation, making §4.3-class leaves (timeout, backoff, timer)
-deliverable through ordinary `receive` flow. RFC 0008 §7's
+advance operation, making RFC 0008 §4.3-class leaves (timeout, backoff,
+timer) deliverable through ordinary `receive` flow. RFC 0008 §7's
 non-normative sketch pictured "a store-held clock handle"; this RFC's
 design supersedes that shape — there is no clock value to hold. The
 store holds a controlled time context (§3.2) and `advance` acts on that
@@ -345,7 +363,12 @@ Two design inputs recorded for that amendment:
   leaf's *first poll*, and the store's scans decide when that first
   poll happens; the amendment's advance semantics must account for
   scan-order-dependent anchoring rather than assuming
-  construction-time anchoring.
+  construction-time anchoring. `Timer` anchors differently — at
+  stream-construction time, not first poll (`interval()` in
+  `src/subscription/time.rs`) — so an advance issued before a timer's
+  stream is first polled counts against the construction anchor; the
+  amendment records both anchors since stage 2 delivers `Timer` leaves
+  too.
 - **Feature availability.** The executor's pause-and-advance facilities
   sit behind the `tokio` `test-util` feature, today a dev-dependency
   only. **Decision:** when the first in-crate controlled-context
@@ -382,8 +405,14 @@ own dev-dependencies and runs its tests on a paused single-threaded
 runtime; feature unification makes every tears time read virtual in
 those tests with no tears-side configuration. Deliverable: a
 deterministic-time section in `docs/testing.md` documenting the recipe
-(paused runtime, explicit advance, the §3.2 auto-advance caveat).
-Documentation, not contract surface.
+(paused runtime, explicit advance, the §3.2 auto-advance caveat). The
+caveat is named concretely: awaiting real network I/O under a paused
+runtime lets the executor judge itself idle and auto-advance the clock
+to the next timer before the I/O completes, so a test exercising §4's
+HTTP staleness must drive time and I/O explicitly rather than awaiting a
+live socket — the auto-advance-versus-real-I/O gotcha, stated because
+§4's payoff is precisely HTTP staleness testability. Documentation, not
+contract surface.
 
 ## 6. Invariants
 
@@ -396,12 +425,16 @@ Enforcement classes follow the pre-review checklist's definitions.
   Structural-mechanical: clippy `disallowed-methods` in `clippy.toml`
   carries exactly §3.1's banned-entry-point inventory (landing with the
   §4 migration, which removes the last violations), failing the
-  workspace lint gate on any reintroduction. Structural-review for time
-  reads the lint does not name — inside `std` (the platform-gated
-  `std::os` socket timeout setters, which do not resolve on every
-  target) as well as outside it (a direct syscall, or a dependency
-  other than the executor used by library code as a time source, §3.1's
-  dependency scoping) — checked at code and dependency review.
+  workspace lint gate on any reintroduction. The platform-gated `std::os`
+  socket timeout setters are carried as `allow-invalid = true` entries
+  (§3.1) and so are enforced mechanically wherever CI resolves them —
+  the Linux gate covers `std::os::unix`, so every current row is
+  enforced and the platform-gated review-half fallback covers an empty
+  set today (§3.1). Structural-review for time reads the lint cannot
+  mechanically reach — a future target CI never lints, and everything
+  outside `std` (a direct syscall, or a dependency other than the
+  executor used by library code as a time source, §3.1's dependency
+  scoping) — checked at code and dependency review.
   (Adversarial models: virtual sleeps combined
   with `std` now-reads for comparisons — the table's now-read rows;
   wall-clock time reached without `SystemTime::now` via
@@ -420,14 +453,24 @@ Enforcement classes follow the pre-review checklist's definitions.
   implicitly-advancing clock fails), then advances exactly to the
   deadline and asserts readiness without real-time waiting.
 - **INV-C3**: the time-dependent contracts pinned by RFC 0004 and by
-  `Timer`'s documented semantics hold identically under the virtual
-  clock. Behavioral: the existing paused-clock timeout/retry suites
+  `Timer`'s semantics hold identically under the virtual clock.
+  `Timer`'s current rustdoc documents only the missed-tick Skip
+  behavior, not the first-tick timing (no tick before one full
+  interval) — the `.skip(1)` in `Timer::stream` is the sole source of
+  that behavior today. The §4 implementation task pins it: it adds a
+  first-tick sentence to `Timer`'s rustdoc citing this RFC as the
+  semantics of record, so INV-C3 references a written contract rather
+  than an implementation accident. Behavioral: the existing paused-clock
+  timeout/retry suites
   (`src/command/effect.rs`, `src/command/retry.rs`, `src/runtime.rs`)
   are the timeout/retry half; new paused-clock `Timer` tests pin the
   timer half — no tick ready before an advance of one full interval,
-  the first tick ready after exactly one interval, and a single advance
-  spanning several intervals yielding exactly one tick (the
-  skipped-not-replayed contract). The existing wide-margin real-time
+  the first tick ready after exactly one interval, and, for a stream
+  already polled once to pending, a single advance spanning several
+  intervals yielding exactly one tick (the skipped-not-replayed
+  contract; the poll-once precondition is the §3.2 construction-anchor
+  caveat — an advance before the first poll yields zero). The existing
+  wide-margin real-time
   `Timer` tests remain as non-normative smoke checks; the paused tests
   are the contract's proof.
 - **INV-C4**: production neutrality — the crate exposes no time-control
@@ -435,7 +478,17 @@ Enforcement classes follow the pre-review checklist's definitions.
   clock, before and after the §5.1 feature flip. Structural: review of
   `Runtime` construction and `RuntimeConfig` for the absence of any
   clock field, and the public-surface check (`tests/api_surface.rs`)
-  showing no time-control item. The §4 migration's
+  showing no time-control item. The flip's "observably identical" claim
+  rests on tokio's never-paused fast path (the read path adds one
+  atomic load), but the runtime reads virtual now per iteration in hot
+  loops (e.g. the micro-batch window in `src/runtime.rs`), so the §5.1
+  implementation task carries a load-path regression check rather than
+  a bespoke wall-clock comparison: RFC 0006's acceptance criteria must
+  continue to pass on its reference machine after the flip, under
+  RFC 0006's own measurement conditions and gating. That reuses an
+  apparatus with a defined pass/fail and environment scope instead of
+  reading "observably free" off a two-run criterion difference. The §4
+  migration's
   behavior-preservation half is structural too: the diff is a type
   swap with no logic change, and the existing HTTP suite stays green.
 

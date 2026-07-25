@@ -302,11 +302,22 @@ acceptance force to the reference machine.
 
 A capability absolute about the enforcement tooling itself is the same
 class: *the lint cannot name X* is verified against the tool's actual
-expressiveness before X is delegated to a weaker check. *From
-PR #242:* socket timeout methods described as something "the lint
-cannot name" are ordinary `disallowed-methods` paths; only the
-platform-gated `std::os` siblings, whose paths do not resolve on every
-target, genuinely needed the review half.
+expressiveness before X is delegated to a weaker check, and that
+expressiveness includes the tool's escape hatches for its own error
+modes — a suppression flag can keep an entry mechanical that a first
+reading would delegate. *From PR #242:* socket timeout methods
+described as something "the lint cannot name" are ordinary
+`disallowed-methods` paths. *Corrected in PR #244:* that same round's
+"only the platform-gated `std::os` siblings genuinely needed the review
+half" was itself too weak — `disallowed-methods` takes a per-entry
+`allow-invalid = true` that suppresses the unresolvable-path
+diagnostic, so those siblings are mechanical entries too, enforced on
+every CI target where their path resolves (the Linux gate covers
+`std::os::unix`). The genuinely-delegated remainder shrinks to targets
+CI never lints — an empty set today. Verify a capability absolute
+against the tool's suppression and configuration surface, not only its
+default diagnostic, before writing any review half at all; and name the
+delegated remainder even when it is currently empty (item 1).
 
 ## 5. Normative force and readiness
 
