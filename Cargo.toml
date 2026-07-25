@@ -104,6 +104,9 @@ required-features = ["http"]
 
 [lints.rust]
 missing_docs = "warn"
+# `--cfg loom` is set by the CI loom job's RUSTFLAGS (not a Cargo feature),
+# so `cfg(loom)` gates need declaring for the unexpected_cfgs lint.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [lints.clippy]
 cargo = { level = "warn", priority = -1 }

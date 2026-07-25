@@ -279,7 +279,8 @@ where
     ///
     /// Anchors first, then moves time (RFC 0008 §3.2, §4.3, INV-T13): every
     /// pending leaf not already holding buffered output is polled exactly
-    /// once, in enqueue order — so a [`Command::timeout`] deadline, created
+    /// once, in enqueue order — so a
+    /// [`Command::timeout`](crate::Command::timeout) deadline, created
     /// at its leaf's first poll, anchors at the leaf's enqueue-time virtual
     /// now, while a wait that starts mid-leaf (a retry backoff) begins at
     /// the poll that observes the failed attempt — and only then does the
@@ -732,6 +733,9 @@ mod tests {
     use futures::channel::oneshot;
     use futures::stream;
     use ratatui::Frame;
+    // `tokio::net` is compiled out under `--cfg loom` (tokio gates it), so
+    // the I/O-dependent leaf helper and its tests are too.
+    #[cfg(not(loom))]
     use tokio::net::TcpStream;
     use tracing::Level;
 
@@ -807,6 +811,7 @@ mod tests {
     /// A leaf that needs the I/O driver: polling it inside the store's
     /// time-only context fails the test (RFC 0008 §4.3), so it stands in
     /// for the would-fail-if-polled class.
+    #[cfg(not(loom))]
     fn io_command() -> Command<Msg> {
         Command::perform(
             async {
@@ -1016,6 +1021,7 @@ mod tests {
     // INV-T7: `CancelInFlight` supersedes an occupant whose poll would fail
     // the test (an I/O-dependent leaf, §4.3) without polling it — the §5.1
     // escape hatch that makes cancelling such a keyed leaf expressible.
+    #[cfg(not(loom))]
     #[test]
     fn cancel_in_flight_supersedes_an_io_dependent_occupant() {
         let id = CommandId::new("k");
@@ -1260,6 +1266,7 @@ mod tests {
     // polling any leaf — an I/O-dependent leaf that would fail the test if
     // polled stays untouched — and the finish check polls nothing and
     // passes.
+    #[cfg(not(loom))]
     #[test]
     fn quit_is_terminal_and_discards_remaining_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
@@ -1542,6 +1549,7 @@ mod tests {
     // RFC 0008 §4.3: polling a leaf that needs the I/O driver fails the
     // test with the underlying missing-reactor panic; the scan reaches it
     // even when the receive targets a different message.
+    #[cfg(not(loom))]
     #[test]
     #[should_panic(expected = "IO is disabled")]
     fn polling_an_io_dependent_leaf_fails_the_test() {
