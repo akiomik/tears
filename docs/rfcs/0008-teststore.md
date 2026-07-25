@@ -811,6 +811,11 @@ INV-T10 scoping note are superseded by the resolutions above and by
 §4.3's revised construction check.
 
 Excluded claims, recorded per the checklist's minimal-contract item: a
+claim that `advance(Duration::ZERO)`'s barrier re-fires
+reached-but-unfired timer entries is not made — under the store's own
+operations every clock move carries its own barrier, so such an entry
+cannot arise, and the claim would rest on unverified `advance(0)`
+behavior; a
 same-poll readiness guarantee ("deliverable on the poll immediately
 after `advance`") is deliberately not claimed — RFC 0009 §3.2 pins
 readiness without wall-clock waiting and no fixed observing poll, and
@@ -1006,17 +1011,22 @@ Enforcement classes follow the pre-review checklist's definitions
   the already-reached instant, §3.2), so
   RFC 0009 §3.2's auto-advance clause never fires under the store's
   own operations (RFC 0009 INV-C2's non-idling controller). The
-  barrier itself is enforced by this invariant's behavioral tests: a
-  missing barrier leaves a reached deadline `Pending` at the next
-  scan, failing the deliverable-at-the-deadline assertions below. The store
+  barrier's *presence* is enforced by this invariant's behavioral
+  tests — a missing barrier leaves a reached deadline `Pending` at the
+  next scan, failing the deliverable-at-the-deadline assertions
+  below — but those tests cannot pin its *location*: an implementation
+  driving the executor from the scan side instead would pass them, so
+  the barrier-inside-`advance` decision (§3.2, resolving RFC 0009
+  §5.1's design input) is checked structurally. The store
   cannot contract this for application code: a leaf's poll runs inside
   the context, and an effect that reaches the executor's clock
   facilities there is §4.3's negative space, outside every
   time-related claim — the same scoping INV-T4 applies to a
   nondeterministic `update`. Structural: review of
   `TestStore::new` for the context's construction (paused,
-  current-thread, time-only) and of the store for the absence of any
-  executor-idling site outside its poll and advance mechanics.
+  current-thread, time-only), of `advance` for the barrier as the
+  store's only executor-driving site, and of the store for the absence
+  of any executor-idling site outside its poll and advance mechanics.
   Behavioral: a `Command::timeout` leaf enqueued ahead of a
   test-controlled leaf with several ready messages stays pending
   across repeated `receive`s of those messages — each scan gives the
