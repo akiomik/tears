@@ -200,19 +200,22 @@ The deprecated `_ms` spellings (`std::thread::sleep_ms`,
 carry their own lint entries. Pure arithmetic between existing time
 values (`duration_since`, `checked_add`, comparisons) reads nothing and
 stays allowed; untimed blocking (`std::thread::park`, `Condvar::wait`)
-waits on events, not on time, and stays allowed. Platform-gated
-siblings of the table's rows — the `std::os` socket types' timeout
-setters (`std::os::unix::net::UnixStream`, `UnixDatagram`) — do not
-resolve on every compilation target, but `disallowed-methods` accepts a
-per-entry `allow-invalid = true` that suppresses the "does not refer to
-a reachable function" error clippy otherwise raises (and itself
-suggests) for an unresolvable path, so they are mechanical lint entries
-too, and the CI lint gate — which runs on Linux, where `std::os::unix`
-resolves — actually enforces the unix rows. Only entries for targets CI
-never lints (a Windows-only socket path) stay silently inactive there
-and fall to INV-C1's review half; the review half likewise covers what
-the lint does not name at all — a direct syscall, or a dependency other
-than the executor used as a time source (next paragraph).
+waits on events, not on time, and stays allowed. The platform-gated
+rows (`std::os::unix::net::UnixStream`, `UnixDatagram` timeout setters)
+do not resolve on every compilation target, but `disallowed-methods`
+accepts a per-entry `allow-invalid = true` that suppresses the "does not
+refer to a reachable function" diagnostic clippy otherwise raises (and
+itself suggests) for an unresolvable path, so they are mechanical lint
+entries like every other row, and the CI lint gate — which runs on
+Linux, where `std::os::unix` resolves — actually enforces them. The
+review-half fallback for a platform-gated row would catch a target CI
+never lints; that set is empty today (`std` exposes no Windows-only
+socket timeout setter — `std::os::windows` adds no such type — so every
+current row resolves and is enforced on the Linux gate), and the clause
+stands as headroom for a future platform-gated member. The review half
+likewise covers what the lint does not name at all — a direct syscall,
+or a dependency other than the executor used as a time source (next
+paragraph).
 Unstable members of the same classes — `std::thread::sleep_until`, the
 `std::sync::mpsc`-style timed receives of `std::sync::mpmc`, and
 `std::net::TcpStream::set_linger` (`tcp_linger`), which time-bounds the
@@ -424,13 +427,14 @@ Enforcement classes follow the pre-review checklist's definitions.
   §4 migration, which removes the last violations), failing the
   workspace lint gate on any reintroduction. The platform-gated `std::os`
   socket timeout setters are carried as `allow-invalid = true` entries
-  (§3.1) and so are enforced mechanically wherever CI resolves them
-  (the Linux gate covers `std::os::unix`). Structural-review for time
-  reads the lint cannot mechanically reach — targets CI never lints (a
-  Windows-only socket path) and everything outside `std` (a direct
-  syscall, or a dependency other than the executor used by library code
-  as a time source, §3.1's dependency scoping) — checked at code and
-  dependency review.
+  (§3.1) and so are enforced mechanically wherever CI resolves them —
+  the Linux gate covers `std::os::unix`, so every current row is
+  enforced and the platform-gated review-half fallback covers an empty
+  set today (§3.1). Structural-review for time reads the lint cannot
+  mechanically reach — a future target CI never lints, and everything
+  outside `std` (a direct syscall, or a dependency other than the
+  executor used by library code as a time source, §3.1's dependency
+  scoping) — checked at code and dependency review.
   (Adversarial models: virtual sleeps combined
   with `std` now-reads for comparisons — the table's now-read rows;
   wall-clock time reached without `SystemTime::now` via
@@ -477,10 +481,14 @@ Enforcement classes follow the pre-review checklist's definitions.
   showing no time-control item. The flip's "observably identical" claim
   rests on tokio's never-paused fast path (the read path adds one
   atomic load), but the runtime reads virtual now per iteration in hot
-  loops (e.g. the micro-batch window at `src/runtime.rs:314-315`), so
-  the §5.1 implementation task reruns the RFC 0006 load bench across the
-  flip as regression evidence that the added load-path check is
-  observably free, not merely argued to be. The §4 migration's
+  loops (e.g. the micro-batch window in `src/runtime.rs`), so the §5.1
+  implementation task carries a load-path regression check rather than
+  a bespoke wall-clock comparison: RFC 0006's acceptance criteria must
+  continue to pass on its reference machine after the flip, under
+  RFC 0006's own measurement conditions and gating. That reuses an
+  apparatus with a defined pass/fail and environment scope instead of
+  reading "observably free" off a two-run criterion difference. The §4
+  migration's
   behavior-preservation half is structural too: the diff is a type
   swap with no logic change, and the existing HTTP suite stays green.
 
