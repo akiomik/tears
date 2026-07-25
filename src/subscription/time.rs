@@ -7,10 +7,8 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use futures::StreamExt;
-use futures::stream::BoxStream;
-use tokio::time::MissedTickBehavior;
-use tokio::time::interval;
-use tokio_stream::wrappers::IntervalStream;
+use futures::stream::{self, BoxStream};
+use tokio::time::{Instant, sleep_until};
 
 use super::SubscriptionSource;
 
@@ -26,17 +24,28 @@ pub enum TimerEvent {
 /// This is useful for creating animations, periodic updates, or any time-based
 /// behavior in your application.
 ///
-/// ## Implementation Details
+/// ## Timing semantics
 ///
-/// Uses `tokio::time::interval` with `MissedTickBehavior::Skip` to provide
-/// accurate timing without catching up on missed ticks. This is appropriate
-/// for UI applications where maintaining a consistent tick rate is more
-/// important than processing every tick.
+/// The semantics of record are RFC 0009 §4.2
+/// (`docs/rfcs/0009-clock-di.md`):
 ///
-/// ## Performance
+/// - **Anchor.** The timer's time anchor is fixed when its stream is built
+///   ([`SubscriptionSource::stream`]); [`Timer::new`] only stores the
+///   interval. The first tick becomes deliverable one full interval after
+///   that anchor — there is no tick at the construction instant.
+/// - **No catch-up.** However many interval boundaries elapse while a tick
+///   goes untaken (a busy runtime, a long delay), exactly one tick becomes
+///   deliverable — never a burst of missed ticks.
+/// - **Post-miss cadence.** Taking a tick sets the next deadline to the
+///   first anchor-phase boundary strictly after that moment: the cadence is
+///   drift-corrected against the anchor, not reset to "now + interval", so
+///   after a late tick the next one can arrive less than one interval
+///   later.
 ///
-/// The timer uses Tokio's efficient interval mechanism with drift correction,
-/// making it suitable for high frame rates (e.g., 60 FPS or higher).
+/// Dropping missed ticks instead of replaying them is appropriate for UI
+/// applications, where holding a consistent tick rate matters more than
+/// processing every scheduled tick; the drift-corrected cadence keeps the
+/// timer suitable for high frame rates (e.g. 60 FPS or higher).
 ///
 /// # Example
 ///
@@ -92,22 +101,24 @@ impl SubscriptionSource for Timer {
     type Key = NonZeroU64;
 
     fn stream(&self) -> BoxStream<'static, TimerEvent> {
-        // NOTE: Using Skip behavior to drop missed ticks rather than trying to catch up.
-        // This is appropriate for UI applications where we want
-        // to maintain a consistent tick rate rather than processing old ticks.
-        let duration = Duration::from_millis(self.interval_ms.get());
+        let interval = Duration::from_millis(self.interval_ms.get());
         tracing::trace!(
             target: "tears::subscription::time",
             interval_ms = self.interval_ms.get(),
             "timer stream created"
         );
-        let mut interval = interval(duration);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        IntervalStream::new(interval)
-            .skip(1) // Skip the first immediate tick
-            .map(|_| TimerEvent::Tick)
-            .boxed()
+        // The anchor is fixed here, at stream construction (RFC 0009 §4.2);
+        // every deadline is an anchor-phase boundary. `tokio::time::interval`
+        // is deliberately not used: its `MissedTickBehavior::Skip` engages
+        // only once a tick is late by more than a fixed margin, so at
+        // sub-margin intervals it replays a catch-up burst the RFC forbids.
+        let anchor = Instant::now();
+        stream::unfold(anchor + interval, move |deadline| async move {
+            sleep_until(deadline).await;
+            let next = next_anchor_phase_deadline(anchor, interval, Instant::now());
+            Some((TimerEvent::Tick, next))
+        })
+        .boxed()
     }
 
     fn key(&self) -> Self::Key {
@@ -115,14 +126,35 @@ impl SubscriptionSource for Timer {
     }
 }
 
+/// The first anchor-phase boundary strictly after `now`: the smallest
+/// `anchor + k * interval` with `k >= 1` that lies after `now` (RFC 0009
+/// §4.2 post-miss cadence).
+fn next_anchor_phase_deadline(anchor: Instant, interval: Duration, now: Instant) -> Instant {
+    let elapsed_intervals = now.duration_since(anchor).as_nanos() / interval.as_nanos();
+    let offset_nanos = interval
+        .as_nanos()
+        .saturating_mul(elapsed_intervals + 1)
+        .try_into()
+        .unwrap_or(u64::MAX);
+    anchor + Duration::from_nanos(offset_nanos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use tokio::time::{Duration, Instant, timeout};
+    use futures::FutureExt;
+    use tokio::time::{Duration, Instant, advance, timeout};
 
     fn timer(interval_ms: u64) -> Timer {
         Timer::new(NonZeroU64::new(interval_ms).expect("timer interval must be non-zero"))
+    }
+
+    /// Polls the stream exactly once without idling the executor, so the
+    /// paused clock never auto-advances (RFC 0009 §3.2's non-idling
+    /// controller).
+    fn poll_once(stream: &mut BoxStream<'static, TimerEvent>) -> Option<TimerEvent> {
+        stream.next().now_or_never().flatten()
     }
 
     #[test]
@@ -148,6 +180,115 @@ mod tests {
 
         // Different intervals should produce different IDs
         assert_ne!(timer1.key(), timer2.key());
+    }
+
+    // Paused-clock contract tests (RFC 0009 §4.2, INV-C3). The 1 ms and 2 ms
+    // intervals fall inside Tokio's `MissedTickBehavior::Skip` lateness
+    // margin, so an implementation leaning on Skip replays a catch-up burst
+    // and fails them. The real-time tests further down remain non-normative
+    // smoke checks.
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timer_paused_first_tick_one_interval_after_anchor() {
+        // INV-C3 (a) and (b): no tick before `anchor + interval`, first tick
+        // ready once virtual now reaches it.
+        let mut stream = timer(2).stream();
+
+        assert!(
+            poll_once(&mut stream).is_none(),
+            "no tick at the construction instant"
+        );
+
+        advance(Duration::from_millis(1)).await;
+        assert!(
+            poll_once(&mut stream).is_none(),
+            "no tick before the first deadline"
+        );
+
+        advance(Duration::from_millis(1)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "first tick ready one interval after the anchor"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timer_paused_no_catch_up_burst() {
+        // INV-C3 (c): one advance spanning several interval boundaries makes
+        // exactly one tick ready, followed by pending until the next
+        // anchor-phase deadline.
+        let mut stream = timer(1).stream();
+
+        advance(Duration::from_micros(5500)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "one tick ready after the multi-interval advance"
+        );
+        assert!(
+            poll_once(&mut stream).is_none(),
+            "a second tick would be a catch-up burst"
+        );
+
+        // The next anchor-phase boundary (6 ms) is only 0.5 ms away.
+        advance(Duration::from_micros(500)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "cadence resumes at the next anchor-phase boundary"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timer_paused_post_miss_cadence_preserves_phase() {
+        // INV-C3 (d): after a tick delivered late at 3.5 ms on a 1 ms timer,
+        // the next tick fires at the 4 ms anchor-phase boundary, not at
+        // "now + interval" (4.5 ms).
+        let mut stream = timer(1).stream();
+
+        advance(Duration::from_millis(1)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "on-time first tick"
+        );
+
+        advance(Duration::from_micros(2500)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "late tick at 3.5 ms"
+        );
+
+        advance(Duration::from_micros(400)).await;
+        assert!(
+            poll_once(&mut stream).is_none(),
+            "no tick before the 4 ms boundary"
+        );
+
+        advance(Duration::from_micros(100)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "tick at the preserved 4 ms anchor-phase boundary, not 4.5 ms"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timer_paused_anchor_is_stream_construction() {
+        // INV-C3 (e): time advanced before `stream()` does not consume the
+        // first interval — the anchor is the `stream()` call, not
+        // `Timer::new`.
+        let source = timer(2);
+        advance(Duration::from_millis(10)).await;
+
+        let mut stream = source.stream();
+        advance(Duration::from_millis(1)).await;
+        assert!(
+            poll_once(&mut stream).is_none(),
+            "pre-stream() time must not count against the first interval"
+        );
+
+        advance(Duration::from_millis(1)).await;
+        assert!(
+            matches!(poll_once(&mut stream), Some(TimerEvent::Tick)),
+            "first deadline is stream_time + interval"
+        );
     }
 
     #[tokio::test]
