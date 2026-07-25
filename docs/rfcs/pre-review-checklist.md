@@ -192,7 +192,14 @@ Prompts that have already paid off:
   `send(Start); send(Cancel)` and then asserted the message was still
   deliverable, which INV-T7 and §5.1 make impossible — a cancelled
   occupant's output is gone; the retention test had to use a
-  non-cancelling `send`, and the cancel case moved to INV-T7).
+  non-cancelling `send`, and the cancel case moved to INV-T7). The walk
+  includes the steps *between* the assertions: a mandated test that
+  continues past an expected failure leans on post-failure state the
+  contract may leave undefined (from PR #253: INV-T12's test scripted
+  repeated failing `receive*` calls and kept driving the store, whose
+  post-panic state no clause pins; restated over non-failing scans that
+  observe the same pending-ness by receiving a later-enqueued
+  control leaf's output).
 - A normative contract stated as *observable properties*, not as the
   implementation mechanism that happens to produce them. A clause phrased
   over a specific call (`.skip(1)`, an `interval` handle) is satisfiable
@@ -278,7 +285,14 @@ read of the relevant code before the text is pushed — including the
 concurrency schedule (who runs on which task, what happens between send
 and receive). This applies with double force to text added while
 responding to review: patch text tends to get less verification than the
-original draft, and it is where false justifications creep in.
+original draft, and it is where false justifications creep in. The
+review's own words are inside that scope: a reviewer's description of a
+mechanism or a dependency's behavior is a hypothesis to verify, not a
+citation, and promoting it into normative text is what triggers the
+check (from PR #253: a review suggestion listed `tokio::time::pause`
+among the clock calls an effect could issue; the fix promoted the list
+to a normative "succeeds", but pausing an already-paused clock panics —
+the reviewer then caught their own suggestion's promotion).
 
 *From PR #211:* "quit occupancy is bounded by producer count" — false,
 because a task terminates after `send` while its signal stays queued —
@@ -388,7 +402,17 @@ a `Timer` contract asserted no catch-up burst "because
 only once a tick is late past a fixed 5 ms margin, so sub-margin
 intervals replayed a burst; and "ready on the next poll after `advance`"
 was stronger than Tokio's `advance`, which documents that it does not
-wait for the sleeps it moves past.
+wait for the sleeps it moves past. The negative form — a normative
+claim that a mechanism is absent or unneeded ("carries no barrier",
+"polls nothing after") — is checked against how the passing
+implementation actually achieves the observable property, because green
+tests prove the property, not the mechanism's absence, and a mechanism
+the contract denies can be silently load-bearing (from PR #253: the
+amendment pinned "no timer-driver barrier" while its implementation's
+`block_on(advance)` supplied exactly that barrier — moving the paused
+clock alone leaves registered timer entries unfired — so the pair
+"no barrier + readiness at the next scan" was jointly unimplementable
+and the barrier became contract).
 
 A "matches the runtime" or parity claim separates outcome-parity from
 mechanism-parity, and the runtime step it names is verified to exist.
