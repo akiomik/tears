@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the late tick). The timer's anchor is fixed at its stream's first
   poll — read from the clock of the runtime that polls it — and the first
   tick arrives one full interval after that anchor (RFC 0009 §4.2)
+- The runtime's frame scheduler no longer replays missed frame deadlines at
+  sub-margin frame rates (above roughly 200 FPS): after a stall, at most one
+  frame fires immediately and the cadence resumes on the frame anchor's
+  phase — the same non-catch-up rule `Timer` now follows. At 60 FPS and other
+  common rates the behavior is unchanged, since tokio's `Skip` already
+  suppressed the burst outside its lateness margin
 
 ### Added
 

@@ -518,14 +518,11 @@ impl<App: Application> Runtime<App> {
                 // Frame tick: render if needed and update subscriptions. The
                 // scheduler parks while idle, so the loop does not wake at the
                 // frame rate just to do nothing. When a message re-enables frame
-                // work, the elapsed timer is ready on the next poll and adds no
-                // render latency; `MissedTickBehavior::Skip` controls where the
-                // following tick lands, but its skip engages only once a tick
-                // is late past tokio's fixed lateness margin, so sub-margin
-                // frame periods (above roughly 200 FPS) can still replay a
-                // catch-up burst of frame ticks after a stall — the defect
-                // RFC 0009 §4.2 removed from `Timer`, tracked for the frame
-                // scheduler in https://github.com/akiomik/tears/issues/256.
+                // work, the elapsed deadline is ready on the next poll and adds
+                // no render latency; missed frame deadlines are never replayed —
+                // at most one immediate frame fires after a stall, and the
+                // cadence resumes on the anchor's phase (the same non-catch-up
+                // rule as `Timer`, RFC 0009 §4.2).
                 () = self.scheduler.next_work_frame() => {
                     self.process_frame_tick(terminal)?;
                 }
