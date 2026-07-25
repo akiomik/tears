@@ -12,8 +12,10 @@
 //! # Scope and limitations
 //!
 //! - **Store-owned controlled time context**: [`TestStore::new`] builds a
-//!   paused, single-threaded, time-only executor context that the store
-//!   alone drives (RFC 0008 §4.3; RFC 0009 §3.2). Construction panics if a
+//!   paused, single-threaded, time-only executor context with no public
+//!   accessor; the store's own operations alone move its clock, and effect
+//!   code that reaches the context's facilities from inside a poll is
+//!   outside the store's contract (RFC 0008 §4.3; RFC 0009 §3.2). Construction panics if a
 //!   Tokio runtime is already entered, so tests run on a plain `#[test]`,
 //!   never `#[tokio::test]` (RFC 0008 INV-T10): an ambient runtime's
 //!   pausedness cannot be verified, and its clock is not the store's clock.
@@ -171,8 +173,9 @@ where
     app: App,
     /// The controlled time context (RFC 0009 §3.2): a current-thread
     /// executor context with the clock started paused and no I/O driver.
-    /// Every poll under §4.1's budget enters it, and `advance` is the only
-    /// thing that moves its clock (RFC 0008 INV-T12).
+    /// Every poll under §4.1's budget enters it, and among the store's own
+    /// operations only `advance` moves its clock (RFC 0008 INV-T12;
+    /// clock-manipulating effects are §4.3's negative space).
     context: Runtime,
     /// Undelivered effect leaves in enqueue order.
     pending: Vec<PendingLeaf<App::Message>>,
@@ -261,7 +264,9 @@ where
     /// # Panics
     ///
     /// Fails the test if quit has already been observed via
-    /// [`receive_quit`](Self::receive_quit).
+    /// [`receive_quit`](Self::receive_quit); a keyed-intake reconciliation
+    /// poll can additionally surface a leaf's own poll failure (an
+    /// I/O-dependent leaf's missing-reactor panic, RFC 0008 §4.3).
     #[track_caller]
     pub fn send(&mut self, msg: App::Message) {
         self.assert_running("send");
@@ -274,8 +279,12 @@ where
     /// pending leaf not already holding buffered output is polled exactly
     /// once, in enqueue order — so a time-gated leaf's deadline anchors at
     /// its enqueue-time virtual now — and only then does the clock move
-    /// forward, by exactly `duration`. Delivers nothing: output made ready
-    /// by the advance is observed at the next
+    /// forward, by exactly `duration`, with a timer-driver barrier: the
+    /// executor is driven through the newly reached instant (never idled
+    /// toward a future deadline), so already-registered timer entries whose
+    /// deadlines the move reached fire. Delivers nothing and polls no leaf
+    /// after the clock moves: output made ready by the advance is observed
+    /// at the next
     /// [`receive`](Self::receive)-family call, [`finish`](Self::finish), or
     /// drop check that polls the leaf. `advance(Duration::ZERO)` is legal
     /// and anchors without moving time.
@@ -283,7 +292,10 @@ where
     /// # Panics
     ///
     /// Fails the test if quit has already been observed via
-    /// [`receive_quit`](Self::receive_quit).
+    /// [`receive_quit`](Self::receive_quit); the anchoring scan can also
+    /// surface a leaf's own poll failure (an I/O-dependent leaf's
+    /// missing-reactor panic, RFC 0008 §4.3), and a `duration` overflowing
+    /// the clock's instant range panics.
     #[track_caller]
     pub fn advance(&mut self, duration: Duration) {
         self.assert_running("advance");
@@ -303,6 +315,12 @@ where
         }
         self.pending
             .retain(|leaf| leaf.stream.is_some() || leaf.buffered.is_some());
+        // The timer-driver barrier (§3.2): block_on drives the executor
+        // through the newly reached instant, firing already-registered
+        // timer entries — moving the paused clock alone would leave them
+        // unfired and Pending under the manual polls above. Tasks spawned
+        // onto the context may receive incidental polls here (§4.3's
+        // negative space).
         self.context.block_on(time::advance(duration));
     }
 
