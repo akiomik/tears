@@ -167,6 +167,9 @@ where
     App::Message: Debug,
 {
     /// Runs `Application::new(flags)` and enqueues the init command.
+    ///
+    /// Panics if called while a Tokio runtime is already entered — for
+    /// example, from inside `#[tokio::test]` (§4.3, INV-T10).
     #[must_use]
     pub fn new(flags: App::Flags) -> Self;
 
@@ -371,13 +374,18 @@ pending command set — §1.2.) Stage 1's contract is honest about this
 rather than silently lenient: polling such a leaf fails the test.
 
 This guarantee holds only because stage 1 requires the reactor's
-genuine *absence*, not merely the store's own inaction: if `TestStore`
-is constructed while a Tokio runtime is already entered (a
-`#[tokio::test]` body, or any code running on a Tokio worker thread),
-the same leaf's first poll finds a real reactor and returns `Pending`
-instead of panicking — it never fails, it just never completes, which
-is a silent stage-1 hang, not the documented failure.
-`TestStore::new` therefore checks
+genuine *absence*, not merely the store's own inaction, and an entered
+Tokio runtime does not reliably restore it: with the default
+`#[tokio::test]` configuration (`enable_all`), the same leaf's first
+poll finds a real reactor and returns `Pending` instead of panicking —
+it never fails, it just never completes, which is a silent stage-1
+hang, not the documented failure — while a runtime entered with a
+narrower driver configuration can still panic on the same poll. Because
+whether polling panics or hangs depends on which drivers the entered
+runtime happens to enable, and the store has no cheap, safe way to
+inspect that from inside, stage 1 does not try to distinguish: it
+refuses to run inside any entered runtime at all. `TestStore::new`
+therefore checks
 `tokio::runtime::Handle::try_current()` and panics immediately, with a
 diagnostic naming the precondition, if one is currently entered. Stage 1
 tests must run on a plain `#[test]` (or equivalent), never
@@ -809,15 +817,18 @@ maps to INV-T1.
 
 - RFC 0002 — redraw suppression: the directive `redraw_requested`
   observes.
-- RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation
-  and INV-1, INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10, INV-11,
-  INV-14 (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
+- RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation,
+  its §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
+  INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10, INV-11, INV-14
+  (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
 - RFC 0005 — structural lifecycle identity: `SubscriptionId`, the
   declared-set semantics `subscription_ids` observes.
 - RFC 0006 — runtime load control: the shutdown discard carve-out §5.3
   mirrors (INV-L2); the runtime contracts §1.2 excludes.
 - RFC 0007 — RuntimeConfig: the prelude-membership reasoning §3.3
   follows.
+- RFC 0009 — Clock DI: its §3.2 controlled time context, which §7's
+  stage-2 sketch and INV-T10's stage-1 scoping (§4.3, §8) both cite.
 - `src/application.rs` — the trait whose bounds §2 pins.
 - `src/command/core.rs`, `src/command/runtime_parts.rs` — the
   decomposition boundary INV-T3 names.
