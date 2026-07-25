@@ -248,20 +248,28 @@ generic) are implementation latitude.
   `redraw_requested`, `subscription_ids`, and `finish` remain callable.
 - **`subscription_ids`** calls `Application::subscriptions` and returns
   the declared IDs in declaration order, deduplicated by RFC 0005 §3.5's
-  first-wins rule: for equal full IDs in the declared list, only the
-  first occurrence is returned. This mirrors the set the runtime would
-  actually start — `SubscriptionManager::update` applies the same rule
-  before spawning — so asserting on `subscription_ids()` predicts which
-  subscriptions would be live, not merely which lines of `subscriptions`
-  were written. TestStore does not reproduce the warning-level tracing
-  event RFC 0005 §3.5 requires of the ignored duplicate: that event is
-  `SubscriptionManager::update`'s own side effect, and TestStore never
-  constructs or runs a `SubscriptionManager` (§1.2). `SubscriptionId` is
-  already `Clone + Eq + Hash + Debug`, so the test asserts on the
-  returned `Vec` directly. This is the observation the
-  `subscriptions`-purity contract (`src/application.rs`) makes
-  meaningful: the declared set is a pure function of state, so asserting
-  it after a `send` is deterministic.
+  first-occurrence-stable rule: for equal full IDs in the declared list,
+  only the first occurrence is kept, at its original position among the
+  survivors (`[A, B, A]` → `[A, B]`, never `[B, A]` or any other
+  reordering). This is the same *desired-set* `SubscriptionManager::update`
+  computes before reconciling — not the set it spawns: `update` leaves an
+  already-running id in that set untouched and calls a source's
+  `stream()` only for an id newly entering it (`src/subscription.rs`).
+  `subscription_ids` performs the same dedup without going anywhere near
+  that machinery — it never calls
+  `stream()` on any declared source and never constructs or runs a
+  `SubscriptionManager` (§1.2) — so its return value predicts the
+  reconciliation *input*, not which ids the runtime spawns or which are
+  currently live. For the same reason it does not reproduce the
+  warning-level tracing event RFC 0005 §3.5 requires of the ignored
+  duplicate: that event is `SubscriptionManager::update`'s own side
+  effect, never triggered by a call that runs no `SubscriptionManager`
+  at all. `SubscriptionId` is already `Clone + Eq + Hash + Debug`, so
+  the test asserts on the returned `Vec` directly. This is the
+  observation the `subscriptions`-purity contract (`src/application.rs`)
+  makes meaningful: the declared set is a pure function of state, so
+  asserting it after a `send` is deterministic. INV-T11 (§8) pins the
+  dedup rule and the no-side-effect claim as tested contract.
 - **`finish` / drop**: `finish` runs the exhaustiveness check (§6).
   Dropping an unfinished store runs the same check, except when the
   thread is already panicking (so a failed assertion does not cascade
@@ -375,17 +383,30 @@ rather than silently lenient: polling such a leaf fails the test.
 
 This guarantee holds only because stage 1 requires the reactor's
 genuine *absence*, not merely the store's own inaction, and an entered
-Tokio runtime does not reliably restore it: with the default
+Tokio runtime does not reliably restore it. With the default
 `#[tokio::test]` configuration (`enable_all`), the same leaf's first
 poll finds a real reactor and returns `Pending` instead of panicking —
-it never fails, it just never completes, which is a silent stage-1
-hang, not the documented failure — while a runtime entered with a
-narrower driver configuration can still panic on the same poll. Because
-whether polling panics or hangs depends on which drivers the entered
-runtime happens to enable, and the store has no cheap, safe way to
-inspect that from inside, stage 1 does not try to distinguish: it
-refuses to run inside any entered runtime at all. `TestStore::new`
-therefore checks
+not the documented immediate failure, but the store's ordinary
+not-yet-deliverable handling: a `receive*` reaching only this leaf
+fails with the ordinary "effects pending but not ready" diagnostic
+(§3.2, §6) rather than the one naming a reactor-requiring leaf, and a
+`Pending` poll by itself is not a failure at all — like any other
+in-flight leaf, it is caught only if `finish`/drop still finds it
+unfinished (the pending-leaf carve-out below, this section). Whether
+it stays unfinished until then is no longer stage 1's decision: because
+a real reactor is now present, the same command effect this leaf
+wraps (`tokio::time::sleep` under `timeout`, or a backoff delay) can
+keep making genuine progress against it between store calls, so a
+later poll may find it deliverable with real output — an outcome timed
+by the ambient runtime and real wall-clock elapsed time, not by the
+test program, which is exactly the nondeterminism stage 1's INV-T4
+exists to rule out. (A runtime entered with a narrower driver
+configuration — no timer, no I/O — still panics on the same poll, so
+the failure mode is not even uniform across entered runtimes.) Because
+the outcome depends on drivers and scheduling the store cannot cheaply
+or safely inspect from inside, stage 1 does not try to distinguish any
+of these cases: it refuses to run inside any entered runtime at all.
+`TestStore::new` therefore checks
 `tokio::runtime::Handle::try_current()` and panics immediately, with a
 diagnostic naming the precondition, if one is currently entered. Stage 1
 tests must run on a plain `#[test]` (or equivalent), never
@@ -768,35 +789,57 @@ Enforcement classes follow the pre-review checklist's definitions
 - **INV-T10**: reactor-absence precondition (stage 1 only, §7) —
   `TestStore::new` panics immediately, before returning a store, if
   `tokio::runtime::Handle::try_current()` succeeds, so §4.3's "polling a
-  time-dependent leaf fails the test" guarantee cannot silently degrade
-  into an unpolled hang inside a Tokio runtime context. Structural:
-  review of `TestStore::new` for the check, placed before any other
-  construction work. Behavioral: a test constructs `TestStore` from
-  inside `#[tokio::test]` and asserts the panic and that its message
-  names the precondition (not the generic missing-reactor panic §4.3
-  otherwise produces).
+  time-dependent leaf fails the test" guarantee cannot silently
+  degrade, inside a Tokio runtime context, into the leaf's ordinary
+  not-yet-deliverable handling — with the test's outcome then timed by
+  the ambient runtime and real wall-clock progress instead of guaranteed
+  fail-fast (§4.3). Structural: review of `TestStore::new` for the
+  check, placed before any other construction work. Behavioral: a test
+  constructs `TestStore` from inside `#[tokio::test]` and asserts the
+  panic and that its message names the precondition (not the generic
+  missing-reactor panic §4.3 otherwise produces).
+- **INV-T11**: subscription-declaration observation —
+  `subscription_ids` returns RFC 0005 §3.5's first-occurrence-stable
+  dedup of `Application::subscriptions()`'s declared list (duplicates
+  collapse to their first occurrence, at that occurrence's original
+  position — `[A, B, A]` → `[A, B]`, never `[B, A]`), and produces it
+  without calling `stream()` on any declared source or otherwise
+  constructing or running a `SubscriptionManager` (§1.2, §3.2). The
+  returned `Vec` is the reconciliation *input* `SubscriptionManager::update`
+  would compute, not a prediction of which ids it spawns or already has
+  running — `update` leaves an already-running id untouched and calls
+  `stream()` only for one newly entering the set
+  (`src/subscription.rs`). Structural: review of `subscription_ids`
+  for the absence of any `SubscriptionManager` construction or
+  `Subscription::spawn`/`stream()` call. Behavioral: a duplicate-ID test
+  asserting `[A, B, A]` dedups to `[A, B]`, not `[B, A]` or any other
+  order — ruling out a last-occurrence or resorted implementation; a
+  `MockSource`-style test asserting its `stream()` constructor is never
+  invoked by a `subscription_ids` call; and, since §3.2 keeps the
+  no-warning claim as contract, a `tracing` capture asserting zero
+  `target: "tears::subscription"` duplicate-ignored events fire from a
+  `subscription_ids` call over a duplicate-ID declaration.
 
 Surface–invariant coverage: `new`/`send`/`receive*`/`finish` map to
 INV-T2/T3/T4/T8, with `new` additionally covered by INV-T10; `state` is
 the pure accessor through which INV-T4's state-transition transcript is
 read, covered there; delivery order maps to INV-T5/T6; cancellation
-metadata to INV-T7; `receive_quit` and the quit state to INV-T9;
-`redraw_requested` and `subscription_ids` are pure observations of
-contracts owned elsewhere (RFC 0002's directive; RFC 0005's declared
-identity) and are covered by INV-T3 (they read what the runtime would
-read) plus one behavioral test each — with two carve-outs. First: the
-init-command directive `redraw_requested` reports before the first step
-is TestStore-specific `Command` introspection and is *not* a prediction
-of the runtime's first render (§5.2), so it falls outside INV-T3's
+metadata to INV-T7; `receive_quit` and the quit state to INV-T9.
+`redraw_requested` is a pure observation of a contract owned elsewhere
+(RFC 0002's directive) and is covered by INV-T3 (it reads what the
+runtime would read, and directives are named in INV-T3's own text)
+plus one behavioral test, with one carve-out: the init-command
+directive `redraw_requested` reports before the first step is
+TestStore-specific `Command` introspection and is *not* a prediction of
+the runtime's first render (§5.2), so it falls outside INV-T3's
 "runtime would read" umbrella; the behavioral test for it asserts the
 init command's folded directive, not a runtime first-frame outcome.
-Second: `subscription_ids`'s first-wins dedup (RFC 0005 §3.5) applies,
-but the duplicate-ignored warning event does not, since TestStore never
-runs a `SubscriptionManager` to emit it (§3.2); the behavioral test for
-`subscription_ids` therefore includes a duplicate-declared-ID case
-asserting the returned `Vec` keeps only the first occurrence, without
-asserting any tracing event. The absence of an `Application` change
-maps to INV-T1.
+`subscription_ids` is a pure observation of a contract owned elsewhere
+(RFC 0005's declared identity) but is *not* an INV-T3 case — INV-T3
+governs `Command` decomposition only, and subscriptions never pass
+through it — so it gets its own invariant, INV-T11, covering the dedup
+rule, the no-side-effect claim, and the no-warning claim together
+(§8). The absence of an `Application` change maps to INV-T1.
 
 ## 9. Open questions
 
