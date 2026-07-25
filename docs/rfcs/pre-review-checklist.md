@@ -177,6 +177,32 @@ Prompts that have already paid off:
   #240: the deliverability check had no poll budget until "each check
   polls each leaf its scan reaches exactly once, with wake-ups not
   honored within the call" was pinned).
+- A behavioral test an invariant *prescribes*, checked against the other
+  invariants and contracts — not only against the property it proves. A
+  mandated test is itself an execution; run the joint-satisfiability walk
+  on it (from PR #246: INV-T8's retention test scripted
+  `send(Start); send(Cancel)` and then asserted the message was still
+  deliverable, which INV-T7 and §5.1 make impossible — a cancelled
+  occupant's output is gone; the retention test had to use a
+  non-cancelling `send`, and the cancel case moved to INV-T7).
+- A normative contract stated as *observable properties*, not as the
+  implementation mechanism that happens to produce them. A clause phrased
+  over a specific call (`.skip(1)`, an `interval` handle) is satisfiable
+  by keeping that mechanism while breaking intent, and is falsely refuted
+  by a conforming reimplementation that drops it (from PR #246: the
+  `Timer` non-catch-up contract was reworded from "`.skip(1)` absorbs the
+  elapsed deadline" to a `next_deadline`-relative property so a
+  from-scratch timer still conforms).
+- A multi-clause contract over one stateful object, checked where its
+  clauses interact and with the *resulting* state pinned, not only the
+  immediate output. Read each clause against the boundary input the
+  others produce (from PR #246: a `Timer` contract said "a gap shorter
+  than one interval yields no tick" and, separately, "the next deadline
+  is the anchor-phase boundary after a miss" — at 3.5 ms on a 1 ms timer
+  that boundary is 4 ms, 0.5 ms later, so the clauses disagreed on
+  whether it fires; and "return one tick after a miss" left the post-miss
+  cadence unpinned. Restating the whole contract deadline-relative fixed
+  both).
 
 ## 3. Enforcement class, declared up front
 
@@ -319,6 +345,43 @@ against the tool's suppression and configuration surface, not only its
 default diagnostic, before writing any review half at all; and name the
 delegated remainder even when it is currently empty (item 1).
 
+A behavioral claim about a dependency is a code claim, verified against
+that dependency's documented semantics — thresholds, margins, and
+"best-effort" hedges included — not its assumed behavior. *From PR #246:*
+a `Timer` contract asserted no catch-up burst "because
+`MissedTickBehavior::Skip` skips missed ticks", but Tokio's Skip engages
+only once a tick is late past a fixed 5 ms margin, so sub-margin
+intervals replayed a burst; and "ready on the next poll after `advance`"
+was stronger than Tokio's `advance`, which documents that it does not
+wait for the sleeps it moves past.
+
+A "matches the runtime" or parity claim separates outcome-parity from
+mechanism-parity, and the runtime step it names is verified to exist.
+*From PR #246:* "the store skips the poll, matching the runtime, which
+aborts the keyed task without sampling it" was false — the runtime
+samples receiver facts before every `Spawn` regardless of policy; the
+store's skip was justified instead by the sample not changing the
+outcome. Separately, `redraw_requested` reading the init directive was
+described as "what the runtime would read" although the runtime never
+consults the init redraw directive at all.
+
+A term naming a code moment — "construction", "start", "first poll",
+"anchor" — is pinned to the exact site when two candidate sites differ
+observably. *From PR #246:* "the timer's construction-time anchor" was
+ambiguous between `Timer::new` (which only stores the interval) and
+`Timer::stream()` (which builds the `interval()`); advancing time between
+them changes the first deadline, so the text was fixed to
+"stream-construction anchor" and given a test that advances time across
+the gap.
+
+"Behavior-preserving", "no-op", or "internal only" is an operational
+absolute about the whole change: one observable difference refutes it,
+and once refuted the header's `CHANGELOG` and `Scope` must record the
+change (item 7). *From PR #246:* the `Timer` non-catch-up fix was an
+observable behavior change for short-interval timers, so `CHANGELOG:
+none` / "behavior-preserving" became `CHANGELOG: Fixed`, with the fix
+added to `Scope` and its own implementation section.
+
 ## 5. Normative force and readiness
 
 An RFC or amendment that gates implementation carries no soft spots in
@@ -421,6 +484,22 @@ changed-claims list.
   happens in `receive*` calls" standing in the API-semantics section —
   found by grepping "poll", invisible to a grep for the rewritten
   sentence).
+- A guarantee you deliberately *weakened or negated* is re-checked
+  across every object that could re-assert it, by the *concept* removed
+  rather than the old wording: the stale restatement is usually a
+  positive claim in a different section that shares no vocabulary with
+  the sentence you changed (from PR #246, twice: after §3.2 stopped
+  fixing "which poll observes readiness", INV-C2 still said "ready on the
+  next poll after one that does", and later the `Timer` contract
+  re-fixed it as "a poll observing now ≥ next_deadline yields a tick" —
+  neither reachable by grepping the §3.2 sentence).
+- A decision that changes observable behavior is reflected in the header
+  block: the `Scope` list, the `CHANGELOG` line, and any
+  "behavior-preserving" / "no new behavior" claim in the summary or
+  invariants. Grep the header for `CHANGELOG:` and "behavior-preserving"
+  whenever a decision's behavior changes (from PR #246: a
+  behavior-changing timer fix shipped for two review rounds with
+  `CHANGELOG: none` and the fix absent from `Scope`).
 - Resolving a decision is a corrected claim: grep for the decision's own
   vocabulary — its option labels ("(a)/(b)"), *pending*, *remaining
   step*, *the input for the choice* — across the findings, every open
