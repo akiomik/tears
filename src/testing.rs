@@ -1,9 +1,11 @@
-//! Deterministic, executor-free testing support for [`Application`]s.
+//! Deterministic testing support for [`Application`]s.
 //!
-//! [`TestStore`] drives an application's `update` transitions and the effects
-//! that become ready without an executor, synchronously and deterministically
-//! (RFC 0008, stage 1). A test constructs the store from the application's
-//! flags, scripts messages with [`TestStore::send`], asserts effect output
+//! [`TestStore`] drives an application's `update` transitions, immediately
+//! ready effects, and — through a store-owned controlled time context —
+//! time-dependent command effects, synchronously, deterministically, and
+//! with no wall-clock waiting (RFC 0008). A test constructs the store from
+//! the application's flags, scripts messages with [`TestStore::send`],
+//! moves virtual time with [`TestStore::advance`], asserts effect output
 //! with [`TestStore::receive`] (or [`TestStore::receive_matching`] /
 //! [`TestStore::receive_quit`]), and closes the run with
 //! [`TestStore::finish`], which fails the test if any deliverable output or
@@ -277,8 +279,11 @@ where
     ///
     /// Anchors first, then moves time (RFC 0008 §3.2, §4.3, INV-T13): every
     /// pending leaf not already holding buffered output is polled exactly
-    /// once, in enqueue order — so a time-gated leaf's deadline anchors at
-    /// its enqueue-time virtual now — and only then does the clock move
+    /// once, in enqueue order — so a [`Command::timeout`] deadline, created
+    /// at its leaf's first poll, anchors at the leaf's enqueue-time virtual
+    /// now, while a wait that starts mid-leaf (a retry backoff) begins at
+    /// the poll that observes the failed attempt — and only then does the
+    /// clock move
     /// forward, by exactly `duration`, with a timer-driver barrier: the
     /// executor is driven through the newly reached instant (never idled
     /// toward a future deadline), so already-registered timer entries whose

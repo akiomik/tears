@@ -33,10 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     controlled time context, and `advance(duration)` drives time-dependent
     command effects (`Command::timeout`, retry backoff) deterministically
     through the ordinary `receive` flow — anchoring every pending leaf
-    before the clock moves, so deadlines count from a leaf's enqueue-time
-    virtual now. Tests still run on a plain `#[test]` (`TestStore::new`
-    panics inside an entered Tokio runtime); I/O-dependent leaves are out
-    of scope, and subscription sources are never executed
+    before the clock moves, so `Command::timeout` deadlines count from a
+    leaf's enqueue-time virtual now (a retry's backoff starts at the poll
+    that observes the failed attempt). Tests still run on a plain
+    `#[test]` (`TestStore::new` panics inside an entered Tokio runtime);
+    I/O-dependent leaves are out of scope, and subscription sources are
+    never executed
 
 ## [0.10.1] - 2026-07-24
 
