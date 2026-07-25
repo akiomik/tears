@@ -540,18 +540,18 @@ changed-claims list.
 
 ## 8. Minimal contract
 
-Items 1–7 all pull one way — toward a more defensible contract. Each is a
-reason some claim is too weak, too broad, unproven, or inconsistent, and
-its fix is almost always to add, tighten, or correct a claim, never to
-drop one. So an RFC that runs the whole checklist converges on *airtight*
-without ever converging on *small*. This item is the counterweight, and
-it runs item 2's adversary in reverse: instead of the implementation that
-satisfies the text while violating intent, construct the *smaller
-contract* that pins the same intent, and keep a clause only against a
-stated reason it is not redundant.
+Items 1–7 all pull one way — toward a more defensible contract. Most name
+a way some claim is too weak, too broad, unproven, or inconsistent, and
+the fix adds, tightens, or corrects it; almost none asks whether a claim
+should exist at all. So an RFC that runs the whole checklist converges on
+*airtight* without ever converging on *small*. This item is the
+counterweight, and it runs item 2's adversary in reverse: instead of the
+implementation that satisfies the text while violating intent, construct
+the *smaller contract* that pins the same intent, and record the reduction
+the way item 2 records the models it excludes.
 
 - For each invariant, requirement, and element of contract surface, ask
-  what an already-present claim fails to pin once it is deleted. If
+  what the rest of the contract fails to pin once it is deleted. If
   nothing, delete it: a claim the rest of the contract already implies is
   not a weaker claim to strengthen, it is one to remove.
 - Two claims both correct where one is a special case of the other
@@ -562,6 +562,11 @@ stated reason it is not redundant.
   might want it (a configuration field, an emitted event with no
   invariant that needs its value) is not yet a contract; defer it to the
   RFC that needs it rather than pinning it now.
-- Record why a kept clause is *not* redundant where the clause is stated —
-  *INV-X is not implied by INV-Y because …* — so a reader re-deriving
-  under item 6 does not re-add what was deliberately left out.
+- Record the reduction as an *excluded claims* note (item 2's form),
+  scoped to the claims this pass acted on, not to every clause that
+  survives: each claim it drops, paired with the surviving claim that
+  implies it — *INV-Z dropped; implied by INV-Y* — and each clause it
+  suspected of redundancy but kept, with why the survivor does *not*
+  imply it. A reader re-deriving from premises under item 6 then sees the
+  dropped claim it would otherwise re-add, and sees the kept one already
+  ruled non-redundant.
