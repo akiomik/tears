@@ -244,11 +244,21 @@ generic) are implementation latitude.
   `receive`, `receive_matching`, and `receive_quit` all fail; `state`,
   `redraw_requested`, `subscription_ids`, and `finish` remain callable.
 - **`subscription_ids`** calls `Application::subscriptions` and returns
-  the declared IDs in declaration order. `SubscriptionId` is already
-  `Clone + Eq + Hash + Debug`, so the test asserts on it directly. This
-  is the observation the `subscriptions`-purity contract
-  (`src/application.rs`) makes meaningful: the declared set is a pure
-  function of state, so asserting it after a `send` is deterministic.
+  the declared IDs in declaration order, deduplicated by RFC 0005 §3.5's
+  first-wins rule: for equal full IDs in the declared list, only the
+  first occurrence is returned. This mirrors the set the runtime would
+  actually start — `SubscriptionManager::update` applies the same rule
+  before spawning — so asserting on `subscription_ids()` predicts which
+  subscriptions would be live, not merely which lines of `subscriptions`
+  were written. TestStore does not reproduce the warning-level tracing
+  event RFC 0005 §3.5 requires of the ignored duplicate: that event is
+  `SubscriptionManager::update`'s own side effect, and TestStore never
+  constructs or runs a `SubscriptionManager` (§1.2). `SubscriptionId` is
+  already `Clone + Eq + Hash + Debug`, so the test asserts on the
+  returned `Vec` directly. This is the observation the
+  `subscriptions`-purity contract (`src/application.rs`) makes
+  meaningful: the declared set is a pure function of state, so asserting
+  it after a `send` is deterministic.
 - **`finish` / drop**: `finish` runs the exhaustiveness check (§6).
   Dropping an unfinished store runs the same check, except when the
   thread is already panicking (so a failed assertion does not cascade
@@ -358,8 +368,31 @@ wraps every leaf in a deadline; a backoff retry sleeps) cannot be
 driven without an executor. (`Timer` is not in this set: it is a
 subscription source, not a command leaf, so it never enters the store's
 pending command set — §1.2.) Stage 1's contract is honest about this
-rather than silently lenient: polling such a leaf fails the test. Note
-what that means under §4.2's scan semantics: the failure fires at the
+rather than silently lenient: polling such a leaf fails the test.
+
+This guarantee holds only because stage 1 requires the reactor's
+genuine *absence*, not merely the store's own inaction: if `TestStore`
+is constructed while a Tokio runtime is already entered (a
+`#[tokio::test]` body, or any code running on a Tokio worker thread),
+the same leaf's first poll finds a real reactor and returns `Pending`
+instead of panicking — it never fails, it just never completes, which
+is a silent stage-1 hang, not the documented failure.
+`TestStore::new` therefore checks
+`tokio::runtime::Handle::try_current()` and panics immediately, with a
+diagnostic naming the precondition, if one is currently entered. Stage 1
+tests must run on a plain `#[test]` (or equivalent), never
+`#[tokio::test]`. The check is structural and happens once, at
+construction, not per leaf: a store built outside a runtime but later
+polled from inside one (a nested `block_on`) is a misuse this RFC does
+not attempt to catch, matching stage 1's synchronous, executor-free
+design (§1, §3.2). This precondition is stage-1-only (INV-T10, §8):
+stage 2's controlled time context (§7; RFC 0009 §3.2) is itself a
+paused single-threaded executor, so the Clock DI amendment replaces this
+check with one that accepts *that specific* controlled context and
+rejects any other runtime, rather than rejecting every runtime as stage
+1 does.
+
+Note what that means under §4.2's scan semantics: the failure fires at the
 *first store call whose scan polls the leaf* — a `receive` aimed at a
 different message, a `finish`/drop check, or a keyed-intake
 reconciliation poll (§5.1) that reaches it, not only a call targeting
@@ -431,6 +464,20 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   that is issued follows §4.1's budget.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
+- When one command carries both explicit cancels and its own keyed
+  spawn, the store applies RFC 0003's fixed order (RFC 0003 §5.1): the
+  explicit cancels apply first, then the keyed spawn's admission
+  decision — so a command can cancel its own occupant and immediately
+  reclaim the id in one step.
+  `Command::batch([Command::cancel(id), work]).cancellable(id)` drops
+  the old occupant's undelivered output exactly as the bullet above
+  describes, then admits `work` under `id`; the old run's output is
+  gone, and only `work`'s output is thereafter deliverable at `id`. An
+  implementation that instead admitted the new spawn before applying
+  the batch's own cancel would cancel `work` itself and leave `id`
+  empty — the wrong outcome — so this ordering is load-bearing, not
+  incidental, and is asserted directly rather than left to fall out of
+  the two bullets above.
 - Unkeyed commands are unaffected by any of the above (INV-1's default
   path).
 - `Command::batch`'s child-key folding needs no restatement: the store
@@ -569,7 +616,14 @@ time-gated *command* leaves (`timeout`, retry backoff) deliverable, and
 the §4.3 limitation for those leaves dissolving into ordinary `receive`
 flow. `Timer` and other subscription sources stay out of scope in
 stage 2 as in stage 1 (§1.2; RFC 0009 §5.1). Nothing in the stage-1
-surface above assumes otherwise or blocks that shape.
+surface above assumes otherwise or blocks that shape. INV-T10's
+construction-time check (§4.3, §8) is stage-1-only for the same reason:
+it rejects *every* Tokio runtime context, while stage 2 is meant to run
+inside the specific paused single-threaded executor RFC 0009 §3.2 calls
+a controlled time context, so the amendment narrows the check rather
+than dropping it outright — it will still reject an *unpaused* or
+multi-threaded runtime, which RFC 0009 §3.2's controlled time context
+already excludes.
 
 ## 8. Invariants
 
@@ -630,11 +684,12 @@ Enforcement classes follow the pre-review checklist's definitions
   declaration order; a leaf made ready late delivers after an
   earlier-enqueued ready leaf but before a later one. The negative-space
   half is documentation, checked in review of the rustdoc (structural).
-- **INV-T7**: cancellation parity — the five behaviors of §5.1
+- **INV-T7**: cancellation parity — the six behaviors of §5.1
   (supersede, keep-in-flight discard, reconciliation release, explicit
-  cancel, unkeyed unaffected) hold over the store's pending output as
-  RFC 0003's INV-3, INV-4, INV-5, INV-6, INV-7, and INV-9 state them
-  for deliverable output. Behavioral: one test per behavior, including
+  cancel, same-command cancel-then-spawn ordering, unkeyed unaffected)
+  hold over the store's pending output as RFC 0003's INV-3, INV-4,
+  INV-5, INV-6, INV-7, and INV-9 state them for deliverable output.
+  Behavioral: one test per behavior, including
   quit suppression (a superseded keyed quit is never observable via
   `receive_quit`) and the two reconciliation edges: a `KeepInFlight`
   command arriving after the occupant's leaves are exhausted is
@@ -648,7 +703,17 @@ Enforcement classes follow the pre-review checklist's definitions
   unobservable via any `receive*` (INV-3, INV-9). This is the
   cancel-before-receive scenario the §6 rationale motivates; INV-T8's
   retention tests deliberately do *not* cancel, since a cancelled
-  output cannot be retained.
+  output cannot be retained. The same-command cancel-then-spawn test
+  (RFC 0003 §5.1) `send`s `Command::batch([Command::cancel(id),
+  work]).cancellable(id)` over an occupied id and asserts both halves
+  at once: the occupant's
+  undelivered output is unobservable via any `receive*` (as the
+  explicit-cancel test already establishes) *and* a following `receive`
+  at `id` yields `work`'s message — an implementation that admits the
+  spawn before applying the batch's own cancel fails this test even
+  though it could still pass the supersede and explicit-cancel tests in
+  isolation, since neither of those combines a cancel and a spawn in one
+  command.
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
@@ -670,7 +735,17 @@ Enforcement classes follow the pre-review checklist's definitions
   ordering is TestStore's linearization, not runtime parity, §6). The
   keyed-only test would pass an implementation that wrongly fails `send`
   on unkeyed pending output; the unkeyed-only test would miss a broken
-  keyed shared-first path — so both are required. The `send`-carried
+  keyed shared-first path — so both are required. Each of these two
+  tests is duplicated with the pending output sourced from the *init*
+  command instead of a step's — an unkeyed init effect surviving a
+  first, unrelated `send`, and a keyed init effect surviving a first,
+  non-cancelling `send` — for four negative tests total. §3.2's `new`
+  rule states the init command's output is subject to the same
+  accounting as any step's output; an implementation that special-cases
+  the very first `send` to still enforce the retracted "receive init
+  output before the first send" reading of the old §3.2 text would pass
+  the two step-sourced tests but fail the two init-sourced ones, so both
+  origins are required alongside both key classes. The `send`-carried
   supersede/cancel case (where the pending output is *removed*, not
   retained) is INV-T7's, not a retention test.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
@@ -682,22 +757,38 @@ Enforcement classes follow the pre-review checklist's definitions
   post-quit call polled it (§4.3) — and asserts the failing `send` and
   `receive*` (whose failure is the quit-state diagnostic, not the
   reactor panic polling would produce) and the passing `finish`.
+- **INV-T10**: reactor-absence precondition (stage 1 only, §7) —
+  `TestStore::new` panics immediately, before returning a store, if
+  `tokio::runtime::Handle::try_current()` succeeds, so §4.3's "polling a
+  time-dependent leaf fails the test" guarantee cannot silently degrade
+  into an unpolled hang inside a Tokio runtime context. Structural:
+  review of `TestStore::new` for the check, placed before any other
+  construction work. Behavioral: a test constructs `TestStore` from
+  inside `#[tokio::test]` and asserts the panic and that its message
+  names the precondition (not the generic missing-reactor panic §4.3
+  otherwise produces).
 
 Surface–invariant coverage: `new`/`send`/`receive*`/`finish` map to
-INV-T2/T3/T4/T8; `state` is the pure accessor through which INV-T4's
-state-transition transcript is read, covered there; delivery order maps
-to INV-T5/T6; cancellation metadata to
-INV-T7; `receive_quit` and the quit state to INV-T9;
+INV-T2/T3/T4/T8, with `new` additionally covered by INV-T10; `state` is
+the pure accessor through which INV-T4's state-transition transcript is
+read, covered there; delivery order maps to INV-T5/T6; cancellation
+metadata to INV-T7; `receive_quit` and the quit state to INV-T9;
 `redraw_requested` and `subscription_ids` are pure observations of
 contracts owned elsewhere (RFC 0002's directive; RFC 0005's declared
 identity) and are covered by INV-T3 (they read what the runtime would
-read) plus one behavioral test each — with one carve-out: the
+read) plus one behavioral test each — with two carve-outs. First: the
 init-command directive `redraw_requested` reports before the first step
 is TestStore-specific `Command` introspection and is *not* a prediction
 of the runtime's first render (§5.2), so it falls outside INV-T3's
 "runtime would read" umbrella; the behavioral test for it asserts the
-init command's folded directive, not a runtime first-frame outcome. The
-absence of an `Application` change maps to INV-T1.
+init command's folded directive, not a runtime first-frame outcome.
+Second: `subscription_ids`'s first-wins dedup (RFC 0005 §3.5) applies,
+but the duplicate-ignored warning event does not, since TestStore never
+runs a `SubscriptionManager` to emit it (§3.2); the behavioral test for
+`subscription_ids` therefore includes a duplicate-declared-ID case
+asserting the returned `Vec` keeps only the first occurrence, without
+asserting any tracing event. The absence of an `Application` change
+maps to INV-T1.
 
 ## 9. Open questions
 
