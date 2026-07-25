@@ -11,6 +11,12 @@ use std::time::Duration;
 /// The value must be non-zero and small enough to produce a non-zero frame
 /// duration. This prevents divide-by-zero panics and invalid zero-duration
 /// Tokio intervals.
+///
+/// Known limitation: at frame rates above roughly 200 FPS — periods inside
+/// tokio's missed-tick lateness margin — the frame scheduler can replay a
+/// short catch-up burst of frames after a stall, instead of dropping the
+/// missed frames as it does at lower rates
+/// (<https://github.com/akiomik/tears/issues/256>).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrameRate {
     frames_per_second: NonZeroU32,

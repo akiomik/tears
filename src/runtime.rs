@@ -524,7 +524,8 @@ impl<App: Application> Runtime<App> {
                 // is late past tokio's fixed lateness margin, so sub-margin
                 // frame periods (above roughly 200 FPS) can still replay a
                 // catch-up burst of frame ticks after a stall — the defect
-                // RFC 0009 §4.2 removed from `Timer`.
+                // RFC 0009 §4.2 removed from `Timer`, tracked for the frame
+                // scheduler in https://github.com/akiomik/tears/issues/256.
                 () = self.scheduler.next_work_frame() => {
                     self.process_frame_tick(terminal)?;
                 }
