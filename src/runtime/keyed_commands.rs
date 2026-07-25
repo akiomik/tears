@@ -5,11 +5,11 @@ use std::task::{Context, Poll};
 
 use futures::FutureExt;
 use futures::stream::{BoxStream, Stream, StreamExt};
-use futures::task::noop_waker_ref;
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_stream::StreamMap;
 
 use crate::command::{Action, CancelPolicy, CommandId};
+use crate::poll_util::noop_context;
 
 use super::channel;
 use super::load::{Channel, LoadObserver};
@@ -513,7 +513,7 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
     }
 
     pub(super) fn try_next_ready(&mut self) -> Option<(CommandId, ReceiverEvent<Msg>)> {
-        let mut context = Context::from_waker(noop_waker_ref());
+        let mut context = noop_context();
         match self.poll_event(&mut context) {
             KeyedPoll::Item(id, event) => Some((id, event)),
             KeyedPoll::PendingWithWakeSource | KeyedPoll::Quiescent => None,
