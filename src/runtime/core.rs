@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::application::Application;
-use crate::command::{Action, RuntimeCommandParts};
+use crate::command::{Action, RuntimeCommandParts, fold_leaves};
 use crate::subscription::SubscriptionManager;
 
 use super::app_input::AppInputs;
@@ -150,14 +150,18 @@ impl<App: Application> RuntimeCore<App> {
     ///
     /// Send failures are silently ignored as they only occur during application shutdown.
     pub(super) fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
-        let (cancels, key, stream) = parts.into_execution_parts();
+        let (cancels, key, leaves) = parts.into_execution_parts();
 
         self.app_inputs.reconcile_keyed_available();
         for id in cancels {
             self.app_inputs.cancel_keyed(&id);
         }
 
-        if let Some(stream) = stream {
+        // Merge the per-leaf streams into the one stream this site spawns —
+        // the same fold `Effect::into_stream()` applied before the parts
+        // carried per-leaf streams (RFC 0008 §4.1). The runtime pins no
+        // cross-leaf delivery order, so the unordered merge is the contract.
+        if let Some(stream) = fold_leaves(leaves) {
             if let Some(key) = key {
                 self.app_inputs.spawn_keyed(key.id, key.policy, stream);
                 return;

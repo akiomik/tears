@@ -7,7 +7,7 @@ use std::{
 
 use futures::{
     FutureExt, Stream, StreamExt,
-    stream::{self, BoxStream, select_all},
+    stream::{self, BoxStream},
 };
 use tokio::time::{Sleep, sleep};
 
@@ -143,14 +143,17 @@ where
 // stay separate because they describe how the runtime treats the update result.
 //
 // Rather than folding children into a single opaque stream at construction
-// time, an effect keeps the flat sequence of leaf streams and only folds them
-// (via `select_all`) at the `into_stream()` boundary. Keeping the leaves apart
-// preserves each leaf's identity through `Command` composition, which is what a
-// future per-leaf cancellation id would attach to.
+// time, an effect keeps the flat sequence of leaf streams and hands them out
+// unfolded at the `into_leaves()` boundary, from where `RuntimeCommandParts`
+// carries them to each consumer (RFC 0008 §4.1): the runtime folds them (via
+// `fold_leaves`) at its spawn site, `TestStore` drives them one by one.
+// Keeping the leaves apart preserves each leaf's identity through `Command`
+// composition, which is what a future per-leaf cancellation id would attach
+// to.
 //
 // Future room: to carry per-leaf metadata, `leaves` could hold
-// `Vec<(LeafMeta, BoxStream<'static, Action<Msg>>)>` without reworking the fold
-// at the `into_stream()` boundary.
+// `Vec<(LeafMeta, BoxStream<'static, Action<Msg>>)>` without reworking the
+// consumers of the `into_leaves()` boundary.
 pub(super) struct Effect<Msg: Send + 'static> {
     leaves: Vec<BoxStream<'static, Action<Msg>>>,
 }
@@ -270,17 +273,17 @@ impl<Msg: Send + 'static> Effect<Msg> {
         self.leaves.len()
     }
 
+    /// Hands the flat leaf sequence to `RuntimeCommandParts`, preserving
+    /// `Command::batch`'s flattened declaration order (RFC 0008 §4.1).
+    pub(super) fn into_leaves(self) -> Vec<BoxStream<'static, Action<Msg>>> {
+        self.leaves
+    }
+
+    // Test-only convenience: production consumers receive the leaves unfolded
+    // through `into_leaves()` and fold at their own site.
+    #[cfg(test)]
     pub(super) fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
-        // Fold the leaves back into one stream here, at the boundary. A single
-        // leaf is returned as-is (a `select_all` over one stream is observably
-        // identical); no leaves yields no stream, which the runtime treats as
-        // no work to spawn.
-        let mut leaves = self.leaves;
-        match leaves.len() {
-            0 => None,
-            1 => leaves.pop(),
-            _ => Some(select_all(leaves).boxed()),
-        }
+        super::runtime_parts::fold_leaves(self.leaves)
     }
 }
 
