@@ -752,7 +752,9 @@ three design inputs RFC 0009 §5.1 recorded for it:
 
 - **Deadline anchoring.** RFC 0004's first-poll anchor, restated over
   the store's scan sites: because `advance` anchors before it moves the
-  clock and nothing else moves the clock at all, a leaf's first poll
+  clock and no other store operation moves the clock at all (INV-T12's
+  scope; clock-manipulating effects are §4.3's negative space), a leaf's
+  first poll
   always happens at its enqueue-time virtual now, so the
   scan-order-dependence RFC 0009 §5.1 flagged dissolves (§4.3).
 - **Advance semantics and executor context.** `advance` carries no
