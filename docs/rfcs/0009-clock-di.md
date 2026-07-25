@@ -6,11 +6,14 @@
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
   the controlled-context determinism contract consumed by TestStore
   stage 2 / debounce–throttle / subscription restart rate control, the
-  HTTP time-source migration prerequisite, and the `test-util` feature
-  decision
+  HTTP time-source migration prerequisite (§4.1), the `Timer`
+  non-catch-up contract-alignment fix (§4.2), and the `test-util`
+  feature decision
 - Feature flag: none
-- CHANGELOG: none (the prerequisite migration and the lint are internal
-  and behavior-preserving)
+- CHANGELOG: `Fixed` — short-interval `Timer` subscriptions no longer
+  replay a catch-up burst of missed ticks after a delay (§4.2). The HTTP
+  time-source migration (§4.1) and the lint are internal and
+  behavior-preserving and carry no entry.
 
 ## Summary
 
@@ -28,7 +31,7 @@ Four decisions:
    that read the current time or wait on its passage are banned
    mechanically via clippy's `disallowed-methods`, whose entries are
    derived as an inventory in §3.1. Two HTTP-module files violate the
-   rule today; migrating them is this RFC's named prerequisite (§4).
+   rule today; migrating them is this RFC's named prerequisite (§4.1).
 3. **Controlled-context contract** (§3.2, INV-C2, INV-C3). A consumer
    that controls the clock may rely on: virtual time advances only under
    the controller's action (plus the executor's idle auto-advance, which
@@ -55,7 +58,7 @@ stage 2 consumes this contract; nothing here gates on TestStore.
   enforcement (§3.1).
 - The determinism contract a controlled time context provides to
   consumers (§3.2), and its negative space (§3.4).
-- The HTTP time-source migration, as a named prerequisite (§4).
+- The HTTP time-source migration, as a named prerequisite (§4.1).
 - The `tokio` `test-util` feature decision for in-crate controlled
   contexts (§5.1).
 - A deterministic-time testing recipe in `docs/testing.md` for
@@ -73,8 +76,8 @@ stage 2 consumes this contract; nothing here gates on TestStore.
   separate determinism axis with its own reproducibility design,
   deferred by RFC 0004 §5.2; a future backoff-policy RFC owns it.
 - **TestStore's time API.** The shape of `advance` on the store, and
-  how time-gated leaves join the §4.2 canonical order, is the RFC 0008
-  stage-2 amendment's job. This RFC provides the contract that
+  how time-gated leaves join RFC 0008's §4.2 canonical order, is the
+  RFC 0008 stage-2 amendment's job. This RFC provides the contract that
   amendment cites (§5.1).
 - **Debounce/throttle and restart-rate semantics.** Their policies and
   invariants belong to their own RFCs; they consume this contract
@@ -167,8 +170,8 @@ Inventory of production time reads at this RFC's writing:
 | `src/runtime.rs` (event loop) | `tokio::time::Instant` | micro-batch window deadline (RFC 0006 mechanism) | yes |
 | `src/runtime/frame_scheduler.rs` | `tokio::time::interval` | frame cadence | yes |
 | `src/runtime/channel.rs` (bounded send) | `tokio::time::Instant` | capacity-wait duration in load events (RFC 0006 observability) | yes |
-| `src/subscription/http/cell.rs` | `std::time::Instant` | `stale_time` / `cache_time` decisions, `time_since_data` | **no — §4 migration** |
-| `src/subscription/http/query.rs` | `std::time::Instant` | `elapsed_ms` tracing field | **no — §4 migration** |
+| `src/subscription/http/cell.rs` | `std::time::Instant` | `stale_time` / `cache_time` decisions, `time_since_data` | **no — §4.1 migration** |
+| `src/subscription/http/query.rs` | `std::time::Instant` | `elapsed_ms` tracing field | **no — §4.1 migration** |
 
 The rule's mechanical floor is an inventory of the `std` entry points
 whose call reads the current time, blocks on its passage, or configures
@@ -223,7 +226,7 @@ blocking of `close` and so falls in the timed-wait-configuration
 class — are uncallable on the crate's stable toolchain and join the
 table on stabilization; `recv_deadline`, equally unstable, is listed
 ahead of that defensively because it completes a family already
-present, and the §4 implementation task confirms the lint accepts its
+present, and the §4.1 implementation task confirms the lint accepts its
 path.
 
 Dependencies are scoped the same way: the executor clock itself
@@ -239,7 +242,7 @@ never virtual).
 Outside library code, exactly one deliberate exception exists:
 `benches/runtime_load.rs` measures real wall-clock latency because
 RFC 0006's statistical acceptance criteria are defined on real time.
-The §4 migration, which lands the lint configuration, adds an explicit
+The §4.1 migration, which lands the lint configuration, adds an explicit
 lint allow at the bench's measurement sites in the same change. Unit
 and integration tests contain no `std::time` reads today and fall under
 the same rule.
@@ -291,17 +294,19 @@ controlled context, the contract a consumer may cite:
   timeout semantics (deadline anchored at the leaf's first poll, one
   timeout message per modifier) and retry-backoff semantics, and
   `Timer`'s semantics (no tick before one full interval after its
-  construction-time anchor, and no catch-up burst: a single advance
-  spanning several intervals yields exactly one tick, and an advance
-  shorter than one full interval yields none, whether the advance falls
-  before or after the timer's first poll — `.skip(1)` absorbs only the
-  construction-instant tick, so at most one elapsed tick is ever
-  deliverable). This non-catch-up property is a contract the `Timer`
-  implementation provides directly; Tokio's `MissedTickBehavior::Skip`
-  does not supply it, because its skip engages only once a tick is late
-  by more than a fixed margin, so for sub-margin intervals it replays
-  one tick per elapsed interval (INV-C3). The contracts are
-  inequality-shaped (never
+  construction-time anchor; no catch-up burst — a gap spanning several
+  intervals yields exactly one tick and a gap shorter than one interval
+  yields none, whether the gap falls before or after the timer's first
+  poll; and, after that single tick, the next tick due at the first
+  interval boundary strictly after now measured from the construction
+  anchor, so the phase is preserved, not reset. These are stated as
+  observable properties of `Timer` (§4.2), not as a claim about
+  `.skip(1)` or any other mechanism). This non-catch-up property is a
+  contract the `Timer` implementation provides directly; Tokio's
+  `MissedTickBehavior::Skip` does not supply it, because its skip engages
+  only once a tick is late by more than a fixed margin, so for sub-margin
+  intervals it replays one tick per elapsed interval (INV-C3). The
+  contracts are inequality-shaped (never
   early; at-or-after), so the virtual clock's perfect granularity and
   the real clock's scheduler-dependent lateness both satisfy them; a
   paused-clock run is therefore evidence for the contract itself — the
@@ -333,9 +338,13 @@ Pinned deliberately as *not* guaranteed:
   to one executor; two controlled contexts do not share time. No
   contract spans contexts.
 
-## 4. Prerequisite: HTTP time-source migration
+## 4. Implementation deliverables
 
-**Named prerequisite, owned by this RFC's implementation task.**
+Both deliverables below are owned by this RFC's implementation task.
+
+### 4.1 HTTP time-source migration (prerequisite)
+
+**Named prerequisite.**
 `src/subscription/http/cell.rs` (lifecycle `inactive_since`, data
 `data_timestamp`, and the `stale_time`/`cache_time` comparisons over
 them) and `src/subscription/http/query.rs` (the `elapsed_ms` tracing
@@ -352,6 +361,42 @@ the rule. They migrate to the virtualizable clock's `Instant`.
   controlled context like every other time-dependent contract.
 - INV-C1's mechanical enforcement turns on with this migration; the
   lint cannot land first.
+
+### 4.2 Timer contract alignment
+
+`src/subscription/time.rs`'s `Timer` does not currently satisfy the
+non-catch-up contract (§3.2, INV-C3): it leans on Tokio's
+`MissedTickBehavior::Skip`, whose skip engages only once a tick is late
+by more than a fixed margin (5 ms in tokio 1.50.0's `interval.rs`), so a
+short-interval timer replays one tick per missed interval after a delay.
+This deliverable changes `Timer` to provide the non-catch-up property
+directly and pins the semantics in rustdoc. Unlike §4.1, it is **not**
+behavior-preserving.
+
+- **Observable change.** After a gap spanning several intervals, `Timer`
+  yields exactly one tick — no catch-up burst — instead of one tick per
+  missed interval. This is a user-visible behavior change for
+  short-interval timers under load, so it lands with a `CHANGELOG: Fixed`
+  entry, not as a mere rustdoc adjustment.
+- **Pinned observable properties** (independent of the implementation
+  mechanism, so a from-scratch reimplementation that drops `.skip(1)` or
+  `interval` altogether still conforms):
+  - No tick is delivered before one full interval has elapsed from the
+    timer's construction-time anchor (the construction-instant tick is
+    never delivered).
+  - A gap of at least one full interval leaves exactly one deliverable
+    tick; a shorter gap leaves none — regardless of whether the gap
+    falls before or after the first poll.
+  - **Post-miss cadence.** After the single overdue tick is delivered,
+    the next tick is due at the first interval boundary strictly after
+    the current instant, measured from the construction anchor — the
+    phase is preserved (Skip-style alignment), not reset to
+    "now + interval" (Delay-style). This preserves the existing
+    drift-corrected cadence the `Timer` rustdoc describes.
+- **rustdoc.** `Timer` gains a first-tick, non-catch-up, and post-miss
+  cadence sentence citing this RFC as the semantics of record.
+- **Tests.** INV-C3's paused-clock tests at 1 ms and 2 ms intervals are
+  the proof; a Skip-margin-dependent implementation fails them.
 
 ## 5. Consumers
 
@@ -425,7 +470,7 @@ tests (already the runtime suite's practice) extend to it unchanged.
 
 ### 5.4 HTTP interval and backoff policies (future work)
 
-Refetch intervals and failure backoff ride §4's migrated module and
+Refetch intervals and failure backoff ride §4.1's migrated module and
 this contract. Their jitter, if any, is randomness — out of scope here
 (§1.2) and owned by that policy's RFC.
 
@@ -439,10 +484,10 @@ deterministic-time section in `docs/testing.md` documenting the recipe
 (paused runtime, explicit advance, the §3.2 auto-advance caveat). The
 caveat is named concretely: awaiting real network I/O under a paused
 runtime lets the executor judge itself idle and auto-advance the clock
-to the next timer before the I/O completes, so a test exercising §4's
+to the next timer before the I/O completes, so a test exercising §4.1's
 HTTP staleness must drive time and I/O explicitly rather than awaiting a
 live socket — the auto-advance-versus-real-I/O gotcha, stated because
-§4's payoff is precisely HTTP staleness testability. Documentation, not
+§4.1's payoff is precisely HTTP staleness testability. Documentation, not
 contract surface.
 
 ## 6. Invariants
@@ -455,7 +500,7 @@ Enforcement classes follow the pre-review checklist's definitions.
   bench exception (§3.1) at its explicitly allowed measurement sites.
   Structural-mechanical: clippy `disallowed-methods` in `clippy.toml`
   carries exactly §3.1's banned-entry-point inventory (landing with the
-  §4 migration, which removes the last violations), failing the
+  §4.1 migration, which removes the last violations), failing the
   workspace lint gate on any reintroduction. The platform-gated `std::os`
   socket timeout setters are carried as `allow-invalid = true` entries
   (§3.1) and so are enforced mechanically wherever CI resolves them —
@@ -477,13 +522,16 @@ Enforcement classes follow the pre-review checklist's definitions.
 - **INV-C2**: in a controlled context, §3.2's advancement rule holds —
   under a non-idling controller, a gated behavior stays pending across
   arbitrarily many polls until an explicit advance reaches its
-  deadline, and is ready on the next poll after one that does.
+  deadline, and thereafter becomes ready with no wall-clock waiting once
+  the executor is driven to progress. This RFC does not fix which poll
+  observes readiness (§3.2's readiness guarantee); the claim is only
+  "pending until advanced, ready without wall-clock waiting after".
   Behavioral: a paused-clock test polls a pending `Command::timeout`
   leaf repeatedly without advancing and asserts it remains pending
   (this is the check a compliant implementation passes and an
   implicitly-advancing clock fails), then advances to the deadline and
   asserts the behavior becomes ready, with no wall-clock waiting, once
-  the executor is driven to progress (§3.2's readiness guarantee).
+  the executor is driven to progress.
 - **INV-C3**: the time-dependent contracts pinned by RFC 0004 and by
   `Timer`'s semantics hold identically under the virtual clock.
   `Timer`'s current rustdoc documents only the missed-tick Skip
@@ -495,27 +543,30 @@ Enforcement classes follow the pre-review checklist's definitions.
   several sub-margin intervals replays one tick per interval — a
   catch-up burst this contract forbids. `.skip(1)` supplies only the
   first-tick timing (no tick at the construction instant); it does not
-  suppress catch-up. The §4 implementation task pins the contract on
-  both ends: it makes `Timer` provide the non-catch-up property
-  directly (rather than leaning on Tokio's lateness-margin Skip) and
-  adds a first-tick and non-catch-up sentence to `Timer`'s rustdoc
+  suppress catch-up. The §4.2 implementation task pins the contract by
+  making `Timer` provide the non-catch-up property directly (rather than
+  leaning on Tokio's lateness-margin Skip) and adds a first-tick,
+  non-catch-up, and post-miss cadence sentence to `Timer`'s rustdoc
   citing this RFC as the semantics of record, so INV-C3 references a
   written contract the code actually satisfies rather than an
-  implementation accident it does not. Behavioral: the existing
-  paused-clock timeout/retry suites
+  implementation accident it does not. The contract is stated as
+  observable properties (§4.2), not as a claim about `.skip(1)` or any
+  other mechanism, so the implementation is free to drop them.
+  Behavioral: the existing paused-clock timeout/retry suites
   (`src/command/effect.rs`, `src/command/retry.rs`, `src/runtime.rs`)
   are the timeout/retry half; new paused-clock `Timer` tests pin the
   timer half at short intervals (1 ms and 2 ms, chosen to fall inside
   Tokio's lateness margin so a Skip-dependent implementation fails
-  them) — no tick ready before an advance of one full interval, the
-  first tick ready after exactly one interval, and a single advance
-  spanning several intervals yielding exactly one tick, not a burst,
-  whether the advance falls before or after the timer's first poll (an
-  advance shorter than one full interval yields no tick; `.skip(1)`
-  absorbs only the construction-instant tick, so at most one elapsed
-  tick is ever deliverable). The existing wide-margin real-time `Timer`
-  tests remain as non-normative smoke checks; the paused tests are the
-  contract's proof.
+  them) — no tick ready before an advance of one full interval; the
+  first tick ready after exactly one interval; a single advance spanning
+  several intervals yielding exactly one tick, not a burst, whether the
+  advance falls before or after the timer's first poll (a gap shorter
+  than one full interval yields no tick); and, after that single tick,
+  the next tick due at the first interval boundary strictly after now
+  measured from the construction anchor, not one interval after the poll
+  (the §4.2 post-miss cadence — a Delay-style reset fails it). The
+  existing wide-margin real-time `Timer` tests remain as non-normative
+  smoke checks; the paused tests are the contract's proof.
 - **INV-C4**: production neutrality — the crate exposes no time-control
   surface and the production runtime never pauses or configures the
   clock, before and after the §5.1 feature flip. Structural: review of
@@ -538,8 +589,10 @@ Enforcement classes follow the pre-review checklist's definitions.
 Surface–invariant coverage: this RFC adds no public API surface. Its
 contract surface is the source rule (INV-C1), the controlled-context
 guarantees (INV-C2, INV-C3), the neutrality guarantee and the §5.1
-feature flip (INV-C4), and the §4 migration (INV-C1 turn-on plus
-INV-C4's preservation check). The `docs/testing.md` recipe (§5.5) is
+feature flip (INV-C4), the §4.1 migration (INV-C1 turn-on plus
+INV-C4's preservation check), and the §4.2 `Timer` contract-alignment
+fix (INV-C3's timer half, plus the `CHANGELOG: Fixed` entry for its
+observable behavior change). The `docs/testing.md` recipe (§5.5) is
 documentation and carries no invariant.
 
 ## 7. Open questions
@@ -569,7 +622,7 @@ consumers (§5) does.
   `src/runtime/frame_scheduler.rs`, `src/runtime/channel.rs` — the
   conforming inventory rows.
 - `src/subscription/http/cell.rs`, `src/subscription/http/query.rs` —
-  the §4 migration sites.
+  the §4.1 migration sites.
 - `benches/runtime_load.rs` — the named real-time exception.
 - `clippy.toml` — INV-C1's mechanical enforcement site.
 - `docs/testing.md` — the paused-time testing conventions §5.5 extends.

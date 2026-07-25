@@ -37,7 +37,7 @@ Three decisions, ordered by urgency:
    received, an effect stream never driven to completion — fails the
    test at `receive`, `finish`, or drop; `send` does not block on
    pending output, so a scripted `send` can supersede or cancel an
-   earlier step's not-yet-received output the way the runtime's
+   earlier step's not-yet-received keyed output the way the runtime's
    shared-first schedule does (§6). The one carve-out mirrors the
    runtime's shutdown contract: output remaining after an observed quit
    is legally discarded. A non-exhaustive mode is deliberately not
@@ -225,8 +225,8 @@ generic) are implementation latitude.
   polls no pending leaf for output; pending deliverable output is left
   in place for a later `receive*` (or caught by `finish`/drop, §6),
   which lets a scripted `send` supersede or cancel an earlier step's
-  not-yet-received output exactly as the runtime's shared-first schedule
-  does (§6). Its only poll is the keyed-intake reconciliation of §5.1,
+  not-yet-received keyed output as the runtime's shared-first schedule
+  allows (§6). Its only poll is the keyed-intake reconciliation of §5.1,
   and only when the returned command is keyed under
   `CancelPolicy::KeepInFlight`; it never delivers output, which happens
   only in `receive*` calls.
@@ -415,10 +415,15 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   issued only for `KeepInFlight`, whose admission outcome depends on
   whether the occupant is still open. For `CancelPolicy::CancelInFlight`
   the outcome is fixed — the occupant is superseded and its undelivered
-  output discarded regardless of its state — so no reconciliation poll
-  is issued: superseding an exhausted occupant and spawning into a
-  released id are indistinguishable, and this matches the runtime, which
-  aborts the in-flight keyed task without sampling it. Not polling also
+  output discarded regardless of its state — so the store issues no
+  reconciliation poll: superseding an exhausted occupant and spawning
+  into a released id are indistinguishable. The runtime does sample the
+  target receiver's facts before *every* `Spawn(policy)`, `CancelInFlight`
+  included (`reconcile_receiver` in `src/runtime/keyed_commands.rs`;
+  RFC 0003 §4.2), but that sample cannot change a `CancelInFlight`
+  admission outcome, and the store has no equivalent receiver snapshot to
+  reconcile — so skipping the poll preserves the delivery contract while
+  matching the runtime's outcome, not its every step. Not polling also
   lets a `CancelInFlight` command supersede a reactor-dependent occupant
   (a `timeout` or backoff leaf) without polling it, so cancellation of a
   time-dependent keyed leaf is expressible in stage 1 (§4.3). Any poll
@@ -492,14 +497,20 @@ Exhaustive assertion is the only stage-1 mode. The rules, by call site:
   output does not block a `send`, and neither do effects that are
   pending but not deliverable. Leaving deliverable output in place lets
   a test script a `send` that supersedes or cancels an earlier step's
-  not-yet-received output — the sequence `send(Start); send(Cancel)`
-  cancels a keyed effect before its output is received — which mirrors
-  the runtime's shared-first schedule, where a shared input (the next
-  message) is processed ahead of a keyed effect's already-ready output
-  (RFC 0003 §4.2; `src/runtime/app_input.rs`). Undelivered output is
-  not lost track of: it stays subject to the `receive*`, `finish`, and
-  drop checks below, which remain exhaustive. `send` still fails after
-  an observed quit (§5.3).
+  not-yet-received *keyed* output — the sequence
+  `send(Start); send(Cancel)` cancels a keyed effect before its output
+  is received — which is exactly the runtime's shared-first schedule:
+  a shared input (the next message) is processed ahead of a keyed
+  effect's already-ready output (RFC 0003 INV-14, §4.2;
+  `src/runtime/app_input.rs`). Ordering a `send` ahead of *unkeyed*
+  pending output is **not** a runtime guarantee: unkeyed command output
+  travels the shared channel in FIFO order alongside other shared
+  traffic (a `send`'s message does not jump it), so a `send` scripted
+  before unkeyed output is TestStore's own linearization, not evidence
+  of runtime scheduling (§4.2's citation rule). Undelivered output is
+  not lost track of either way: it stays subject to the `receive*`,
+  `finish`, and drop checks below, which remain exhaustive. `send` still
+  fails after an observed quit (§5.3).
 - **`receive` / `receive_matching` / `receive_quit`** fail on a
   mismatch, on quit-versus-message confusion, or when nothing is
   deliverable — each with a diagnostic that names the actual value
