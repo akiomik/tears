@@ -203,6 +203,20 @@ Prompts that have already paid off:
   whether it fires; and "return one tick after a miss" left the post-miss
   cadence unpinned. Restating the whole contract deadline-relative fixed
   both).
+- An ambient-facility adversary: a contract that requires some shared
+  facility's *absence* (no executor, no reactor, no ambient clock) is
+  checked against being invoked while that facility is already present
+  and running, not only against the harness's own internal state
+  machine — the facility being absent by default in a plain unit test
+  is not the same as the contract *forbidding* its presence, and
+  nothing stops a caller from providing it anyway. (From PR #247: RFC
+  0008's "polling a time-dependent leaf fails the test" assumed the
+  reactor's genuine absence without forbidding an already-entered Tokio
+  runtime; entered, the same poll returns `Pending` instead of
+  panicking, and the outcome becomes timed by the ambient runtime and
+  real wall-clock progress instead of the documented fail-fast — fixed
+  by adding a construction-time check that rejects the ambient facility
+  outright rather than assuming it away.)
 
 ## 3. Enforcement class, declared up front
 
@@ -271,6 +285,19 @@ because bounded mode "exists to exit" the overload regime, while §4.3
 had already established that bounded capacity leaves shared readiness —
 and with it keyed starvation — intact at any capacity; backpressure
 bounds memory and shared latency, not keyed liveness.
+
+A failure-mode claim about a mechanism — panics, blocks, hangs,
+silently degrades — is checked against any execution model the same
+document already pins for that mechanism, not asserted as a
+free-standing plausibility judgment. *From PR #247:* a rationale
+paragraph asserted that polling a still-pending time-dependent leaf
+inside an ambient executor "never completes" — a hang — without
+rereading the same document's own already-normative poll budget (every
+check polls each reached leaf at most once and returns immediately, so
+the store cannot block by construction); the actual defect was
+nondeterministic later-delivery (a leaf turning up genuinely
+deliverable on a later poll once real wall-clock time elapses), not
+blocking, and the fix text changed accordingly.
 
 Invariant citations are code claims too: "X is already carried by RFC
 N's INV-M" gets a fresh read of INV-M's exact statement, and an umbrella
@@ -430,7 +457,17 @@ PR #215:
   (item 3). Walk the surface list and name the invariant for each; an
   element whose semantics are defined nowhere (`batch_max_messages` had
   neither counting semantics nor a corresponding invariant) is a finding
-  you can file yourself.
+  you can file yourself. A named invariant is not yet coverage: walk the
+  mapping the other direction too, from each cited invariant back to its
+  own exact statement (item 4's invariant-citation rule applies here),
+  and confirm its stated scope actually reaches the surface element —
+  not merely that the label exists and sounds adjacent. (From PR #247:
+  `subscription_ids` was mapped to INV-T3 for coverage ("a pure
+  observation ... covered by INV-T3"), but INV-T3's own text scopes it
+  to `Command` decomposition, which subscriptions never pass through —
+  the mapping named a real invariant that did not, in fact, cover the
+  claim, and the fix added a dedicated invariant instead of stretching
+  INV-T3's label over an unrelated surface.)
 
 ## 6. Re-derive, don't patch
 
