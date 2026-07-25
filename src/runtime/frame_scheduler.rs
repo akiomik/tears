@@ -6,10 +6,11 @@
 //! rendering, and re-evaluating subscriptions.
 
 use std::future::pending;
-#[cfg(test)]
 use std::time::Duration;
 
-use tokio::time::{Interval, MissedTickBehavior, interval};
+use tokio::time::{Instant, sleep_until};
+
+use crate::time_util::next_anchor_phase_deadline;
 
 use super::frame_rate::FrameRate;
 use super::pending_work::PendingWork;
@@ -20,30 +21,32 @@ use super::pending_work::PendingWork;
 /// loop remains event-driven while idle instead of waking at the frame rate to
 /// do nothing.
 pub(super) struct FrameScheduler {
-    interval: Interval,
+    period: Duration,
+    /// The frame cadence's anchor and next deadline, sampled on the first
+    /// [`next_work_frame`](Self::next_work_frame) await — the polling
+    /// runtime's clock — never at construction, which may run outside that
+    /// runtime (`Runtime` construction precedes `block_on`).
+    schedule: Option<(Instant, Instant)>,
     pub(super) pending: PendingWork,
 }
 
 impl FrameScheduler {
     /// Creates a frame scheduler with the given target frame rate.
     pub(super) fn new(frame_rate: FrameRate) -> Self {
-        // Divide a one-second `Duration` directly so the period is exact (e.g.
-        // 60 FPS -> 16.667ms) instead of truncating to whole milliseconds.
-        let frame_duration = frame_rate.frame_duration();
-        let mut interval = interval(frame_duration);
-        // Skip missed frames rather than trying to catch up.
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
         Self {
-            interval,
+            // `frame_duration` divides a one-second `Duration` directly so
+            // the period is exact (e.g. 60 FPS -> 16.667ms) instead of
+            // truncating to whole milliseconds.
+            period: frame_rate.frame_duration(),
+            schedule: None,
             pending: PendingWork::new(),
         }
     }
 
     /// Returns the scheduler's frame period.
     #[cfg(test)]
-    pub(super) fn frame_period(&self) -> Duration {
-        self.interval.period()
+    pub(super) const fn frame_period(&self) -> Duration {
+        self.period
     }
 
     /// Records whether a processed command requested a redraw.
@@ -89,7 +92,27 @@ impl FrameScheduler {
             pending::<()>().await;
         }
 
-        self.interval.tick().await;
+        // Frame deadlines are anchor-phase boundaries (`time_util`), not
+        // `tokio::time::interval` ticks: `MissedTickBehavior::Skip` engages
+        // only once a tick is late past a fixed margin, so at sub-margin
+        // frame periods (above roughly 200 FPS) a stall whose missed
+        // deadlines sit within that margin replayed them one frame tick per
+        // missed period — the defect RFC 0009 §4.2 removed from `Timer`. A
+        // deadline already in the past resolves immediately (a re-enabled
+        // frame adds no render latency), and completing a frame then
+        // advances to the first anchor-phase boundary strictly after now:
+        // at most one immediate frame per stall, cadence preserved.
+        let (anchor, deadline) = *self.schedule.get_or_insert_with(|| {
+            let anchor = Instant::now();
+            // The first frame is due immediately, as `interval`'s first
+            // tick was.
+            (anchor, anchor)
+        });
+        sleep_until(deadline).await;
+        self.schedule = Some((
+            anchor,
+            next_anchor_phase_deadline(anchor, self.period, Instant::now()),
+        ));
     }
 }
 
@@ -97,7 +120,7 @@ impl FrameScheduler {
 mod tests {
     use std::num::NonZeroU32;
 
-    use tokio::time::{Duration, Instant, timeout};
+    use tokio::time::{Duration, Instant, advance, timeout};
 
     use super::*;
 
@@ -141,6 +164,72 @@ mod tests {
             Instant::now(),
             before,
             "re-arming after idle should not wait an extra frame period"
+        );
+    }
+
+    // The sub-margin non-catch-up check: at 500 FPS (2 ms) a 5 ms stall
+    // leaves every missed deadline inside tokio's `MissedTickBehavior::Skip`
+    // lateness margin, exactly where the old interval-based scheduler
+    // replayed one tick per missed period (RFC 0009 §4.2's forbidden
+    // catch-up burst; a longer stall pushes the lateness past the margin,
+    // where Skip works and either implementation passes).
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stalled_frames_do_not_replay_a_catch_up_burst() {
+        let mut scheduler = FrameScheduler::new(frame_rate(500));
+
+        // First frame: due immediately; anchors the cadence.
+        scheduler.record_redraw(true);
+        scheduler.next_work_frame().await;
+        let anchor = Instant::now();
+
+        // Stall past the 2 ms and 4 ms deadlines with work still pending.
+        scheduler.record_redraw(true);
+        advance(Duration::from_millis(5)).await;
+
+        // Exactly one immediate late frame ...
+        scheduler.next_work_frame().await;
+        assert_eq!(
+            Instant::now(),
+            anchor + Duration::from_millis(5),
+            "one frame fires immediately after a stall"
+        );
+
+        // ... and the next frame waits for the 6 ms anchor-phase boundary:
+        // a Skip-based scheduler replays the missed 4 ms deadline
+        // immediately instead.
+        scheduler.record_redraw(true);
+        scheduler.next_work_frame().await;
+        assert_eq!(
+            Instant::now(),
+            anchor + Duration::from_millis(6),
+            "missed frame deadlines must not replay as a catch-up burst"
+        );
+    }
+
+    // Post-stall cadence resumes on the anchor's phase: after the late frame
+    // the next boundary can be less than one period away and still fires.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn post_stall_cadence_resumes_on_the_anchor_phase() {
+        let mut scheduler = FrameScheduler::new(frame_rate(250));
+
+        scheduler.record_redraw(true);
+        scheduler.next_work_frame().await;
+        let anchor = Instant::now();
+
+        // Stall to 18 ms past the anchor (between the 16 ms and 20 ms
+        // boundaries), then take the one late frame.
+        scheduler.record_redraw(true);
+        advance(Duration::from_millis(18)).await;
+        scheduler.next_work_frame().await;
+
+        // The next frame is due at the 20 ms anchor-phase boundary — 2 ms
+        // later — not a full 4 ms period after the late frame.
+        scheduler.record_redraw(true);
+        scheduler.next_work_frame().await;
+        assert_eq!(
+            Instant::now(),
+            anchor + Duration::from_millis(20),
+            "cadence resumes on the anchor's phase, not reset to now + period"
         );
     }
 }
