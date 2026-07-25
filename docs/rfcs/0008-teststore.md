@@ -513,16 +513,17 @@ whose observable delivery depends on such a task's progress is outside
 INV-T4's determinism scope — the store contracts only its own polls,
 the same scoping INV-T4 already applies to a nondeterministic
 `update`. The same boundary covers the clock itself: a leaf's poll
-runs inside the store's paused context, so effect code that calls the
-executor's clock facilities there — `tokio::time::pause`, `resume`, or
-an in-effect `advance` — succeeds, and moves or even unpauses the very
-clock the store schedules against. The store does not detect or defend
-against this; every time-related claim in this document (INV-T12,
-INV-T13, and the §4.3 deliverability contract) is scoped to the
-store's own operations and is void for a test whose effects manipulate
-the clock. Constructing a nested runtime inside a leaf's poll and
-blocking on it panics (Tokio forbids blocking a runtime thread) — a
-loud failure, not a silent one.
+runs inside the store's paused context, so effect code that calls
+`tokio::time::resume` or an in-effect `tokio::time::advance` there
+succeeds, and unpauses or moves the very clock the store schedules
+against. The store does not detect or defend against this; every
+time-related claim in this document (INV-T12, INV-T13, and the §4.3
+deliverability contract) is scoped to the store's own operations and
+is void for a test whose effects manipulate the clock.
+`tokio::time::pause` is not in that silent set: pausing an
+already-paused clock panics, so an effect calling it fails loudly — as
+does constructing a nested runtime inside a leaf's poll and blocking
+on it (Tokio forbids blocking a runtime thread).
 
 **I/O leaves.** The controlled context enables time only, so a leaf
 that needs an I/O reactor keeps stage 1's honest failure: its first
