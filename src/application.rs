@@ -338,6 +338,41 @@ mod tests {
         }
     }
 
+    // INV-T1 (RFC 0008 §8): `Application::Message` carries no bound beyond
+    // `Send + 'static`. `BareMessage` deliberately implements nothing else —
+    // no `Debug`, `Clone`, or `PartialEq` — so a bound smuggled onto the
+    // trait breaks this compile test regardless of how the doc examples
+    // above evolve.
+    struct BareMessage;
+
+    struct BareApp;
+
+    impl Application for BareApp {
+        type Message = BareMessage;
+        type Flags = ();
+
+        fn new(_flags: ()) -> (Self, Command<BareMessage>) {
+            (Self, Command::none())
+        }
+
+        fn update(&mut self, _msg: BareMessage) -> Command<BareMessage> {
+            Command::none()
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<BareMessage>> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_message_type_requires_only_send_and_static() {
+        let (mut app, cmd) = BareApp::new(());
+        assert!(cmd.is_none());
+        let _ = app.update(BareMessage);
+    }
+
     // Test message traits
     #[test]
     fn test_message_debug() {

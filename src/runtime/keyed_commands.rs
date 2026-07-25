@@ -574,7 +574,7 @@ mod tests {
     use tracing::Level;
 
     use crate::Command;
-    use crate::command::RetryPolicy;
+    use crate::command::{RetryPolicy, fold_leaves};
     use crate::test_support::{TraceRecorder, wait_until, with_silent_panic_hook};
 
     fn actions<I>(items: I) -> BoxStream<'static, Action<i32>>
@@ -586,8 +586,8 @@ mod tests {
     }
 
     fn command_stream(command: Command<i32>) -> BoxStream<'static, Action<i32>> {
-        let (_, _, stream) = command.into_runtime_parts().into_execution_parts();
-        stream.expect("command should have a stream")
+        let (_, _, leaves) = command.into_runtime_parts().into_execution_parts();
+        fold_leaves(leaves).expect("command should have a stream")
     }
 
     struct WakeCounter(AtomicUsize);
@@ -920,9 +920,10 @@ mod tests {
         let command = Command::future(pending())
             .timeout(Duration::from_secs(5), || 99)
             .cancellable(id.clone());
-        let (_, key, stream) = command.into_runtime_parts().into_execution_parts();
+        let (_, key, leaves) = command.into_runtime_parts().into_execution_parts();
         let key = key.expect("key should be present");
-        manager.spawn(key.id, key.policy, stream.expect("stream should exist"));
+        let stream = fold_leaves(leaves).expect("stream should exist");
+        manager.spawn(key.id, key.policy, stream);
 
         assert!(manager.try_next_ready().is_none());
         manager.cancel(&id);

@@ -35,7 +35,7 @@ pub(crate) use cancellation::CancellableCommand;
 pub use cancellation::{CancelPolicy, CommandId};
 pub(crate) use core::Command;
 pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};
-pub(crate) use runtime_parts::RuntimeCommandParts;
+pub(crate) use runtime_parts::{RuntimeCommandParts, fold_leaves};
 
 /// An internal runtime directive produced by a command's effect stream.
 ///

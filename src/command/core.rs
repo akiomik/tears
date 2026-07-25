@@ -142,7 +142,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub(crate) fn into_runtime_parts(self) -> RuntimeCommandParts<Msg> {
         RuntimeCommandParts::new(
             self.directives,
-            self.effect.into_stream(),
+            self.effect.into_leaves(),
             self.cancellation,
         )
     }

@@ -98,6 +98,11 @@ pub mod prelude;
 pub(crate) mod runtime;
 mod structural_key;
 pub mod subscription;
+// `TestStore`'s single public path is `tears::testing::TestStore`: no
+// crate-root re-export and no prelude membership, because a minimal skeleton
+// app never names the type (RFC 0008 §3.3; docs/api-guidelines.md "Prelude
+// Membership").
+pub mod testing;
 
 // Re-export commonly used types
 pub use application::Application;
