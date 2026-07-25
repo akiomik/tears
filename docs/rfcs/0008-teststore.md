@@ -650,9 +650,17 @@ Enforcement classes follow the pre-review checklist's definitions
   message contains the class's required content — the leaked value's
   `Debug` rendering for the message classes — because the wrong-value
   adversary is exactly what the message-content assertion exists to
-  fail; plus one negative test that a `send` issued while a deliverable
+  fail; plus two negative tests that a `send` issued while a deliverable
   message is still pending does *not* fail and leaves that message
-  assertable by a later `receive` (the shared-first script of §6).
+  assertable by a later `receive` — one over a **keyed** occupant's
+  output (the `send(Start); send(Cancel)` shared-first script of §6,
+  whose ordering is runtime parity, RFC 0003 INV-14) and one over
+  **unkeyed** output (which asserts only that `send` does not block on
+  it; the ordering is TestStore's linearization, not runtime parity,
+  §6). The keyed-only test would pass an implementation that wrongly
+  fails `send` on unkeyed pending output; the unkeyed-only test would
+  miss a broken keyed cancellation/shared-first path — so both are
+  required.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
   `send`/`receive*` fail on the quit state without polling any leaf,
   and the `finish` and drop checks poll nothing and pass regardless of

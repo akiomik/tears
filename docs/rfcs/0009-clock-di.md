@@ -59,6 +59,8 @@ stage 2 consumes this contract; nothing here gates on TestStore.
 - The determinism contract a controlled time context provides to
   consumers (§3.2), and its negative space (§3.4).
 - The HTTP time-source migration, as a named prerequisite (§4.1).
+- The `Timer` non-catch-up contract-alignment fix (§4.2), a
+  behavior-changing deliverable carrying a `CHANGELOG: Fixed` entry.
 - The `tokio` `test-util` feature decision for in-crate controlled
   contexts (§5.1).
 - A deterministic-time testing recipe in `docs/testing.md` for
@@ -293,15 +295,17 @@ controlled context, the contract a consumer may cite:
   elsewhere holds identically under the virtual clock: RFC 0004's
   timeout semantics (deadline anchored at the leaf's first poll, one
   timeout message per modifier) and retry-backoff semantics, and
-  `Timer`'s semantics (no tick before one full interval after its
-  construction-time anchor; no catch-up burst — a gap spanning several
-  intervals yields exactly one tick and a gap shorter than one interval
-  yields none, whether the gap falls before or after the timer's first
-  poll; and, after that single tick, the next tick due at the first
-  interval boundary strictly after now measured from the construction
-  anchor, so the phase is preserved, not reset. These are stated as
-  observable properties of `Timer` (§4.2), not as a claim about
-  `.skip(1)` or any other mechanism). This non-catch-up property is a
+  `Timer`'s semantics, stated over a running `next_deadline` that starts
+  one full interval after the timer's stream-construction anchor: a poll
+  with virtual now `<` `next_deadline` yields no tick; a poll with now
+  `>=` `next_deadline` yields exactly one tick, never a burst, however
+  many deadlines have elapsed; and delivering a tick advances
+  `next_deadline` to the first anchor-phase boundary strictly after the
+  current now, so the phase is preserved, not reset (§4.2). This is
+  deadline-relative, not gap-relative: after a tick delivered late, the
+  very next boundary can be less than one interval away and still fires.
+  These are observable properties of `Timer`, not a claim about
+  `.skip(1)` or any other mechanism. This non-catch-up property is a
   contract the `Timer` implementation provides directly; Tokio's
   `MissedTickBehavior::Skip` does not supply it, because its skip engages
   only once a tick is late by more than a fixed margin, so for sub-margin
@@ -373,28 +377,38 @@ This deliverable changes `Timer` to provide the non-catch-up property
 directly and pins the semantics in rustdoc. Unlike §4.1, it is **not**
 behavior-preserving.
 
-- **Observable change.** After a gap spanning several intervals, `Timer`
-  yields exactly one tick — no catch-up burst — instead of one tick per
-  missed interval. This is a user-visible behavior change for
+- **Observable change.** After a delay spanning several intervals,
+  `Timer` yields exactly one tick — no catch-up burst — instead of one
+  tick per missed interval. This is a user-visible behavior change for
   short-interval timers under load, so it lands with a `CHANGELOG: Fixed`
   entry, not as a mere rustdoc adjustment.
-- **Pinned observable properties** (independent of the implementation
-  mechanism, so a from-scratch reimplementation that drops `.skip(1)` or
-  `interval` altogether still conforms):
-  - No tick is delivered before one full interval has elapsed from the
-    timer's construction-time anchor (the construction-instant tick is
-    never delivered).
-  - A gap of at least one full interval leaves exactly one deliverable
-    tick; a shorter gap leaves none — regardless of whether the gap
-    falls before or after the first poll.
-  - **Post-miss cadence.** After the single overdue tick is delivered,
-    the next tick is due at the first interval boundary strictly after
-    the current instant, measured from the construction anchor — the
-    phase is preserved (Skip-style alignment), not reset to
-    "now + interval" (Delay-style). This preserves the existing
-    drift-corrected cadence the `Timer` rustdoc describes.
+- **Anchor.** The time anchor is fixed at **stream construction** — the
+  moment `Timer::stream()` is called (`interval()` in
+  `src/subscription/time.rs`), not `Timer::new`, which only stores the
+  interval value. Time that passes between `Timer::new` and `stream()`
+  does not count against the timer; the first `next_deadline` is one
+  full interval after the `stream()` call.
+- **Pinned observable properties**, stated over a running `next_deadline`
+  (independent of the implementation mechanism, so a from-scratch
+  reimplementation that drops `.skip(1)` or `interval` altogether still
+  conforms):
+  - `next_deadline` starts one full interval after the stream-construction
+    anchor. The construction-instant tick is never delivered.
+  - A poll observing virtual now `<` `next_deadline` yields no tick. A
+    poll observing now `>=` `next_deadline` yields **exactly one** tick,
+    however many interval boundaries lie between the old `next_deadline`
+    and now — never a burst. This holds whether the poll is the first or
+    a later one.
+  - **Post-miss cadence.** Delivering a tick advances `next_deadline` to
+    the first anchor-phase boundary strictly after the current now (the
+    phase is preserved — Skip-style alignment — not reset to
+    "now + interval", Delay-style). This is deadline-relative: after a
+    late tick, the next boundary can be less than one interval away and
+    still fires. It preserves the drift-corrected cadence the `Timer`
+    rustdoc describes.
 - **rustdoc.** `Timer` gains a first-tick, non-catch-up, and post-miss
-  cadence sentence citing this RFC as the semantics of record.
+  cadence sentence citing this RFC as the semantics of record, and names
+  the stream-construction anchor.
 - **Tests.** INV-C3's paused-clock tests at 1 ms and 2 ms intervals are
   the proof; a Skip-margin-dependent implementation fails them.
 
@@ -426,14 +440,14 @@ idles the executor, so the auto-advance clause never applies) and
 INV-C3's transparency (store results are evidence about production time
 contracts, completing the INV-T3 argument on the time axis).
 
-Two design inputs recorded for that amendment:
+Three design inputs recorded for that amendment:
 
 - **Deadline anchoring.** RFC 0004 anchors a timeout's deadline at the
   leaf's *first poll*, and the store's scans decide when that first
   poll happens; the amendment's advance semantics must account for
   scan-order-dependent anchoring rather than assuming
-  construction-time anchoring. (`Timer`'s construction-time anchor
-  (§3.2) is not a stage-2 concern: stage 2 delivers command time leaves
+  construction-time anchoring. (`Timer`'s stream-construction anchor
+  (§4.2) is not a stage-2 concern: stage 2 delivers command time leaves
   only, never `Timer`.)
 - **Advance semantics and executor context.** Tokio's `advance` does
   not wait for the sleeps it moves past to complete (§3.2), so the
@@ -556,15 +570,22 @@ Enforcement classes follow the pre-review checklist's definitions.
   (`src/command/effect.rs`, `src/command/retry.rs`, `src/runtime.rs`)
   are the timeout/retry half; new paused-clock `Timer` tests pin the
   timer half at short intervals (1 ms and 2 ms, chosen to fall inside
-  Tokio's lateness margin so a Skip-dependent implementation fails
-  them) — no tick ready before an advance of one full interval; the
-  first tick ready after exactly one interval; a single advance spanning
-  several intervals yielding exactly one tick, not a burst, whether the
-  advance falls before or after the timer's first poll (a gap shorter
-  than one full interval yields no tick); and, after that single tick,
-  the next tick due at the first interval boundary strictly after now
-  measured from the construction anchor, not one interval after the poll
-  (the §4.2 post-miss cadence — a Delay-style reset fails it). The
+  Tokio's lateness margin so a Skip-dependent implementation fails them),
+  covering the §4.2 observable properties:
+  (a) no tick ready while now is before the first `next_deadline` (one
+  interval after the stream-construction anchor);
+  (b) the first tick ready once now reaches that deadline;
+  (c) a single advance past several interval boundaries yielding exactly
+  one tick, not a burst, whether it is the first poll or a later one;
+  (d) **post-miss cadence** — after a late tick delivered at, say,
+  now = 3.5 ms on a 1 ms timer, the next tick fires at 4 ms (the first
+  anchor-phase boundary strictly after now, only 0.5 ms later), *not* at
+  4.5 ms; a Delay-style "now + interval" reset fails this, and a
+  gap-length rule that suppressed the sub-interval boundary would too;
+  and
+  (e) **anchor** — advancing virtual time between `Timer::new` and
+  `stream()` shifts no deadline, since the anchor is the `stream()` call
+  (finding: `new` stores only the interval). The
   existing wide-margin real-time `Timer` tests remain as non-normative
   smoke checks; the paused tests are the contract's proof.
 - **INV-C4**: production neutrality — the crate exposes no time-control
