@@ -1,22 +1,31 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
 - Status: Accepted
-- Target: an additive, executor-free test harness for the current
-  `Application` API (stage 1: pure `update` + immediately ready effects)
+- Amended: 2026-07-25 — stage 2: the store-held controlled time context
+  and `advance` (§3, §4.3, §7), consuming RFC 0009's contract
+- Target: an additive test harness for the current `Application` API:
+  pure `update` transitions and immediately ready effects (stage 1),
+  plus time-dependent command effects under a store-held controlled
+  time context (stage 2)
 - Scope: the `Message` trait-bound decision, the exhaustive-assertion
   decision, the `TestStore` public surface, its delivery-order and
   cancellation-parity contracts, the per-leaf `RuntimeCommandParts`
-  prerequisite (§4.1), and the staging split with Clock DI
+  prerequisite (§4.1), the staging split with Clock DI, and the stage-2
+  controlled-time contract (`advance`, anchoring, the store-owned
+  executor context — §3.2, §4.3, §7)
 - Feature flag: none (precedent: `subscription::mock` ships
-  unconditionally)
+  unconditionally); stage 2's implementation adds tokio's `test-util`
+  to the crate's unconditional dependency features per RFC 0009 §5.1's
+  decision
 - CHANGELOG: `Added` entry lands at the implementation release, not with
-  this RFC
+  this RFC; stage 2 amends the same not-yet-released entry
 
-> **Staging.** This RFC specifies stage 1 only: driving pure `update`
-> transitions and effects that become ready without an executor, a timer,
-> or wall-clock time. Time-dependent *command* effects (`Command::timeout`,
-> retry backoff) are stage 2, which waits on a separate Clock DI RFC (§7)
-> and lands as a reviewed amendment to this document. `Timer`-based
+> **Staging.** Stage 1 drives pure `update` transitions and effects
+> that become ready without an executor or the passage of time. Stage 2
+> — specified by the 2026-07-25 amendment, gated on RFC 0009 — adds a
+> store-held controlled time context and `advance`, making
+> time-dependent *command* effects (`Command::timeout`, retry backoff)
+> deliverable through ordinary `receive` flow (§4.3, §7). `Timer`-based
 > subscriptions are not staged here at all: TestStore never executes
 > subscription sources (§1.2), so lifting that is a separate
 > subscription-execution design, not stage 2.
@@ -44,7 +53,9 @@ Three decisions, ordered by urgency:
    designed here (open question 2).
 3. **Clock DI split** (§7): Clock injection is a separate RFC. This RFC
    does not gate on it, and stage 2 of TestStore gates on that RFC, not
-   the reverse.
+   the reverse. RFC 0009 is Accepted; the stage-2 amendment consumes
+   its contract and resolves the three design inputs its §5.1 recorded
+   (§7).
 
 The harness itself: `tears::testing::TestStore<App>` wraps an
 `Application`, applies messages synchronously through `update`, consumes
@@ -53,16 +64,18 @@ runtime uses (§4.1 records the named prerequisite refactor that makes
 that boundary carry per-leaf streams), and lets the test assert state,
 delivered messages, quit,
 declared subscription identity, and the redraw directive — with RFC 0003
-cancellation semantics honored on the pending output (§5).
+cancellation semantics honored on the pending output (§5). Stage 2 adds
+`advance`, the store's only time control, over a controlled time
+context the store itself owns (§4.3).
 
 ## 1. Scope
 
-### 1.1 In scope (stage 1)
+### 1.1 In scope
 
 - Constructing the store from `Application::new(flags)`, including the
   init command's effects.
 - `send`: apply one message through `update`, synchronously, with no
-  executor and no task spawn.
+  task spawn.
 - `receive`: assert the next deliverable message (or quit) and apply it
   through `update`, closing the effect→message loop the runtime closes.
 - State observation (`state(&self) -> &App`) for plain-assertion access.
@@ -77,13 +90,18 @@ cancellation semantics honored on the pending output (§5).
 - The redraw directive (RFC 0002) as a per-step observation (§5.2).
 - Declared subscription identity: the `SubscriptionId` set returned by
   `subscriptions()`, observed without starting any source (§3.2).
+- Time-dependent *command* effects (stage 2): `Command::timeout` and
+  retry backoff, deliverable through ordinary `receive` flow once
+  `advance` has moved the store's virtual clock to their deadline
+  (§3.2, §4.3).
 
-### 1.2 Out of scope (stage 1)
+### 1.2 Out of scope
 
-- **Time-dependent effects**: `Command::timeout`, `RetryPolicy` with a
-  non-zero backoff, and any effect that needs a timer or reactor. Polling
-  such a leaf inside TestStore fails the test (§4.3); making it pass
-  deterministically is exactly stage 2's job (§7).
+- **Effects needing facilities the controlled context lacks**: the
+  store's context enables time only, never I/O (§4.3) — a leaf that
+  needs an I/O reactor fails the test at its first poll, exactly as
+  stage 1's time leaves did. Real I/O is nondeterministic by nature; a
+  test feeds results through test-controlled sources instead.
 - **Subscription source execution**: TestStore never starts, polls, or
   restarts a subscription source. It observes the *declared* set only.
   Lifecycle behavior (keyed restart, RFC 0005) stays covered by the
@@ -153,10 +171,10 @@ cancellation semantics honored on the pending output (§5).
 ### 3.1 Type and construction
 
 ```rust
-/// Deterministic, executor-free test harness for an `Application`
-/// (RFC 0008). Drives `update` and immediately ready effects
-/// synchronously; time-dependent effects are out of scope until the
-/// Clock DI RFC lands.
+/// Deterministic test harness for an `Application` (RFC 0008). Drives
+/// `update`, immediately ready effects, and — via `advance` over a
+/// store-held controlled time context — time-dependent command
+/// effects, synchronously and without wall-clock waiting.
 pub struct TestStore<App: Application>
 where
     App::Message: Debug,
@@ -181,6 +199,15 @@ where
     /// undelivered output stays caught by `receive*`/`finish`/drop (§6).
     /// Fails the test only if quit has been observed (§5.3).
     pub fn send(&mut self, msg: App::Message);
+
+    /// Advances the store's virtual clock by `duration` (stage 2):
+    /// anchors first — every pending leaf without buffered output is
+    /// polled exactly once, in enqueue order — then moves virtual time
+    /// forward by exactly `duration`. Delivers nothing; output made
+    /// ready by the advance is observed at the next check whose scan
+    /// polls it (§3.2, §4.3). Fails the test only if quit has been
+    /// observed (§5.3).
+    pub fn advance(&mut self, duration: Duration);
 
     /// Asserts that the next deliverable output is a message equal to
     /// `expected`, then applies it through `update`.
@@ -223,7 +250,7 @@ generic) are implementation latitude.
   accounting as any step's output (§6); `send` does not require it to
   be received first.
 - **`send`** is one synchronous `update` call plus bookkeeping. It
-  spawns no task, requires no executor, and returns only after the
+  spawns no task, awaits nothing, and returns only after the
   command's metadata (directives, cancellation) has been applied to the
   store. It runs no deliverable-output exhaustiveness precondition and
   polls no pending leaf for output; pending deliverable output is left
@@ -234,6 +261,20 @@ generic) are implementation latitude.
   and only when the returned command is keyed under
   `CancelPolicy::KeepInFlight`; it never delivers output, which happens
   only in `receive*` calls.
+- **`advance`** (stage 2) is the store's only time control. It fails on
+  the quit state like `send` (§5.3). Otherwise it anchors first, then
+  moves time: its **anchoring scan** polls every pending leaf not
+  already holding buffered output exactly once, in enqueue order, under
+  §4.1's budget — a yield is buffered at the leaf's canonical position,
+  exactly as the keyed-intake reconciliation buffers (§5.1) — and only
+  then does the controlled context's virtual clock move forward, by
+  exactly `duration`. The scan reaches *every* pending leaf and never
+  stops early: its job is anchoring (§4.3), not delivery. `advance`
+  delivers nothing and polls nothing after the clock moves: a leaf
+  whose deadline the advance reached becomes deliverable at the next
+  check whose scan polls it (RFC 0009 §3.2's readiness guarantee — no
+  wall-clock waiting, no fixed observing poll). `advance(Duration::ZERO)`
+  is legal and anchors without moving time.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
   `update` — so the store advances exactly as the runtime would on that
@@ -244,8 +285,9 @@ generic) are implementation latitude.
   pending effects" from "effects pending but not ready" (§4.3).
 - **`receive_quit`** asserts the next deliverable output is a quit
   request. After it succeeds, the store is in the quit state: `send`,
-  `receive`, `receive_matching`, and `receive_quit` all fail; `state`,
-  `redraw_requested`, `subscription_ids`, and `finish` remain callable.
+  `advance`, `receive`, `receive_matching`, and `receive_quit` all
+  fail; `state`, `redraw_requested`, `subscription_ids`, and `finish`
+  remain callable.
 - **`subscription_ids`** calls `Application::subscriptions` and returns
   the declared IDs in declaration order, deduplicated by RFC 0005 §3.5's
   first-occurrence-stable rule: for equal full IDs in the declared list,
@@ -323,18 +365,20 @@ keeping them apart. INV-T3 names this revised boundary.
 
 **Deliverability and the poll budget.** A leaf's output is
 **deliverable** at a given check when the leaf yields it on that
-check's poll, or when a keyed-intake reconciliation poll (§5.1) has
+check's poll, or when an earlier poll under this budget (a keyed-intake
+reconciliation, §5.1, or an anchoring scan, §3.2) has
 already yielded it into the leaf's buffer — a buffered item is
 deliverable at every later check without a further poll. The poll
 contract is fixed, because INV-T4's determinism rests on it: polling
-happens only inside `receive*`, `finish`, and drop checks, plus the
+happens only inside `receive*`, `finish`, and drop checks, the
 keyed-intake reconciliation of §5.1 (a keyed `send`'s only poll, and
-only under `KeepInFlight`). A bare `send` polls no leaf (§6). The
+only under `KeepInFlight`), and `advance`'s anchoring scan (§3.2). A
+bare `send` polls no leaf (§6). The
 quit-state check precedes every one of these sites, so after an
-observed quit no store call polls at all: `send`/`receive*` fail on
-the quit state before reaching any leaf, and the `finish` and drop
-checks pass without polling (§5.3, §6). Each check polls each leaf its
-scan reaches (§4.2) exactly
+observed quit no store call polls at all: `send`/`advance`/`receive*`
+fail on the quit state before reaching any leaf, and the `finish` and
+drop checks pass without polling (§5.3, §6). Each check polls each leaf
+its scan reaches (§4.2) exactly
 once, with a waker whose wake-ups are not honored within the call. A
 self-waking leaf is therefore re-polled no earlier than the next store
 call and cannot loop a check — if it does not yield on its one poll, it
@@ -342,6 +386,14 @@ is not deliverable at that check; a leaf made ready between calls by a
 test-controlled source (a oneshot the test completed, a
 `MockSource`-style seam) is observed at the next check whose scan
 reaches it. Between calls the store does nothing.
+
+Stage 2 changes where a poll runs, not when: every poll under this
+budget happens inside the store-held controlled time context (§4.3),
+so a time-gated leaf finds the paused clock rather than no clock. The
+budget above is otherwise unchanged, and between calls the store still
+does nothing — in particular, it never lets its executor idle, so
+RFC 0009 §3.2's auto-advance clause never applies to the store's own
+operations (INV-T12).
 
 ### 4.2 Ordering
 
@@ -358,8 +410,16 @@ reaches it. Between calls the store does nothing.
   head, or a yield on that leaf's one poll); the pre-quit `finish`/drop
   checks scan in the same order until they find a deliverable output or
   an unfinished leaf (failing) or exhaust the set (establishing nothing
-  is outstanding). `send` runs no such scan (§6). Either way, each
-  reached leaf gets exactly one poll (§4.1).
+  is outstanding); `advance`'s anchoring scan walks the same order but
+  never stops early (§3.2). `send` runs no such scan (§6). In every
+  case, each reached leaf gets exactly one poll (§4.1).
+- **Time-made-ready leaves join the same order**: a leaf whose deadline
+  an `advance` reached is simply deliverable at later checks, at its
+  enqueue position. Two time-gated leaves whose deadlines fall inside
+  the same `advance` deliver in enqueue order like any other pair of
+  deliverable leaves — the store's linearization supplying the
+  equal-deadline order RFC 0009 §3.4 deliberately leaves unspecified,
+  so the citation rule below applies to it.
 - **Negative space, stated deliberately**: the canonical cross-leaf
   order is *TestStore's* contract, not the runtime's. The runtime folds
   a command's leaves through an unordered select and pins no cross-leaf
@@ -372,75 +432,98 @@ reaches it. Between calls the store does nothing.
   set-based `receive_unordered` helper should exist for such tests is
   open question 1.
 
-### 4.3 Leaves that cannot become ready
+### 4.3 Time-gated leaves and the controlled context
 
-A command leaf that requires a timer or reactor (`Command::timeout`
-wraps every leaf in a deadline; a backoff retry sleeps) cannot be
-driven without an executor. (`Timer` is not in this set: it is a
-subscription source, not a command leaf, so it never enters the store's
-pending command set — §1.2.) Stage 1's contract is honest about this
-rather than silently lenient: polling such a leaf fails the test.
+*Rewritten by the stage-2 amendment. Stage 1 required the reactor's
+genuine absence and failed the test on any poll of a time-dependent
+leaf; that contract, and the entered-runtime analysis behind it, lives
+in this section's pre-amendment text (git history) and survives here
+only as the I/O rule below and INV-T10's construction check.*
 
-This guarantee holds only because stage 1 requires the reactor's
-genuine *absence*, not merely the store's own inaction, and an entered
-Tokio runtime does not reliably restore it. With the default
-`#[tokio::test]` configuration (`enable_all`), the same leaf's first
-poll finds a real reactor and returns `Pending` instead of panicking —
-not the documented immediate failure, but the store's ordinary
-not-yet-deliverable handling: a `receive*` reaching only this leaf
-fails with the same "effects pending but not ready" diagnostic
-(§3.2, §6) any ordinary in-flight effect produces — not this leaf
-class's own diagnostic, the missing-reactor panic (poor as that
-diagnostic is, below) — and a `Pending` poll by itself is not a
-failure at all — like any other in-flight leaf, it is caught only if
-`finish`/drop still finds it unfinished (the pending-leaf carve-out
-below, this section). Whether it stays unfinished until then is no
-longer stage 1's decision: because a real reactor is now present, the
-same command effect this leaf wraps (`tokio::time::sleep` under
-`timeout`, or a backoff delay) can keep making genuine progress
-against it between store calls, so a later poll may find it
-deliverable with real output — an outcome timed by the ambient runtime
-and real wall-clock elapsed time, not by the test program, which would
-undermine the very determinism INV-T4 asserts. Ruling that out before
-it can happen, rather than living with it, is INV-T10's job. (A
-runtime entered with a narrower driver configuration — no timer, no
-I/O — still panics on the same poll, so the failure mode is not even
-uniform across entered runtimes.) Because
-the outcome depends on drivers and scheduling the store cannot cheaply
-or safely inspect from inside, stage 1 does not try to distinguish any
-of these cases: it refuses to run inside any entered runtime at all.
-`TestStore::new` therefore checks
-`tokio::runtime::Handle::try_current()` and panics immediately, with a
-diagnostic naming the precondition, if one is currently entered. Stage 1
-tests must run on a plain `#[test]` (or equivalent), never
-`#[tokio::test]`. The check is structural and happens once, at
-construction, not per leaf: a store built outside a runtime but later
-polled from inside one (a nested `block_on`) is a misuse this RFC does
-not attempt to catch, matching stage 1's synchronous, executor-free
-design (§1, §3.2). This precondition is stage-1-only (INV-T10, §8):
-stage 2's controlled time context (§7; RFC 0009 §3.2) is itself a
-paused single-threaded executor, so the Clock DI amendment replaces this
-check with one that accepts *that specific* controlled context and
-rejects any other runtime, rather than rejecting every runtime as stage
-1 does.
+The store owns a **controlled time context** in RFC 0009 §3.2's sense:
+a single-threaded executor context, constructed by `TestStore::new`,
+whose clock starts paused and which enables no I/O driver. Every poll
+under §4.1's budget happens inside it; the caller never provides,
+enters, or observes it. The store's operations never idle the
+executor — §4.1's checks poll and return — so RFC 0009 §3.2's
+auto-advance clause never applies to them: the store's virtual time
+moves only through `advance` (INV-T12).
 
-Note what that means under §4.2's scan semantics: the failure fires at the
-*first store call whose scan polls the leaf* — a `receive` aimed at a
-different message, a `finish`/drop check, or a keyed-intake
-reconciliation poll (§5.1) that reaches it, not only a call targeting
-the leaf itself; a bare `send` never triggers it, because `send` polls
-no leaf (§6). So from its enqueue onward the store is effectively
-poisoned for those calls, unless every scan stops at an
-earlier-enqueued yielding leaf first, or a `send`-issued cancellation
-removes the leaf (§5.1) before a scan reaches it — the latter is now
-expressible precisely because `send` itself does not poll. The failure
-today surfaces as the underlying missing-reactor panic, which is a poor
-diagnostic; the documentation on `TestStore` names the limitation and
-points at the stage-2 plan (§7). A leaf that is merely *pending* on a
-test-controlled source does not fail anything: it is skipped by the
-canonical order
-until it becomes deliverable, and only `finish` holds it to account
-(§6).
+A time-gated *command* leaf — `Command::timeout` wraps every leaf of
+its child effect in a deadline; a backoff retry sleeps between
+attempts — is therefore an ordinary pending leaf: not deliverable
+while virtual now is before its deadline, deliverable at the first
+check whose scan polls it once virtual now is at or past the deadline.
+This is RFC 0009 §3.2's no-early-firing and readiness contract, plus
+its transparency clause: RFC 0004's timeout and retry semantics hold
+identically under the virtual clock (RFC 0009 INV-C3), so what a store
+test observes about them is evidence about production behavior —
+completing the INV-T3 argument on the time axis. (`Timer` is not in
+this set: it is a subscription source, not a command leaf, so it never
+enters the store's pending command set — §1.2.)
+
+**Anchoring.** RFC 0004 anchors a timeout's deadline at the leaf's
+*first poll*, and a backoff sleep starts at the poll that observes the
+failed attempt; the store adds only *when* polls happen. Because
+virtual time moves only inside `advance`, and only after its anchoring
+scan has seen every pending leaf polled at least once — the scan polls
+each leaf without buffered output, and a buffered leaf was already
+polled, which is how it buffered (§3.2) — no virtual time can pass
+between a leaf's enqueue and its first poll — whichever check's scan
+reaches it first, virtual now is still the leaf's enqueue-time now. A
+timeout leaf's deadline is therefore its enqueue-time virtual now plus
+its declared duration, independent of scan order — the
+scan-order-dependence RFC 0009 §5.1 flagged as a design input
+dissolves rather than needing per-script reasoning. Waits that start
+mid-leaf (a retry's backoff after a failed attempt) anchor at the
+virtual now of the scan that observed the failure, which the test's
+own script determines.
+
+**Construction check (INV-T10, revised).** `TestStore::new` still
+checks `tokio::runtime::Handle::try_current()` and panics immediately,
+with a diagnostic naming the precondition, if any runtime context is
+entered — `#[tokio::test]` included, paused or not. Stage 1 rejected
+every ambient runtime because it required the reactor's absence; stage
+2 keeps the identical check with a different rationale, and this
+supersedes the pre-amendment §4.3/§7 expectation that the amendment
+would "accept that specific controlled context": the accepted
+controlled context is the *store's own*, so the caller-facing rule is
+unchanged — construct the store on a plain `#[test]`, never inside
+`#[tokio::test]`. An ambient runtime is rejected rather than adopted
+because the store cannot verify an ambient runtime's pausedness or
+thread model through any public surface, and because driving the
+store's own context from inside another runtime would block a runtime
+thread, which Tokio forbids. The check is structural and happens once,
+at construction: a store built outside a runtime but later driven from
+inside one is a misuse this RFC does not attempt to catch, as in
+stage 1.
+
+**Outside the store's contract.** A user effect that spawns onto the
+ambient executor (`tokio::spawn` from inside a leaf's poll) now finds
+a context and succeeds, but the spawned task is outside the store's
+pending set: the store neither schedules it deterministically, nor
+drives it to completion, nor counts it in exhaustiveness (§6). A test
+whose observable delivery depends on such a task's progress is outside
+INV-T4's determinism scope — the store contracts only its own polls,
+the same scoping INV-T4 already applies to a nondeterministic
+`update`. Constructing a nested runtime inside a leaf's poll and
+blocking on it panics (Tokio forbids blocking a runtime thread) — a
+loud failure, not a silent one.
+
+**I/O leaves.** The controlled context enables time only, so a leaf
+that needs an I/O reactor keeps stage 1's honest failure: its first
+poll fails the test with the underlying missing-reactor panic, at the
+first store call whose scan polls it — an `advance`, a `receive*`
+aimed at a different message, a `finish`/drop check, or a keyed-intake
+reconciliation poll — never a bare `send`, which polls no leaf (§6).
+From its enqueue onward the store is effectively poisoned for those
+calls unless a scan stops at an earlier-enqueued deliverable leaf
+first (an `advance`'s anchoring scan never stops early, §3.2) or a
+`send`-issued cancellation removes the leaf (§5.1) before a scan
+reaches it. A leaf that is merely *pending* on a test-controlled
+source or a not-yet-reached deadline fails nothing: it is skipped by
+the canonical order until it becomes deliverable, and only `finish`
+holds it to account (§6).
 
 ## 5. Cancellation, directives, quit
 
@@ -490,10 +573,11 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   admission outcome, and the store has no equivalent receiver snapshot to
   reconcile — so skipping the poll preserves the delivery contract while
   matching the runtime's outcome, not its every step. Not polling also
-  lets a `CancelInFlight` command supersede a reactor-dependent occupant
-  (a `timeout` or backoff leaf) without polling it, so cancellation of a
-  time-dependent keyed leaf is expressible in stage 1 (§4.3). Any poll
-  that is issued follows §4.1's budget.
+  lets a `CancelInFlight` command supersede an occupant whose poll
+  would fail the test without polling it — in stage 1 that made
+  cancelling a time-dependent keyed leaf expressible at all; under
+  stage 2 the same escape hatch remains for I/O-dependent leaves
+  (§4.3). Any poll that is issued follows §4.1's budget.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
 - When one command carries both explicit cancels and its own keyed
@@ -565,13 +649,13 @@ via `receive_quit` (§3.2). After quit is observed the store mirrors the
 runtime's shutdown contract: remaining undelivered output is legally
 discarded — the `finish` and drop checks poll nothing and pass
 regardless of what remains (the analogue of the shutdown discard
-carve-out in RFC 0006's INV-L2), and further `send`/`receive*` calls
-fail because the application would no longer be running. A quit that is *suppressed* by cancellation (§5.1) is not
+carve-out in RFC 0006's INV-L2), and further `send`/`advance`/`receive*`
+calls fail because the application would no longer be running. A quit that is *suppressed* by cancellation (§5.1) is not
 "observed" and triggers none of this — exactly RFC 0003 INV-9.
 
 ## 6. Exhaustiveness
 
-Exhaustive assertion is the only stage-1 mode. The rules, by call site:
+Exhaustive assertion is the only mode. The rules, by call site:
 
 - **`send`** performs no exhaustiveness check: pending deliverable
   output does not block a `send`, and neither do effects that are
@@ -596,14 +680,19 @@ Exhaustive assertion is the only stage-1 mode. The rules, by call site:
   deliverable — each with a diagnostic that names the actual value
   (`Debug`) and, in the nothing-deliverable case, distinguishes "no
   pending effects" from "effects pending but not ready".
+- **`advance`** performs no exhaustiveness check either: its anchoring
+  scan buffers what it happens to yield and fails nothing (§3.2) — like
+  `send`, it still fails after an observed quit (§5.3).
 - **`finish`** (and the drop check, §3.2) fails if quit was not
   observed and either (a) a deliverable message or quit request remains,
   or (b) any pending leaf has not been driven to completion — an
   in-flight effect the test never accounted for is a leak even if it
-  never produced a message. After an observed quit, `finish` and the
-  drop check poll nothing and pass unconditionally (§5.3) — a
-  reactor-dependent leaf legally discarded at quit cannot fail them,
-  because §4.3's failure requires a poll.
+  never produced a message. A time-gated leaf the test never advanced
+  to its deadline is exactly such an unfinished leaf: exhaustiveness
+  makes declared time effects part of the accounting. After an observed
+  quit, `finish` and the drop check poll nothing and pass
+  unconditionally (§5.3) — an I/O-dependent leaf legally discarded at
+  quit cannot fail them, because §4.3's failure requires a poll.
 - Every exhaustiveness failure names the leaked messages via `Debug`;
   unfinished leaves that have produced no value are reported by count
   and enqueue position (there is no value to print).
@@ -621,8 +710,9 @@ smuggled in half-specified (open question 2).
 **Decision: Clock injection is its own RFC; this RFC does not contain
 it.** Stage 2 of TestStore — deterministic driving of the
 time-dependent *command* effects (`timeout`, retry backoff, and future
-command-side coalescing timers such as debounce/throttle) — lands as an
-amendment to this document after that RFC is accepted. `Timer` and other
+command-side coalescing timers such as debounce/throttle) — landed as
+the 2026-07-25 amendment to this document, after RFC 0009's
+acceptance. `Timer` and other
 subscription sources are not part of stage 2 (§1.2): they are not
 command leaves and TestStore never executes subscription sources.
 
@@ -640,22 +730,43 @@ Rationale:
 - Stage 1 is additive and independently shippable; bundling would gate
   it behind the larger design.
 
-Non-normative sketch of what the amendment adds, recorded so stage-1 API
-shapes are chosen with it in mind: a store-held controlled time context
-(RFC 0009 §3.2 supersedes the earlier "clock handle" phrasing — there
-is no clock value to hold), an `advance(duration)` call that makes
-time-gated *command* leaves (`timeout`, retry backoff) deliverable, and
-the §4.3 limitation for those leaves dissolving into ordinary `receive`
-flow. `Timer` and other subscription sources stay out of scope in
-stage 2 as in stage 1 (§1.2; RFC 0009 §5.1). Nothing in the stage-1
-surface above assumes otherwise or blocks that shape. INV-T10's
-construction-time check (§4.3, §8) is stage-1-only for the same reason:
-it rejects *every* Tokio runtime context, while stage 2 is meant to run
-inside the specific paused single-threaded executor RFC 0009 §3.2 calls
-a controlled time context, so the amendment narrows the check rather
-than dropping it outright — it will still reject an *unpaused* or
-multi-threaded runtime, which RFC 0009 §3.2's controlled time context
-already excludes.
+The stage-2 amendment consumes RFC 0009's contract and resolves the
+three design inputs RFC 0009 §5.1 recorded for it:
+
+- **Deadline anchoring.** RFC 0004's first-poll anchor, restated over
+  the store's scan sites: because `advance` anchors before it moves the
+  clock and nothing else moves the clock at all, a leaf's first poll
+  always happens at its enqueue-time virtual now, so the
+  scan-order-dependence RFC 0009 §5.1 flagged dissolves (§4.3).
+- **Advance semantics and executor context.** `advance` carries no
+  timer-driver barrier: it moves the clock and polls nothing after,
+  and readiness is observed at the next check whose scan polls the
+  leaf (§3.2) — the executor-progress reading RFC 0009 §3.2 allows.
+  The store owns its controlled time context outright; every ambient
+  runtime is still rejected at construction, superseding the
+  pre-amendment sketch's "accept that specific controlled context"
+  shape (§4.3). User effects that spawn tasks, and nested runtimes,
+  are outside the store's contract (§4.3).
+- **Feature availability.** Per RFC 0009 §5.1's decision, the
+  implementation task adds `test-util` to the crate's unconditional
+  `tokio` dependency features; RFC 0009 INV-C4 carries the load-path
+  regression check that covers the flip, and this document adds no
+  second check for it.
+
+`Timer` and other subscription sources stay out of scope in stage 2 as
+in stage 1 (§1.2; RFC 0009 §5.1). The pre-amendment §7 sketch and its
+INV-T10 scoping note are superseded by the resolutions above and by
+§4.3's revised construction check.
+
+Excluded claims, recorded per the checklist's minimal-contract item: a
+same-poll readiness guarantee ("deliverable on the poll immediately
+after `advance`") is deliberately not claimed — RFC 0009 §3.2 pins
+readiness without wall-clock waiting and no fixed observing poll, and
+the store's §4.2 scan already determines which check observes it; and
+no store-level invariant restates RFC 0004's timeout/retry semantics —
+RFC 0009 INV-C3's transparency carries them onto the virtual clock, and
+INV-T12's behavioral tests exercise them through the store without
+re-proving them.
 
 ## 8. Invariants
 
@@ -695,17 +806,20 @@ Enforcement classes follow the pre-review checklist's definitions
   results evidence about real commands rather than about a test-only
   model.
 - **INV-T4**: the store introduces no nondeterminism of its own —
-  `send` and `receive*` are synchronous (no task spawn, no executor
-  requirement) and polling follows §4.1's fixed budget — so for an
-  application whose `update` is deterministic (the store cannot
+  `send`, `advance`, and `receive*` are synchronous (no task spawn, no
+  wall-clock waiting) and polling follows §4.1's fixed budget — so for
+  an application whose `update` is deterministic (the store cannot
   contract this for the application; `subscriptions` alone carries a
-  purity contract), two executions of one test program observe
+  purity contract) and whose effects do not depend on spawned-task
+  progress (§4.3), two executions of one test program observe
   identical state transitions and delivery sequences. Behavioral: a
   repeated-run test over a deterministic application asserts equal
   delivery transcripts across runs of a multi-leaf,
   cancellation-exercising program, and a poll-counting leaf asserts
   §4.1's one-poll-per-reached-leaf budget (a double-polling
-  implementation fails it).
+  implementation fails it), including `advance`'s anchoring scan (one
+  poll per pending leaf, none after the clock moves — INV-T13's budget
+  half).
 - **INV-T5**: one leaf's messages are delivered in stream order.
   Behavioral: a multi-message `Command::stream` test.
 - **INV-T6**: across leaves, delivery follows §4.2's canonical order
@@ -781,26 +895,63 @@ Enforcement classes follow the pre-review checklist's definitions
   supersede/cancel case (where the pending output is *removed*, not
   retained) is INV-T7's, not a retention test.
 - **INV-T9**: quit terminality and carve-out — after `receive_quit`,
-  `send`/`receive*` fail on the quit state without polling any leaf,
+  `send`/`advance`/`receive*` fail on the quit state without polling
+  any leaf,
   and the `finish` and drop checks poll nothing and pass regardless of
   remaining output. Behavioral: a test quits with output still
-  pending — including a reactor-dependent leaf, which the post-quit
+  pending — including an I/O-dependent leaf, which the post-quit
   no-poll rule leaves untouched and which would fail the run if any
-  post-quit call polled it (§4.3) — and asserts the failing `send` and
+  post-quit call polled it (§4.3) — and asserts the failing `send`,
+  `advance`, and
   `receive*` (whose failure is the quit-state diagnostic, not the
   reactor panic polling would produce) and the passing `finish`.
-- **INV-T10**: reactor-absence precondition (stage 1 only, §7) —
-  `TestStore::new` panics immediately, before returning a store, if
-  `tokio::runtime::Handle::try_current()` succeeds, so §4.3's "polling a
-  time-dependent leaf fails the test" guarantee cannot silently
-  degrade, inside a Tokio runtime context, into the leaf's ordinary
-  not-yet-deliverable handling — with the test's outcome then timed by
-  the ambient runtime and real wall-clock progress instead of guaranteed
-  fail-fast (§4.3). Structural: review of `TestStore::new` for the
+- **INV-T10**: ambient-runtime rejection (revised by the stage-2
+  amendment; the stage-1 statement covered reactor absence) —
+  `TestStore::new` panics immediately, before any other construction
+  work — its own controlled context included — if
+  `tokio::runtime::Handle::try_current()` succeeds. The store's own
+  controlled context must be the only executor context in play: an
+  ambient runtime's pausedness and thread model are unverifiable from
+  the store, its clock is not the store's clock (RFC 0009 §3.4: no
+  contract spans contexts), and driving the store's context from
+  inside another runtime would block a runtime thread (§4.3).
+  Structural: review of `TestStore::new` for the
   check, placed before any other construction work. Behavioral: a test
   constructs `TestStore` from inside `#[tokio::test]` and asserts the
-  panic and that its message names the precondition (not the generic
-  missing-reactor panic §4.3 otherwise produces).
+  panic and that its message names the precondition.
+- **INV-T12**: controlled-context ownership and explicit-only time —
+  the store constructs and owns a controlled time context (RFC 0009
+  §3.2: single-threaded, clock started paused, no I/O driver), every
+  poll under §4.1's budget happens inside it, and its virtual time
+  moves only through `advance`, by exactly the requested duration —
+  the store never idles its executor, so RFC 0009 §3.2's auto-advance
+  clause never fires under the store's own operations (RFC 0009
+  INV-C2's non-idling controller). Structural: review of
+  `TestStore::new` for the context's construction (paused,
+  current-thread, time-only) and of the store for the absence of any
+  executor-idling site outside its poll and advance mechanics.
+  Behavioral: a `Command::timeout` leaf stays pending across repeated
+  failing `receive*` scans and across `advance`s summing to less than
+  its duration, becomes deliverable once cumulative advances reach its
+  deadline, and a retry command with a non-zero backoff delivers its
+  retried outcome only after an advance spanning the backoff — all
+  timed by scripted advances, never by wall-clock waiting (the
+  transparency half is RFC 0009 INV-C3's, not re-proven here; these
+  tests exercise it through the store).
+- **INV-T13**: anchoring — `advance` polls every pending leaf not
+  holding buffered output exactly once, in enqueue order, *before*
+  moving the clock, and delivers nothing; combined with `advance`
+  being the only clock mover, a leaf's first poll always happens at
+  its enqueue-time virtual now, so a timeout leaf's deadline is that
+  now plus its declared duration regardless of scan order (§4.3).
+  Behavioral: (a) `send` a `timeout(d)` command, `advance(d)`, and
+  `receive` the timeout's message — deliverable exactly at the
+  deadline; (b) `advance(x)` first, then `send` a `timeout(d)`
+  command, then `advance` just short of `d` — a `receive*` still
+  reports it pending, and a final `advance` covering the remainder
+  delivers it, failing an implementation that anchors deadlines at
+  store construction instead of the leaf's first poll; (c) the
+  poll-count half lives in INV-T4's budget test.
 - **INV-T11**: subscription-declaration observation —
   `subscription_ids` returns RFC 0005 §3.5's first-occurrence-stable
   dedup of `Application::subscriptions()`'s declared list (duplicates
@@ -824,9 +975,13 @@ Enforcement classes follow the pre-review checklist's definitions
   `subscription_ids` call over a duplicate-ID declaration.
 
 Surface–invariant coverage: `new`/`send`/`receive*`/`finish` map to
-INV-T2/T3/T4/T8, with `new` additionally covered by INV-T10; `state` is
+INV-T2/T3/T4/T8, with `new` additionally covered by INV-T10 and
+INV-T12 (the context it constructs); `advance` maps to INV-T12
+(explicit-only time movement), INV-T13 (anchoring), and INV-T4's
+budget; `state` is
 the pure accessor through which INV-T4's state-transition transcript is
-read, covered there; delivery order maps to INV-T5/T6; cancellation
+read, covered there; delivery order maps to INV-T5/T6, including
+time-made-ready leaves (§4.2); cancellation
 metadata to INV-T7; `receive_quit` and the quit state to INV-T9.
 `redraw_requested` is a pure observation of a contract owned elsewhere
 (RFC 0002's directive) and is covered by INV-T3 (it reads what the
@@ -851,7 +1006,7 @@ rule, the no-side-effect claim, and the no-warning claim together
    exist for tests over sibling leaves, so they need not encode the
    canonical linearization? Trigger: real tests that repeatedly assert
    cross-leaf sequences where the order is incidental. Additive either
-   way; stage 1 ships without it.
+   way; stages 1 and 2 ship without it.
 2. **Non-exhaustive mode.** A lenient mode (unasserted output tolerated,
    or selectively skippable) is not designed here. Trigger: a concrete
    consumer — most plausibly migrating a large existing test suite —
@@ -871,10 +1026,17 @@ rule, the no-side-effect claim, and the no-warning claim together
   declared-set semantics `subscription_ids` observes.
 - RFC 0006 — runtime load control: the shutdown discard carve-out §5.3
   mirrors (INV-L2); the runtime contracts §1.2 excludes.
+- RFC 0004 — command timeout and retry: the first-poll deadline anchor
+  and backoff semantics §4.3's anchoring contract restates over the
+  store's scan sites; RFC 0009 INV-C3 carries them onto the virtual
+  clock.
 - RFC 0007 — RuntimeConfig: the prelude-membership reasoning §3.3
   follows.
-- RFC 0009 — Clock DI: its §3.2 controlled time context, which §7's
-  stage-2 sketch and INV-T10's stage-1 scoping (§4.3, §8) both cite.
+- RFC 0009 — Clock DI: its §3.2 controlled time context and INV-C2/
+  INV-C3, consumed by §4.3 and INV-T12; its §3.4 equal-deadline
+  negative space, which §4.2's linearization supplies; its §5.1 design
+  inputs and `test-util` decision, resolved and carried out by §7's
+  amendment record.
 - `src/application.rs` — the trait whose bounds §2 pins.
 - `src/command/core.rs`, `src/command/runtime_parts.rs` — the
   decomposition boundary INV-T3 names.
