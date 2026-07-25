@@ -1529,37 +1529,36 @@ mod tests {
         store.receive(Msg::N(1));
     }
 
-    // INV-T12: a `Command::timeout` leaf stays pending across repeated
-    // failing receive scans and sub-deadline advances — virtual time moves
-    // only through `advance` — and becomes deliverable exactly when the
+    // INV-T12: a `Command::timeout` leaf enqueued ahead of a
+    // test-controlled leaf stays pending across repeated non-failing
+    // receive scans — each scan gives it one poll on its way to the
+    // deliverable leaf, and delivering the control message proves the
+    // timeout leaf was not deliverable — and across advances summing to
+    // less than its duration; it becomes deliverable exactly when the
     // cumulative advances reach its deadline (INV-T13's exact-deadline
     // half), with no wall-clock waiting.
     #[test]
     fn timeout_leaf_is_pending_until_advance_reaches_its_deadline() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::Start => timeout_command(60),
+            Msg::Start => Command::batch([
+                timeout_command(60),
+                Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])),
+            ]),
             _ => Command::none(),
         });
         store.send(Msg::Start);
 
-        // Repeated polls without an advance never make it ready: an
-        // implicitly advancing clock would fail these.
-        for _ in 0..3 {
-            let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
-            assert!(
-                failure_message(failure).contains("effects are pending but none is ready"),
-                "the timeout leaf must stay pending without an advance"
-            );
-        }
+        // No advance yet: the timeout leaf is polled and pending.
+        store.receive(Msg::N(1));
 
         store.advance(Duration::from_secs(30));
-        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
-        assert!(
-            failure_message(failure).contains("effects are pending but none is ready"),
-            "half the deadline is not the deadline"
-        );
+        store.receive(Msg::N(2));
 
-        store.advance(Duration::from_secs(30));
+        // 59 of 60 seconds: still pending.
+        store.advance(Duration::from_secs(29));
+        store.receive(Msg::N(3));
+
+        store.advance(Duration::from_secs(1));
         store.receive(Msg::N(99));
         store.finish();
     }
@@ -1570,20 +1569,20 @@ mod tests {
     #[test]
     fn timeout_deadline_anchors_at_first_poll_not_construction() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::Start => timeout_command(60),
+            Msg::Start => Command::batch([
+                timeout_command(60),
+                Command::stream(stream::iter([Msg::N(1)])),
+            ]),
             _ => Command::none(),
         });
         store.advance(Duration::from_secs(10));
         store.send(Msg::Start);
 
-        // 59s after the anchor: a construction-anchored implementation
-        // (deadline at t=60s, now t=69s) would already deliver here.
+        // 59s after the anchor (69s absolute): a construction-anchored
+        // implementation (deadline at t=60s) would deliver N(99) here
+        // instead of the control message.
         store.advance(Duration::from_secs(59));
-        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
-        assert!(
-            failure_message(failure).contains("effects are pending but none is ready"),
-            "the deadline counts from the leaf's first poll, not store construction"
-        );
+        store.receive(Msg::N(1));
 
         store.advance(Duration::from_secs(1));
         store.receive(Msg::N(99));
@@ -1597,30 +1596,31 @@ mod tests {
     #[test]
     fn retry_backoff_delivers_after_an_advance_spanning_the_backoff() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::StartRetry => Command::retry(
-                RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero"))
-                    .with_fixed_backoff(Duration::from_secs(5)),
-                |ctx| async move {
-                    if ctx.attempt().get() == 1 {
-                        Err("first attempt fails")
-                    } else {
-                        Ok(42)
-                    }
-                },
-                |result| Msg::N(result.expect("the second attempt succeeds")),
-            ),
+            Msg::StartRetry => Command::batch([
+                Command::retry(
+                    RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero"))
+                        .with_fixed_backoff(Duration::from_secs(5)),
+                    |ctx| async move {
+                        if ctx.attempt().get() == 1 {
+                            Err("first attempt fails")
+                        } else {
+                            Ok(42)
+                        }
+                    },
+                    |result| Msg::N(result.expect("the second attempt succeeds")),
+                ),
+                Command::stream(stream::iter([Msg::N(1)])),
+            ]),
             _ => Command::none(),
         });
         store.send(Msg::StartRetry);
 
         // The anchoring scan runs the failing first attempt and starts the
-        // backoff sleep; short of the backoff nothing is deliverable.
+        // backoff sleep; one second short of the backoff, the receive scan
+        // polls the retry leaf (still sleeping) on its way to the control
+        // message.
         store.advance(Duration::from_secs(4));
-        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(42))));
-        assert!(
-            failure_message(failure).contains("effects are pending but none is ready"),
-            "the backoff must gate the second attempt"
-        );
+        store.receive(Msg::N(1));
 
         store.advance(Duration::from_secs(1));
         store.receive(Msg::N(42));
