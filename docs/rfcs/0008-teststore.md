@@ -256,11 +256,11 @@ generic) are implementation latitude.
   already-running id in that set untouched and calls a source's
   `stream()` only for an id newly entering it (`src/subscription.rs`).
   `subscription_ids` performs the same dedup without going anywhere near
-  that machinery — it never calls
-  `stream()` on any declared source and never constructs or runs a
-  `SubscriptionManager` (§1.2) — so its return value predicts the
-  reconciliation *input*, not which ids the runtime spawns or which are
-  currently live. For the same reason it does not reproduce the
+  that machinery — it never calls `stream()` on any declared source and
+  never constructs or runs a `SubscriptionManager` (§1.2) — so its
+  return value predicts the reconciliation *input*, not which ids the
+  runtime spawns or which are currently live. For the same reason it
+  does not reproduce the
   warning-level tracing event RFC 0005 §3.5 requires of the ignored
   duplicate: that event is `SubscriptionManager::update`'s own side
   effect, never triggered by a call that runs no `SubscriptionManager`
@@ -388,21 +388,24 @@ Tokio runtime does not reliably restore it. With the default
 poll finds a real reactor and returns `Pending` instead of panicking —
 not the documented immediate failure, but the store's ordinary
 not-yet-deliverable handling: a `receive*` reaching only this leaf
-fails with the ordinary "effects pending but not ready" diagnostic
-(§3.2, §6) rather than the one naming a reactor-requiring leaf, and a
-`Pending` poll by itself is not a failure at all — like any other
-in-flight leaf, it is caught only if `finish`/drop still finds it
-unfinished (the pending-leaf carve-out below, this section). Whether
-it stays unfinished until then is no longer stage 1's decision: because
-a real reactor is now present, the same command effect this leaf
-wraps (`tokio::time::sleep` under `timeout`, or a backoff delay) can
-keep making genuine progress against it between store calls, so a
-later poll may find it deliverable with real output — an outcome timed
-by the ambient runtime and real wall-clock elapsed time, not by the
-test program, which is exactly the nondeterminism stage 1's INV-T4
-exists to rule out. (A runtime entered with a narrower driver
-configuration — no timer, no I/O — still panics on the same poll, so
-the failure mode is not even uniform across entered runtimes.) Because
+fails with the same "effects pending but not ready" diagnostic
+(§3.2, §6) any ordinary in-flight effect produces — not this leaf
+class's own diagnostic, the missing-reactor panic (poor as that
+diagnostic is, below) — and a `Pending` poll by itself is not a
+failure at all — like any other in-flight leaf, it is caught only if
+`finish`/drop still finds it unfinished (the pending-leaf carve-out
+below, this section). Whether it stays unfinished until then is no
+longer stage 1's decision: because a real reactor is now present, the
+same command effect this leaf wraps (`tokio::time::sleep` under
+`timeout`, or a backoff delay) can keep making genuine progress
+against it between store calls, so a later poll may find it
+deliverable with real output — an outcome timed by the ambient runtime
+and real wall-clock elapsed time, not by the test program, which would
+undermine the very determinism INV-T4 asserts. Ruling that out before
+it can happen, rather than living with it, is INV-T10's job. (A
+runtime entered with a narrower driver configuration — no timer, no
+I/O — still panics on the same poll, so the failure mode is not even
+uniform across entered runtimes.) Because
 the outcome depends on drivers and scheduling the store cannot cheaply
 or safely inspect from inside, stage 1 does not try to distinguish any
 of these cases: it refuses to run inside any entered runtime at all.
