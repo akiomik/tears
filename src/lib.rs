@@ -95,7 +95,6 @@ pub(crate) mod application;
 pub mod command;
 pub(crate) mod panic;
 pub(crate) mod poll_util;
-pub(crate) mod time_util;
 pub mod prelude;
 pub(crate) mod runtime;
 mod structural_key;
@@ -105,6 +104,7 @@ pub mod subscription;
 // app never names the type (RFC 0008 §3.3; docs/api-guidelines.md "Prelude
 // Membership").
 pub mod testing;
+pub(crate) mod time_util;
 
 // Re-export commonly used types
 pub use application::Application;

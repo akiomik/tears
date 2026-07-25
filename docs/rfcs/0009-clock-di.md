@@ -168,15 +168,16 @@ completion depends on the current time: now-reads (`Instant::now`,
 executor's virtualizable clock, i.e. through `tokio::time` types and
 functions. `Duration` values are plain data and are not time reads.
 
-Inventory of production time reads at this RFC's writing:
+Inventory of production time reads (refreshed 2026-07-25, after the
+§4.2 `Timer` fix and the frame-scheduler alignment):
 
 | Site | Read | Purpose | Conforming |
 | --- | --- | --- | --- |
 | `src/command/effect.rs` (timeout leaf) | `tokio::time::sleep` | `Command::timeout` deadline (RFC 0004; anchored at the leaf's first poll) | yes |
 | `src/command/retry.rs` (`run_retry`) | `tokio::time::sleep` | retry backoff delay (RFC 0004) | yes |
-| `src/subscription/time.rs` (`Timer`) | `tokio::time::interval` | periodic ticks; first-tick and non-catch-up semantics (INV-C3) | yes |
+| `src/subscription/time.rs` (`Timer`) | `tokio::time::sleep_until`, `tokio::time::Instant` | periodic ticks; first-tick and non-catch-up semantics (INV-C3) | yes |
 | `src/runtime.rs` (event loop) | `tokio::time::Instant` | micro-batch window deadline (RFC 0006 mechanism) | yes |
-| `src/runtime/frame_scheduler.rs` | `tokio::time::interval` | frame cadence | yes |
+| `src/runtime/frame_scheduler.rs` | `tokio::time::sleep_until`, `tokio::time::Instant` | frame cadence | yes |
 | `src/runtime/channel.rs` (bounded send) | `tokio::time::Instant` | capacity-wait duration in load events (RFC 0006 observability) | yes |
 | `src/subscription/http/cell.rs` | `std::time::Instant` | `stale_time` / `cache_time` decisions, `time_since_data` | **no — §4.1 migration** |
 | `src/subscription/http/query.rs` | `std::time::Instant` | `elapsed_ms` tracing field | **no — §4.1 migration** |

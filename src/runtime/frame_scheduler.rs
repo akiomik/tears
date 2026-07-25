@@ -22,12 +22,19 @@ use super::pending_work::PendingWork;
 /// do nothing.
 pub(super) struct FrameScheduler {
     period: Duration,
-    /// The frame cadence's anchor and next deadline, sampled on the first
+    /// The frame cadence, sampled on the first
     /// [`next_work_frame`](Self::next_work_frame) await — the polling
     /// runtime's clock — never at construction, which may run outside that
     /// runtime (`Runtime` construction precedes `block_on`).
-    schedule: Option<(Instant, Instant)>,
+    schedule: Option<FrameSchedule>,
     pub(super) pending: PendingWork,
+}
+
+/// The frame cadence: the phase-defining anchor and the next frame deadline.
+#[derive(Clone, Copy)]
+struct FrameSchedule {
+    anchor: Instant,
+    next_deadline: Instant,
 }
 
 impl FrameScheduler {
@@ -102,25 +109,35 @@ impl FrameScheduler {
         // frame adds no render latency), and completing a frame then
         // advances to the first anchor-phase boundary strictly after now:
         // at most one immediate frame per stall, cadence preserved.
-        let (anchor, deadline) = *self.schedule.get_or_insert_with(|| {
-            let anchor = Instant::now();
-            // The first frame is due immediately, as `interval`'s first
-            // tick was.
-            (anchor, anchor)
-        });
-        sleep_until(deadline).await;
-        self.schedule = Some((
+        let FrameSchedule {
             anchor,
-            next_anchor_phase_deadline(anchor, self.period, Instant::now()),
-        ));
+            next_deadline,
+        } = *self.schedule.get_or_insert_with(|| {
+            let anchor = Instant::now();
+            FrameSchedule {
+                anchor,
+                // The first frame is due immediately, as `interval`'s
+                // first tick was.
+                next_deadline: anchor,
+            }
+        });
+        sleep_until(next_deadline).await;
+        self.schedule = Some(FrameSchedule {
+            anchor,
+            next_deadline: next_anchor_phase_deadline(anchor, self.period, Instant::now()),
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::num::NonZeroU32;
+    use std::pin::pin;
 
     use tokio::time::{Duration, Instant, advance, timeout};
+
+    use crate::poll_util::noop_context;
 
     use super::*;
 
@@ -203,6 +220,40 @@ mod tests {
             Instant::now(),
             anchor + Duration::from_millis(6),
             "missed frame deadlines must not replay as a catch-up burst"
+        );
+    }
+
+    // Cancel safety: the runtime's select! loop drops this future whenever
+    // another branch wins; a pending poll must not move the deadline. An
+    // implementation deriving the deadline from the await's own start time
+    // ("now + period" per call) drifts here and fails.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn dropping_a_pending_frame_future_preserves_the_deadline() {
+        let mut scheduler = FrameScheduler::new(frame_rate(250));
+
+        scheduler.record_redraw(true);
+        scheduler.next_work_frame().await;
+        let anchor = Instant::now();
+
+        // 1 ms into the 4 ms frame period, poll the frame future exactly
+        // once (registering its sleep) and drop it.
+        scheduler.record_redraw(true);
+        advance(Duration::from_millis(1)).await;
+        {
+            let fut = pin!(scheduler.next_work_frame());
+            assert!(
+                fut.poll(&mut noop_context()).is_pending(),
+                "mid-period frame future starts pending"
+            );
+        }
+
+        // Re-awaiting completes at the original 4 ms deadline, not 1 ms +
+        // one period.
+        scheduler.next_work_frame().await;
+        assert_eq!(
+            Instant::now(),
+            anchor + Duration::from_millis(4),
+            "the deadline survives dropping a pending frame future"
         );
     }
 
