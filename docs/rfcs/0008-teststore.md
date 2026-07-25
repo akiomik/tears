@@ -197,16 +197,20 @@ where
     /// Applies `msg` through `update` and enqueues the returned
     /// command's effects. Does not deliver or poll pending output;
     /// undelivered output stays caught by `receive*`/`finish`/drop (§6).
-    /// Fails the test only if quit has been observed (§5.3).
+    /// Fails the test on the quit state (§5.3); a keyed-intake
+    /// reconciliation poll can additionally surface a leaf's own poll
+    /// failure (§4.3).
     pub fn send(&mut self, msg: App::Message);
 
     /// Advances the store's virtual clock by `duration` (stage 2):
     /// anchors first — every pending leaf without buffered output is
     /// polled exactly once, in enqueue order — then moves virtual time
-    /// forward by exactly `duration`. Delivers nothing; output made
-    /// ready by the advance is observed at the next check whose scan
-    /// polls it (§3.2, §4.3). Fails the test only if quit has been
-    /// observed (§5.3).
+    /// forward by exactly `duration`, with a timer-driver barrier.
+    /// Delivers nothing; output made ready by the advance is observed
+    /// at the next check whose scan polls it (§3.2, §4.3). Fails the
+    /// test on the quit state (§5.3); the anchoring scan can also
+    /// surface a leaf's own poll failure (§4.3), and a `duration`
+    /// overflowing the clock's instant range panics.
     pub fn advance(&mut self, duration: Duration);
 
     /// Asserts that the next deliverable output is a message equal to
@@ -268,12 +272,22 @@ generic) are implementation latitude.
   §4.1's budget — a yield is buffered at the leaf's canonical position,
   exactly as the keyed-intake reconciliation buffers (§5.1) — and only
   then does the controlled context's virtual clock move forward, by
-  exactly `duration`. The scan reaches *every* pending leaf and never
-  stops early: its job is anchoring (§4.3), not delivery. `advance`
-  delivers nothing and polls nothing after the clock moves: a leaf
-  whose deadline the advance reached becomes deliverable at the next
-  check whose scan polls it (RFC 0009 §3.2's readiness guarantee — no
-  wall-clock waiting, no fixed observing poll). `advance(Duration::ZERO)`
+  exactly `duration`, with a **timer-driver barrier**: `advance`
+  drives its executor just far enough for the timer driver to process
+  the newly reached instant — never far enough to idle awaiting a
+  future deadline — because moving the paused clock alone does not fire
+  the timer entries already registered against it, and an unfired entry
+  reads `Pending` on a later manual poll. The barrier is executor
+  progress, not a leaf poll: `advance` delivers nothing and polls no
+  *leaf* after the clock moves (§4.1's budget is unchanged), and a leaf
+  whose deadline the advance reached is deliverable at the next check
+  whose scan polls it — the executor-progress readiness point RFC 0009
+  §3.2 left for this amendment to fix, with no wall-clock waiting.
+  Tasks spawned onto the context by earlier effects may receive
+  incidental polls while the barrier drives the executor (§4.3's
+  negative space). The scan reaches *every* pending leaf and never
+  stops early: its job is anchoring (§4.3), not delivery.
+  `advance(Duration::ZERO)`
   is legal and anchors without moving time.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
@@ -391,9 +405,10 @@ Stage 2 changes where a poll runs, not when: every poll under this
 budget happens inside the store-held controlled time context (§4.3),
 so a time-gated leaf finds the paused clock rather than no clock. The
 budget above is otherwise unchanged, and between calls the store still
-does nothing — in particular, it never lets its executor idle, so
-RFC 0009 §3.2's auto-advance clause never applies to the store's own
-operations (INV-T12).
+does nothing — in particular, it never lets its executor idle awaiting
+a future deadline (`advance`'s driver barrier, §3.2, drives only
+through the already-reached instant), so RFC 0009 §3.2's auto-advance
+clause never applies to the store's own operations (INV-T12).
 
 ### 4.2 Ordering
 
@@ -443,9 +458,13 @@ only as the I/O rule below and INV-T10's construction check.*
 The store owns a **controlled time context** in RFC 0009 §3.2's sense:
 a single-threaded executor context, constructed by `TestStore::new`,
 whose clock starts paused and which enables no I/O driver. Every poll
-under §4.1's budget happens inside it; the caller never provides,
-enters, or observes it. The store's operations never idle the
-executor — §4.1's checks poll and return — so RFC 0009 §3.2's
+under §4.1's budget happens inside it; the store exposes no accessor
+for it, and in ordinary use the caller neither provides nor enters
+it — though effect code polled inside it can capture a handle to it,
+which is negative space below, not an accessor. The store's operations
+never idle the executor awaiting a future deadline — §4.1's checks
+poll and return, and `advance`'s timer-driver barrier (§3.2) drives
+only through the already-reached instant — so RFC 0009 §3.2's
 auto-advance clause never applies to them: the store's own operations
 move virtual time only through `advance` (INV-T12). Like INV-T4's
 determinism, that claim scopes to what the store itself does — leaf
@@ -507,8 +526,11 @@ stage 1.
 **Outside the store's contract.** A user effect that spawns onto the
 ambient executor (`tokio::spawn` from inside a leaf's poll) now finds
 a context and succeeds, but the spawned task is outside the store's
-pending set: the store neither schedules it deterministically, nor
-drives it to completion, nor counts it in exhaustiveness (§6). A test
+pending set: it is not counted in exhaustiveness (§6), and the store
+gives it no specified schedule — it may receive incidental polls
+whenever the store drives its executor (the `advance` barrier, §3.2),
+so it can progress or even complete, but neither the occurrence nor
+the extent of that progress is contract. A test
 whose observable delivery depends on such a task's progress is outside
 INV-T4's determinism scope — the store contracts only its own polls,
 the same scoping INV-T4 already applies to a nondeterministic
@@ -519,8 +541,12 @@ succeeds, and unpauses or moves the very clock the store schedules
 against. The store does not detect or defend against this; every
 time-related claim in this document (INV-T12, INV-T13, and the §4.3
 deliverability contract) is scoped to the store's own operations and
-is void for a test whose effects manipulate the clock.
-`tokio::time::pause` is not in that silent set: pausing an
+is void for a test whose effects manipulate the clock. An effect can
+likewise capture `tokio::runtime::Handle::current()` during its poll
+and smuggle the handle out; everything reached through such a handle —
+entering the context from outside the store's calls, spawning onto it,
+driving it, manipulating its clock — is this same negative space.
+`tokio::time::pause` is not in the silent set: pausing an
 already-paused clock panics, so an effect calling it fails loudly — as
 does constructing a nested runtime inside a leaf's poll and blocking
 on it (Tokio forbids blocking a runtime thread).
@@ -757,10 +783,17 @@ three design inputs RFC 0009 §5.1 recorded for it:
   first poll
   always happens at its enqueue-time virtual now, so the
   scan-order-dependence RFC 0009 §5.1 flagged dissolves (§4.3).
-- **Advance semantics and executor context.** `advance` carries no
-  timer-driver barrier: it moves the clock and polls nothing after,
-  and readiness is observed at the next check whose scan polls the
-  leaf (§3.2) — the executor-progress reading RFC 0009 §3.2 allows.
+- **Advance semantics and executor context.** `advance` carries a
+  timer-driver barrier: after moving the clock it drives its executor
+  until the timer driver has processed the newly reached instant —
+  never idling toward a future deadline — because moving the paused
+  clock alone leaves already-registered timer entries unfired and
+  `Pending` under the store's manual polls. Readiness is then observed
+  at the next check whose scan polls the leaf (§3.2), fixing the
+  executor-progress question RFC 0009 §3.2 left to this amendment;
+  `advance` still polls no leaf after the clock moves. Tasks spawned
+  onto the context may receive incidental polls during the barrier —
+  unspecified progress, §4.3's negative space.
   The store owns its controlled time context outright; every ambient
   runtime is still rejected at construction, superseding the
   pre-amendment sketch's "accept that specific controlled context"
@@ -837,8 +870,9 @@ Enforcement classes follow the pre-review checklist's definitions
   cancellation-exercising program, and a poll-counting leaf asserts
   §4.1's one-poll-per-reached-leaf budget (a double-polling
   implementation fails it), including `advance`'s anchoring scan (one
-  poll per pending leaf not holding buffered output, none after the
-  clock moves — INV-T13's budget half).
+  poll per pending leaf not holding buffered output, and no leaf poll
+  after the clock moves — INV-T13's budget half; the driver barrier is
+  executor progress, not a leaf poll, §3.2).
 - **INV-T5**: one leaf's messages are delivered in stream order.
   Behavioral: a multi-message `Command::stream` test.
 - **INV-T6**: across leaves, delivery follows §4.2's canonical order
@@ -967,9 +1001,14 @@ Enforcement classes follow the pre-review checklist's definitions
   §3.2: single-threaded, clock started paused, no I/O driver), every
   poll under §4.1's budget happens inside it, and the store's own
   operations move its virtual time only through `advance`, by exactly
-  the requested duration — the store never idles its executor, so
+  the requested duration — the store never idles its executor awaiting
+  a future deadline (`advance`'s driver barrier drives only through
+  the already-reached instant, §3.2), so
   RFC 0009 §3.2's auto-advance clause never fires under the store's
-  own operations (RFC 0009 INV-C2's non-idling controller). The store
+  own operations (RFC 0009 INV-C2's non-idling controller). The
+  barrier itself is enforced by this invariant's behavioral tests: a
+  missing barrier leaves a reached deadline `Pending` at the next
+  scan, failing the deliverable-at-the-deadline assertions below. The store
   cannot contract this for application code: a leaf's poll runs inside
   the context, and an effect that reaches the executor's clock
   facilities there is §4.3's negative space, outside every
