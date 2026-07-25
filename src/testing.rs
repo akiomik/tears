@@ -9,19 +9,24 @@
 //! [`TestStore::finish`], which fails the test if any deliverable output or
 //! unfinished effect remains unaccounted for.
 //!
-//! # Scope and limitations (stage 1)
+//! # Scope and limitations
 //!
-//! - **Executor-free by contract**: [`TestStore::new`] panics if a Tokio
-//!   runtime is already entered, so stage-1 tests run on a plain `#[test]`,
-//!   never `#[tokio::test]` (RFC 0008 INV-T10). Inside an entered runtime a
-//!   time-dependent leaf could make real wall-clock progress and silently
-//!   destroy the determinism the store exists to guarantee.
-//! - **Time-dependent command effects are out of scope**: a leaf that needs a
-//!   timer or reactor ([`Command::timeout`], a retry backoff) cannot become
-//!   ready here, and polling one fails the test with the underlying
-//!   missing-reactor panic. Deterministic driving of those leaves is staged on
-//!   the Clock DI RFC (RFC 0009); a keyed time-dependent leaf can still be
-//!   *cancelled* in stage 1, because cancellation removes it without polling.
+//! - **Store-owned controlled time context**: [`TestStore::new`] builds a
+//!   paused, single-threaded, time-only executor context that the store
+//!   alone drives (RFC 0008 §4.3; RFC 0009 §3.2). Construction panics if a
+//!   Tokio runtime is already entered, so tests run on a plain `#[test]`,
+//!   never `#[tokio::test]` (RFC 0008 INV-T10): an ambient runtime's
+//!   pausedness cannot be verified, and its clock is not the store's clock.
+//! - **Time-dependent command effects are driven by `advance`**: a
+//!   [`Command::timeout`] or retry-backoff leaf stays pending until
+//!   [`TestStore::advance`] moves the store's virtual clock to its deadline,
+//!   then delivers through the ordinary `receive` flow. Virtual time never
+//!   moves on its own.
+//! - **I/O is out of scope**: the store's context enables no I/O driver, so
+//!   a leaf that needs one fails the test at its first poll with the
+//!   underlying missing-reactor panic. Feed results through test-controlled
+//!   sources instead; a keyed I/O leaf can still be *cancelled*, because
+//!   cancellation removes it without polling.
 //! - **Subscription sources are never executed**: the store observes the
 //!   *declared* subscription set via [`TestStore::subscription_ids`] and
 //!   starts nothing. Source lifecycle stays covered by the runtime's tests.
@@ -48,9 +53,11 @@
 use std::fmt::Debug;
 use std::task::Poll;
 use std::thread;
+use std::time::Duration;
 
 use futures::stream::BoxStream;
-use tokio::runtime::Handle;
+use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::time;
 
 use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts};
@@ -63,9 +70,10 @@ struct PendingLeaf<Msg> {
     stream: Option<BoxStream<'static, Action<Msg>>>,
     /// Output yielded by an earlier check's poll but not yet delivered,
     /// waiting at this leaf's canonical position as its next deliverable
-    /// output. At most one item can be buffered: the only buffering site is
-    /// the keyed-intake reconciliation poll, which stops at its first yield,
-    /// and delivery scans take the buffer before polling again.
+    /// output. At most one item can be buffered: the buffering sites are
+    /// the keyed-intake reconciliation poll (which stops at its first
+    /// yield) and `advance`'s anchoring scan (which skips already-buffered
+    /// leaves), and delivery scans take the buffer before polling again.
     buffered: Option<Action<Msg>>,
     /// The cancellation id this leaf's command runs under, if keyed.
     key: Option<CommandId>,
@@ -91,12 +99,12 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
     }
 }
 
-/// Deterministic, executor-free test harness for an [`Application`]
-/// (RFC 0008).
+/// Deterministic test harness for an [`Application`] (RFC 0008).
 ///
-/// Drives `update` and immediately ready effects synchronously;
-/// time-dependent effects are out of scope until the Clock DI RFC lands (see
-/// the [module documentation](self) for the full scope).
+/// Drives `update`, immediately ready effects, and — via
+/// [`advance`](Self::advance) over a store-held controlled time context —
+/// time-dependent command effects, synchronously and without wall-clock
+/// waiting (see the [module documentation](self) for the full scope).
 ///
 /// Assertions are exhaustive: deliverable output that a test never receives,
 /// or an effect stream never driven to completion, fails the test at
@@ -161,6 +169,11 @@ where
     App::Message: Debug,
 {
     app: App,
+    /// The controlled time context (RFC 0009 §3.2): a current-thread
+    /// executor context with the clock started paused and no I/O driver.
+    /// Every poll under §4.1's budget enters it, and `advance` is the only
+    /// thing that moves its clock (RFC 0008 INV-T12).
+    context: Runtime,
     /// Undelivered effect leaves in enqueue order.
     pending: Vec<PendingLeaf<App::Message>>,
     redraw_requested: bool,
@@ -188,26 +201,35 @@ where
     /// # Panics
     ///
     /// Panics if called while a Tokio runtime is already entered — for
-    /// example, from inside `#[tokio::test]` (RFC 0008 §4.3, INV-T10).
-    /// Stage 1 requires the reactor's genuine absence: inside an entered
-    /// runtime, a time-dependent leaf's poll could find a real reactor and
-    /// make wall-clock progress instead of failing fast, so stage-1 tests
-    /// must run on a plain `#[test]`.
+    /// example, from inside `#[tokio::test]` (RFC 0008 §4.3, INV-T10). The
+    /// store owns its controlled time context, and that context must be the
+    /// only executor context in play: an ambient runtime's pausedness and
+    /// thread model cannot be verified, and its clock is not the store's
+    /// clock — so tests run on a plain `#[test]`.
     ///
     /// [`finish`]: Self::finish
     #[must_use]
     #[track_caller]
     pub fn new(flags: App::Flags) -> Self {
-        // INV-T10: checked before any other construction work.
+        // INV-T10: checked before any other construction work, the store's
+        // own controlled context included.
         assert!(
             Handle::try_current().is_err(),
-            "TestStore::new: a Tokio runtime is already entered; stage-1 TestStore is \
-             executor-free and must run on a plain #[test], not #[tokio::test] \
-             (RFC 0008 §4.3)"
+            "TestStore::new: a Tokio runtime is already entered; TestStore owns its \
+             controlled time context and must be constructed on a plain #[test], not \
+             #[tokio::test] (RFC 0008 §4.3)"
         );
+        // The controlled time context (RFC 0009 §3.2): current-thread, clock
+        // started paused, time driver only — no I/O (RFC 0008 §4.3).
+        let context = Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
         let mut store = Self {
             app,
+            context,
             pending: Vec::new(),
             // Placeholder only: enqueue_command below overwrites this with
             // the init command's folded directive (§5.2).
@@ -244,6 +266,44 @@ where
     pub fn send(&mut self, msg: App::Message) {
         self.assert_running("send");
         self.apply_update(msg);
+    }
+
+    /// Advances the store's virtual clock by `duration`.
+    ///
+    /// Anchors first, then moves time (RFC 0008 §3.2, §4.3, INV-T13): every
+    /// pending leaf not already holding buffered output is polled exactly
+    /// once, in enqueue order — so a time-gated leaf's deadline anchors at
+    /// its enqueue-time virtual now — and only then does the clock move
+    /// forward, by exactly `duration`. Delivers nothing: output made ready
+    /// by the advance is observed at the next
+    /// [`receive`](Self::receive)-family call, [`finish`](Self::finish), or
+    /// drop check that polls the leaf. `advance(Duration::ZERO)` is legal
+    /// and anchors without moving time.
+    ///
+    /// # Panics
+    ///
+    /// Fails the test if quit has already been observed via
+    /// [`receive_quit`](Self::receive_quit).
+    #[track_caller]
+    pub fn advance(&mut self, duration: Duration) {
+        self.assert_running("advance");
+        {
+            // The anchoring scan (INV-T13): one poll per pending leaf,
+            // before the clock moves; a yield is buffered at the leaf's
+            // canonical position like a reconciliation yield (§5.1).
+            let _context = self.context.enter();
+            for leaf in &mut self.pending {
+                if leaf.buffered.is_some() {
+                    continue;
+                }
+                if let Poll::Ready(Some(action)) = leaf.poll_once() {
+                    leaf.buffered = Some(action);
+                }
+            }
+        }
+        self.pending
+            .retain(|leaf| leaf.stream.is_some() || leaf.buffered.is_some());
+        self.context.block_on(time::advance(duration));
     }
 
     /// Asserts that the next deliverable output is a message equal to
@@ -297,7 +357,8 @@ where
     /// After it succeeds, the store mirrors the runtime's shutdown contract:
     /// remaining undelivered output is legally discarded — the
     /// [`finish`](Self::finish) and drop checks poll nothing and pass — and
-    /// further [`send`](Self::send)/`receive*` calls fail because the
+    /// further [`send`](Self::send)/[`advance`](Self::advance)/`receive*`
+    /// calls fail because the
     /// application would no longer be running. [`state`](Self::state),
     /// [`redraw_requested`](Self::redraw_requested),
     /// [`subscription_ids`](Self::subscription_ids), and
@@ -452,6 +513,7 @@ where
 
         // Poll the occupant's remaining leaves in enqueue order, stopping at
         // the first that shows the run still open.
+        let _context = self.context.enter();
         for leaf in &mut self.pending {
             if leaf.key.as_ref() != Some(id) || leaf.stream.is_none() {
                 continue;
@@ -515,6 +577,7 @@ where
     fn next_deliverable(&mut self, method: &str) -> Action<App::Message> {
         let mut found = None;
         let mut any_open = false;
+        let context = self.context.enter();
         for leaf in &mut self.pending {
             if let Some(action) = leaf.buffered.take() {
                 found = Some(action);
@@ -529,6 +592,7 @@ where
                 Poll::Pending => any_open = true,
             }
         }
+        drop(context);
         // Drop leaves observed exhausted so long scripts do not rescan them;
         // diagnostics carry their own enqueue positions, so removal is
         // invisible to delivery order and error messages.
@@ -560,6 +624,7 @@ where
         }
 
         let mut leak = None;
+        let _context = self.context.enter();
         for leaf in &mut self.pending {
             if let Some(action) = &leaf.buffered {
                 leak = Some(Leak::Deliverable {
@@ -639,12 +704,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use std::num::NonZeroUsize;
+
     use futures::channel::oneshot;
     use futures::stream;
     use ratatui::Frame;
+    use tokio::net::TcpStream;
     use tracing::Level;
 
-    use crate::command::Command;
+    use crate::command::{Command, RetryPolicy};
     use crate::subscription::core::Subscription;
     use crate::subscription::mock::MockSource;
     use crate::test_support::TraceRecorder;
@@ -704,12 +772,31 @@ mod tests {
         N(u32),
         Keyed(u32),
         Start,
+        StartRetry,
         Restart,
         TryKeep,
         Cancel,
         Unrelated,
         Loud,
         StartQuit,
+    }
+
+    /// A leaf that needs the I/O driver: polling it inside the store's
+    /// time-only context fails the test (RFC 0008 §4.3), so it stands in
+    /// for the would-fail-if-polled class.
+    fn io_command() -> Command<Msg> {
+        Command::perform(
+            async {
+                drop(TcpStream::connect("127.0.0.1:9").await);
+            },
+            |()| Msg::N(99),
+        )
+    }
+
+    /// A `Command::timeout` leaf over a never-ready future: deliverable
+    /// only once the store's virtual clock reaches its deadline.
+    fn timeout_command(secs: u64) -> Command<Msg> {
+        Command::future(pending()).timeout(Duration::from_secs(secs), || Msg::N(99))
     }
 
     fn failure_message<T>(result: Result<T, Box<dyn Any + Send>>) -> String {
@@ -818,10 +905,16 @@ mod tests {
         store.send(Msg::Unrelated);
         assert_eq!(polls.load(Ordering::SeqCst), 1);
 
+        // advance's anchoring scan gives each pending leaf exactly one
+        // poll, and nothing is polled after the clock moves (INV-T13's
+        // budget half, asserted here with INV-T4's counting).
+        store.advance(Duration::from_millis(1));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+
         // The finish scan gives the leaf its one poll, on which it completes.
         done.store(true, Ordering::SeqCst);
         store.finish();
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
     }
 
     // INV-T5: one leaf's messages are delivered in stream order.
@@ -897,16 +990,14 @@ mod tests {
         store.finish();
     }
 
-    // INV-T7: `CancelInFlight` supersedes a reactor-dependent occupant
-    // without polling it, so cancelling a time-dependent keyed leaf is
-    // expressible in stage 1 (RFC 0008 §4.3, §5.1).
+    // INV-T7: `CancelInFlight` supersedes an occupant whose poll would fail
+    // the test (an I/O-dependent leaf, §4.3) without polling it — the §5.1
+    // escape hatch that makes cancelling such a keyed leaf expressible.
     #[test]
-    fn cancel_in_flight_supersedes_a_reactor_dependent_occupant() {
+    fn cancel_in_flight_supersedes_an_io_dependent_occupant() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::future(pending())
-                .timeout(Duration::from_secs(60), || Msg::N(99))
-                .cancellable(id.clone()),
+            Msg::Start => io_command().cancellable(id.clone()),
             Msg::Restart => Command::message(Msg::Keyed(9)).cancellable(id.clone()),
             _ => Command::none(),
         });
@@ -1143,15 +1234,13 @@ mod tests {
     }
 
     // INV-T9: after `receive_quit`, steps fail on the quit state without
-    // polling any leaf — a reactor-dependent leaf that would panic if polled
-    // stays untouched — and the finish check polls nothing and passes.
+    // polling any leaf — an I/O-dependent leaf that would fail the test if
+    // polled stays untouched — and the finish check polls nothing and
+    // passes.
     #[test]
     fn quit_is_terminal_and_discards_remaining_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::StartQuit => Command::batch([
-                Command::quit(),
-                Command::future(pending()).timeout(Duration::from_secs(60), || Msg::N(99)),
-            ]),
+            Msg::StartQuit => Command::batch([Command::quit(), io_command()]),
             _ => Command::none(),
         });
         store.send(Msg::StartQuit);
@@ -1159,6 +1248,7 @@ mod tests {
 
         for failure in [
             catch_unwind(AssertUnwindSafe(|| store.send(Msg::Unrelated))),
+            catch_unwind(AssertUnwindSafe(|| store.advance(Duration::from_secs(1)))),
             catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(1)))),
             catch_unwind(AssertUnwindSafe(|| store.receive_matching(|_| true))),
             catch_unwind(AssertUnwindSafe(|| store.receive_quit())),
@@ -1426,19 +1516,151 @@ mod tests {
         store.receive_matching(|msg| matches!(msg, Msg::N(2)));
     }
 
-    // RFC 0008 §4.3: polling a leaf that needs a reactor fails the test with
-    // the underlying missing-reactor panic; the scan reaches it even when the
-    // receive targets a different message.
+    // RFC 0008 §4.3: polling a leaf that needs the I/O driver fails the
+    // test with the underlying missing-reactor panic; the scan reaches it
+    // even when the receive targets a different message.
     #[test]
-    #[should_panic(expected = "no reactor running")]
-    fn polling_a_reactor_dependent_leaf_fails_the_test() {
+    #[should_panic(expected = "IO is disabled")]
+    fn polling_an_io_dependent_leaf_fails_the_test() {
         let mut store = store_with(
-            Command::batch([
-                Command::future(pending()).timeout(Duration::from_secs(60), || Msg::N(99)),
-                Command::message(Msg::N(1)),
-            ]),
+            Command::batch([io_command(), Command::message(Msg::N(1))]),
             |_| Command::none(),
         );
         store.receive(Msg::N(1));
+    }
+
+    // INV-T12: a `Command::timeout` leaf stays pending across repeated
+    // failing receive scans and sub-deadline advances — virtual time moves
+    // only through `advance` — and becomes deliverable exactly when the
+    // cumulative advances reach its deadline (INV-T13's exact-deadline
+    // half), with no wall-clock waiting.
+    #[test]
+    fn timeout_leaf_is_pending_until_advance_reaches_its_deadline() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Start => timeout_command(60),
+            _ => Command::none(),
+        });
+        store.send(Msg::Start);
+
+        // Repeated polls without an advance never make it ready: an
+        // implicitly advancing clock would fail these.
+        for _ in 0..3 {
+            let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
+            assert!(
+                failure_message(failure).contains("effects are pending but none is ready"),
+                "the timeout leaf must stay pending without an advance"
+            );
+        }
+
+        store.advance(Duration::from_secs(30));
+        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
+        assert!(
+            failure_message(failure).contains("effects are pending but none is ready"),
+            "half the deadline is not the deadline"
+        );
+
+        store.advance(Duration::from_secs(30));
+        store.receive(Msg::N(99));
+        store.finish();
+    }
+
+    // INV-T13: the deadline anchors at the leaf's first poll (its
+    // enqueue-time virtual now), not at store construction — time advanced
+    // before the leaf exists does not count against its deadline.
+    #[test]
+    fn timeout_deadline_anchors_at_first_poll_not_construction() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Start => timeout_command(60),
+            _ => Command::none(),
+        });
+        store.advance(Duration::from_secs(10));
+        store.send(Msg::Start);
+
+        // 59s after the anchor: a construction-anchored implementation
+        // (deadline at t=60s, now t=69s) would already deliver here.
+        store.advance(Duration::from_secs(59));
+        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(99))));
+        assert!(
+            failure_message(failure).contains("effects are pending but none is ready"),
+            "the deadline counts from the leaf's first poll, not store construction"
+        );
+
+        store.advance(Duration::from_secs(1));
+        store.receive(Msg::N(99));
+        store.finish();
+    }
+
+    // INV-T12: a retry with a non-zero backoff delivers its retried outcome
+    // only after an advance spanning the backoff (RFC 0004's semantics,
+    // carried onto the virtual clock by RFC 0009 INV-C3, exercised through
+    // the store).
+    #[test]
+    fn retry_backoff_delivers_after_an_advance_spanning_the_backoff() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::StartRetry => Command::retry(
+                RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero"))
+                    .with_fixed_backoff(Duration::from_secs(5)),
+                |ctx| async move {
+                    if ctx.attempt().get() == 1 {
+                        Err("first attempt fails")
+                    } else {
+                        Ok(42)
+                    }
+                },
+                |result| Msg::N(result.expect("the second attempt succeeds")),
+            ),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartRetry);
+
+        // The anchoring scan runs the failing first attempt and starts the
+        // backoff sleep; short of the backoff nothing is deliverable.
+        store.advance(Duration::from_secs(4));
+        let failure = catch_unwind(AssertUnwindSafe(|| store.receive(Msg::N(42))));
+        assert!(
+            failure_message(failure).contains("effects are pending but none is ready"),
+            "the backoff must gate the second attempt"
+        );
+
+        store.advance(Duration::from_secs(1));
+        store.receive(Msg::N(42));
+        store.finish();
+    }
+
+    // RFC 0008 §4.2: leaves made ready by the same advance deliver in
+    // enqueue order — the store's linearization of the equal-deadline order
+    // RFC 0009 §3.4 leaves unspecified.
+    #[test]
+    fn equal_deadline_timeout_leaves_deliver_in_enqueue_order() {
+        let mut store = store_with(
+            Command::batch([
+                Command::future(pending()).timeout(Duration::from_secs(5), || Msg::N(1)),
+                Command::future(pending()).timeout(Duration::from_secs(5), || Msg::N(2)),
+            ]),
+            |_| Command::none(),
+        );
+        store.advance(Duration::from_secs(5));
+        store.receive(Msg::N(1));
+        store.receive(Msg::N(2));
+        store.finish();
+    }
+
+    // RFC 0008 §3.2: advance's anchoring scan buffers a ready yield at its
+    // canonical position instead of delivering or dropping it.
+    #[test]
+    fn advance_buffers_ready_output_without_delivering() {
+        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        store.advance(Duration::ZERO);
+        store.receive(Msg::N(1));
+        store.finish();
+    }
+
+    // RFC 0008 §6: a time-gated leaf the test never advanced to its
+    // deadline is an ordinary unfinished-leaf leak at finish.
+    #[test]
+    #[should_panic(expected = "effect leaf(s) not driven to completion")]
+    fn finish_fails_on_an_unadvanced_timeout_leaf() {
+        let store = store_with(timeout_command(60), |_| Command::none());
+        store.finish();
     }
 }

@@ -47,7 +47,11 @@ loom = { version = "0.7", optional = true }
 ratatui = { version = "0.30", features = ["serde", "macros"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 thiserror = { version = "2", default-features = false, optional = true }
-tokio = { version = "1", features = ["full"] }
+# `test-util` (not part of `full`) provides the paused virtual clock behind
+# `tears::testing::TestStore`'s controlled time context; it is unconditional
+# per RFC 0009 §5.1 (pausing is opt-in at runtime construction, so production
+# behavior is unchanged — RFC 0009 INV-C4).
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = { version = "0.30", default-features = false, optional = true }
 tokio-util = "0.7"
@@ -65,9 +69,6 @@ proptest = "1"
 rustdoc-json = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `test-util` (not part of `full`) provides paused virtual time for the idle
-# frame wake-up tests.
-tokio = { version = "1", features = ["test-util"] }
 # Used by integration-test tracing helpers; integration tests compile as
 # separate crates and should name their test-only dependencies directly.
 tracing = "0.1"

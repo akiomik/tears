@@ -29,11 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Application::Message`'s bounds stay exactly `Send + 'static`: the store
     carries its own bounds (`Debug` on the store, `PartialEq` only on
     `receive`) and requires `Clone` nowhere
-  - Stage-1 scope: the store is executor-free — `TestStore::new` panics
-    inside an entered Tokio runtime, so tests run on a plain `#[test]` —
-    time-dependent command effects (`Command::timeout`, retry backoff) wait
-    on the Clock DI RFC (RFC 0009), and subscription sources are never
-    executed
+  - Stage 2 (RFC 0008 stage-2 amendment; RFC 0009): the store owns a paused
+    controlled time context, and `advance(duration)` drives time-dependent
+    command effects (`Command::timeout`, retry backoff) deterministically
+    through the ordinary `receive` flow — anchoring every pending leaf
+    before the clock moves, so deadlines count from a leaf's enqueue-time
+    virtual now. Tests still run on a plain `#[test]` (`TestStore::new`
+    panics inside an entered Tokio runtime); I/O-dependent leaves are out
+    of scope, and subscription sources are never executed
 
 ## [0.10.1] - 2026-07-24
 
