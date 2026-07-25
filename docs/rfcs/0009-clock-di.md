@@ -1,6 +1,6 @@
 # RFC 0009: Clock DI — deterministic time via the virtual clock
 
-- Status: Draft
+- Status: Accepted
 - Target: a crate-wide determinism contract for time-dependent behavior,
   with no new public API
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
