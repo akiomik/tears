@@ -215,9 +215,10 @@ generic) are implementation latitude.
 ### 3.2 Method semantics
 
 - **`new`** applies `Application::new` and enqueues the init command
-  exactly as a `send` enqueues an update's command. Exhaustiveness
-  applies from construction: an init command's ready message must be
-  received before the first `send`.
+  exactly as a `send` enqueues an update's command. The init command's
+  deliverable output is subject to the same `receive*`/`finish`/drop
+  accounting as any step's output (§6); `send` does not require it to
+  be received first.
 - **`send`** is one synchronous `update` call plus bookkeeping. It
   spawns no task, requires no executor, and returns only after the
   command's metadata (directives, cancellation) has been applied to the
