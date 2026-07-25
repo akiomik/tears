@@ -65,7 +65,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Instant;
+use tokio::time::Instant;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;

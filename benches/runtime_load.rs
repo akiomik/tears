@@ -763,6 +763,10 @@ struct Metrics {
 }
 
 impl Metrics {
+    // Real wall-clock reads: RFC 0006's statistical acceptance criteria are
+    // defined on real time, the one sanctioned exception to the
+    // single-time-source rule (RFC 0009 §3.1).
+    #[allow(clippy::disallowed_methods)]
     fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -800,10 +804,12 @@ impl Metrics {
         produced.saturating_sub(processed)
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn elapsed_ns(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn push_latency(bucket: &Mutex<Vec<u64>>, sent_at: Instant) {
         let nanos = u64::try_from(sent_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
         bucket.lock().expect("latency bucket poisoned").push(nanos);
@@ -830,6 +836,7 @@ impl SubscriptionSource for FloodSource {
     type Output = Msg;
     type Key = u32;
 
+    #[allow(clippy::disallowed_methods)]
     fn stream(&self) -> BoxStream<'static, Msg> {
         let metrics = Arc::clone(&self.metrics);
         let total = self.cfg.total;
@@ -884,6 +891,7 @@ impl Application for LoadApp {
     type Message = Msg;
     type Flags = (ScenarioCfg, Arc<Metrics>);
 
+    #[allow(clippy::disallowed_methods)]
     fn new((cfg, metrics): Self::Flags) -> (Self, Command<Msg>) {
         let cmd = if cfg.keyed_probe {
             let mut ticker = interval(Duration::from_millis(25));
@@ -1002,6 +1010,7 @@ impl Application for LoadApp {
 }
 
 /// Busy-waits for `duration` to simulate CPU-bound work on the runtime task.
+#[allow(clippy::disallowed_methods)]
 fn spin(duration: Duration) {
     if duration.is_zero() {
         return;
@@ -1031,6 +1040,7 @@ struct Report {
     seq_broken: bool,
 }
 
+#[allow(clippy::disallowed_methods)]
 async fn run_scenario(cfg: ScenarioCfg) -> Report {
     let rss_before = peak_rss_bytes();
     let metrics = Arc::new(Metrics::new());

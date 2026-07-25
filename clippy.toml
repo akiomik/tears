@@ -3,3 +3,41 @@
 # Valid identifiers in documentation that should not require backticks
 # The ".." appends to the default list instead of replacing it
 doc-valid-idents = ["TanStack", ".."]
+
+# Single-time-source rule (RFC 0009 §3.1, INV-C1): every time read goes
+# through the virtualizable executor clock (`tokio::time`). The entries below
+# are §3.1's banned-entry-point inventory — `std` calls that read the current
+# time, block on its passage, or configure a timed block. Pure arithmetic on
+# existing time values and untimed blocking stay allowed. The one sanctioned
+# exception is `benches/runtime_load.rs`'s wall-clock measurement sites,
+# which carry explicit `#[allow(clippy::disallowed_methods)]`.
+disallowed-methods = [
+    # Now-reads
+    { path = "std::time::Instant::now", reason = "time reads go through tokio::time (RFC 0009 §3.1)" },
+    { path = "std::time::Instant::elapsed", reason = "now-read reachable via tokio::time::Instant::into_std; use tokio::time::Instant (RFC 0009 §3.1)" },
+    { path = "std::time::SystemTime::now", reason = "time reads go through tokio::time (RFC 0009 §3.1)" },
+    { path = "std::time::SystemTime::elapsed", reason = "now-read callable on UNIX_EPOCH without a prior now() (RFC 0009 §3.1)" },
+    # Real-time waits
+    { path = "std::thread::sleep", reason = "real-time wait; use tokio::time::sleep (RFC 0009 §3.1)" },
+    { path = "std::thread::sleep_ms", reason = "real-time wait (deprecated spelling) (RFC 0009 §3.1)" },
+    { path = "std::thread::park_timeout", reason = "real-time wait (RFC 0009 §3.1)" },
+    { path = "std::thread::park_timeout_ms", reason = "real-time wait (deprecated spelling) (RFC 0009 §3.1)" },
+    { path = "std::sync::Condvar::wait_timeout", reason = "real-time wait (RFC 0009 §3.1)" },
+    { path = "std::sync::Condvar::wait_timeout_while", reason = "real-time wait (RFC 0009 §3.1)" },
+    { path = "std::sync::Condvar::wait_timeout_ms", reason = "real-time wait (deprecated spelling) (RFC 0009 §3.1)" },
+    { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "real-time wait (RFC 0009 §3.1)" },
+    { path = "std::sync::mpsc::Receiver::recv_deadline", reason = "real-time wait (unstable; listed defensively, RFC 0009 §3.1)" },
+    { path = "std::net::TcpStream::connect_timeout", reason = "real-time wait (RFC 0009 §3.1)" },
+    # Timed-wait configuration (the setters close the only route to a timed
+    # socket wait; the blocking read/write sites stay unbanned)
+    { path = "std::net::TcpStream::set_read_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)" },
+    { path = "std::net::TcpStream::set_write_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)" },
+    { path = "std::net::UdpSocket::set_read_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)" },
+    { path = "std::net::UdpSocket::set_write_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)" },
+    # Platform-gated rows: unresolvable on non-unix targets; enforced by the
+    # Linux CI lint gate (RFC 0009 §3.1)
+    { path = "std::os::unix::net::UnixStream::set_read_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)", allow-invalid = true },
+    { path = "std::os::unix::net::UnixStream::set_write_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)", allow-invalid = true },
+    { path = "std::os::unix::net::UnixDatagram::set_read_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)", allow-invalid = true },
+    { path = "std::os::unix::net::UnixDatagram::set_write_timeout", reason = "timed-wait configuration (RFC 0009 §3.1)", allow-invalid = true },
+]
