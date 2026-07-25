@@ -4,13 +4,21 @@ Run this before requesting review on a new RFC or an amendment to an
 existing one. It exists because contract text fails review in predictable
 ways: the checklist internalizes the reviewer's method — *construct an
 implementation or execution that satisfies everything stated but violates
-the intent* — so those findings surface before review instead of during
-it. It distills the review of the RFC 0006 open-question-3 amendment
-(PR #211), where three of five passes were preventable in hindsight.
+the intent, and cut the claims that pin no intent at all* — so those
+findings surface before review instead of during it. It distills
+the review of the RFC 0006 open-question-3 amendment (PR #211),
+where three of five passes were preventable in hindsight.
 
-This is a living document: when a review pass finds a defect class this
-checklist should have caught, add an item (or a prompt under an existing
-item) in the same PR that fixes the finding.
+This is a living document, and it prunes as well as grows. When a review
+pass finds a defect class this checklist should have caught, add an item
+(or a prompt under an existing item) in the same PR that fixes the
+finding — but when the new prompt only restates a principle an existing
+item already carries, fold it in rather than adding a peer, and when
+several *From PR* examples have collapsed to one internalized principle,
+keep the one or two that still teach the pattern and retire the rest. An
+item earns its length by catching what its shorter form would miss;
+length that no longer does is a defect class this checklist should catch
+in its own text.
 
 ## 1. Quantifiers against the inventory
 
@@ -529,3 +537,31 @@ changed-claims list.
   §5.1 named the supersession).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
+
+## 8. Minimal contract
+
+Items 1–7 all pull one way — toward a more defensible contract. Each is a
+reason some claim is too weak, too broad, unproven, or inconsistent, and
+its fix is almost always to add, tighten, or correct a claim, never to
+drop one. So an RFC that runs the whole checklist converges on *airtight*
+without ever converging on *small*. This item is the counterweight, and
+it runs item 2's adversary in reverse: instead of the implementation that
+satisfies the text while violating intent, construct the *smaller
+contract* that pins the same intent, and keep a clause only against a
+stated reason it is not redundant.
+
+- For each invariant, requirement, and element of contract surface, ask
+  what an already-present claim fails to pin once it is deleted. If
+  nothing, delete it: a claim the rest of the contract already implies is
+  not a weaker claim to strengthen, it is one to remove.
+- Two claims both correct where one is a special case of the other
+  collapse to the general one. A redundant invariant is two statements a
+  later amendment can drift apart — item 7's stale-restatement defect,
+  introduced on purpose.
+- A surface element whose only justification is that some implementation
+  might want it (a configuration field, an emitted event with no
+  invariant that needs its value) is not yet a contract; defer it to the
+  RFC that needs it rather than pinning it now.
+- Record why a kept clause is *not* redundant where the clause is stated —
+  *INV-X is not implied by INV-Y because …* — so a reader re-deriving
+  under item 6 does not re-add what was deliberately left out.
