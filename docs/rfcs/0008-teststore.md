@@ -20,13 +20,12 @@
 
 > **Staging.** Stage 1 drives pure `update` transitions and effects
 > that become ready without an executor or the passage of time. Stage 2
-> — gated on RFC 0009 — adds a
-> store-held controlled time context and `advance`, making
-> time-dependent *command* effects (`Command::timeout`, retry backoff)
-> deliverable through ordinary `receive` flow (§4.3, §7). `Timer`-based
-> subscriptions are not staged here at all: TestStore never executes
-> subscription sources (§1.2), so lifting that is a separate
-> subscription-execution design, not stage 2.
+> — gated on RFC 0009 — adds a store-held controlled time context and
+> `advance`, making time-dependent *command* effects (`Command::timeout`,
+> retry backoff) deliverable through ordinary `receive` flow (§4.3, §7).
+> `Timer`-based subscriptions are not staged here at all: TestStore
+> never executes subscription sources (§1.2), so lifting that is a
+> separate subscription-execution design, not stage 2.
 
 ## Summary
 

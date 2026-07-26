@@ -391,9 +391,8 @@ property directly and pins the semantics in rustdoc. Unlike §4.1, it is
   tick per missed interval. This is a user-visible behavior change for
   short-interval timers under load, so it landed with a
   `CHANGELOG: Fixed` entry, not as a mere rustdoc adjustment.
-- **Anchor.**
-  The time anchor is fixed at the stream's **first poll** — not
-  `Timer::new`, which only stores the interval value, and not the
+- **Anchor.** The time anchor is fixed at the stream's **first poll** —
+  not `Timer::new`, which only stores the interval value, and not the
   `stream()` call, which only builds the stream. `stream()` may legally
   run outside the runtime that will poll the stream (on another thread,
   or in setup code outside a paused test runtime), and an anchor read
