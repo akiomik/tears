@@ -218,7 +218,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::*;
-    use crate::poll_util::noop_context;
+    use crate::noop_waker::noop_context;
 
     fn cap(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("capacity must be non-zero")

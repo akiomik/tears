@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use tokio::time::{Instant, sleep_until};
 
-use crate::time_util::next_anchor_phase_deadline;
+use crate::cadence::next_anchor_phase_deadline;
 
 use super::SubscriptionSource;
 
@@ -150,7 +150,7 @@ mod tests {
 
     use tokio::time::{Duration, Instant, advance, timeout};
 
-    use crate::poll_util::noop_context;
+    use crate::noop_waker::noop_context;
 
     fn timer(interval_ms: u64) -> Timer {
         Timer::new(NonZeroU64::new(interval_ms).expect("timer interval must be non-zero"))

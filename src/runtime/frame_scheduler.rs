@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::{Instant, sleep_until};
 
-use crate::time_util::next_anchor_phase_deadline;
+use crate::cadence::next_anchor_phase_deadline;
 
 use super::frame_rate::FrameRate;
 use super::pending_work::PendingWork;
@@ -99,7 +99,7 @@ impl FrameScheduler {
             pending::<()>().await;
         }
 
-        // Frame deadlines are anchor-phase boundaries (`time_util`), not
+        // Frame deadlines are anchor-phase boundaries (`cadence`), not
         // `tokio::time::interval` ticks: `MissedTickBehavior::Skip` engages
         // only once a tick is late past a fixed margin, so at sub-margin
         // frame periods (above roughly 200 FPS) a stall whose missed
@@ -137,7 +137,7 @@ mod tests {
 
     use tokio::time::{Duration, Instant, advance, timeout};
 
-    use crate::poll_util::noop_context;
+    use crate::noop_waker::noop_context;
 
     use super::*;
 
