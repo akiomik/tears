@@ -605,6 +605,15 @@ changed-claims list.
   divergent texts (from PR #242: the no-clock-handle design
   contradicted RFC 0008 §7's "store-held clock handle" sketch until
   §5.1 named the supersession).
+- A deliverable that names its home — the document, module, or surface
+  it will land in — is checked against that home's existing audience
+  and purpose: a repository document serves the readers it already has,
+  and content aimed at a different reader is misplaced even when
+  correct. Match the deliverable to the surface whose audience is its
+  intended reader before naming it (from PR #257: RFC 0009 §5.5 placed
+  a downstream-application testing recipe in `docs/testing.md`,
+  contributor test policy — the deliverable moved to rustdoc, the
+  crate's user-facing surface alongside the README and examples).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
 

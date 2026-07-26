@@ -5,6 +5,11 @@
   construction to the stream's first poll (review finding: a stream
   built outside the polling runtime's clock context anchored against
   the wrong clock and ticked immediately or never)
+- Amended: 2026-07-26 — §5.5: the application recipe's documented home
+  moved from `docs/testing.md` to rustdoc (audience finding:
+  `docs/testing.md` is contributor test policy, and the repository's
+  user-facing documentation surfaces are the README, rustdoc, and
+  examples)
 - Target: a crate-wide determinism contract for time-dependent behavior,
   with no new public API
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
@@ -67,8 +72,8 @@ stage 2 consumes this contract; nothing here gates on TestStore.
   behavior-changing deliverable carrying a `CHANGELOG: Fixed` entry.
 - The `tokio` `test-util` feature decision for in-crate controlled
   contexts (§5.1).
-- A deterministic-time testing recipe in `docs/testing.md` for
-  application authors (§5.5) — a documentation deliverable, not
+- A deterministic-time testing recipe for application authors,
+  delivered as rustdoc (§5.5) — a documentation deliverable, not
   contract surface.
 
 ### 1.2 Out of scope
@@ -519,10 +524,26 @@ this contract. Their jitter, if any, is randomness — out of scope here
 A downstream application enables the `tokio` `test-util` feature in its
 own dev-dependencies and runs its tests on a paused single-threaded
 runtime; feature unification makes every tears time read virtual in
-those tests with no tears-side configuration. Deliverable: a
-deterministic-time section in `docs/testing.md` documenting the recipe
-(paused runtime, explicit advance, the §3.2 auto-advance caveat). The
-caveat is named concretely: awaiting real network I/O under a paused
+those tests with no tears-side configuration.
+
+Deliverable (amended 2026-07-26; originally "a deterministic-time
+section in `docs/testing.md`" — an audience mismatch: that file is
+contributor test policy, and the repository's user-facing documentation
+surfaces are the README, rustdoc, and examples): the recipe documented
+as rustdoc, at two sites, each matched to the reader who needs it —
+
+- the `tears::testing` module doc carries the recipe (`test-util` in
+  the application's dev-dependencies, a paused single-threaded runtime,
+  explicit advance, the §3.2 auto-advance caveat), stated against
+  TestStore's own scope boundary: TestStore drives command time leaves
+  with no ambient runtime, and the paused-runtime recipe is the
+  instrument for what TestStore never executes — subscription sources
+  and §4.1's HTTP staleness (RFC 0008 §1.2);
+- `QueryConfig`'s rustdoc (`stale_time`/`cache_time`) names the
+  auto-advance caveat at the site whose tests hit it, linking the
+  module-doc recipe.
+
+The caveat is named concretely: awaiting real network I/O under a paused
 runtime lets the executor judge itself idle and auto-advance the clock
 to the next timer before the I/O completes, so a test exercising §4.1's
 HTTP staleness must drive time and I/O explicitly rather than awaiting a
@@ -650,7 +671,7 @@ guarantees (INV-C2, INV-C3), the neutrality guarantee and the §5.1
 feature flip (INV-C4), the §4.1 migration (INV-C1 turn-on plus
 INV-C4's preservation check), and the §4.2 `Timer` contract-alignment
 fix (INV-C3's timer half, plus the `CHANGELOG: Fixed` entry for its
-observable behavior change). The `docs/testing.md` recipe (§5.5) is
+observable behavior change). The rustdoc recipe (§5.5) is
 documentation and carries no invariant.
 
 ## 7. Open questions
@@ -683,5 +704,6 @@ consumers (§5) does.
   the §4.1 migration sites.
 - `benches/runtime_load.rs` — the named real-time exception.
 - `clippy.toml` — INV-C1's mechanical enforcement site.
-- `docs/testing.md` — the paused-time testing conventions §5.5 extends.
+- `src/testing.rs` (module doc), `src/subscription/http/config.rs`
+  (`QueryConfig`) — the §5.5 recipe's rustdoc homes.
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.
