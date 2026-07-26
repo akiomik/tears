@@ -3,6 +3,20 @@ use std::time::Duration;
 /// Configuration for query behavior.
 ///
 /// This controls how queries retain data and when they consider it stale.
+///
+/// # Testing staleness deterministically
+///
+/// The `stale_time` and `cache_time` comparisons read the executor's
+/// virtualizable clock (RFC 0009 §4.1), so they can be tested on a paused
+/// single-threaded runtime (`#[tokio::test(start_paused = true)]`, with
+/// tokio's `test-util` feature in your dev-dependencies) and driven with
+/// `tokio::time::advance` — no wall-clock waiting. One caveat: a paused
+/// runtime auto-advances the clock whenever the executor is idle, so a
+/// test awaiting real network I/O can jump past a staleness deadline
+/// before the response arrives. Drive time and I/O explicitly — feed
+/// responses through test-controlled sources, then advance — rather than
+/// awaiting a live socket. See the [`testing`](crate::testing) module doc
+/// for the full recipe.
 #[derive(Debug, Clone)]
 pub struct QueryConfig {
     /// How long data is considered fresh before becoming stale.

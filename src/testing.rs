@@ -51,6 +51,47 @@
 //! sibling leaves asserts the store's linearization and must not be cited as
 //! evidence of runtime ordering.
 //!
+//! # Deterministic time without `TestStore`
+//!
+//! `TestStore` covers `update` transitions and command effects. For what it
+//! never executes — subscription sources, and the `http` feature's
+//! staleness and cache-eviction behavior (`QueryConfig`'s
+//! `stale_time`/`cache_time`) —
+//! the same determinism is available directly from the executor: tears
+//! reads time exclusively through the virtualizable clock (`tokio::time`;
+//! RFC 0009), so a paused runtime makes every tears time read virtual with
+//! no tears-side configuration.
+//!
+//! 1. Enable tokio's `test-util` feature in your dev-dependencies:
+//!
+//!    ```toml
+//!    [dev-dependencies]
+//!    tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+//!    ```
+//!
+//! 2. Run the test on a paused single-threaded runtime:
+//!    `#[tokio::test(start_paused = true)]`. (`#[tokio::test]` uses the
+//!    `current_thread` flavor by default, the only flavor that supports
+//!    pausing; the production multi-thread runtime cannot be paused.)
+//!
+//! 3. Move virtual time explicitly with `tokio::time::advance`. No
+//!    time-gated behavior fires before its deadline, and once an advance
+//!    reaches a deadline the gated behavior becomes ready without
+//!    wall-clock waiting (RFC 0009 §3.2).
+//!
+//! **Auto-advance versus real I/O**: a paused runtime auto-advances the
+//! clock to the earliest pending timer deadline whenever the executor is
+//! idle. Awaiting real network I/O under a paused runtime therefore lets
+//! the executor judge itself idle and jump the clock to the next timer
+//! before the I/O completes — a test exercising HTTP
+//! `stale_time`/`cache_time` behavior must drive time and I/O explicitly
+//! (feed responses through test-controlled sources, then advance) rather
+//! than awaiting a live socket.
+//!
+//! `TestStore` itself needs none of this: it owns its paused context and
+//! is constructed on a plain `#[test]`, never inside `#[tokio::test]`,
+//! paused or not.
+//!
 //! [`Command::batch`]: crate::Command::batch
 //! [`Command::timeout`]: crate::Command::timeout
 
