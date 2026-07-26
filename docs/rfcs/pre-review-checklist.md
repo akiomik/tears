@@ -556,6 +556,18 @@ changed-claims list.
   (From PR #257: the second amendment in an RFC's life appended its
   line under the first — the convention's first exercise, unreadable
   off the singular "is updated" alone.)
+- A `Status` flip to Implemented is a corrected claim about every
+  sentence that described the pre-implementation state as current, in
+  this RFC's body and in any other document that cites its state: grep
+  for pre-implementation framing (*today*, *currently*, *lands*,
+  *implementation task*, *prerequisite*, *migrate*) and restate landed
+  deliverables in the present tense, keeping pre-implementation facts
+  in explicit past tense only where they still carry the rationale —
+  and refresh any state inventory the body dates (from PR #257: both
+  RFCs flipped to Implemented while the bodies still said "Two
+  HTTP-module files violate the rule today", "`Timer` does not
+  currently satisfy", "Today that boundary folds", and §3.1's
+  inventory still listed the migrated files as non-conforming).
 - Citations of another document's invariants name things that actually
   exist there, and a corrected claim is corrected everywhere: grep for
   the old term across the RFC, its references section, and the index
