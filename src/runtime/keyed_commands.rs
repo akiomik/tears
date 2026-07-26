@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[allow(clippy::panic, reason = "the command intentionally panics")]
+    #[expect(clippy::panic, reason = "the command intentionally panics")]
     async fn keyed_task_panic_is_logged() {
         let recorder = TraceRecorder::new()
             .with_target("tears::runtime")
@@ -1049,7 +1049,7 @@ mod tests {
                 CancelPolicy::CancelInFlight,
                 command_stream(Command::future(async {
                     panic!("boom");
-                    #[allow(
+                    #[expect(
                         unreachable_code,
                         reason = "the value follows an unconditional panic! that never returns, but types the async block"
                     )]

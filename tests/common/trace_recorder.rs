@@ -1,3 +1,14 @@
+//! Shared tracing test recorder, included via `#[path]` into several
+//! integration-test targets. Each accessor is exercised by some targets and not
+//! others, so any given method reads as dead code in the targets that never
+//! call it. `#[expect(dead_code)]` cannot express that (it would be unfulfilled
+//! in the targets that *do* use the method), so the whole helper opts out of
+//! `dead_code` at the module level.
+#![allow(
+    dead_code,
+    reason = "shared cross-target test helper; per-target usage varies (see module docs)"
+)]
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,10 +85,6 @@ impl TraceRecorder {
     ///
     /// `#[path]` compiles this helper per integration-test target, so methods
     /// used by one test target can be dead code in another.
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this level filter builder is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub const fn with_level(mut self, level: Level) -> Self {
         self.filter.level = Some(level);
@@ -97,20 +104,12 @@ impl TraceRecorder {
     }
 
     /// Returns the number of events that matched this recorder's filter.
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this matched-event-count accessor is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.state.events.load(Ordering::SeqCst)
     }
 
     /// Returns all bool values recorded for the named event field.
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this bool-field accessor is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub fn bool_values(&self, field: &str) -> Vec<bool> {
         self.state
@@ -124,10 +123,6 @@ impl TraceRecorder {
 
     /// Returns all unsigned-integer values recorded for the named event field
     /// (covers `u64` and `usize` fields).
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this unsigned-integer-field accessor is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub fn u64_values(&self, field: &str) -> Vec<u64> {
         self.state
@@ -140,10 +135,6 @@ impl TraceRecorder {
     }
 
     /// Returns all string values recorded for the named event field.
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this string-field accessor is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub fn str_values(&self, field: &str) -> Vec<String> {
         self.state
@@ -157,10 +148,6 @@ impl TraceRecorder {
 
     /// Returns the sorted field-name set of every matching event, in arrival
     /// order — for asserting which fields appear together on one event.
-    #[allow(
-        dead_code,
-        reason = "shared test helper: this per-event field-name-set accessor is used by some integration-test targets but not all, so it reads as dead in targets that never call it"
-    )]
     #[must_use]
     pub fn field_name_sets(&self) -> Vec<Vec<String>> {
         self.state

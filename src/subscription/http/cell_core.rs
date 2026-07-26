@@ -22,17 +22,9 @@
 
 use loom::sync::atomic::{AtomicU64, Ordering};
 
-#[allow(
-    dead_code,
-    reason = "sentinel is read only by CellCore, the loom-only test mirror, so a non-test loom-core build has no reader"
-)]
 const NONE: u64 = u64::MAX;
 
-#[allow(
-    dead_code,
-    reason = "loom-only concurrency mirror constructed only by its own cfg(test) loom model tests"
-)]
-#[allow(
+#[expect(
     clippy::struct_field_names,
     reason = "the three generation counters intentionally share the _generation suffix to mirror Cell's state fields"
 )]
@@ -43,10 +35,6 @@ pub(super) struct CellCore {
     last_error_generation: AtomicU64,
 }
 
-#[allow(
-    dead_code,
-    reason = "all methods are exercised only by the cfg(test) loom model tests, so a non-test loom-core build sees them as unused"
-)]
 impl CellCore {
     pub(super) fn new() -> Self {
         Self {

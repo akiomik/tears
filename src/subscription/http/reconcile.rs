@@ -9,7 +9,7 @@ pub(super) enum ReconcileReason {
 }
 
 /// Snapshot of the state needed to decide whether reconcile should fetch.
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "struct models several independent boolean fetch-decision inputs, not a single state better expressed as an enum"
 )]

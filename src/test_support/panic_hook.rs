@@ -57,7 +57,7 @@ impl Drop for SilentPanicHook {
 /// then resumed. Cancellation also restores the hook through the internal drop
 /// guard. This helper is for `current_thread` tests because it holds
 /// [`PANIC_HOOK_GUARD`] across `.await`.
-#[allow(
+#[expect(
     clippy::await_holding_lock,
     clippy::future_not_send,
     reason = "the helper intentionally serializes a process-global hook across a current-thread future"
@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
-    #[allow(
+    #[expect(
         clippy::await_holding_lock,
         clippy::panic,
         reason = "the test verifies hook restoration across an intentional panic on one thread"

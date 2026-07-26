@@ -1258,7 +1258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform() {
-        #[allow(
+        #[expect(
             clippy::unused_async,
             reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
         )]
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_result() {
-        #[allow(
+        #[expect(
             clippy::unused_async,
             reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
         )]
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_error_handling() {
-        #[allow(
+        #[expect(
             clippy::unused_async,
             reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
         )]

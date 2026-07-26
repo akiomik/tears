@@ -888,7 +888,7 @@ mod tests {
 
         fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
-        #[allow(
+        #[expect(
             clippy::panic,
             clippy::manual_assert,
             reason = "the subscriber intentionally panics on its first event"

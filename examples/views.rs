@@ -250,10 +250,6 @@ impl App {
 }
 
 /// Handle keyboard events based on current view
-#[allow(
-    clippy::use_self,
-    reason = "the example names the concrete View and Command<Message> types explicitly for reader clarity rather than Self"
-)]
 fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
     match view {
         View::Menu { .. } => match key.code {

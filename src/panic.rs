@@ -74,7 +74,7 @@ mod tests {
     // Running multiple hook-swapping tests in parallel would let them clobber
     // each other's hooks, so both properties are asserted here in one go.
     #[test]
-    #[allow(clippy::panic, reason = "driving the panic hook requires a real panic")]
+    #[expect(clippy::panic, reason = "driving the panic hook requires a real panic")]
     fn test_compose_hook_restores_then_delegates_once() {
         // Serialize against other tests that touch the global panic hook or
         // panic, so a concurrent panic cannot invoke our recording hook.

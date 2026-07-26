@@ -38,7 +38,7 @@ struct CounterApp {
 
 #[derive(Debug, Clone)]
 enum CounterMessage {
-    #[allow(
+    #[expect(
         dead_code,
         reason = "this message variant completes the enum for the test app but is never constructed in this test"
     )]
@@ -131,7 +131,7 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[allow(
+#[expect(
     clippy::panic,
     reason = "the test intentionally panics inside a command"
 )]
@@ -150,7 +150,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
         fn new((): ()) -> (Self, Command<Message>) {
             let cmd = Command::future(async {
                 panic!("boom");
-                #[allow(
+                #[expect(
                     unreachable_code,
                     reason = "the preceding panic! diverges, so this trailing expression that types the async block is unreachable"
                 )]
