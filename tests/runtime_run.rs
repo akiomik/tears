@@ -38,7 +38,10 @@ struct CounterApp {
 
 #[derive(Debug, Clone)]
 enum CounterMessage {
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "this message variant completes the enum for the test app but is never constructed in this test"
+    )]
     Increment,
 }
 
@@ -147,7 +150,10 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
         fn new((): ()) -> (Self, Command<Message>) {
             let cmd = Command::future(async {
                 panic!("boom");
-                #[allow(unreachable_code)]
+                #[allow(
+                    unreachable_code,
+                    reason = "the preceding panic! diverges, so this trailing expression that types the async block is unreachable"
+                )]
                 Message::Quit
             });
 

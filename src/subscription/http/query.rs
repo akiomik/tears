@@ -280,7 +280,10 @@ impl QueryClient {
     }
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "generic downcast helper reached only from the cell-reuse (Occupied) branch, which dead-code analysis need not treat as instantiated"
+)]
 fn downcast_cell<T>(cell: Arc<dyn AnyCell>) -> Arc<Cell<T>>
 where
     T: Clone + Send + Sync + 'static,
@@ -1346,7 +1349,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive async test walks a full invalidation-and-refetch coalescing scenario step by step"
+    )]
     async fn test_invalidations_during_one_fetch_window_coalesce_to_one_refetch() {
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));

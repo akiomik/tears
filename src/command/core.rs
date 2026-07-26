@@ -1258,7 +1258,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform() {
-        #[allow(clippy::unused_async)]
+        #[allow(
+            clippy::unused_async,
+            reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
+        )]
         async fn fetch_value() -> i32 {
             42
         }
@@ -1273,7 +1276,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_result() {
-        #[allow(clippy::unused_async)]
+        #[allow(
+            clippy::unused_async,
+            reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
+        )]
         async fn fallible_operation() -> Result<String, String> {
             Ok("success".to_owned())
         }
@@ -1383,7 +1389,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_perform_with_error_handling() {
-        #[allow(clippy::unused_async)]
+        #[allow(
+            clippy::unused_async,
+            reason = "fixture must be async to produce a future for Command::perform even though it awaits nothing"
+        )]
         async fn may_fail(should_fail: bool) -> Result<i32, &'static str> {
             if should_fail {
                 Err("operation failed")

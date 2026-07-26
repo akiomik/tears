@@ -20,7 +20,10 @@ pub(super) trait AnyCell: Any + Send + Sync + 'static {
     fn gc_inactive_data_and_should_evict(&self, cache_time: Duration) -> bool;
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "query cell is constructed only through the http feature's Query/QueryClient runtime path and the module tests"
+)]
 pub(super) struct Cell<T> {
     state: Mutex<CellState<T>>,
     tx: watch::Sender<QueryResult<T>>,
@@ -37,7 +40,10 @@ struct CellLifecycle {
     inactive_since: Option<Instant>,
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "subscription handle is constructed only by the http query runtime and exercised by the module tests"
+)]
 pub(super) struct CellSubscription<T>
 where
     T: Clone + Send + Sync + 'static,
@@ -50,7 +56,10 @@ where
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "inner cell state is populated and read only through the http cell's reconcile/complete/snapshot paths"
+)]
 struct CellState<T> {
     data: Option<T>,
     error: Option<QueryError>,
@@ -67,7 +76,10 @@ impl<T> Cell<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "constructor is reached only via new_subscribed on the http query path and the module tests"
+    )]
     pub(super) fn new() -> Self {
         let result = QueryResult::pending(FetchStatus::Idle);
         let (tx, _) = watch::channel(result);
@@ -92,7 +104,10 @@ where
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "used only by the http query client's cell-creation path and the module tests"
+    )]
     pub(super) fn new_subscribed() -> (Arc<Self>, CellSubscription<T>) {
         let cell = Arc::new(Self::new());
         {
@@ -111,7 +126,10 @@ where
         (cell, subscription)
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "extra-subscriber path used only by the http query runtime and the module tests"
+    )]
     pub(super) fn subscribe(self: &Arc<Self>) -> CellSubscription<T> {
         {
             let mut lifecycle = self
@@ -129,7 +147,10 @@ where
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "read only by the module's cfg(test) GC tests, so non-test http builds see no caller"
+    )]
     pub(super) fn snapshot(&self, config: &QueryConfig) -> QueryResult<T> {
         self.state
             .lock()
@@ -273,12 +294,18 @@ impl<T> CellSubscription<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "shared-borrow accessor kept for symmetry with receiver_mut; the stream only needs the mutable accessor, so this one has no caller"
+    )]
     pub(super) const fn receiver(&self) -> &watch::Receiver<QueryResult<T>> {
         &self.rx
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "used only by the http subscription stream's watch_cell change-wait loop"
+    )]
     pub(super) const fn receiver_mut(&mut self) -> &mut watch::Receiver<QueryResult<T>> {
         &mut self.rx
     }
@@ -384,7 +411,10 @@ impl<T> CellState<T>
 where
     T: Clone,
 {
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "invoked only through the http cell's reconcile/complete/snapshot paths"
+    )]
     fn snapshot(&self, config: &QueryConfig) -> QueryResult<T> {
         let is_stale = self.data.is_some()
             && (self.data_generation < Some(self.current_generation)

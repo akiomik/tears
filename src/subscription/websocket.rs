@@ -233,7 +233,10 @@ impl SubscriptionSource for WebSocket {
     type Output = WebSocketMessage;
     type Key = String;
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the WebSocket connection state machine is expressed as one stream::unfold with every transition inline"
+    )]
     fn stream(&self) -> BoxStream<'static, WebSocketMessage> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
