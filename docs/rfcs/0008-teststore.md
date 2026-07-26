@@ -14,11 +14,11 @@
   controlled-time contract (`advance`, anchoring, the store-owned
   executor context — §3.2, §4.3, §7)
 - Feature flag: none (precedent: `subscription::mock` ships
-  unconditionally); stage 2's implementation adds tokio's `test-util`
+  unconditionally); stage 2's implementation added tokio's `test-util`
   to the crate's unconditional dependency features per RFC 0009 §5.1's
   decision
-- CHANGELOG: `Added` entry lands at the implementation release, not with
-  this RFC; stage 2 amends the same not-yet-released entry
+- CHANGELOG: `Added` entry ships with the implementation release, not
+  with this RFC; stage 2 amended the same not-yet-released entry
 
 > **Staging.** Stage 1 drives pure `update` transitions and effects
 > that become ready without an executor or the passage of time. Stage 2
@@ -39,8 +39,8 @@ Three decisions, ordered by urgency:
    `Debug` on the store, `PartialEq` scoped to the equality-asserting
    methods only, and `Clone` nowhere. Retrofitting a bound onto
    `Application::Message` later would be a silent breaking change for
-   every existing application, so the placement is pinned now, before any
-   TestStore code exists, and constrains future RFCs (INV-T1, INV-T2).
+   every existing application, so the placement was pinned before any
+   TestStore code existed, and constrains future RFCs (INV-T1, INV-T2).
 2. **Exhaustive assertions** (§6): exhaustive is the only mode.
    Undelivered deliverable output — a ready message never
    received, an effect stream never driven to completion — fails the
@@ -357,25 +357,27 @@ boundary (`into_runtime_parts`) so that what the store observes —
 directives, cancellation metadata, effects — is what the runtime
 observes (INV-T3).
 
-**Named prerequisite — per-leaf parts.** Today that boundary folds a
-multi-leaf effect into one stream before the parts exist:
-`into_runtime_parts` calls `Effect::into_stream()`, which merges the
-leaves through an unordered select (`src/command/core.rs`,
-`src/command/effect.rs`). A store built on the current parts type
-therefore could not implement §4.2's per-leaf canonical order without
-re-deriving the leaves in parallel — exactly what INV-T3 forbids — and
-relying on the merged stream happening to yield in declaration order
-would rest on a coincidental property of the select combinator, not on
-any contract. Stage-1 implementation is therefore gated on a
-prerequisite refactor, owned by this RFC's implementation task:
-`RuntimeCommandParts` carries the effect's leaves unfolded, in
-`Command::batch`'s flattened declaration order, and each consumer folds
-or drives them at its own consumption site — the runtime merging them
-at its spawn site exactly as `into_stream()` merges them today (a
-behavior-preserving relocation of the existing fold; `Effect` already
-keeps its leaves apart to preserve leaf identity for future per-leaf
-consumers, per its own comment in `src/command/effect.rs`), the store
-keeping them apart. INV-T3 names this revised boundary.
+**Named prerequisite — per-leaf parts.** At this RFC's drafting that
+boundary folded a multi-leaf effect into one stream before the parts
+existed: `into_runtime_parts` called `Effect::into_stream()`, which
+merged the leaves through an unordered select. A store built on that
+parts type could not have implemented §4.2's per-leaf canonical order
+without re-deriving the leaves in parallel — exactly what INV-T3
+forbids — and relying on the merged stream happening to yield in
+declaration order would have rested on a coincidental property of the
+select combinator, not on any contract. Stage-1 implementation was
+therefore gated on a prerequisite refactor, owned by this RFC's
+implementation task and since landed: `RuntimeCommandParts` carries the
+effect's leaves unfolded, in `Command::batch`'s flattened declaration
+order (`into_runtime_parts` calls `Effect::into_leaves()`,
+`src/command/core.rs`, `src/command/runtime_parts.rs`), and each
+consumer folds or drives them at its own consumption site — the
+runtime merging them at its spawn site with `fold_leaves`, exactly as
+the pre-refactor `into_stream()` merged them (a behavior-preserving
+relocation of the existing fold; `Effect` already kept its leaves
+apart to preserve leaf identity for per-leaf consumers, per its own
+comment in `src/command/effect.rs`), the store keeping them apart.
+INV-T3 names this revised boundary.
 
 **Deliverability and the poll budget.** A leaf's output is
 **deliverable** at a given check when the leaf yields it on that
@@ -800,9 +802,9 @@ three design inputs RFC 0009 §5.1 recorded for it:
   shape (§4.3). User effects that spawn tasks, and nested runtimes,
   are outside the store's contract (§4.3).
 - **Feature availability.** Per RFC 0009 §5.1's decision, the
-  implementation task adds `test-util` to the crate's unconditional
+  implementation task added `test-util` to the crate's unconditional
   `tokio` dependency features; RFC 0009 INV-C4 carries the load-path
-  regression check that covers the flip, and this document adds no
+  regression check that covered the flip, and this document adds no
   second check for it.
 
 `Timer` and other subscription sources stay out of scope in stage 2 as
@@ -858,8 +860,9 @@ Enforcement classes follow the pre-review checklist's definitions
   review of the store's single command-intake site (it accepts the
   parts type and touches no `Command` or `Effect` internals), and
   review of the runtime's spawn site for the prerequisite's
-  behavior-preservation half (the relocated fold merges the leaves
-  exactly as `into_stream()` does today). This is what makes TestStore
+  behavior-preservation half (the relocated fold, `fold_leaves`, merges
+  the leaves exactly as the pre-refactor `into_stream()` did). This is
+  what makes TestStore
   results evidence about real commands rather than about a test-only
   model.
 - **INV-T4**: the store introduces no nondeterminism of its own —
