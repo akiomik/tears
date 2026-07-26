@@ -1,10 +1,6 @@
 # RFC 0009: Clock DI — deterministic time via the virtual clock
 
 - Status: Implemented
-- Amended: 2026-07-26 — §5.5: the application recipe's documented home
-  moved from `docs/testing.md` to rustdoc (audience finding:
-  `docs/testing.md` is contributor test policy, not application-author
-  documentation)
 - Target: a crate-wide determinism contract for time-dependent behavior,
   with no new public API
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
@@ -83,9 +79,9 @@ stage 2 consumes this contract; nothing here gates on TestStore.
   separate determinism axis with its own reproducibility design,
   deferred by RFC 0004 §5.2; a future backoff-policy RFC owns it.
 - **TestStore's time API.** The shape of `advance` on the store, and
-  how time-gated leaves join RFC 0008's §4.2 canonical order, is the
-  RFC 0008 stage-2 amendment's job. This RFC provides the contract that
-  amendment cites (§5.1).
+  how time-gated leaves join RFC 0008's §4.2 canonical order, is
+  RFC 0008 stage 2's job. This RFC provides the contract stage 2
+  cites (§5.1).
 - **Debounce/throttle and restart-rate semantics.** Their policies and
   invariants belong to their own RFCs; they consume this contract
   (§5.2, §5.3).
@@ -169,9 +165,7 @@ completion depends on the current time: now-reads (`Instant::now`,
 executor's virtualizable clock, i.e. through `tokio::time` types and
 functions. `Duration` values are plain data and are not time reads.
 
-Inventory of production time reads (refreshed 2026-07-26, after the
-§4.1 HTTP migration, the §4.2 `Timer` fix, and the frame-scheduler
-alignment):
+Inventory of production time reads:
 
 | Site | Read | Purpose | Conforming |
 | --- | --- | --- | --- |
@@ -397,7 +391,7 @@ property directly and pins the semantics in rustdoc. Unlike §4.1, it is
   tick per missed interval. This is a user-visible behavior change for
   short-interval timers under load, so it landed with a
   `CHANGELOG: Fixed` entry, not as a mere rustdoc adjustment.
-- **Anchor** (amended 2026-07-25; originally "stream construction").
+- **Anchor.**
   The time anchor is fixed at the stream's **first poll** — not
   `Timer::new`, which only stores the interval value, and not the
   `stream()` call, which only builds the stream. `stream()` may legally
@@ -443,9 +437,9 @@ property directly and pins the semantics in rustdoc. Unlike §4.1, it is
 
 ## 5. Consumers
 
-### 5.1 TestStore stage 2 (RFC 0008 §7 amendment)
+### 5.1 TestStore stage 2 (RFC 0008 §7)
 
-The stage-2 amendment gives the store a controlled time context and an
+Stage 2 gives the store a controlled time context and an
 advance operation, making RFC 0008 §4.3-class *command* time leaves
 (`timeout`, retry backoff) deliverable through ordinary `receive` flow.
 `Timer` is deliberately excluded: it is a subscription source, not a
@@ -455,32 +449,30 @@ command set at all. Delivering it would require a subscription-execution
 design — source spawn, ID reconciliation, restart, and source
 cancellation, everything the runtime's `SubscriptionManager` provides —
 which is out of scope for both RFCs; if a future need arises it is a
-separate, explicitly-designed amendment, not this stage-2 one.
+separate, explicitly-designed effort, not part of stage 2.
 `Timer`'s own determinism under the virtual clock is still pinned here
 (INV-C3), exercised directly against its stream rather than through
-TestStore. RFC 0008 §7's
-non-normative sketch pictured "a store-held clock handle"; this RFC's
-design supersedes that shape — there is no clock value to hold. The
+TestStore. This RFC provides no clock *value* to hold: the
 store holds a controlled time context (§3.2) and `advance` acts on that
-context's clock; the amendment specifies its API against this RFC, not
-against the sketch. What it cites here:
+context's clock. Stage 2 specifies its API against this RFC. What it
+cites here:
 INV-C2's explicit-advance determinism (the store's poll budget never
 idles the executor, so the auto-advance clause never applies) and
 INV-C3's transparency (store results are evidence about production time
 contracts, completing the INV-T3 argument on the time axis).
 
-Three design inputs recorded for that amendment:
+Three design inputs for stage 2:
 
 - **Deadline anchoring.** RFC 0004 anchors a timeout's deadline at the
   leaf's *first poll*, and the store's scans decide when that first
-  poll happens; the amendment's advance semantics must account for
+  poll happens; stage 2's advance semantics must account for
   scan-order-dependent anchoring rather than assuming
   construction-time anchoring. (`Timer`'s first-poll anchor
   (§4.2) is not a stage-2 concern: stage 2 delivers command time leaves
   only, never `Timer`.)
 - **Advance semantics and executor context.** Tokio's `advance` does
-  not wait for the sleeps it moves past to complete (§3.2), so the
-  amendment must fix whether the store's advance carries a timer-driver
+  not wait for the sleeps it moves past to complete (§3.2), so
+  stage 2 must fix whether the store's advance carries a timer-driver
   barrier or whether "ready after advance" means "ready once the
   executor is driven to progress, with no wall-clock wait". It must also
   fix the executor context the store owns or borrows — whether the store
@@ -525,8 +517,7 @@ own dev-dependencies and runs its tests on a paused single-threaded
 runtime; feature unification makes every tears time read virtual in
 those tests with no tears-side configuration.
 
-Deliverable (amended 2026-07-26; originally a `docs/testing.md`
-section): the recipe documented as rustdoc — with the README and
+Deliverable: the recipe documented as rustdoc — with the README and
 examples, the surface where the repository's application-author
 documentation lives, where `docs/testing.md` is contributor test
 policy — at two sites, each matched to the reader who needs it:

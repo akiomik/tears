@@ -1,8 +1,6 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
 - Status: Implemented
-- Amended: 2026-07-25 — stage 2: the store-held controlled time context
-  and `advance` (§3, §4.3, §7), consuming RFC 0009's contract
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
@@ -18,11 +16,11 @@
   to the crate's unconditional dependency features per RFC 0009 §5.1's
   decision
 - CHANGELOG: `Added` entry ships with the implementation release, not
-  with this RFC; stage 2 amended the same not-yet-released entry
+  with this RFC
 
 > **Staging.** Stage 1 drives pure `update` transitions and effects
 > that become ready without an executor or the passage of time. Stage 2
-> — specified by the 2026-07-25 amendment, gated on RFC 0009 — adds a
+> — gated on RFC 0009 — adds a
 > store-held controlled time context and `advance`, making
 > time-dependent *command* effects (`Command::timeout`, retry backoff)
 > deliverable through ordinary `receive` flow (§4.3, §7). `Timer`-based
@@ -53,8 +51,8 @@ Three decisions, ordered by urgency:
    designed here (open question 2).
 3. **Clock DI split** (§7): Clock injection is a separate RFC. This RFC
    does not gate on it, and stage 2 of TestStore gates on that RFC, not
-   the reverse. RFC 0009 is Implemented; the stage-2 amendment consumes
-   its contract and resolves the three design inputs its §5.1 recorded
+   the reverse. RFC 0009 is Implemented; stage 2 consumes
+   its contract and resolves the three design inputs its §5.1 records
    (§7).
 
 The harness itself: `tears::testing::TestStore<App>` wraps an
@@ -108,7 +106,7 @@ context the store itself owns (§4.3).
   runtime's own tests. This covers `Timer` and every other
   `SubscriptionSource`: subscription execution is out of scope in
   stage 1 and stage 2 alike — lifting it would be a separate
-  subscription-execution design, not the Clock DI stage-2 amendment
+  subscription-execution design, not the Clock DI work stage 2 covers
   (RFC 0009 §5.1), which delivers command time leaves only.
 - **Runtime integration contracts**: channel capacities, backpressure,
   batching, and scheduling (RFC 0006/0007) are properties of the runtime
@@ -282,7 +280,7 @@ generic) are implementation latitude.
   *leaf* after the clock moves (§4.1's budget is unchanged), and a leaf
   whose deadline the advance reached is deliverable at the next check
   whose scan polls it — the executor-progress readiness point RFC 0009
-  §3.2 left for this amendment to fix, with no wall-clock waiting.
+  §3.2 left for stage 2 to fix, with no wall-clock waiting.
   Tasks spawned onto the context by earlier effects may receive
   incidental polls while the barrier drives the executor (§4.3's
   negative space). The scan reaches *every* pending leaf and never
@@ -451,12 +449,6 @@ clause never applies to the store's own operations (INV-T12).
 
 ### 4.3 Time-gated leaves and the controlled context
 
-*Rewritten by the stage-2 amendment. Stage 1 required the reactor's
-genuine absence and failed the test on any poll of a time-dependent
-leaf; that contract, and the entered-runtime analysis behind it, lives
-in this section's pre-amendment text (git history) and survives here
-only as the I/O rule below and INV-T10's construction check.*
-
 The store owns a **controlled time context** in RFC 0009 §3.2's sense:
 a single-threaded executor context, constructed by `TestStore::new`,
 whose clock starts paused and which enables no I/O driver. Every poll
@@ -506,27 +498,22 @@ mid-leaf (a retry's backoff after a failed attempt) anchor at the
 virtual now of the scan that observed the failure, which the test's
 own script determines.
 
-**Construction check (INV-T10, revised).** `TestStore::new` still
+**Construction check (INV-T10).** `TestStore::new`
 checks `tokio::runtime::Handle::try_current()` and panics immediately,
 with a diagnostic naming the precondition, if any runtime context is
-entered — `#[tokio::test]` included, paused or not. Stage 1 rejected
-every ambient runtime because it required the reactor's absence; stage
-2 keeps the identical check with a different rationale, and this
-supersedes the pre-amendment §4.3/§7 expectation that the amendment
-would "accept that specific controlled context": the accepted
-controlled context is the *store's own*, so the caller-facing rule is
-unchanged — construct the store on a plain `#[test]`, never inside
+entered — `#[tokio::test]` included, paused or not. The only
+controlled context the store accepts is its *own*, so the caller-facing
+rule is: construct the store on a plain `#[test]`, never inside
 `#[tokio::test]`. An ambient runtime is rejected rather than adopted
 because the store cannot verify an ambient runtime's pausedness or
 thread model through any public surface, and because driving the
 store's own context from inside another runtime would block a runtime
 thread, which Tokio forbids. The check is structural and happens once,
 at construction: a store built outside a runtime but later driven from
-inside one is a misuse this RFC does not attempt to catch, as in
-stage 1.
+inside one is a misuse this RFC does not attempt to catch.
 
 **Outside the store's contract.** A user effect that spawns onto the
-ambient executor (`tokio::spawn` from inside a leaf's poll) now finds
+ambient executor (`tokio::spawn` from inside a leaf's poll) finds
 a context and succeeds, but the spawned task is outside the store's
 pending set: it is not counted in exhaustiveness (§6), and the store
 gives it no specified schedule — it may receive incidental polls
@@ -755,9 +742,8 @@ smuggled in half-specified (open question 2).
 **Decision: Clock injection is its own RFC; this RFC does not contain
 it.** Stage 2 of TestStore — deterministic driving of the
 time-dependent *command* effects (`timeout`, retry backoff, and future
-command-side coalescing timers such as debounce/throttle) — landed as
-the 2026-07-25 amendment to this document, after RFC 0009's
-acceptance. `Timer` and other
+command-side coalescing timers such as debounce/throttle) — gates on
+RFC 0009, which is Implemented. `Timer` and other
 subscription sources are not part of stage 2 (§1.2): they are not
 command leaves and TestStore never executes subscription sources.
 
@@ -775,8 +761,8 @@ Rationale:
 - Stage 1 is additive and independently shippable; bundling would gate
   it behind the larger design.
 
-The stage-2 amendment consumes RFC 0009's contract and resolves the
-three design inputs RFC 0009 §5.1 recorded for it:
+Stage 2 consumes RFC 0009's contract and resolves the
+three design inputs RFC 0009 §5.1 records for it:
 
 - **Deadline anchoring.** RFC 0004's first-poll anchor, restated over
   the store's scan sites: because `advance` anchors before it moves the
@@ -792,25 +778,21 @@ three design inputs RFC 0009 §5.1 recorded for it:
   clock alone leaves already-registered timer entries unfired and
   `Pending` under the store's manual polls. Readiness is then observed
   at the next check whose scan polls the leaf (§3.2), fixing the
-  executor-progress question RFC 0009 §3.2 left to this amendment;
+  executor-progress question RFC 0009 §3.2 left to stage 2;
   `advance` still polls no leaf after the clock moves. Tasks spawned
   onto the context may receive incidental polls during the barrier —
   unspecified progress, §4.3's negative space.
   The store owns its controlled time context outright; every ambient
-  runtime is still rejected at construction, superseding the
-  pre-amendment sketch's "accept that specific controlled context"
-  shape (§4.3). User effects that spawn tasks, and nested runtimes,
-  are outside the store's contract (§4.3).
+  runtime is rejected at construction (§4.3). User effects that spawn
+  tasks, and nested runtimes, are outside the store's contract (§4.3).
 - **Feature availability.** Per RFC 0009 §5.1's decision, the
   implementation task added `test-util` to the crate's unconditional
   `tokio` dependency features; RFC 0009 INV-C4 carries the load-path
   regression check that covered the flip, and this document adds no
   second check for it.
 
-`Timer` and other subscription sources stay out of scope in stage 2 as
-in stage 1 (§1.2; RFC 0009 §5.1). The pre-amendment §7 sketch and its
-INV-T10 scoping note are superseded by the resolutions above and by
-§4.3's revised construction check.
+`Timer` and other subscription sources stay out of scope in stage 2, as
+in stage 1 (§1.2; RFC 0009 §5.1).
 
 Excluded claims, recorded per the checklist's minimal-contract item: a
 claim that `advance(Duration::ZERO)`'s barrier re-fires
@@ -969,8 +951,7 @@ Enforcement classes follow the pre-review checklist's definitions
   `advance`, and
   `receive*` (whose failure is the quit-state diagnostic, not the
   reactor panic polling would produce) and the passing `finish`.
-- **INV-T10**: ambient-runtime rejection (revised by the stage-2
-  amendment; the stage-1 statement covered reactor absence) —
+- **INV-T10**: ambient-runtime rejection —
   `TestStore::new` panics immediately, before any other construction
   work — its own controlled context included — if
   `tokio::runtime::Handle::try_current()` succeeds. The store's own
@@ -1120,8 +1101,7 @@ rule, the no-side-effect claim, and the no-warning claim together
 - RFC 0009 — Clock DI: its §3.2 controlled time context and INV-C2/
   INV-C3, consumed by §4.3 and INV-T12; its §3.4 equal-deadline
   negative space, which §4.2's linearization supplies; its §5.1 design
-  inputs and `test-util` decision, resolved and carried out by §7's
-  amendment record.
+  inputs and `test-util` decision, resolved and carried out by §7.
 - `src/application.rs` — the trait whose bounds §2 pins.
 - `src/command/core.rs`, `src/command/runtime_parts.rs` — the
   decomposition boundary INV-T3 names.

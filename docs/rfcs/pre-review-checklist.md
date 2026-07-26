@@ -547,15 +547,16 @@ changed-claims list.
 ## 7. Mechanical pass
 
 - Cross-references: open-question numbers point at their resolutions;
-  preamble/decision-scope status agrees with the body; the amendment
-  header line is updated **in place** — one `- Amended:` line naming
-  the latest amendment, never a second line appended, which starts
-  exactly the header log the process rule forbids (README: change
-  history lives in Git; superseded amendments stay recorded there and
-  in the body's own minimal `(amended DATE; originally X)` markers).
-  (From PR #257: the second amendment in an RFC's life appended its
-  line under the first — the convention's first exercise, unreadable
-  off the singular "is updated" alone.)
+  preamble/decision-scope status agrees with the body. An RFC records
+  no revision history of itself — no `Amended:` header line, no dated
+  changelog entry, and no in-body `(amended DATE; originally X)`
+  markers: the body states the current contract, and its change history
+  lives in Git (README). Grep a revised RFC for `Amended`, `amended`,
+  `originally`, and `pre-amendment`, and rewrite each hit that narrates
+  the document's own evolution into a present-tense statement of the
+  contract. (This replaces the earlier single-`Amended`-line
+  convention, which still kept in the document the history the README
+  assigns to Git.)
 - A `Status` flip to Implemented is a corrected claim about every
   sentence that described the pre-implementation state as current, in
   this RFC's body and in any other document that cites its state: grep
@@ -599,8 +600,8 @@ changed-claims list.
   `CHANGELOG: none` and the fix absent from `Scope`).
 - Resolving a decision is a corrected claim: grep for the decision's own
   vocabulary — its option labels ("(a)/(b)"), *pending*, *remaining
-  step*, *the input for the choice* — across the findings, every open
-  question's resolution text, and the amendment header (from PR #215:
+  step*, *the input for the choice* — across the findings and every open
+  question's resolution text (from PR #215:
   open question 8 still described F6 as the input to a choice the same
   amendment had already made).
 - The PR title, body, and stated review focus match the final RFC text
@@ -616,14 +617,15 @@ changed-claims list.
   explicit lint allow at its measurement sites" described an allow the
   RFC's own migration prerequisite had yet to add, inside an inventory
   framed as "at this RFC's writing").
-- Superseding another document's recorded expectation is a corrected
-  claim even when the expectation was non-normative: when a decision
-  replaces a sketch or shape another RFC recorded, name the
-  supersession where the decision lands, so the later amendment
-  reconciles against the decision rather than against two silently
-  divergent texts (from PR #242: the no-clock-handle design
-  contradicted RFC 0008 §7's "store-held clock handle" sketch until
-  §5.1 named the supersession).
+- Contradicting another document's stated contract is a corrected claim
+  even when what it stated was non-normative: when a decision here
+  conflicts with a shape another RFC currently states, reconcile the two
+  texts so they agree — edit the other RFC in place to state the current
+  contract, its superseded shape going to Git (README), never leaving
+  two silently divergent texts (from PR #242: the no-clock-handle design
+  conflicted with a "store-held clock handle" shape RFC 0008 §7 then
+  stated; both now state the current contract, the earlier shape in
+  Git).
 - A deliverable that names its home — the document, module, or surface
   it will land in — is checked against that home's existing audience
   and purpose: a repository document serves the readers it already has,
