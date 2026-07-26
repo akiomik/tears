@@ -1,6 +1,6 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
-- Status: Accepted
+- Status: Implemented
 - Amended: 2026-07-25 — stage 2: the store-held controlled time context
   and `advance` (§3, §4.3, §7), consuming RFC 0009's contract
 - Target: an additive test harness for the current `Application` API:
@@ -53,7 +53,7 @@ Three decisions, ordered by urgency:
    designed here (open question 2).
 3. **Clock DI split** (§7): Clock injection is a separate RFC. This RFC
    does not gate on it, and stage 2 of TestStore gates on that RFC, not
-   the reverse. RFC 0009 is Accepted; the stage-2 amendment consumes
+   the reverse. RFC 0009 is Implemented; the stage-2 amendment consumes
    its contract and resolves the three design inputs its §5.1 recorded
    (§7).
 

@@ -1,6 +1,6 @@
 # RFC 0009: Clock DI — deterministic time via the virtual clock
 
-- Status: Accepted
+- Status: Implemented
 - Amended: 2026-07-25 — §4.2/INV-C3: `Timer`'s anchor moved from stream
   construction to the stream's first poll (review finding: a stream
   built outside the polling runtime's clock context anchored against
