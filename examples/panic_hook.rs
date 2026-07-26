@@ -54,7 +54,7 @@ impl Application for PanicDemo {
         match msg {
             Message::Terminal(Event::Key(key)) => match key.code {
                 // Intentionally panic to demonstrate terminal recovery.
-                #[allow(clippy::panic, reason = "demonstrating panic recovery")]
+                #[expect(clippy::panic, reason = "demonstrating panic recovery")]
                 KeyCode::Char('p') => panic!("intentional panic triggered by 'p'"),
                 // Quit normally.
                 KeyCode::Char('q') => Command::quit(),

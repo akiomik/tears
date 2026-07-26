@@ -226,7 +226,7 @@ mod tests {
 
     /// Polls a fresh `send` future exactly once and asserts it resolved without
     /// suspending, returning the send result.
-    #[allow(
+    #[expect(
         clippy::panic,
         reason = "a suspended send is the failure this helper reports"
     )]

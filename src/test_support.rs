@@ -29,10 +29,6 @@ pub struct TestApp {
 }
 
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "shared test fixture whose variants are not all constructed by every test module that imports it"
-)]
 pub enum TestMessage {
     Increment,
     Quit,

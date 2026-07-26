@@ -57,7 +57,10 @@
 
 #[cfg(feature = "http")]
 mod cell;
-#[cfg(feature = "loom-core")]
+// `loom-core` is a test-only feature (its `CellCore` mirror is exercised solely
+// by the `#[cfg(test)]` loom model checks), so gate the module on `test` too:
+// a non-test `--all-features` build would otherwise compile it with no callers.
+#[cfg(all(feature = "loom-core", test))]
 mod cell_core;
 #[cfg(feature = "http")]
 mod config;

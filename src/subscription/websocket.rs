@@ -233,7 +233,7 @@ impl SubscriptionSource for WebSocket {
     type Output = WebSocketMessage;
     type Key = String;
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "the WebSocket connection state machine is expressed as one stream::unfold with every transition inline"
     )]

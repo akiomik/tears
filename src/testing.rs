@@ -230,7 +230,7 @@ where
     finished: bool,
 }
 
-#[allow(
+#[expect(
     clippy::panic,
     reason = "assertion failures in a test harness are panics by design"
 )]
@@ -380,7 +380,7 @@ where
     /// quit request (assert that with [`receive_quit`](Self::receive_quit)),
     /// if nothing is deliverable, or if quit has already been observed.
     #[track_caller]
-    #[allow(
+    #[expect(
         clippy::needless_pass_by_value,
         reason = "the expected value is consumed by the assertion (RFC 0008 §2.1)"
     )]
