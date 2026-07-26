@@ -1043,14 +1043,14 @@ spawn multiple independently keyed tasks." This RFC keeps the first
 implementation small and explicit: the batch is the cancellation boundary, child
 keys warn and do nothing, child cancels fold.
 
-### Design history
+### Occupancy liveness and generation filtering
 
-Earlier drafts treated task liveness as occupancy and used generation filtering
-over the shared channels. Review reversed both decisions: a finished task with
-buffered output is still deliverable stale output, and a dying task can enqueue
-after a recorded generation release point. The prerequisite `Effect` leaf
-refactor (PR #137) keeps per-effect ids possible later, but this RFC deliberately
-ships the smaller per-command lifecycle first.
+Rejected. Task liveness is not occupancy, and delivery does not use generation
+filtering over the shared channels: a finished task with buffered output is
+still deliverable stale output, and a dying task can enqueue after a recorded
+generation release point. The prerequisite `Effect` leaf refactor (PR #137)
+keeps per-effect ids possible later, but this RFC deliberately ships the smaller
+per-command lifecycle first.
 
 ## 9. Implementation Plan
 
