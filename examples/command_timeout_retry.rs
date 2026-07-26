@@ -231,3 +231,102 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+/// Deterministic tests for this example's timeout and retry logic, driven by
+/// `tears::testing::TestStore` (RFC 0008). Every time-dependent command effect
+/// is moved forward with `advance`, so nothing waits on the wall clock; run
+/// them with `cargo test --example command_timeout_retry`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tears::testing::TestStore;
+
+    /// Builds the `Input` message a keystroke would produce, so a test can
+    /// script the same commands the terminal subscription feeds at runtime.
+    fn press(c: char) -> Message {
+        Message::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::empty(),
+        )))
+    }
+
+    /// A fetch that finishes before its deadline delivers its data, and the
+    /// timeout leaf that guarded it is driven to completion with nothing left
+    /// over.
+    #[test]
+    fn fast_fetch_completes_before_deadline() {
+        let mut store = TestStore::<App>::new(());
+
+        // 'f' starts `perform(fetch(200ms)).timeout(1s)`. The fetch is pending
+        // until virtual time reaches its 200ms sleep.
+        store.send(press('f'));
+        store.advance(Duration::from_millis(200));
+
+        store.receive_matching(|msg| matches!(msg, Message::Loaded(data) if data == "fast data"));
+        assert_eq!(store.state().log.last().unwrap(), "Loaded: fast data");
+        store.finish();
+    }
+
+    /// A fetch slower than its deadline delivers the timeout message and never
+    /// the (still-sleeping) data.
+    #[test]
+    fn slow_fetch_times_out() {
+        let mut store = TestStore::<App>::new(());
+
+        // 's' starts `perform(fetch(3s)).timeout(800ms)`. Advancing to the
+        // deadline fires the timeout before the inner fetch can finish.
+        store.send(press('s'));
+        store.advance(Duration::from_millis(800));
+
+        store.receive_matching(|msg| matches!(msg, Message::TimedOut));
+        assert_eq!(
+            store.state().log.last().unwrap(),
+            "Timed out before the deadline"
+        );
+        store.finish();
+    }
+
+    /// A flaky operation that fails twice then succeeds recovers on its third
+    /// attempt. Each 200ms attempt and each 300ms fixed backoff is a separate
+    /// virtual-time wait the retry leaf registers only after the previous one
+    /// is observed, so the test crosses them one `advance` at a time.
+    #[test]
+    fn retry_recovers_after_two_failures() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(press('r'));
+        store.advance(Duration::from_millis(200)); // attempt 1 fails
+        store.advance(Duration::from_millis(300)); // backoff before attempt 2
+        store.advance(Duration::from_millis(200)); // attempt 2 fails
+        store.advance(Duration::from_millis(300)); // backoff before attempt 3
+        store.advance(Duration::from_millis(200)); // attempt 3 succeeds
+
+        store.receive_matching(|msg| {
+            matches!(msg, Message::RetryFinished(Ok(data)) if data.contains("recovered on attempt 3"))
+        });
+        store.finish();
+    }
+
+    /// A retry policy that runs out of attempts delivers the final error, and
+    /// the reported attempt count matches the policy's limit.
+    #[test]
+    fn retry_gives_up_after_exhausting_attempts() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(press('x'));
+        store.advance(Duration::from_millis(200)); // attempt 1 fails
+        store.advance(Duration::from_millis(300)); // backoff before attempt 2
+        store.advance(Duration::from_millis(200)); // attempt 2 fails, none left
+
+        store.receive_matching(|msg| matches!(msg, Message::RetryFinished(Err(_))));
+        assert!(
+            store
+                .state()
+                .log
+                .last()
+                .unwrap()
+                .starts_with("Retry gave up after 2 attempt(s)")
+        );
+        store.finish();
+    }
+}

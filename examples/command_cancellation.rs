@@ -251,3 +251,82 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+/// Deterministic tests for this example's keyed-cancellation logic, driven by
+/// `tears::testing::TestStore` (RFC 0008). The store honors the same
+/// `CancelPolicy` admission the runtime does, so a superseded or explicitly
+/// cancelled search produces no output. The 400ms search delay is crossed with
+/// `advance`, never the wall clock; run them with
+/// `cargo test --example command_cancellation`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tears::testing::TestStore;
+
+    const SEARCH_DELAY: Duration = Duration::from_millis(400);
+
+    /// Builds the `Input` message a character keystroke would produce.
+    fn press(c: char) -> Message {
+        Message::Input(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::empty(),
+        )))
+    }
+
+    /// Builds the `Input` message a non-character key would produce.
+    fn key(code: KeyCode) -> Message {
+        Message::Input(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
+    }
+
+    /// Under the default `CancelInFlight` policy, a second keystroke aborts the
+    /// first search, so only the most recently typed query ever delivers a
+    /// result and the store finishes with no orphaned effect.
+    #[test]
+    fn cancel_in_flight_delivers_only_the_latest_query() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(press('r')); // starts a search for "r"
+        store.send(press('u')); // supersedes it with a search for "ru"
+
+        store.advance(SEARCH_DELAY);
+        store.receive_matching(
+            |msg| matches!(msg, Message::SearchFinished { query, .. } if query == "ru"),
+        );
+        store.finish();
+    }
+
+    /// Under `KeepInFlight`, the running search is preserved and the newer
+    /// command is dropped, so the delivered result lags behind the typed query.
+    #[test]
+    fn keep_in_flight_preserves_the_running_search() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(key(KeyCode::Tab)); // switch to KeepInFlight
+        assert_eq!(store.state().policy, CancelPolicy::KeepInFlight);
+
+        store.send(press('r')); // starts a search for "r"
+        store.send(press('u')); // dropped; the "r" search keeps running
+
+        store.advance(SEARCH_DELAY);
+        store.receive_matching(
+            |msg| matches!(msg, Message::SearchFinished { query, .. } if query == "r"),
+        );
+        assert_eq!(store.state().query, "ru");
+        store.finish();
+    }
+
+    /// Pressing Esc issues an explicit `Command::cancel`, which removes the
+    /// in-flight search leaf without polling it, so advancing past the search
+    /// delay delivers nothing.
+    #[test]
+    fn esc_cancels_the_in_flight_search() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(press('r'));
+        store.send(key(KeyCode::Esc));
+        assert!(store.state().query.is_empty());
+
+        store.advance(SEARCH_DELAY);
+        store.finish();
+    }
+}

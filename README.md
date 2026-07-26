@@ -260,6 +260,41 @@ cargo run --example websocket --features ws,rustls
 cargo run --example http_todo --features http
 ```
 
+## Testing Your Application
+
+`tears::testing::TestStore` drives an `Application`'s `update` transitions and
+command effects synchronously and deterministically, with no wall-clock waiting.
+A test constructs the store from the application's flags, scripts messages with
+`send`, moves virtual time with `advance`, asserts effect output with
+`receive`/`receive_matching`/`receive_quit`, and closes the run with `finish`
+(which fails the test if any deliverable output or unfinished effect is left
+unaccounted for). Assertions are exhaustive by design.
+
+```rust,ignore
+use tears::testing::TestStore;
+
+let mut store = TestStore::<App>::new(flags);
+store.send(some_message);
+store.advance(Duration::from_millis(200)); // move a Command::timeout deadline
+store.receive_matching(|msg| matches!(msg, Message::Loaded(_)));
+store.finish();
+```
+
+`TestStore` is constructed on a plain `#[test]` (never `#[tokio::test]`; it owns
+its own paused time context) and does not execute subscription sources — it
+observes only the *declared* set via `subscription_ids`. See the
+[`tears::testing`](https://docs.rs/tears/latest/tears/testing/) module docs for
+the full contract, including deterministic time without `TestStore`. Worked,
+runnable tests ship with the command examples:
+
+```bash
+cargo test --example command_timeout_retry
+cargo test --example command_cancellation
+cargo test --example dashboard
+```
+
+Repository-wide test conventions live in [docs/testing.md](docs/testing.md).
+
 ## Optional Features
 
 Tears supports optional features that can be enabled in your `Cargo.toml`:
