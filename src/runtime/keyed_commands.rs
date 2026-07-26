@@ -9,7 +9,7 @@ use tokio::task::{AbortHandle, JoinSet};
 use tokio_stream::StreamMap;
 
 use crate::command::{Action, CancelPolicy, CommandId};
-use crate::poll_util::noop_context;
+use crate::noop_waker::noop_context;
 
 use super::channel;
 use super::load::{Channel, LoadObserver};

@@ -106,7 +106,7 @@ use tokio::time;
 
 use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts};
-use crate::poll_util::noop_context;
+use crate::noop_waker::noop_context;
 use crate::subscription::core::SubscriptionId;
 
 /// One undelivered effect leaf, held at its enqueue position.
