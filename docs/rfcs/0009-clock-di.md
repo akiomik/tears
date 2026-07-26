@@ -1,15 +1,10 @@
 # RFC 0009: Clock DI — deterministic time via the virtual clock
 
 - Status: Implemented
-- Amended: 2026-07-25 — §4.2/INV-C3: `Timer`'s anchor moved from stream
-  construction to the stream's first poll (review finding: a stream
-  built outside the polling runtime's clock context anchored against
-  the wrong clock and ticked immediately or never)
 - Amended: 2026-07-26 — §5.5: the application recipe's documented home
   moved from `docs/testing.md` to rustdoc (audience finding:
-  `docs/testing.md` is contributor test policy, and the repository's
-  user-facing documentation surfaces are the README, rustdoc, and
-  examples)
+  `docs/testing.md` is contributor test policy, not application-author
+  documentation)
 - Target: a crate-wide determinism contract for time-dependent behavior,
   with no new public API
 - Scope: the no-clock-abstraction decision, the single-time-source rule,
@@ -526,11 +521,11 @@ own dev-dependencies and runs its tests on a paused single-threaded
 runtime; feature unification makes every tears time read virtual in
 those tests with no tears-side configuration.
 
-Deliverable (amended 2026-07-26; originally "a deterministic-time
-section in `docs/testing.md`" — an audience mismatch: that file is
-contributor test policy, and the repository's user-facing documentation
-surfaces are the README, rustdoc, and examples): the recipe documented
-as rustdoc, at two sites, each matched to the reader who needs it —
+Deliverable (amended 2026-07-26; originally a `docs/testing.md`
+section): the recipe documented as rustdoc — with the README and
+examples, the surface where the repository's application-author
+documentation lives, where `docs/testing.md` is contributor test
+policy — at two sites, each matched to the reader who needs it:
 
 - the `tears::testing` module doc carries the recipe (`test-util` in
   the application's dev-dependencies, a paused single-threaded runtime,
