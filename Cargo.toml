@@ -134,6 +134,7 @@ similar_names = "allow"
 
 # Enable some restriction lints
 absolute_paths = "warn"
+allow_attributes_without_reason = "warn"
 cognitive_complexity = "warn"
 mod_module_files = "warn"
 str_to_string = "warn"

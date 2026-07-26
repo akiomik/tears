@@ -72,7 +72,8 @@
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    reason = "metric reporting casts counters and nanosecond values to floating point for human-readable output; precision loss there is irrelevant"
 )]
 
 use std::fmt::Debug;
@@ -594,7 +595,10 @@ impl Subscriber for QuitDeliverySubscriber {
     // suggestion — would let a concurrent stale gauge event interleave its store
     // between the check and the apply, the exact reorder the `seq` ordering
     // exists to defeat (RFC 0006 §4.4).
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the gauge high-water guard is deliberately held across the value stores so \"advance and apply\" is one step; tightening it would let a concurrent stale gauge event interleave a store between the check and the apply (RFC 0006 §4.4)"
+    )]
     fn event(&self, event: &Event<'_>) {
         let is_load = event.metadata().target() == "tears::runtime::load";
         let mut visitor = LoadVisitor::default();
@@ -766,7 +770,10 @@ impl Metrics {
     // Real wall-clock reads: RFC 0006's statistical acceptance criteria are
     // defined on real time, the one sanctioned exception to the
     // single-time-source rule (RFC 0009 §3.1).
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "calls std Instant::now to stamp the real wall-clock baseline; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+    )]
     fn new() -> Self {
         Self {
             start: Instant::now(),
@@ -804,12 +811,18 @@ impl Metrics {
         produced.saturating_sub(processed)
     }
 
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "calls std Instant::elapsed to read real wall-clock elapsed time; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+    )]
     fn elapsed_ns(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "calls std Instant::elapsed to measure real wall-clock message latency; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+    )]
     fn push_latency(bucket: &Mutex<Vec<u64>>, sent_at: Instant) {
         let nanos = u64::try_from(sent_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
         bucket.lock().expect("latency bucket poisoned").push(nanos);
@@ -836,7 +849,10 @@ impl SubscriptionSource for FloodSource {
     type Output = Msg;
     type Key = u32;
 
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "calls std Instant::now to stamp each message's send time and Instant::elapsed to record when the producer finishes, both real wall-clock reads; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+    )]
     fn stream(&self) -> BoxStream<'static, Msg> {
         let metrics = Arc::clone(&self.metrics);
         let total = self.cfg.total;
@@ -891,7 +907,10 @@ impl Application for LoadApp {
     type Message = Msg;
     type Flags = (ScenarioCfg, Arc<Metrics>);
 
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "calls std Instant::now to stamp each keyed-probe send time, a real wall-clock read; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+    )]
     fn new((cfg, metrics): Self::Flags) -> (Self, Command<Msg>) {
         let cmd = if cfg.keyed_probe {
             let mut ticker = interval(Duration::from_millis(25));
@@ -1010,7 +1029,10 @@ impl Application for LoadApp {
 }
 
 /// Busy-waits for `duration` to simulate CPU-bound work on the runtime task.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "calls std Instant::now to busy-wait against a real wall-clock deadline while simulating CPU-bound work; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+)]
 fn spin(duration: Duration) {
     if duration.is_zero() {
         return;
@@ -1040,7 +1062,10 @@ struct Report {
     seq_broken: bool,
 }
 
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "calls std Instant::now and Instant::elapsed to measure the scenario's real wall-clock duration; RFC 0006's acceptance criteria are defined on real time, the sanctioned single-time-source exception (RFC 0009 §3.1)"
+)]
 async fn run_scenario(cfg: ScenarioCfg) -> Report {
     let rss_before = peak_rss_bytes();
     let metrics = Arc::new(Metrics::new());

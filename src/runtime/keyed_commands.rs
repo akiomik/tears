@@ -1049,7 +1049,10 @@ mod tests {
                 CancelPolicy::CancelInFlight,
                 command_stream(Command::future(async {
                     panic!("boom");
-                    #[allow(unreachable_code)]
+                    #[allow(
+                        unreachable_code,
+                        reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                    )]
                     1
                 })),
             );
