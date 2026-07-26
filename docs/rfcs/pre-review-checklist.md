@@ -548,7 +548,26 @@ changed-claims list.
 
 - Cross-references: open-question numbers point at their resolutions;
   preamble/decision-scope status agrees with the body; the amendment
-  header line is updated.
+  header line is updated **in place** — one `- Amended:` line naming
+  the latest amendment, never a second line appended, which starts
+  exactly the header log the process rule forbids (README: change
+  history lives in Git; superseded amendments stay recorded there and
+  in the body's own minimal `(amended DATE; originally X)` markers).
+  (From PR #257: the second amendment in an RFC's life appended its
+  line under the first — the convention's first exercise, unreadable
+  off the singular "is updated" alone.)
+- A `Status` flip to Implemented is a corrected claim about every
+  sentence that described the pre-implementation state as current, in
+  this RFC's body and in any other document that cites its state: grep
+  for pre-implementation framing (*today*, *currently*, *lands*,
+  *implementation task*, *prerequisite*, *migrate*) and restate landed
+  deliverables in the present tense, keeping pre-implementation facts
+  in explicit past tense only where they still carry the rationale —
+  and refresh any state inventory the body dates (from PR #257: both
+  RFCs flipped to Implemented while the bodies still said "Two
+  HTTP-module files violate the rule today", "`Timer` does not
+  currently satisfy", "Today that boundary folds", and §3.1's
+  inventory still listed the migrated files as non-conforming).
 - Citations of another document's invariants name things that actually
   exist there, and a corrected claim is corrected everywhere: grep for
   the old term across the RFC, its references section, and the index
@@ -605,6 +624,15 @@ changed-claims list.
   divergent texts (from PR #242: the no-clock-handle design
   contradicted RFC 0008 §7's "store-held clock handle" sketch until
   §5.1 named the supersession).
+- A deliverable that names its home — the document, module, or surface
+  it will land in — is checked against that home's existing audience
+  and purpose: a repository document serves the readers it already has,
+  and content aimed at a different reader is misplaced even when
+  correct. Match the deliverable to the surface whose audience is its
+  intended reader before naming it (from PR #257: RFC 0009 §5.5 placed
+  a downstream-application testing recipe in `docs/testing.md`,
+  contributor test policy — the deliverable moved to rustdoc, the
+  crate's user-facing surface alongside the README and examples).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
 
