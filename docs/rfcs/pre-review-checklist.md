@@ -548,7 +548,14 @@ changed-claims list.
 
 - Cross-references: open-question numbers point at their resolutions;
   preamble/decision-scope status agrees with the body; the amendment
-  header line is updated.
+  header line is updated **in place** — one `- Amended:` line naming
+  the latest amendment, never a second line appended, which starts
+  exactly the header log the process rule forbids (README: change
+  history lives in Git; superseded amendments stay recorded there and
+  in the body's own minimal `(amended DATE; originally X)` markers).
+  (From PR #257: the second amendment in an RFC's life appended its
+  line under the first — the convention's first exercise, unreadable
+  off the singular "is updated" alone.)
 - Citations of another document's invariants name things that actually
   exist there, and a corrected claim is corrected everywhere: grep for
   the old term across the RFC, its references section, and the index
