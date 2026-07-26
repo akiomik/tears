@@ -622,3 +622,93 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+/// Deterministic tests for this example's structured `update` logic, driven by
+/// `tears::testing::TestStore` (RFC 0008). This example's transitions are pure
+/// — most produce `Command::none()`, and the key handler produces follow-up
+/// messages via `Command::message` — so the store needs no virtual time here;
+/// run them with `cargo test --example dashboard`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use tears::testing::TestStore;
+
+    /// Builds the `Terminal` message a keystroke would produce, so a test can
+    /// exercise the same `handle_key_event` path the subscription feeds.
+    fn key(code: KeyCode) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
+    }
+
+    /// Sending the child message directly walks focus through the panels.
+    #[test]
+    fn focus_next_cycles_through_panels() {
+        let mut store = TestStore::<App>::new(());
+        assert_eq!(store.state().focus, Focus::Navigation);
+
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Tasks);
+
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        store.finish();
+    }
+
+    /// A key event is dispatched through `handle_key_event`, whose returned
+    /// `Command::message(FocusNext)` the store delivers as the next message.
+    #[test]
+    fn tab_key_emits_focus_next() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(key(KeyCode::Tab));
+        store.receive_matching(|msg| matches!(msg, Message::FocusNext));
+
+        assert_eq!(store.state().focus, Focus::Tasks);
+        store.finish();
+    }
+
+    /// Toggling the selected task flips its `done` flag and records an activity
+    /// entry.
+    #[test]
+    fn toggle_marks_selected_task_done() {
+        let mut store = TestStore::<App>::new(());
+        assert!(!store.state().tasks.tasks[0].done);
+        let activity_before = store.state().activity.entries.len();
+
+        store.send(Message::Tasks(TaskMessage::Toggle));
+
+        assert!(store.state().tasks.tasks[0].done);
+        assert_eq!(store.state().activity.entries.len(), activity_before + 1);
+        store.finish();
+    }
+
+    /// Adding a task then deleting it returns to the original count while the
+    /// id counter keeps advancing.
+    #[test]
+    fn add_then_delete_returns_to_original_count() {
+        let mut store = TestStore::<App>::new(());
+        assert_eq!(store.state().tasks.tasks.len(), 3);
+        assert_eq!(store.state().tasks.next_id, 4);
+
+        store.send(Message::Tasks(TaskMessage::Add));
+        assert_eq!(store.state().tasks.tasks.len(), 4);
+
+        store.send(Message::Tasks(TaskMessage::Delete));
+        assert_eq!(store.state().tasks.tasks.len(), 3);
+        assert_eq!(store.state().tasks.next_id, 5);
+        store.finish();
+    }
+
+    /// Pressing 'q' asks the key handler for a `Quit` message, whose `update`
+    /// returns `Command::quit()`; the store observes both the message and the
+    /// quit request.
+    #[test]
+    fn quit_key_requests_shutdown() {
+        let mut store = TestStore::<App>::new(());
+
+        store.send(key(KeyCode::Char('q')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+    }
+}
