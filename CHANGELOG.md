@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `tears::testing::TestStore`, a deterministic, executor-free test harness
-  that drives an `Application`'s `update` transitions and immediately ready
-  effects synchronously (RFC 0008, stage 1)
+- `tears::testing::TestStore`, a deterministic test harness that drives an
+  `Application`'s `update` transitions, immediately ready effects, and —
+  through a store-owned paused time context — time-dependent command
+  effects, synchronously and with no wall-clock waiting (RFC 0008;
+  RFC 0009)
   - `send` applies one message through `update`; `receive`, `receive_matching`,
     and `receive_quit` assert the next deliverable effect output — under a
     canonical per-leaf delivery order that is the store's own contract, not a
@@ -29,16 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Application::Message`'s bounds stay exactly `Send + 'static`: the store
     carries its own bounds (`Debug` on the store, `PartialEq` only on
     `receive`) and requires `Clone` nowhere
-  - Stage 2 (RFC 0008 stage-2 amendment; RFC 0009): the store owns a paused
-    controlled time context, and `advance(duration)` drives time-dependent
-    command effects (`Command::timeout`, retry backoff) deterministically
-    through the ordinary `receive` flow — anchoring every pending leaf
-    before the clock moves, so `Command::timeout` deadlines count from a
-    leaf's enqueue-time virtual now (a retry's backoff starts at the poll
-    that observes the failed attempt). Tests still run on a plain
-    `#[test]` (`TestStore::new` panics inside an entered Tokio runtime);
-    I/O-dependent leaves are out of scope, and subscription sources are
-    never executed
+  - `advance(duration)` drives the time-dependent command effects
+    (`Command::timeout`, retry backoff) through the ordinary `receive`
+    flow: it anchors every pending leaf before the clock moves — so
+    `Command::timeout` deadlines count from a leaf's enqueue-time virtual
+    now (a retry's backoff starts at the poll that observes the failed
+    attempt) — then moves virtual time by exactly `duration`. Tests run on
+    a plain `#[test]` (`TestStore::new` panics inside an entered Tokio
+    runtime); I/O-dependent leaves are out of scope, and subscription
+    sources are never executed
 
 ## [0.10.1] - 2026-07-24
 
