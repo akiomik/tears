@@ -662,8 +662,9 @@ split-pass adversary.
   track (out of scope here).
 - RFC 0003 — command cancellation: INV-10 (one-item drain), §4.3
   (dispatch), §4.4 (batch window, dirtiness rule, keyed-quit exit),
-  §5.5/§7.3 (keyed panic containment INV-LC8 restates), §5.6 (shutdown
-  mechanism), INV-9/INV-14.
+  §5.5 (the keyed catch-and-log mechanism) and §7.3 (the log-occurrence
+  requirement — the continuation/containment property itself is owned
+  by INV-LC8 here), §5.6 (shutdown mechanism), INV-9/INV-14.
 - RFC 0005 — structural lifecycle identity: the reconciliation contract
   whose *timing* §2 pins.
 - RFC 0006 — runtime load control: INV-L4/R4/F5/F6 (the contracts §2.3's
