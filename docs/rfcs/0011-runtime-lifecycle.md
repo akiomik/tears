@@ -42,7 +42,9 @@ down. This RFC is the owner of that contract. Five decisions:
    with a reason and the shutdown postconditions hold by `run()`'s
    return) and abrupt (drop of the `run` future, a panic unwinding
    through `run` from application code on the driving task, drop of a
-   never-run runtime value: synchronous cleanup by `Drop`). Both routes reach
+   never-run runtime value: ownership teardown and cancellation
+   requests complete synchronously by `Drop`; task futures follow on
+   the quiescent stage). Both routes reach
    the same postconditions in two stages: an immediate stage at the
    terminating operation's completion, and a quiescent stage once the
    executor has processed the requested cancellations — task
@@ -389,13 +391,17 @@ This RFC pins no *new* common diagnostic schema for panics or
 termination: no supervision-event surface, and no unified target,
 wording, or payload across the three task kinds. Diagnostic
 requirements other RFCs already state stand unchanged and are carved
-out of this section, at the scope their owners enforce — specifically
-the keyed-panic log event RFC 0003 §7.3 requires, whose enforced scope
-is what RFC 0003's test checks: that the event fires, on its target and
-level (`tears::runtime`, error). The message wording is RFC 0003
-§5.5's mechanism description and is not re-pinned here. RFC 0006
-INV-L13's load-event schema is likewise carved out, at its own stated
-scope. Beyond those owner-stated requirements, the tracing output
+out of this section, at the scope their owners actually state —
+specifically, RFC 0003 §7.3 requires that keyed task panics are
+logged, so the carve-out is that the keyed-panic log event fires, and
+no more. The event's target, level, and message wording are not owner
+contract: RFC 0003 §5.5 records the wording as mechanism, and the
+existing test's target-and-level filter is a conformance check against
+the current implementation, not a contract either RFC states. Any
+preservation of those values is an implementation-side compatibility
+baseline, not an RFC requirement — this RFC neither pins them nor
+amends RFC 0003 to do so. RFC 0006 INV-L13's load-event schema is
+likewise carved out, at its own stated scope. Beyond those owner-stated requirements, the tracing output
 accompanying a contained panic or a termination is diagnostic, not
 contract, and may not be matched on as a stable surface. A task's exit cause (stream end,
 panic, closed channel, abort) is likewise not contract surface today:
@@ -583,9 +589,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   producers are not cancelled by it — their subsequent output remains
   deliverable and is delivered under the ordinary delivery contracts,
   with no schedule or ordering claim (§5). The containment property is
-  pinned here for all three kinds; RFC 0003's keyed-panic test checks
-  the §5.5 log, not continuation, so the keyed row below is not
-  redundant with it, and no new diagnostic schema is pinned (§5.1).
+  pinned here for all three kinds; RFC 0003's keyed-panic requirement
+  is that the log event fires (§7.3), not that the application
+  continues, so the keyed row below is not redundant with its test, and
+  no new diagnostic schema is pinned (§5.1).
   Behavioral at the integration layer, one row per task kind — a
   panicking unkeyed effect, a panicking keyed effect, and a
   subscription whose source constructor succeeds and whose stream
@@ -632,9 +639,10 @@ split-pass adversary.
    cleanup, and `resume_unwind` — keeping the panic payload while
    pulling cleanup onto the controlled path's code — or rely on
    `Drop`-based cleanup with the panic unwinding through untouched?
-   Both satisfy INV-LC6 (cleanup synchronous within the unwind, panic
-   propagates); the catch-and-resume form is acceptable only as exactly
-   that — fail-fast is not up for revision. Resolves at implementation
+   Both satisfy INV-LC6 (ownership teardown and cancellation requests
+   synchronous within the unwind, panic propagates); the
+   catch-and-resume form is acceptable only as exactly that — fail-fast
+   is not up for revision. Resolves at implementation
    design, in this RFC's body.
 2. **Controlled-route quiescence.** Should the controlled route
    guarantee the quiescent postcondition by `run()`'s return — a join
