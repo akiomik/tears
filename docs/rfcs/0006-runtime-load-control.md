@@ -1228,15 +1228,23 @@ the check that realizes it; the implementation realizes those checks.
   regression checks, not proofs (this section's
   bounded-test-against-unbounded-parameter argument).
 
-Each invariant except INV-L14 and INV-L15 gets a regression scenario in
-`benches/runtime_load.rs` or a unit, runtime-layer, or integration test.
-Those two are structural-only, with no scenario or test of their own,
-because each pins negative space — a permitted execution and the absence
-of a policy — so there is no compliant behavior for a scenario to
-regress against, and no finite scenario can prove an absence (the same
-argument as INV-L9's pool case below); their checks are the reviews
-declared with them, and the shared-wins unit tests remain the nearest
-behavioral neighbors, scoped as regression checks by section 4.7. The overload scenario is the acceptance measurement for
+Each invariant except INV-L6, INV-L7, INV-L8, INV-L14, and INV-L15 gets
+a regression scenario in `benches/runtime_load.rs` or a unit,
+runtime-layer, or integration test. Those five are structural-only,
+each for a stated reason: INV-L6 because the checkable claim is the
+default code path's structural identity — its own statement rules the
+empirical alternative ("outputs are identical under load") not
+practically checkable, and its section 5.1 `steady_*` row is a
+code-inspection row, not a measurement; INV-L7 and INV-L8 because code
+review of every runtime-internal send and spawn site is the only
+defense — no finite scenario proves the absence of an event-loop send
+or of an admission limit; and INV-L14 and INV-L15 because each pins
+negative space — a permitted execution and the absence of a policy — so
+there is no compliant behavior for a scenario to regress against, and
+no finite scenario can prove an absence (the same argument as INV-L9's
+pool case below). Their checks are the reviews declared with them; for
+INV-L15 the shared-wins unit tests remain the nearest behavioral
+neighbors, scoped as regression checks by section 4.7. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
@@ -1279,8 +1287,9 @@ returns one ready element from whichever key is picked, so waiting for the
 probe's delivery may drain the saturated keys instead — and delivery
 latency carries no bound to check (open question 6 resolved against a
 fairness policy, section 4.7), which INV-L9 does not answer either way.
-INV-L7 and
-INV-L8 are structural rather than load-dependent and are checked by code
+INV-L6, INV-L7, and
+INV-L8 are structural-only per the exception stated above — INV-L6 by
+inspection of the default construction path, INV-L7 and INV-L8 by code
 review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
