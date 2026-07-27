@@ -66,3 +66,4 @@ Three corollaries:
 | [0007](0007-runtime-config.md) | RuntimeConfig public API, load-control acceptance parameters |
 | [0008](0008-teststore.md) | TestStore: deterministic update/effect testing, `Message` boundary |
 | [0009](0009-clock-di.md) | Clock DI: single-time-source rule, virtual-clock determinism contract |
+| [0011](0011-runtime-lifecycle.md) | Runtime lifecycle: phase order, bootstrap, termination model |
