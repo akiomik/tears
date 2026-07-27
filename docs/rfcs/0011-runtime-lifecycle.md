@@ -16,8 +16,9 @@
 ## Summary
 
 Every RFC so far assumes a runtime life cycle none of them states: that
-messages are processed before frames render, that subscriptions of a new
-state start after that state exists, that quitting tears the runtime
+rendering happens at frame granularity rather than per message, that a
+frame pass puts its render ahead of its subscription reconciliation and
+runs both against the current state, that quitting tears the runtime
 down. This RFC is the owner of that contract. Five decisions:
 
 1. **Steady-state phase order** (§2, INV-LC1/INV-LC2). Processing is
@@ -93,8 +94,9 @@ funnel, the single-task parking assumption — is recorded as informative
   the zero-grace degenerate form of a drain model (§4.5); a bounded
   grace period is future work with its own RFC.
 - **Supervision surface.** Typed task-exit causes and any supervision
-  event schema are future work; today's termination and panic
-  diagnostics are unpinned in either direction (§5.1).
+  event schema are future work. This RFC adds no new common diagnostic
+  schema; diagnostic requirements existing owners state (RFC 0003,
+  RFC 0006) stand unchanged (§5.1).
 - **Quit vocabulary.** The shape of the public quit surface (whether
   quit remains an `Action` or becomes a `Command` constructor) is
   RFC 0002 §9's breaking-change track, orthogonal to the lifecycle
@@ -300,11 +302,14 @@ through `run`); the runtime value is dropped without ever being run —
 once `run` is called the value is owned by the future, so a mid-run
 drop *is* the run-future drop above.
 
-Contract (INV-LC6): cleanup is synchronous and `Drop`-based — it
-completes during the drop or unwind itself, with no further call
-required and no task left behind to "notice" termination later. The
-immediate postcondition (§4.4) holds when the drop or unwind of the
-runtime's structures completes. A panic in the application's transition
+Contract (INV-LC6): the terminating drop or unwind itself performs the
+ownership teardown and the cancellation requests — the §4.4 immediate
+postcondition holds when it completes, with no further call required
+and no runtime component left waiting to notice termination later. The
+synchronous half is exactly that: teardown of ownership and the abort
+requests. The task futures themselves are dismantled by the executor
+afterward, on the quiescent stage's schedule (§4.4) — synchrony is not
+claimed for them. A panic in the application's transition
 functions stays fail-fast: it propagates to `run()`'s caller (whether
 the implementation lets it unwind directly or resumes it after cleanup —
 open question 1) and is never converted into a continued run.
@@ -384,12 +389,15 @@ This RFC pins no *new* common diagnostic schema for panics or
 termination: no supervision-event surface, and no unified target,
 wording, or payload across the three task kinds. Diagnostic
 requirements other RFCs already state stand unchanged and are carved
-out of this section — specifically RFC 0003 §5.5/§7.3's keyed-panic log
-(`"keyed command task panicked"`), which remains RFC 0003's requirement
-with its existing test, and RFC 0006 INV-L13's load-event schema.
-Beyond those owner-stated requirements, the tracing output accompanying
-a contained panic or a termination is diagnostic, not contract, and may
-not be matched on as a stable surface. A task's exit cause (stream end,
+out of this section, at the scope their owners enforce — specifically
+the keyed-panic log event RFC 0003 §7.3 requires, whose enforced scope
+is what RFC 0003's test checks: that the event fires, on its target and
+level (`tears::runtime`, error). The message wording is RFC 0003
+§5.5's mechanism description and is not re-pinned here. RFC 0006
+INV-L13's load-event schema is likewise carved out, at its own stated
+scope. Beyond those owner-stated requirements, the tracing output
+accompanying a contained panic or a termination is diagnostic, not
+contract, and may not be matched on as a stable surface. A task's exit cause (stream end,
 panic, closed channel, abort) is likewise not contract surface today:
 this RFC neither exposes causes nor pins their absence, leaving a
 future supervision surface free to expose them additively.
@@ -521,12 +529,29 @@ Enforcement classes follow the pre-review checklist's definitions.
   unwinding through `run` from application code on the driving task
   (`update`, `view`, `subscriptions` at either call site, or a
   subscription's lazy source constructor), drop of a never-run runtime
-  value — completes cleanup synchronously during the drop or unwind,
-  reaching the §4.4 immediate postcondition with no further call; a
-  panic propagates to the caller (§4.3). Behavioral at the integration
-  layer, one row per quantified cause and call site, each row followed
-  by the INV-LC7 settle loop and, for the panic rows, the propagation
-  assertion (the test harness catches the unwind):
+  value — performs the ownership teardown and cancellation requests
+  synchronously during the drop or unwind, reaching the §4.4 immediate
+  postcondition with no further call (task futures are dismantled
+  afterward by the executor — the quiescent stage); a panic propagates
+  to the caller (§4.3). Structural for the synchrony half: review of
+  the `Drop` owners that carry the teardown — the task-set and manager
+  structures whose drops issue the abort requests
+  (`src/runtime/core.rs`, `src/runtime/keyed_commands.rs`,
+  `src/subscription.rs`) — confirming every runtime-owned task is
+  reachable from a structure the runtime value's drop or the unwind
+  reaches, with no teardown step deferred to a later call or task.
+  Behavioral at the integration layer, one row per quantified cause and
+  call site; each row asserts that from the moment the drop or unwind
+  completes — checked immediately, and re-checked across the INV-LC7
+  settle loop's yields, not only after settling — no further
+  transition, delivery, or source poll is observed (a settle-only check
+  would pass an implementation that defers its cancellation requests by
+  a scheduler pass, whose still-live producers keep polling sources
+  during that window), plus the propagation assertion for the panic
+  rows (the test harness catches the unwind). The rows run on a
+  single-threaded test executor, so no producer poll is in flight
+  across the drop itself and the no-further-poll assertion is
+  deterministic:
   - the `run` future dropped mid-run (a caller `select!`/timeout);
   - a panic in `update`;
   - a panic in `view`;
@@ -562,10 +587,12 @@ Enforcement classes follow the pre-review checklist's definitions.
   the §5.5 log, not continuation, so the keyed row below is not
   redundant with it, and no new diagnostic schema is pinned (§5.1).
   Behavioral at the integration layer, one row per task kind — a
-  panicking unkeyed effect, a panicking keyed effect, and a panicking
-  subscription source — each running alongside a surviving producer
-  whose later messages must still arrive at `update`, with the run then
-  quitting normally.
+  panicking unkeyed effect, a panicking keyed effect, and a
+  subscription whose source constructor succeeds and whose stream
+  panics while the forwarder task polls it (distinct from INV-LC6's
+  constructor-panic row, which unwinds on the driving task) — each
+  running alongside a surviving producer whose later messages must
+  still arrive at `update`, with the run then quitting normally.
 - **INV-LC9**: at most one owner drives a runtime instance at a time,
   and `update`/`view`/`subscriptions` execute serially and
   non-reentrantly; a future driving surface is additive iff it preserves
