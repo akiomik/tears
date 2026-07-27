@@ -570,6 +570,13 @@ this layer:
 - A keyed `Quit` exits through the same shutdown path as `quit_rx`; it does not
   call `update()`.
 
+The two quit semantics — an unkeyed `Action::Quit` delivered through the
+dedicated channel, and a keyed `Action::Quit` delivered in-band through its
+run's private channel and cancellable until delivered (INV-9; RFC 0006
+INV-L10/INV-L11) — are delivery contract, owned by this RFC and RFC 0006. The
+loop exit and shutdown that both deliveries converge on, and the runtime's
+lifecycle phases and termination model generally, are owned by RFC 0011.
+
 `AppInputs::try_next_ready()` is the non-blocking batch-drain counterpart to
 `AppInputs::poll_next`:
 
@@ -1104,6 +1111,8 @@ starts from those seams.
 - `docs/rfcs/0001-http-module-redesign.md`
 - `docs/rfcs/0002-redraw-suppression.md`
 - `docs/rfcs/0004-command-timeout-retry.md`
+- `docs/rfcs/0011-runtime-lifecycle.md` (lifecycle phases and termination
+  model, section 4.4)
 - TCA `Effect.cancellable(id:cancelInFlight:)`
 - TCA `Effect.cancel(id:)`
 - RxJS `switchMap` and `exhaustMap`
