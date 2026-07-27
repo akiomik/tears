@@ -2,8 +2,7 @@
 
 - Status: Draft
 - Target: 0.11.0 — one behavior change (construction no longer starts the
-  init command's effect, §3.4) and one conformance fix (a render error
-  exits through shutdown, §4.2); public signatures unchanged
+  init command's effect, §3.4); public signatures unchanged
 - Scope: the runtime's steady-state phase order, the bootstrap contract,
   the termination model (controlled and abrupt routes, with two-stage
   postconditions), panic containment for runtime-owned tasks, and driver
@@ -11,10 +10,8 @@
 - Feature flag: none
 - CHANGELOG: `Changed` — constructing a `Runtime` no longer starts the
   init command's effect; it starts inside `run()` (§3.4), observable only
-  to code that constructs a runtime it does not run. `Fixed` — a render
-  error performs the runtime shutdown before `run()` returns instead of
-  leaving producer tasks running until the runtime value is dropped
-  (§4.2). Both entries land with the implementation.
+  to code that constructs a runtime it does not run. The entry lands with
+  the implementation.
 
 ## Summary
 
@@ -23,12 +20,14 @@ messages are processed before frames render, that subscriptions of a new
 state start after that state exists, that quitting tears the runtime
 down. This RFC is the owner of that contract. Five decisions:
 
-1. **Steady-state phase order** (§2, INV-LC1/INV-LC2). Processing
-   alternates input batches and frame passes. A batch processes inputs
-   one at a time (RFC 0003 INV-10) and records its outcome as pending
-   work; a frame pass consumes it in a fixed order — render first, then
-   subscription re-evaluation — so a state whose batch requested a
-   redraw is rendered once before any subscription it declares starts.
+1. **Steady-state phase order** (§2, INV-LC1/INV-LC2). Processing is
+   organized into input batches and frame passes; their interleaving is
+   unspecified (§2.3). A batch processes inputs one at a time (RFC 0003
+   INV-10) and records its outcome as pending work; a frame pass
+   consumes it in a fixed order — render first, then subscription
+   re-evaluation — with both steps observing the pass's current state,
+   so whenever a redraw was pending at a frame pass, subscriptions start
+   against a state that same pass has just rendered.
 2. **Bootstrap** (§3, INV-LC3/INV-LC4). Constructing a `Runtime` is
    inert: no runtime-owned task is spawned, no command effect is polled,
    no subscription source starts. Inside `run()`, the init command is
@@ -39,10 +38,10 @@ down. This RFC is the owner of that contract. Five decisions:
    exists and is outside this contract.
 3. **Termination** (§4, INV-LC5–INV-LC7). Termination has two routes —
    controlled (unkeyed quit, keyed quit, render error: the loop exits
-   with a reason and performs the explicit shutdown) and abrupt (drop of
-   the `run` future, a panic unwinding through `run` from application
-   code on the driving task, drop of the runtime value: synchronous
-   cleanup by `Drop`). Both routes reach
+   with a reason and the shutdown postconditions hold by `run()`'s
+   return) and abrupt (drop of the `run` future, a panic unwinding
+   through `run` from application code on the driving task, drop of a
+   never-run runtime value: synchronous cleanup by `Drop`). Both routes reach
    the same postconditions in two stages: an immediate stage at the
    terminating operation's completion, and a quiescent stage once the
    executor has processed the requested cancellations — task
@@ -73,7 +72,7 @@ funnel, the single-task parking assumption — is recorded as informative
 - The construction-dispatch behavior change, as a named deliverable
   (§3.4).
 - The termination model: routes, causes, two-stage postconditions, and
-  the render-error conformance fix (§4).
+  the render-error no-divergence analysis (§4).
 - Panic containment for runtime-owned tasks (§5).
 - Driver exclusivity and non-reentrancy (§6).
 - The premises this contract's enforcement and other RFCs' invariants
@@ -108,8 +107,10 @@ funnel, the single-task parking assumption — is recorded as informative
 
 ### 2.1 The cycle
 
-After bootstrap (§3) and until termination (§4), the runtime alternates
-two kinds of passes, both executed on the driving task:
+After bootstrap (§3) and until termination (§4), the runtime interleaves
+two kinds of passes, both executed on the driving task — which kind runs
+next is §2.3's negative space, so no alternation or ratio between them
+is guaranteed:
 
 - **Input batch.** Inputs are processed one at a time: each message runs
   `update`, and the returned command is dispatched before the next input
@@ -133,24 +134,32 @@ premise) and keeps reconciliation from running per message.
 
 Within one frame pass the render step precedes subscription
 re-evaluation, and a frame pass never begins subscription re-evaluation
-while a redraw is pending (INV-LC2). Consequently, a state whose batch
-requested a redraw is rendered once before any subscription that state
-declares is started.
+while a redraw is pending (INV-LC2). Both steps of one pass observe the
+same state — the runtime's current state when the pass begins; no batch
+interleaves within a pass (§6). Consequently, whenever a redraw was
+pending at a frame pass, the state whose subscriptions that pass starts
+is a state the same pass has just rendered.
 
-The consequence is scoped, not universal: a state processed entirely
-under RFC 0002's `without_redraw` leaves no redraw pending, so its
-subscriptions are re-evaluated at the next frame pass with no preceding
-render — suppression suppresses the redraw, never the re-evaluation
-(RFC 0002 non-negotiable B). And a render step that fails is a
-controlled termination (§4.1): the state's subscriptions never start,
-which also satisfies "never begins re-evaluation while a redraw is
-pending". (Adversarial models: an implementation that re-evaluates in
-one frame pass and renders in the next would satisfy a bare intra-pass
-ordering claim while starting subscriptions against an unrendered
-state — excluded by the never-while-pending form; an unconditional
-"every new state is rendered before its subscriptions start" is refuted
-by the `without_redraw` path — excluded by scoping the consequence to
-redraw-requesting states.)
+The contract is stated over the pass's current state, not over
+individual states. Pending work does not queue per state, so a state
+that requested a redraw is not itself promised a render: a later batch
+can replace it before the next frame pass, and the pass then renders the
+newer state — the earlier one is never drawn. (Adversarial model: batch
+A requests a redraw, batch B runs `without_redraw` before the frame; the
+redraw is still pending, and the pass renders the post-B state once
+while the post-A state is never rendered — a compliant execution, and
+the sequence INV-LC2's checks include for exactly this reason.) The
+consequence is also scoped by suppression: a pass entered with no redraw
+pending — every contributing batch opted out under RFC 0002's
+`without_redraw` — re-evaluates subscriptions with no preceding render;
+suppression suppresses the redraw, never the re-evaluation (RFC 0002
+non-negotiable B). And a render step that fails is a controlled
+termination (§4.1): re-evaluation never runs, which also satisfies
+"never begins re-evaluation while a redraw is pending". (A second
+adversarial model: an implementation that re-evaluates in one frame pass
+and renders in the next would satisfy a bare intra-pass ordering claim
+while starting subscriptions against an unrendered state — excluded by
+the never-while-pending form.)
 
 ### 2.3 Negative space: arbitration
 
@@ -250,21 +259,34 @@ RFC 0006's contract (INV-9, INV-L4, INV-L10/INV-L11) and are not
 restated here; what this RFC pins is what happens next.
 
 Contract (INV-LC5): every controlled cause exits the loop with its
-reason and performs the explicit shutdown before `run()` returns; the
-immediate postcondition (§4.4) holds when `run()` returns, and the
-return value classifies the reason — `Ok(())` for either quit form,
-`Err` carrying the render error.
+reason; the immediate postcondition (§4.4) holds when `run()` returns,
+and the return value classifies the reason — `Ok(())` for either quit
+form, `Err` carrying the render error. `run` consumes the runtime, so
+the terminating operation — the loop exit, any explicit shutdown, and
+the value's teardown — completes inside the call; whether a given cause
+reaches the postcondition through the explicit shutdown routine or
+through the consumed value's drop is mechanism (§4.2).
 
-### 4.2 Deliverable: render error exits through shutdown
+### 4.2 Render error: no divergence on contract surface
 
-Today a render error propagates out of `run()` directly
-(`src/runtime.rs`), bypassing the explicit shutdown: producer tasks keep
-running — subscription sources keep being polled — until the runtime
-value is dropped. That does not conform to INV-LC5, and the gap is
-observable: a caller that keeps the runtime value alive after an `Err`
-return keeps executing user subscription code. The implementation routes
-the render-error exit through the same shutdown as the quit exits and
-carries this RFC's `Fixed` entry.
+Today the quit exits run the explicit shutdown while the render-error
+exit returns early without it (`src/runtime.rs`). The contract question
+is whether that difference is observable; it is not, on any pinned
+surface: `run` takes the runtime by value, so the early return
+drops the runtime inside the call, and the value's drop requests
+cancellation of every runtime-owned task — the unkeyed and keyed task
+sets abort on drop, and the subscription manager aborts its forwarders
+on drop — before the caller can observe the `Err`. Both §4.4 stages are
+therefore reached at the same boundaries as on the quit exits; the
+producer gauges fire only on change (RFC 0006 §4.4), so deduplicated
+teardown emissions do not distinguish the paths either, and what
+remains distinct is unpinned diagnostics (§5.1). A caller cannot hold
+the runtime after `run` returns, so the divergence a bypass could
+otherwise expose — a kept-alive runtime whose subscription sources keep
+being polled after an `Err` — is unconstructible. (Adversarial model
+considered and excluded by the signature, `run(self, …)`.) Routing the render-error
+exit through the same explicit shutdown routine is implementation
+tidying, not a contract deliverable, and carries no CHANGELOG entry.
 
 ### 4.3 Abrupt termination
 
@@ -274,7 +296,9 @@ invoked on the driving task — `update`, `view`, `subscriptions`
 (called during bootstrap *and* on every dirty frame), or a declared
 subscription's lazy source constructor, which runs inside the same
 reconcile (all four sites are on the driving task, so all unwind
-through `run`); the runtime value is dropped, run or not.
+through `run`); the runtime value is dropped without ever being run —
+once `run` is called the value is owned by the future, so a mid-run
+drop *is* the run-future drop above.
 
 Contract (INV-LC6): cleanup is synchronous and `Drop`-based — it
 completes during the drop or unwind itself, with no further call
@@ -339,12 +363,15 @@ configured) is future work, not settled here.
 
 A panic inside a runtime-owned producer task — an unkeyed command task,
 a keyed command task, or a subscription forwarder — does not terminate
-the application (INV-LC8): the event loop keeps running, delivery from
-other producers is unaffected, and the terminated producer's resources
-are released like any other task exit (its gauge contribution falls,
-subject to §4.4's quiescence timing). For the keyed case this restates
-what RFC 0003 §5.5/§7.3 already carry; the unkeyed and
-subscription-forwarder cases are pinned here.
+the application (INV-LC8): the event loop keeps running, other
+producers are not cancelled by it — their subsequent output remains
+deliverable and is delivered under the ordinary delivery contracts
+(RFC 0003/RFC 0006; no schedule or ordering claim is made) — and the
+terminated producer's resources are released like any other task exit
+(its gauge contribution falls, subject to §4.4's quiescence timing).
+The containment property is pinned here for all three kinds; for the
+keyed kind, RFC 0003 §5.5/§7.3 already record the catch-and-log
+behavior, and that diagnostic requirement stays RFC 0003's (§5.1).
 
 The complement is deliberate: a panic in the application's own code on
 the driving task — `update`, `view`, `subscriptions`, a subscription's
@@ -353,13 +380,19 @@ source constructor — is the application's own bug and stays fail-fast
 
 ### 5.1 Negative space: diagnostics and exit causes
 
-The tracing output accompanying a contained panic or a termination —
-targets, message wording, payloads — is diagnostic, not contract; unlike
-RFC 0006 INV-L13's load schema, no schema is pinned and none of it may
-be matched on as a stable surface. A task's exit cause (stream end,
+This RFC pins no *new* common diagnostic schema for panics or
+termination: no supervision-event surface, and no unified target,
+wording, or payload across the three task kinds. Diagnostic
+requirements other RFCs already state stand unchanged and are carved
+out of this section — specifically RFC 0003 §5.5/§7.3's keyed-panic log
+(`"keyed command task panicked"`), which remains RFC 0003's requirement
+with its existing test, and RFC 0006 INV-L13's load-event schema.
+Beyond those owner-stated requirements, the tracing output accompanying
+a contained panic or a termination is diagnostic, not contract, and may
+not be matched on as a stable surface. A task's exit cause (stream end,
 panic, closed channel, abort) is likewise not contract surface today:
-this RFC neither exposes causes nor pins their absence, leaving a future
-supervision surface free to expose them additively.
+this RFC neither exposes causes nor pins their absence, leaving a
+future supervision surface free to expose them additively.
 
 ## 6. Driver exclusivity
 
@@ -369,8 +402,8 @@ non-reentrantly: no transition begins before the previous one returns,
 and none is invoked from inside another (INV-LC9).
 
 This is pinned as a *property*, not as the absence of an API. Today it
-is delivered by the single `run(&mut self)` entry point on one driving
-task; a future `step`-style or handle-based driving surface is additive
+is delivered by the single consuming `run(self)` entry point on one
+driving task; a future `step`-style or handle-based driving surface is additive
 exactly as long as the property is preserved, and a change that breaks
 it — concurrent or reentrant transitions — is an amendment to this RFC
 regardless of what API introduces it.
@@ -430,16 +463,22 @@ Enforcement classes follow the pre-review checklist's definitions.
   processing several messages triggers no `view`/`subscriptions` call,
   and that the following frame pass performs each at most once.
 - **INV-LC2**: within one frame pass the render step precedes
-  subscription re-evaluation, and a frame pass never begins subscription
-  re-evaluation while a redraw is pending — so a state whose batch
-  requested a redraw is rendered before any subscription it declares is
-  started (§2.2; the consequence is scoped to redraw-requesting states —
-  the `without_redraw` path re-evaluates with no preceding render, by
-  design). Behavioral, same seam as INV-LC1: a recording application
-  whose batch marks both redraw and dirtiness asserts the `view`-before-
-  `subscriptions` call order within the pass; a `without_redraw` variant
-  asserts re-evaluation still happens (RFC 0002 INV-4's separation,
-  observed from the lifecycle side).
+  subscription re-evaluation, a frame pass never begins subscription
+  re-evaluation while a redraw is pending, and both steps observe the
+  pass's current state — so whenever a redraw was pending at a pass,
+  the subscriptions that pass starts are those of a state the same pass
+  has just rendered (§2.2; the claim is per pass, not per individual
+  state — no state is itself promised a render — and a pass with no
+  redraw pending re-evaluates with no preceding render, by design).
+  Behavioral, same seam as INV-LC1: a recording application whose batch
+  marks both redraw and dirtiness asserts the
+  `view`-before-`subscriptions` call order within the pass and that
+  both calls observed the same state; the superseding sequence — a
+  redraw-requesting batch, then a `without_redraw` batch, then the
+  frame pass — asserts exactly one render, of the latest state, with
+  the intermediate state never rendered; a `without_redraw`-only
+  variant asserts re-evaluation still happens (RFC 0002 INV-4's
+  separation, observed from the lifecycle side).
 - **INV-LC3**: constructing a `Runtime` spawns no runtime-owned task,
   polls no command effect, and starts no subscription source; no claim
   is made about `Application::new`'s own side effects, and an
@@ -465,28 +504,42 @@ Enforcement classes follow the pre-review checklist's definitions.
   runtime layer: a freshly constructed runtime's first frame pass
   renders with no message processed.
 - **INV-LC5**: each controlled cause — unkeyed quit, keyed quit, render
-  error — exits the loop and performs the explicit shutdown before
-  `run()` returns; the §4.4 immediate postcondition holds at return, and
-  the return value classifies the reason (`Ok(())` for the quits, `Err`
-  for the render error) (§4.1). Behavioral, per cause at the integration
-  layer: each cause's test asserts the return classification, that no
-  further `update`/`view`/`subscriptions` call is observed afterward,
-  and — through the INV-LC7 settle loop — that producers wind down; the
-  render-error case is the §4.2 conformance fix's test, asserting a
-  still-alive runtime value no longer polls subscription sources after
-  the `Err` return (the current implementation fails exactly this).
+  error — exits the loop, and the §4.4 immediate postcondition holds
+  when `run()` returns, with the return value classifying the reason
+  (`Ok(())` for the quits, `Err` for the render error); whether a cause
+  reaches the postcondition through the explicit shutdown routine or
+  through the consumed runtime value's drop is mechanism (§4.1, §4.2).
+  Behavioral, one row per cause at the integration layer, each row
+  asserting the return classification, that no further
+  `update`/`view`/`subscriptions` call is observed afterward, and —
+  through the INV-LC7 settle loop — that producers wind down:
+  - an unkeyed quit under running producers;
+  - a keyed quit under running producers;
+  - a render error (injected failing render), asserting the `Err`
+    return plus the same settle-loop quiescence as the quit rows.
 - **INV-LC6**: each abrupt cause — drop of the `run` future, a panic
   unwinding through `run` from application code on the driving task
   (`update`, `view`, `subscriptions` at either call site, or a
-  subscription's lazy source constructor), drop of the runtime value —
-  completes cleanup synchronously during the
-  drop or unwind, reaching the §4.4 immediate postcondition with no
-  further call; a transition panic propagates to the caller (§4.3).
-  Behavioral at the integration layer: drop the `run` future mid-run;
-  panic from `update` and from `subscriptions` (caught by the test
-  harness); drop a constructed-and-run-then-abandoned runtime — each
-  followed by the INV-LC7 settle loop asserting quiescence, plus the
-  propagation assertion for the panic cases.
+  subscription's lazy source constructor), drop of a never-run runtime
+  value — completes cleanup synchronously during the drop or unwind,
+  reaching the §4.4 immediate postcondition with no further call; a
+  panic propagates to the caller (§4.3). Behavioral at the integration
+  layer, one row per quantified cause and call site, each row followed
+  by the INV-LC7 settle loop and, for the panic rows, the propagation
+  assertion (the test harness catches the unwind):
+  - the `run` future dropped mid-run (a caller `select!`/timeout);
+  - a panic in `update`;
+  - a panic in `view`;
+  - a panic in `subscriptions` at the bootstrap call site (raised on
+    its first call, before the loop);
+  - a panic in `subscriptions` at the steady call site (raised only on
+    a re-evaluation after a processed message);
+  - a panic in a subscription's lazy source constructor (raised at the
+    reconcile that starts it);
+  - a never-run runtime value dropped — with §3.4 landed there is
+    nothing to wind down, and the row asserts exactly that (no effect
+    executed, no source started, no producer-gauge event), reusing
+    INV-LC3's recorder setup.
 - **INV-LC7**: after either route's terminating operation, once the
   executor has processed the requested cancellations, every
   runtime-owned task has terminated and every producer gauge reads
@@ -501,26 +554,33 @@ Enforcement classes follow the pre-review checklist's definitions.
   drops ride later polls.)
 - **INV-LC8**: a panic inside a runtime-owned producer task (unkeyed
   command task, keyed command task, subscription forwarder) does not
-  terminate the application: the loop keeps running and other producers'
-  delivery is unaffected; the keyed case restates RFC 0003 §5.5/§7.3,
-  the other two are pinned here (§5). No diagnostic schema is pinned
-  (§5.1). Behavioral at the integration layer: a panicking unkeyed
-  effect and a panicking subscription source, each running alongside a
-  surviving producer whose messages must continue to arrive, with the
-  run then quitting normally.
+  terminate the application: the loop keeps running, and other
+  producers are not cancelled by it — their subsequent output remains
+  deliverable and is delivered under the ordinary delivery contracts,
+  with no schedule or ordering claim (§5). The containment property is
+  pinned here for all three kinds; RFC 0003's keyed-panic test checks
+  the §5.5 log, not continuation, so the keyed row below is not
+  redundant with it, and no new diagnostic schema is pinned (§5.1).
+  Behavioral at the integration layer, one row per task kind — a
+  panicking unkeyed effect, a panicking keyed effect, and a panicking
+  subscription source — each running alongside a surviving producer
+  whose later messages must still arrive at `update`, with the run then
+  quitting normally.
 - **INV-LC9**: at most one owner drives a runtime instance at a time,
   and `update`/`view`/`subscriptions` execute serially and
   non-reentrantly; a future driving surface is additive iff it preserves
   this (§6). Structural: the property is delivered by construction
-  (`run(&mut self)` as the sole driving entry point, transitions invoked
-  only from the driving task) and reviewed at those invocation sites —
-  a behavioral test cannot prove the absence of a reentrant path.
+  (the consuming `run(self)` as the sole driving entry point,
+  transitions invoked only from the driving task) and reviewed at those
+  invocation sites — a behavioral test cannot prove the absence of a
+  reentrant path.
 
 Surface–invariant coverage: this RFC adds no public API. Its contract
 surface is the phase order (INV-LC1/INV-LC2 and §2.3's negative space),
 construction inertness and the §3.4 change (INV-LC3), the bootstrap
 order and first-render eligibility (INV-LC4), the termination routes
-with the §4.2 fix (INV-LC5/INV-LC6), the two-stage postconditions
+with §4.2's no-divergence analysis (INV-LC5/INV-LC6), the two-stage
+postconditions
 (INV-LC7), panic containment with §5.1's negative space (INV-LC8), and
 driver exclusivity (INV-LC9). The §3.3 TestStore-mapping paragraph is
 scoping for RFC 0008's existing surface and carries no invariant here.
