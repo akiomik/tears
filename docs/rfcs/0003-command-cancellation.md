@@ -1112,7 +1112,7 @@ starts from those seams.
 - `docs/rfcs/0002-redraw-suppression.md`
 - `docs/rfcs/0004-command-timeout-retry.md`
 - `docs/rfcs/0011-runtime-lifecycle.md` (lifecycle phases and termination
-  model, section 4.4)
+  model, its §2–§4; cited in section 4.4)
 - TCA `Effect.cancellable(id:cancelInFlight:)`
 - TCA `Effect.cancel(id:)`
 - RxJS `switchMap` and `exhaustMap`
