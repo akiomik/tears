@@ -1,6 +1,6 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Implemented (section 5.1 records the bounded acceptance results)
+- Status: Draft (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
@@ -443,7 +443,7 @@ merged" are known.
   This is not an INV-14 violation (the input was never "ready" in the
   channel), but it does mean RFC 0003's practical goal of prompt
   cancellation is weaker in bounded mode than under the current unbounded
-  default.
+  default. Pinned as INV-L14 (section 5).
 - **Redraw suppression** (RFC 0002) and subscription re-evaluation gating:
   unchanged; they operate downstream of input delivery.
 - **Shutdown**: bounded channels close exactly like unbounded ones; senders
@@ -1166,6 +1166,56 @@ the check that realizes it; the implementation realizes those checks.
   layer; the `subscriptions`/`unkeyed_commands`/`keyed_commands`
   gauge transitions end-to-end over an integration run; and the
   gauge event's strictly increasing `seq` at the gauge layer.
+- **INV-L14**: bounded mode does not preserve the unbounded default's
+  practical cancellation immediacy — the section 4.3 cancellation
+  bullet's negative space, stated as an invariant so later text is
+  measured against it. INV-14's literal guarantee is unchanged (a
+  *ready* shared cancel message suppresses a *ready* keyed output before
+  delivery, and a keyed producer blocked on a full private channel is
+  aborted exactly like a running one), but with bounded channels the
+  forwarding task carrying a cancelling input can itself be waiting for
+  admission — outside the queue — for as long as the shared channel
+  stays full, and a keyed output racing during that admission window can
+  be delivered before the cancel arrives. Such an execution violates
+  nothing (the input was never ready in the channel) and is compliant:
+  no test or document may treat bounded mode as preserving
+  unbounded-mode cancellation promptness, or flag an admission-window
+  delivery as a regression — the section 5.1 bounded keyed-quit row
+  already records such deliveries as legal. Structural: this invariant
+  pins permitted executions rather than behavior to produce, so its
+  check is review — of dependent documents and of any test asserting
+  cancellation timing — that nothing asserts a not-yet-admitted cancel
+  wins the race; the positive guarantee it leaves intact is INV-14's
+  own, imported by INV-L5 with its existing checks.
+- **INV-L15**: beyond the class-specific treatment this contract
+  already pins — the dedicated, never-bounded quit channel with its
+  always-armed branch (R4, INV-L4), shared-first pull (INV-14 via
+  INV-L5; INV-L11 for keyed quit), and the per-class capacity
+  configuration of section 4.1 — the runtime provides no
+  traffic-class-specific treatment for its traffic classes (the source
+  classes of sections 1.1 and 4.2: subscription output, unkeyed command
+  output, keyed command output, quit signals): no reservation,
+  priority, weight, or fairness policy, no class-specific shedding or
+  coalescing (RFC 0003's cancellation drops are per-command semantics,
+  not a load-shedding policy — the same carve-out INV-L2 makes), and no
+  inter-class delivery-ordering guarantee. This
+  weakens nothing already pinned: INV-L2's lossless delivery, the
+  per-source-class FIFO scopes of section 4.3, and INV-14 hold exactly
+  as stated. Whether the runtime internally tracks a message's class is
+  mechanism, pinned in neither direction. The fairness clause restates
+  open question 6's resolution (section 4.7) in invariant form; the
+  remainder — reservation, weights, shedding, coalescing, and any
+  further inter-class order — is pinned here so a future class-aware
+  design is measured against a stated contract rather than a silent
+  absence: a change to shared-first delivery is an amendment to
+  RFC 0003's INV-14 (section 4.7's reopening rule), while adding
+  internal class metadata alone is additive. Structural, at the seams a
+  class policy would have to occupy — the same seams as section 4.7's
+  policy-absence check (the two `AppInputs` pull points and the
+  micro-batch loop) plus the channel-construction and send sites where
+  a reservation, shedding, or coalescing policy would live; the
+  shared-wins unit tests remain regression checks, not proofs (this
+  section's bounded-test-against-unbounded-parameter argument).
 
 Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
 unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
