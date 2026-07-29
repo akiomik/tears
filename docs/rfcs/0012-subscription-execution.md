@@ -87,8 +87,9 @@ policy RFC owns rates (§8).
   ordering are RFC 0006; the template cites its §4.2 pacing clause and
   adds no delivery claim.
 - **Lifecycle phases.** When re-evaluation runs is RFC 0011 (§2,
-  INV-LC1/INV-LC2); this RFC's admission rules are constrained by that
-  contract, not amendments to it.
+  INV-LC1/INV-LC2). This RFC contributes one thing to that contract —
+  the subscription-lifecycle-completion dirty source RFC 0011 §2.1
+  records — and its admission rules are otherwise constrained by it.
 - **TestStore's public API.** Owned by RFC 0008; a stage-3 driving API
   is a future amendment there (§6.2).
 - **Restart rate policy.** A future opt-in RFC (§8).
@@ -102,11 +103,16 @@ A subscription source's execution life is three phases, each with its
 own contract:
 
 - **Start.** A subscription declares itself as an identity plus a lazy
-  spawner; the spawner is what builds the source's stream. Source-side
-  effects — opening a device, connecting, spawning I/O — belong to the
-  spawner and therefore happen at *start*, when the manager admits the
-  subscription and invokes the spawner: exactly once per admitted run
-  (INV-SE1). Declaration is effect-free: returning a subscription from
+  spawner; *start* is the boundary at which the manager invokes the
+  spawner — exactly once per admitted run (INV-SE1) — the spawner
+  builds the source's stream, and the forwarder is spawned. The
+  source's execution therefore begins no earlier than start. Where a
+  source acquires its resources is deliberately not pinned: at stream
+  construction or in any later poll are both conforming — production
+  sources do both (a WebSocket source connects inside its stream's
+  polling, a signal source installs its handler at first poll;
+  `src/subscription/websocket.rs`, `src/subscription/signal.rs`).
+  Declaration is effect-free: returning a subscription from
   `subscriptions()` executes nothing, and identity comparison never
   invokes a spawner (RFC 0005 INV-12 owns the never-invoked cases —
   discarded duplicates and continuing IDs; this RFC owns the
@@ -140,11 +146,15 @@ builds on:
   down, or the run is being torn down abruptly. This is a request in
   exactly RFC 0011 §4.4's sense: cancellation is asked for, not yet
   observed complete, and a poll already in flight may still finish.
-- **Quiesced** — the task has terminated, as a confirmed fact rather
-  than a pending request. After quiescence the source's stream is
-  never polled again and the source value is dropped. (This is
-  RFC 0011's request/quiescent two-stage model applied per
-  subscription; RFC 0011 §4.4 states it for whole-runtime
+- **Quiesced** — the forwarder task has terminated, as a confirmed
+  fact rather than a pending request. After quiescence the run-owned
+  stream and execution state are no longer polled and have been
+  dropped. The declaration-side `Source` value's own drop point is
+  *not* pinned: today's spawner consumes it when the stream is built
+  (`src/subscription/core.rs`), and a declaring layer must not rely on
+  the value living until quiescence — or on any particular drop
+  moment. (This is RFC 0011's request/quiescent two-stage model
+  applied per subscription; RFC 0011 §4.4 states it for whole-runtime
   termination.)
 - **Restart admitted** — a successor is started: the spawner of a
   newly desired or restarting subscription is invoked and its
@@ -194,20 +204,36 @@ and its replacement poll the same resource concurrently.
   un-invoked spawners are discarded; only the newest desired set is
   ever admitted. The mandated check (part of this invariant's
   enforcement): declare `{A}`, re-evaluate to `{B}` (stop requested
-  for A), then — before A quiesces — re-evaluate to `{C}`; when A
-  quiesces, B's spawner must never be invoked, and C's subscription is
-  what starts.
-- **INV-SE5 — admission executes at a conforming point only.** An
-  admission executes either (a) within the re-evaluation that issued
-  the stops, by awaiting quiescence before admitting, or (b) at a
-  subsequent frame-pass re-evaluation that reads the then-current
-  state. Starting a source directly from a task-exit event is not a
-  conforming shape: it would act on a desired set that no frame-pass
-  re-evaluation has refreshed, re-opening the phase contract RFC 0011
-  §2 pins (subscription re-evaluation is a frame-pass activity,
-  INV-LC1). Both conforming points are compatible with RFC 0011: shape
-  (a) suspends the frame pass as a whole (no batch interleaves within
-  a pass), shape (b) is an ordinary re-evaluation.
+  for A), then — before A quiesces — re-evaluate to `{C}`; then A
+  quiesces, marking subscriptions dirty (INV-SE5), and the next frame
+  pass re-evaluates against the then-current state — `{C}` — and
+  admits C. B's spawner is never invoked at any point in the
+  sequence.
+- **INV-SE5 — admission executes only at a subscription
+  re-evaluation** — the bootstrap reconcile (RFC 0011 §3.2) or a
+  frame-pass re-evaluation; deferred admissions are always the
+  latter. A stop-requested task's quiescence marks subscriptions
+  dirty — the
+  second dirty source RFC 0011 §2.1 records for this RFC — and the
+  next frame pass's re-evaluation, reading the then-current state,
+  admits whatever that state declares, under INV-SE3's barrier. Two
+  shapes are non-conforming: starting a source directly from a
+  task-exit event (it would act on a desired set no frame-pass
+  re-evaluation has refreshed, outside RFC 0011's phase contract —
+  re-evaluation is a frame-pass activity, INV-LC1), and blocking the
+  stopping re-evaluation to await quiescence inline before admitting
+  (it suspends the loop across the quiescence gap, so no newer
+  re-evaluation can arrive to supersede the pending set — INV-SE4's
+  mandated sequence becomes unsatisfiable).
+
+Joint satisfiability of INV-SE4, INV-SE5, and RFC 0011 INV-LC1, walked
+against the amended contracts: a conforming implementation stops A,
+admits nothing, and returns from the pass; A's quiescence only marks
+dirt; the next frame pass runs the single re-evaluation INV-LC1
+permits, reads the newest state, and admits from it — superseding is
+automatic because no desired set is carried across passes, and every
+admission is inside a frame-pass re-evaluation. All three hold on one
+execution, including the INV-SE4 sequence.
 
 ### 4.3 Conformance and INV-13
 
@@ -263,9 +289,12 @@ Any source that satisfies §2 and §3 — effect-free declaration, side
 effects at start via the lazy spawner, forwarder-paced polling,
 quiescence on stop — can stand in for a production source under the
 same identity rules (RFC 0005), with no runtime changes. That is the
-whole injection contract: a test double (a mock source driven by the
-test) is a conforming source, not a special mode. The concrete
-`MockSource` API shape is an open question (§10).
+whole injection contract: a test double is a conforming source, not a
+special mode — and one exists: the public `MockSource`
+(`src/subscription/mock.rs`, a cloneable broadcast-backed source with
+`emit` and `receiver_count`) is the reference conforming seam. What
+remains open is only its integration shape with a future RFC 0008
+stage-3 driver (§12).
 
 ### 6.2 The RFC 0008 boundary
 
@@ -356,21 +385,33 @@ Enforcement classes follow the pre-review checklist's definitions.
   single-threaded test executor, where the quiescence gap is
   deterministic: after a re-evaluation that stops A and adds B, assert
   B's spawner has not run before the executor processes A's
-  cancellation, then drive the executor and assert B starts; the
+  cancellation, then drive the executor through A's quiescence and the
+  next frame-pass re-evaluation and assert B is admitted there; the
   pure-addition and finished-restart cases assert immediate admission.
 - **INV-SE4**: only the newest desired set is admitted; a superseded
   generation's pending spawners are discarded un-invoked. Behavioral
   at the manager layer — the mandated sequence: `{A}` → `{B}` (stop
-  requested for A) → before A quiesces, `{C}`; when A quiesces, B's
-  spawner is never invoked and C starts. This sequence is a required
-  test, not an example.
-- **INV-SE5**: admissions execute only within the stopping
-  re-evaluation (awaiting quiescence) or at a later frame-pass
-  re-evaluation; no admission is triggered directly from a task-exit
-  event. Structural: review of the admission call sites — the manager
-  API's callers must be the reconcile path (`update_subscriptions` /
-  bootstrap, `src/runtime.rs`) and no task-exit handler; a behavioral
-  test cannot prove the absence of a bypass site.
+  requested for A) → before A quiesces, `{C}` → A quiesces, marking
+  subscriptions dirty → the next frame pass re-evaluates against the
+  then-current state (`{C}`) and admits C; B's spawner is never
+  invoked at any point. This sequence, including its post-quiescence
+  frame-pass stage, is a required test, not an example.
+- **INV-SE5**: admissions execute only at a subscription
+  re-evaluation — the bootstrap reconcile (RFC 0011 §3.2) or a
+  frame-pass re-evaluation — against the then-current state, and
+  deferred admissions only at the latter; a stop-requested task's
+  quiescence
+  marks subscriptions dirty and nothing more. No admission is
+  triggered directly from a task-exit event, and the stopping
+  re-evaluation does not block awaiting quiescence to admit inline
+  (§4.2 — that shape makes INV-SE4's sequence unsatisfiable).
+  Structural: review of the admission call sites — the manager admits
+  only from the reconcile path (`update_subscriptions` / bootstrap,
+  `src/runtime.rs`), the quiescence handler only marks dirt, and no
+  await sits between a reconcile's stop requests and its return; a
+  behavioral test cannot prove the absence of a bypass site, and the
+  INV-SE4 sequence is the behavioral neighbor exercising the deferred
+  flow end to end.
 - **INV-SE6**: `subscriptions()` purity (§5) — same state, same
   declared set; no side effects; no reads of external mutable state;
   no reliance on call count or timing. Structural: this is an
@@ -419,16 +460,20 @@ INV-SE3's checks.
 ## 12. Open questions
 
 1. **Quiescence observation.** How the manager observes that a stopped
-   task has quiesced — awaiting join handles, a reap pass driven by
-   the reconcile, or a completion notification — is an implementation
-   choice with observable admission-latency implications but no
-   contract difference under §4's rules. Resolves at implementation
-   design, in this RFC's body.
-2. **Mock source API.** The concrete shape of a test-driven conforming
-   source (construction, item injection, completion control) — §6.1
-   pins what it must satisfy, not what it looks like. Resolves with
-   the injection deliverable or with RFC 0008's stage-3 amendment,
-   whichever lands first.
+   task has quiesced — awaiting join handles from a watcher, a
+   completion notification from the forwarder, or polling handles — is
+   an implementation choice with admission-latency implications; the
+   contract constrains only its effect: quiescence marks subscriptions
+   dirty (INV-SE5), so a shape that can observe quiescence only inside
+   an already-triggered reconcile — never marking the dirt that would
+   trigger one — does not conform. Resolves at implementation design,
+   in this RFC's body.
+2. **Mock-source integration.** A public `MockSource` already exists
+   (`src/subscription/mock.rs`: construction, `emit`,
+   `receiver_count`) and serves as §6.1's reference conforming seam.
+   What remains open is only the stage-3 integration shape — how a
+   driving TestStore consumes such a source — which RFC 0008's future
+   amendment designs against this contract. Resolves there.
 
 ## 13. References
 
@@ -454,8 +499,12 @@ INV-SE3's checks.
   request/quiescent two-stage model §3 applies per subscription).
 - `src/subscription.rs` (`SubscriptionManager::update`,
   `spawn_subscription` — the admission seam and the current
-  nonconformance), `src/application.rs` (the purity rustdoc INV-SE6
-  canonicalizes), `src/runtime.rs` (`update_subscriptions`, the
-  reconcile path INV-SE5 names), `tests/api_surface.rs` (INV-SE8's
-  regression neighbor).
+  nonconformance), `src/subscription/core.rs` (the spawner that
+  consumes the `Source` at stream construction, §3),
+  `src/subscription/websocket.rs` / `src/subscription/signal.rs`
+  (poll-time resource acquisition, §2), `src/subscription/mock.rs`
+  (the reference conforming seam, §6.1), `src/application.rs` (the
+  purity rustdoc INV-SE6 canonicalizes), `src/runtime.rs`
+  (`update_subscriptions`, the reconcile path INV-SE5 names),
+  `tests/api_surface.rs` (INV-SE8's regression neighbor).
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.

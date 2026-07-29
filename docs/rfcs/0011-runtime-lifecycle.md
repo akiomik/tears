@@ -24,8 +24,9 @@ down. This RFC is the owner of that contract. Five decisions:
 1. **Steady-state phase order** (§2, INV-LC1/INV-LC2). Processing is
    organized into input batches and frame passes; their interleaving is
    unspecified (§2.3). A batch processes inputs one at a time (RFC 0003
-   INV-10) and records its outcome as pending work; a frame pass
-   consumes it in a fixed order — render first, then subscription
+   INV-10) and records its outcome as pending work (subscription
+   lifecycle completions also mark pending work — RFC 0012); a frame
+   pass consumes it in a fixed order — render first, then subscription
    re-evaluation — with both steps observing the pass's current state,
    so whenever a redraw was pending at a frame pass, subscriptions start
    against a state that same pass has just rendered.
@@ -128,6 +129,16 @@ is guaranteed:
   are dirty) — `subscriptions()` is called on the current state and the
   declared set is reconciled per RFC 0005.
 
+Subscription dirtiness has two sources, not one: a batch that ran
+`update` (the RFC 0003 §4.4 rule above), and a **subscription lifecycle
+completion** — the quiescence of a subscription task whose stop was
+requested marks subscriptions dirty, so the admissions RFC 0012 defers
+on quiescence are picked up by the next frame pass's re-evaluation
+against the then-current state (RFC 0012 §4). The recording rule for
+that second source is RFC 0012's; what this RFC pins is unchanged in
+shape — re-evaluation stays a frame-pass activity, whatever marked the
+dirt.
+
 Rendering and subscription re-evaluation are frame-phase activities:
 neither runs inside an input batch, and one frame pass performs at most
 one render and at most one re-evaluation (INV-LC1). This is what makes
@@ -155,7 +166,8 @@ while the post-A state is never rendered — a compliant execution, and
 the sequence INV-LC2's checks include for exactly this reason.) The
 consequence is also scoped by suppression: a pass entered with no redraw
 pending — every contributing batch opted out under RFC 0002's
-`without_redraw` — re-evaluates subscriptions with no preceding render;
+`without_redraw`, or only a subscription lifecycle completion marked
+the dirt (§2.1) — re-evaluates subscriptions with no preceding render;
 suppression suppresses the redraw, never the re-evaluation (RFC 0002
 non-negotiable B). And a render step that fails is a controlled
 termination (§4.1): re-evaluation never runs, which also satisfies
@@ -470,7 +482,9 @@ Enforcement classes follow the pre-review checklist's definitions.
   re-evaluation happen only in frame passes — never inside an input
   batch — and one frame pass performs at most one render and at most one
   subscription re-evaluation, consuming pending work recorded by
-  preceding batches (§2.1). Behavioral, at the runtime layer (the
+  preceding batches or by subscription lifecycle completions (§2.1;
+  the second source's recording rule is RFC 0012's). Behavioral, at the
+  runtime layer (the
   layer's existing white-box pattern): tests drive the batch and
   frame-pass paths (`process_input_batch`, `process_frame_tick` in
   `src/runtime.rs`) with a recording application and assert that a batch
@@ -623,8 +637,9 @@ Excluded claims (minimal-contract pass): an update-before-dispatch
 ordering invariant was dropped — RFC 0003 INV-10 already owns it, and
 INV-LC1 cites rather than restates it; a batch-end flag-recording
 invariant was dropped — RFC 0002 (redraw OR-fold) and RFC 0003 §4.4
-(dirtiness rule) own the recording, and INV-LC1 pins only the
-frame-granularity consumption they do not; a shutdown step list
+(the batch dirtiness rule) own the recording, RFC 0012 owns the
+lifecycle-completion dirty source's recording, and INV-LC1 pins only
+the frame-granularity consumption they do not; a shutdown step list
 (abort order, entry clearing) was dropped as mechanism — RFC 0003 §5.6
 records it, and §4.4's postconditions pin everything a dependent may
 rely on. INV-LC2 was kept despite overlapping INV-LC1 (both constrain
@@ -675,6 +690,9 @@ split-pass adversary.
 - RFC 0008 — TestStore: §3.2 (construction semantics §3.3 scopes), §4.2
   (the citation rule §2.3 mirrors), §5.2 (the init-directive
   independence §3.2 cites), §5.3 (the shutdown-discard mirror).
+- RFC 0012 — subscription execution: §4 (the subscription
+  lifecycle-completion dirty source §2.1 records, and the admission
+  rules that consume this RFC's frame-phase contract).
 - `src/runtime.rs` (`run`, `process_input_batch`, `process_frame_tick`),
   `src/runtime/core.rs` (construction, dispatch, shutdown),
   `src/runtime/keyed_commands.rs`, `src/subscription.rs` (the three
