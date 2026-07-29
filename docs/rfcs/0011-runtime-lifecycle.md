@@ -11,7 +11,10 @@
 - CHANGELOG: `Changed` — constructing a `Runtime` no longer starts the
   init command's effect; it starts inside `run()` (§3.4), observable only
   to code that constructs a runtime it does not run. The entry lands with
-  the implementation.
+  the implementation. The §2.1 subscription lifecycle-completion dirty
+  source is a behavior change too (message-independent re-evaluation);
+  its `Changed` entry is carried by RFC 0012, which owns that source's
+  recording rule.
 
 ## Summary
 
@@ -131,13 +134,17 @@ is guaranteed:
 
 Subscription dirtiness has two sources, not one: a batch that ran
 `update` (the RFC 0003 §4.4 rule above), and a **subscription lifecycle
-completion** — the quiescence of a subscription task whose stop was
-requested marks subscriptions dirty, so the admissions RFC 0012 defers
-on quiescence are picked up by the next frame pass's re-evaluation
-against the then-current state (RFC 0012 §4). The recording rule for
-that second source is RFC 0012's; what this RFC pins is unchanged in
-shape — re-evaluation stays a frame-pass activity, whatever marked the
-dirt.
+completion** — the quiescence of a subscription task that a
+steady-state re-evaluation stopped (removed or replaced out of the
+desired set) marks subscriptions dirty, so the admissions RFC 0012
+defers on quiescence are picked up by the next frame pass's
+re-evaluation against the then-current state (RFC 0012 §4).
+Termination is excluded: quiescence during shutdown or abrupt teardown
+marks no dirt and triggers no re-evaluation — the §4.4 postconditions
+stand, and `subscriptions` is never invoked after termination. The
+recording rule for the second source is RFC 0012's; what this RFC pins
+is unchanged in shape — re-evaluation stays a frame-pass activity,
+whatever marked the dirt.
 
 Rendering and subscription re-evaluation are frame-phase activities:
 neither runs inside an input batch, and one frame pass performs at most
@@ -459,11 +466,17 @@ Premises:
   dispatched before the next input is pulled and subscription
   reconciliation spawns forwarders inside the frame pass — the premise
   of RFC 0006 INV-L7/INV-L8's no-self-deadlock argument.
-- **Single-task parking.** The frame scheduler parks by returning a
-  never-ready future when no work is pending, which assumes the one
-  driving task is woken through its channels and timers
-  (`src/runtime/frame_scheduler.rs`). An external-driving design must
-  revisit this assumption alongside INV-LC9.
+- **Parking and wake sources.** The frame scheduler parks by returning
+  a never-ready future when no work is pending, and the parked future
+  registers no wake for later pending-flag changes
+  (`src/runtime/frame_scheduler.rs`) — parking is sound only while
+  every pending-work source either runs on the driving task or
+  carries an explicit wake. "Pending work is marked only by the
+  driving task" is therefore not a safe design premise: the §2.1
+  lifecycle-completion dirty source is marked from outside the driving
+  task, so it requires an explicitly notified design — the wake is
+  RFC 0012's observable requirement, the mechanism free. An
+  external-driving design must revisit parking alongside INV-LC9.
 
 Mechanism inventory (free to change while the contract holds): the
 runtime owns three task kinds — unkeyed command tasks in a `JoinSet`

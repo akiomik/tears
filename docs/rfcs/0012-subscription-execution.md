@@ -1,12 +1,14 @@
 # RFC 0012: Subscription Execution
 
 - Status: Draft
-- Target: 0.11.0 — one behavior change (restart and replacement
-  admission waits for the stopped task's quiescence, §4); public
-  signatures unchanged
+- Target: 0.11.0 — one behavior change with two faces (restart and
+  replacement admission waits for the stopped task's quiescence, and
+  subscription re-evaluation gains a message-independent trigger, §4);
+  public signatures unchanged
 - Scope: the subscription source execution contract (start / poll /
   stop-and-restart), the three-boundary stop vocabulary with the
-  uniform quiescence barrier and its admission rules, the
+  uniform quiescence barrier, its admission rules, and the
+  message-independent re-evaluation trigger they introduce, the
   `subscriptions()` purity contract, the source-side injection
   contract, source-internal state management, the restart-rate-control
   delegation frame, and the effect-DI negative space
@@ -16,7 +18,12 @@
   (§4). Re-evaluations with no outstanding stopped task — pure
   additions, and restarts of already-finished subscriptions — admit
   immediately as today, and continuing subscriptions are unaffected.
-  Lands with the implementation.
+  Subscription re-evaluation also gains a message-independent trigger:
+  the quiescence of a task stopped by re-evaluation marks
+  subscriptions dirty, so `subscriptions()` can run — and a finished,
+  still-declared subscription restart — on a frame pass with no new
+  message (§4.3); the `Application::subscriptions` rustdoc is updated
+  to match. Lands with the implementation.
 
 ## Summary
 
@@ -212,11 +219,18 @@ and its replacement poll the same resource concurrently.
 - **INV-SE5 — admission executes only at a subscription
   re-evaluation** — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation; deferred admissions are always the
-  latter. A stop-requested task's quiescence marks subscriptions
-  dirty — the
-  second dirty source RFC 0011 §2.1 records for this RFC — and the
-  next frame pass's re-evaluation, reading the then-current state,
-  admits whatever that state declares, under INV-SE3's barrier. Two
+  latter. The quiescence of a task stopped by a steady-state
+  re-evaluation — removed or replaced out of the desired set — marks
+  subscriptions dirty (the second dirty source RFC 0011 §2.1 records
+  for this RFC), and marking that dirt wakes an idle runtime: a
+  parked loop with no pending input is woken by the quiescence so the
+  next frame pass can run — the wake is contract, the notification
+  mechanism is unpinned. The next frame pass's re-evaluation, reading
+  the then-current state, admits whatever that state declares, under
+  INV-SE3's barrier. Termination-driven stops are outside this rule:
+  quiescence during shutdown or abrupt teardown marks no dirt and
+  triggers no re-evaluation — RFC 0011 §4.4's postconditions stand,
+  and `subscriptions` is never invoked after termination. Two
   shapes are non-conforming: starting a source directly from a
   task-exit event (it would act on a desired set no frame-pass
   re-evaluation has refreshed, outside RFC 0011's phase contract —
@@ -241,9 +255,22 @@ The current manager does not conform: `SubscriptionManager::update`
 (`src/subscription.rs`) aborts removed tasks and invokes new spawners
 in the same synchronous pass, without awaiting the aborted tasks'
 termination — stop requested and restart admitted are collapsed. The
-conformance change is this RFC's `Changed` entry: what changes is the
-*admission timing* of new and restarted subscriptions when stopped
-tasks are still quiescing, nothing else.
+conformance change is this RFC's `Changed` entry, and its scope is
+two-fold, stated honestly: (1) *admission timing* — new and restarted
+subscriptions wait for outstanding stopped tasks' quiescence; and
+(2) *a new re-evaluation trigger* — that quiescence marks
+subscriptions dirty, so `subscriptions()` can be re-evaluated on a
+frame pass that no message preceded. An observable consequence of
+(2): if subscription A's stream finishes naturally while stopped B is
+still quiescing, B's quiescence dirties the next frame pass, whose
+re-evaluation restarts the still-declared A with no new message having
+been processed — where today A would wait for the next message. The
+`Application::subscriptions` rustdoc currently pins the
+single-trigger world ("re-evaluates subscriptions only after a
+message is processed"; a finished source restarts "after the next
+message" — `src/application.rs`); updating that rustdoc to the
+two-trigger contract is an implementation deliverable of this RFC,
+alongside the conformance change itself.
 
 RFC 0005 INV-13 — a finished subscription that remains desired under
 the same full ID restarts on the next re-evaluation — is preserved in
@@ -399,9 +426,10 @@ Enforcement classes follow the pre-review checklist's definitions.
 - **INV-SE5**: admissions execute only at a subscription
   re-evaluation — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation — against the then-current state, and
-  deferred admissions only at the latter; a stop-requested task's
-  quiescence
-  marks subscriptions dirty and nothing more. No admission is
+  deferred admissions only at the latter; the quiescence of a task
+  stopped by a steady-state re-evaluation marks subscriptions dirty,
+  waking an idle runtime, and nothing more — termination-driven
+  quiescence marks nothing (§4.2). No admission is
   triggered directly from a task-exit event, and the stopping
   re-evaluation does not block awaiting quiescence to admit inline
   (§4.2 — that shape makes INV-SE4's sequence unsatisfiable).
@@ -412,6 +440,22 @@ Enforcement classes follow the pre-review checklist's definitions.
   behavioral test cannot prove the absence of a bypass site, and the
   INV-SE4 sequence is the behavioral neighbor exercising the deferred
   flow end to end.
+
+A runtime-level end-to-end gate accompanies INV-SE3's and INV-SE4's
+manager-layer checks, because the manager layer alone cannot catch a
+parked production loop: with the runtime idle — no pending input, the
+frame branch parked — a stopped task's quiescence must wake the
+runtime, whose next frame pass re-evaluates against the then-current
+state and admits exactly what it declares (in the INV-SE4 sequence: C
+alone, never B). The wake is INV-SE5's observable requirement; the
+notification mechanism is free. This gate exists because an
+implementation whose pending-work flag is set from another task
+without a wake passes every manager-layer check while the production
+loop parks forever — the current scheduler's parking comment records
+exactly that hazard and demands an explicitly notified design when
+pending work is marked off the driving task
+(`src/runtime/frame_scheduler.rs`; RFC 0011 §7's parking premise).
+
 - **INV-SE6**: `subscriptions()` purity (§5) — same state, same
   declared set; no side effects; no reads of external mutable state;
   no reliance on call count or timing. Structural: this is an
