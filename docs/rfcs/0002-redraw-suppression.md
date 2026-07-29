@@ -490,8 +490,11 @@ Breaking (separate scope, motivated but not required by this RFC):
   framing (`Command` is the directive channel; `Quit` and a redraw policy are
   directives of different shapes) is a secondary argument, and `without_redraw()`
   is additive and independent of this. Migration is cheap and mechanical:
-  pre-1.0, few users, no loss of expressiveness (there is no asynchronous `Quit`
-  path today).
+  pre-1.0, few users, and no loss of expressiveness — provided the redesign
+  preserves both quit delivery contracts now pinned: unkeyed quit's
+  backlog-independent dedicated-channel delivery (RFC 0006 R4/INV-L4) and
+  keyed quit's in-band cancellable delivery (RFC 0003 INV-9, RFC 0006
+  INV-L10), plus the cancellation-metadata lowering path.
 
 ### The modifier form as a deliberate extension point
 
@@ -511,7 +514,8 @@ avoid.
   identically. **This is the axis the "minimal `bool`/enum attribute set" image
   describes; it does not describe Axis B.**
 - **Axis B — execution lifecycle = per-effect stream transformation
-  (`timeout`, `retry`) or lifecycle metadata (`cancellable`), NOT a field.**
+  (`timeout`, `retry`) or dedicated lifecycle metadata (`cancellable`), never
+  an Axis-A-style passive field.**
   `.timeout(d)` must wrap `self.stream`
   at call time (e.g. `tokio::time::timeout`), because `batch` combines child
   streams via `select_all` (`command.rs:196-204`) and per-child timeouts must
@@ -522,7 +526,11 @@ avoid.
   exception to the stream-transformation form: RFC 0003 carries
   `.cancellable(id)` as command lifecycle metadata (`CommandCancellation`,
   lowered by the runtime through `RuntimeCommandParts` into a keyed delivery
-  lifecycle) — not a stream wrapper, and not a field either. **Caution:** do
+  lifecycle) — not a stream wrapper, and not an Axis-A-style passive field
+  either: it is a dedicated `cancellation` field on the command
+  (`src/command/core.rs`), but folded by its own lifecycle rules — `batch`
+  warns and discards child keys and concatenates cancel lists (RFC 0003
+  INV-11) — not OR-folded like Axis A's directives. **Caution:** do
   not read "attribute set" as "make everything a field" — field-ifying Axis B's
   stream-transformation members silently breaks `batch`.
 - **The A/B split is deeper than representation; it is *scope*.** Axis B is an
