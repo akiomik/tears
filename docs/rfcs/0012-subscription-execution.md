@@ -222,10 +222,12 @@ and its replacement poll the same resource concurrently.
   latter. The quiescence of a task stopped by a steady-state
   re-evaluation — removed or replaced out of the desired set — marks
   subscriptions dirty (the second dirty source RFC 0011 §2.1 records
-  for this RFC), and marking that dirt wakes an idle runtime: a
-  parked loop with no pending input is woken by the quiescence so the
-  next frame pass can run — the wake is contract, the notification
-  mechanism is unpinned. The next frame pass's re-evaluation, reading
+  for this RFC), and the completion reaches an idle runtime as a
+  wake-capable event: a parked loop with no pending input is woken so
+  the next frame pass can run — the wake's occurrence is contract; the
+  mechanism, and which task records the dirt (a notified driver
+  recording it itself conforms), are unpinned. The next frame pass's
+  re-evaluation, reading
   the then-current state, admits whatever that state declares, under
   INV-SE3's barrier. Termination-driven stops are outside this rule:
   quiescence during shutdown or abrupt teardown marks no dirt and
@@ -258,9 +260,10 @@ termination — stop requested and restart admitted are collapsed. The
 conformance change is this RFC's `Changed` entry, and its scope is
 two-fold, stated honestly: (1) *admission timing* — new and restarted
 subscriptions wait for outstanding stopped tasks' quiescence; and
-(2) *a new re-evaluation trigger* — that quiescence marks
-subscriptions dirty, so `subscriptions()` can be re-evaluated on a
-frame pass that no message preceded. An observable consequence of
+(2) *a new re-evaluation trigger* — that quiescence (of tasks a
+steady-state re-evaluation stopped) marks subscriptions dirty, so
+`subscriptions()` can be re-evaluated on a frame pass that no message
+preceded. An observable consequence of
 (2): if subscription A's stream finishes naturally while stopped B is
 still quiescing, B's quiescence dirties the next frame pass, whose
 re-evaluation restarts the still-declared A with no new message having
@@ -427,9 +430,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   re-evaluation — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation — against the then-current state, and
   deferred admissions only at the latter; the quiescence of a task
-  stopped by a steady-state re-evaluation marks subscriptions dirty,
-  waking an idle runtime, and nothing more — termination-driven
-  quiescence marks nothing (§4.2). No admission is
+  stopped by a steady-state re-evaluation marks subscriptions dirty
+  and reaches an idle runtime as a wake-capable event, and nothing
+  more — termination-driven quiescence marks nothing (§4.2). No
+  admission is
   triggered directly from a task-exit event, and the stopping
   re-evaluation does not block awaiting quiescence to admit inline
   (§4.2 — that shape makes INV-SE4's sequence unsatisfiable).
@@ -444,16 +448,17 @@ Enforcement classes follow the pre-review checklist's definitions.
 A runtime-level end-to-end gate accompanies INV-SE3's and INV-SE4's
 manager-layer checks, because the manager layer alone cannot catch a
 parked production loop: with the runtime idle — no pending input, the
-frame branch parked — a stopped task's quiescence must wake the
-runtime, whose next frame pass re-evaluates against the then-current
-state and admits exactly what it declares (in the INV-SE4 sequence: C
-alone, never B). The wake is INV-SE5's observable requirement; the
-notification mechanism is free. This gate exists because an
-implementation whose pending-work flag is set from another task
-without a wake passes every manager-layer check while the production
-loop parks forever — the current scheduler's parking comment records
-exactly that hazard and demands an explicitly notified design when
-pending work is marked off the driving task
+frame branch parked — the quiescence of a task stopped by a
+re-evaluation must wake the runtime, whose next frame pass
+re-evaluates against the then-current state and admits exactly what
+it declares (in the INV-SE4 sequence: C alone, never B). The wake's
+occurrence is INV-SE5's observable requirement; the mechanism, and
+which task records the dirt, are unpinned — what the gate checks is
+that the completion reaches the idle driver as a wake-capable input.
+This gate exists because a completion that updates state without
+waking the driver passes every manager-layer check while the
+production loop parks forever — the current scheduler's parking
+comment records exactly that hazard
 (`src/runtime/frame_scheduler.rs`; RFC 0011 §7's parking premise).
 
 - **INV-SE6**: `subscriptions()` purity (§5) — same state, same
@@ -507,11 +512,13 @@ INV-SE3's checks.
    task has quiesced — awaiting join handles from a watcher, a
    completion notification from the forwarder, or polling handles — is
    an implementation choice with admission-latency implications; the
-   contract constrains only its effect: quiescence marks subscriptions
-   dirty (INV-SE5), so a shape that can observe quiescence only inside
-   an already-triggered reconcile — never marking the dirt that would
-   trigger one — does not conform. Resolves at implementation design,
-   in this RFC's body.
+   contract constrains only its effect: the quiescence of a task
+   stopped by a steady-state re-evaluation marks subscriptions dirty
+   and reaches an idle driver as a wake-capable event (INV-SE5), so a
+   shape that can observe quiescence only inside an already-triggered
+   reconcile — never producing the dirt or the wake that would trigger
+   one — does not conform. Resolves at implementation design, in this
+   RFC's body.
 2. **Mock-source integration.** A public `MockSource` already exists
    (`src/subscription/mock.rs`: construction, `emit`,
    `receiver_count`) and serves as §6.1's reference conforming seam.

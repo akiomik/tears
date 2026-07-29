@@ -1,8 +1,11 @@
 # RFC 0011: Runtime Lifecycle
 
 - Status: Draft
-- Target: 0.11.0 — one behavior change (construction no longer starts the
-  init command's effect, §3.4); public signatures unchanged
+- Target: 0.11.0 — two behavior changes: one owned here (construction no
+  longer starts the init command's effect, §3.4) and the
+  message-independent re-evaluation trigger RFC 0012 introduces through
+  §2.1's second dirty source, whose `Changed` entry RFC 0012 carries;
+  public signatures unchanged
 - Scope: the runtime's steady-state phase order, the bootstrap contract,
   the termination model (controlled and abrupt routes, with two-stage
   postconditions), panic containment for runtime-owned tasks, and driver
@@ -470,13 +473,17 @@ Premises:
   a never-ready future when no work is pending, and the parked future
   registers no wake for later pending-flag changes
   (`src/runtime/frame_scheduler.rs`) — parking is sound only while
-  every pending-work source either runs on the driving task or
-  carries an explicit wake. "Pending work is marked only by the
-  driving task" is therefore not a safe design premise: the §2.1
-  lifecycle-completion dirty source is marked from outside the driving
-  task, so it requires an explicitly notified design — the wake is
-  RFC 0012's observable requirement, the mechanism free. An
-  external-driving design must revisit parking alongside INV-LC9.
+  every source of pending work reaches the driver through something
+  that wakes it. The §2.1 lifecycle-completion dirty source originates
+  off the driving task, so its contract is that the completion
+  reaches an idle driver as a **wake-capable input** — a completion
+  event the loop selects on, a notification that wakes the parked
+  task, or any equivalent. The wake's occurrence is RFC 0012's
+  observable requirement; the mechanism, and which task then updates
+  the pending flag (the notified driver itself is a conforming
+  choice), are unpinned. The non-conforming shape is a bare flag
+  write that wakes nothing. An external-driving design must revisit
+  parking alongside INV-LC9.
 
 Mechanism inventory (free to change while the contract holds): the
 runtime owns three task kinds — unkeyed command tasks in a `JoinSet`
