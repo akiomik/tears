@@ -586,7 +586,11 @@ question 3 asked whether the runtime should enforce that premise with an
 admission limit, upgrading R1/R3 from channel-buffer claims to
 total-pending-work guarantees. The resolution: **no admission limit — the
 premise stays with the application, and the runtime makes it observable
-instead of enforced.**
+instead of enforced.** (Lifecycle ordering is a different axis:
+RFC 0012 §4's quiescence barrier sequences subscription admission
+behind stopped tasks' quiescence — that is admission-timing contract
+owned there, not a producer-count or load-coupled limit, and it is
+outside this question's scope.)
 
 An admission limit is structurally unsound in this runtime:
 
@@ -639,7 +643,9 @@ total is `m × keyed_channel_capacity` with `m` — the number of active
 knob.
 
 The decision is captured in two invariants: INV-L8 (load control paces
-sends, never producer admission) and INV-L9 (keyed backpressure is
+sends and never intervenes in producer admission — admissibility and
+admission timing stay with their owners: RFC 0005 and RFC 0012 §4 for
+subscriptions, RFC 0003 for commands) and INV-L9 (keyed backpressure is
 isolated per command — the testable form of the no-shared-pool choice).
 
 ### 4.6 Keyed quit routing (open question 7 resolved)
@@ -1052,15 +1058,25 @@ the check that realizes it; the implementation realizes those checks.
   enforces — a future change that has the event loop inject a message
   directly into a shared or keyed channel it also drains would deadlock as
   soon as that channel fills.
-- **INV-L8**: The runtime never blocks, rejects, or defers producer
-  admission. Every subscription the reconciliation contract says should
-  run is started, and every command returned from `update` (or
-  `Application::new`) is dispatched, synchronously and unconditionally —
-  load control paces sends, never producer creation (section 4.5). This
-  protects the RFC 0005 reconciliation contract and effect delivery from a
-  future admission limit, and — because producers are created on the event
-  loop task — it is also what keeps INV-L7's no-self-deadlock argument
-  closed at spawn sites, not just send sites.
+- **INV-L8**: Load control never intervenes in producer admission: a
+  producer that the owning contracts make admissible is not
+  additionally blocked, rejected, or deferred by load-control
+  configuration, channel occupancy, or producer-count pressure.
+  Admission itself — whether and when a producer starts — belongs to
+  those owners, and INV-L8 adds no claim to either side: for
+  subscriptions, *which* producers are admissible is RFC 0005's
+  reconciliation contract and *when* they are admitted is RFC 0012
+  §4's quiescence barrier, so a lifecycle-ordering deferral under that
+  barrier is not an INV-L8 violation; for commands, every command
+  returned from `update` (or `Application::new`) is dispatched
+  synchronously and unconditionally, before the next input is pulled
+  (RFC 0003 INV-10) — RFC 0012 defers no command, and no load-control
+  state may delay that dispatch. Load control paces sends, never
+  admission (section 4.5). This protects the RFC 0005 reconciliation
+  contract and effect delivery from a future load-coupled admission
+  limit, and — because producers are created on the event loop task —
+  it is also what keeps INV-L7's no-self-deadlock argument closed at
+  spawn sites, not just send sites.
 - **INV-L9**: Keyed backpressure is isolated per command. A send blocked on
   one keyed channel's full capacity never delays admission into the shared
   channel or into any other keyed channel; each keyed channel's admission
@@ -1238,7 +1254,8 @@ practically checkable, and its section 5.1 `steady_*` row is a
 code-inspection row, not a measurement; INV-L7 and INV-L8 because code
 review of every runtime-internal send and spawn site is the only
 defense — no finite scenario proves the absence of an event-loop send
-or of an admission limit; and INV-L14 and INV-L15 because each pins
+or of load-control intervention in admission (a load-coupled admission
+limit); and INV-L14 and INV-L15 because each pins
 negative space — a permitted execution and the absence of a policy — so
 there is no compliant behavior for a scenario to regress against, and
 no finite scenario can prove an absence (the same argument as INV-L9's
@@ -1450,7 +1467,9 @@ prerequisite of the implementation PR (section 3.2).
    section 4.4). Keyed channels are bounded per command rather than by a
    shared pool, pinned as testable isolation (INV-L9, `keyed_isolation`
    scenario in section 5.1). Full rationale in section 4.5; the
-   no-admission-limit contract itself is INV-L8.
+   contract that load control never intervenes in admission is INV-L8
+   (admissibility and admission timing belong to their owners —
+   RFC 0005 and RFC 0012 §4 for subscriptions, RFC 0003 for commands).
 4. Where backpressure-wait telemetry lives (`tracing` only, or counters
    exposed by future profiling-hook work).
    **Resolved.** `tracing` only for the initial
@@ -1567,4 +1586,6 @@ prerequisite of the implementation PR (section 3.2).
   cancel-before-delivery, INV-9 buffered-quit suppression; it states no
   FIFO invariant — keyed-quit delivery ordering is this RFC's INV-L10).
 - RFC 0005 — structural lifecycle identity (subscription reconciliation the
-  load path feeds).
+  load path feeds; the admissibility owner INV-L8 defers to).
+- RFC 0012 — subscription execution (§4's quiescence barrier, the
+  subscription admission-timing owner INV-L8 defers to).

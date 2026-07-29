@@ -189,6 +189,15 @@ closed for the classes that need it. The uniform rule closes it as a
 general property and, with it, removes the window in which an old task
 and its replacement poll the same resource concurrently.
 
+The barrier is lifecycle ordering, not load control: it defers
+admission behind quiescence regardless of load, channel occupancy, or
+producer counts, so it sits beside — not against — RFC 0006 INV-L8,
+which guarantees that load control never *additionally* blocks,
+rejects, or defers a producer the owning contracts make admissible.
+The two divide the axis: this section owns when lifecycle ordering
+admits a subscription; INV-L8 pins that load control adds no
+interference on top.
+
 ### 4.2 The four admission rules
 
 - **INV-SE2 — continuing subscriptions are exempt.** An ID present in
@@ -360,7 +369,11 @@ RFC owns, consistent with the standing position that `RuntimeConfig`
 carries no restart-rate field (RFC 0007 §4, RFC 0006 open question 5).
 The delegation frame is fixed here: a rate policy may delay an
 admission beyond quiescence; it may never admit before quiescence, and
-it changes none of §4's rules.
+it changes none of §4's rules. A rate policy's added delay is likewise
+outside RFC 0006 INV-L8's load-control non-interference guarantee:
+like this RFC's quiescence barrier, it is an owned admission-timing
+contract on its own axis — the delegated frame here — not load-control
+interference, so adopting one amends no part of INV-L8.
 
 ## 9. Negative space: no effect DI in core
 
