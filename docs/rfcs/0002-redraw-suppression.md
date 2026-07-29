@@ -482,10 +482,11 @@ Breaking (separate scope, motivated but not required by this RFC):
   the public surface closes over `Command` constructors alone. The primary
   motivation is **forward-compatibility, not consistency**: while `Action` is
   public, every new internal directive is a breaking change, so privatizing the
-  stream's item type is what lets the directive set grow (e.g. a future
-  `cancellable` modifier, flagged in the modifier notes as possibly needing
-  variants beyond `Message | Quit`) without further breaks — so it is best landed
-  **before** such a directive-adding modifier, not merely "someday." §4's
+  stream's item type is what lets the directive set grow without further
+  breaks — so it is best landed **before** an extension that genuinely needs a
+  new `Action` variant, not merely "someday." (Cancellation needed no new
+  variant: RFC 0003 carries it as command lifecycle metadata — see the Axis B
+  notes below.) §4's
   framing (`Command` is the directive channel; `Quit` and a redraw policy are
   directives of different shapes) is a secondary argument, and `without_redraw()`
   is additive and independent of this. Migration is cheap and mechanical:
@@ -509,16 +510,21 @@ avoid.
   is set at the same synchronous point (`runtime.rs:302-304`) and folds
   identically. **This is the axis the "minimal `bool`/enum attribute set" image
   describes; it does not describe Axis B.**
-- **Axis B — execution lifecycle (`timeout`, `retry`, `cancellable`) = eager
-  stream transformation, NOT a field.** `.timeout(d)` must wrap `self.stream`
+- **Axis B — execution lifecycle = per-effect stream transformation
+  (`timeout`, `retry`) or lifecycle metadata (`cancellable`), NOT a field.**
+  `.timeout(d)` must wrap `self.stream`
   at call time (e.g. `tokio::time::timeout`), because `batch` combines child
   streams via `select_all` (`command.rs:196-204`) and per-child timeouts must
   stay independent — a single outer `Option<Duration>` field cannot represent
   `batch([a.timeout(1s), b.timeout(2s)])`. A bonus of the eager-wrap form: `map`
   and `batch` preserve it for free (it is already in the stream), unlike Axis A
-  fields which must be threaded explicitly. **Caution:** do not read "attribute
-  set" as "make everything a field" — field-ifying Axis B silently breaks
-  `batch`.
+  fields which must be threaded explicitly. Cancellation is the settled
+  exception to the stream-transformation form: RFC 0003 carries
+  `.cancellable(id)` as command lifecycle metadata (`CommandCancellation`,
+  lowered by the runtime through `RuntimeCommandParts` into a keyed delivery
+  lifecycle) — not a stream wrapper, and not a field either. **Caution:** do
+  not read "attribute set" as "make everything a field" — field-ifying Axis B's
+  stream-transformation members silently breaks `batch`.
 - **The A/B split is deeper than representation; it is *scope*.** Axis B is an
   attribute of a specific async effect — it travels with that effect and
   composes (`batch`/`chain`/`map`), which is why it lives in the stream. Axis A
@@ -532,20 +538,22 @@ avoid.
   lifting in with defaults. (iced itself keeps `RedrawRequest` off `Task` for
   exactly this reason.) The `-> Self` call-site uniformity is an ergonomic
   convenience, not a reason to model the two scopes as one type.
-- **`cancellable` stresses the model most.** `.cancellable(id)` is only
-  half a modifier: assigning the id is `-> Self`, but *cancelling* a running
-  task needs runtime machinery keyed by id (today's `command_tasks` `JoinSet`
-  has no id map). It may require **opening the internal directive set beyond
-  `Message | Quit`** (a third internal action or a side-channel), which is in
-  tension with the "closed set" claim (§4). Its future RFC should address that
-  head-on.
+- **`cancellable` settled the model's hardest case.** `.cancellable(id)` is
+  only half a modifier: assigning the id is `-> Self`, but *cancelling* a
+  running task needs runtime machinery keyed by id. RFC 0003 resolved this:
+  the id and policy travel as `CommandCancellation` metadata that the runtime
+  lowers (`RuntimeCommandParts`), keyed output flows through runtime-owned
+  private receivers, and the internal action set stayed closed —
+  `Message | Quit`, with no third variant and no side-channel. The tension
+  with §4's "closed set" claim resolved in the closed set's favor.
 - **Modifiers are not composition combinators.** `then`/`chain` (iced `Task`)
   sequence effects and are a *separate* category; a future async-composability
   evolution of `Command` is orthogonal to this family. (iced's `Command` →
   `Task` move concerns async composability, not redraw, so it does not bear on
   this RFC.)
 
-The concrete future modifiers above are **each left to its own RFC;**
+The concrete modifiers above are **each owned by its own RFC**
+(`timeout`/`retry` by RFC 0004, cancellation by RFC 0003);
 cf. TCA's `.cancellable(id:cancelInFlight:)` and `.animation()` as prior art for
 the two axes. This RFC only records that the modifier form is their agreed home *for now*
 (terminally for Axis B, transitionally for Axis A per the scope note above),
