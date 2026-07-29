@@ -67,3 +67,4 @@ Three corollaries:
 | [0008](0008-teststore.md) | TestStore: deterministic update/effect testing, `Message` boundary |
 | [0009](0009-clock-di.md) | Clock DI: single-time-source rule, virtual-clock determinism contract |
 | [0011](0011-runtime-lifecycle.md) | Runtime lifecycle: phase order, bootstrap, termination model |
+| [0012](0012-subscription-execution.md) | Subscription execution: source template, quiescence barrier, effect-DI negative space |
