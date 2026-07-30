@@ -19,7 +19,9 @@
 > API. Sections 4–6 fix the load-control contract. The items this RFC
 > delegated to the separate `RuntimeConfig` RFC — capacity values,
 > recommended defaults, the section 5.1 bounded-run parameters, and the CI
-> smoke-profile question — are settled there; that RFC is Implemented, so no
+> smoke-profile question — are settled there and implemented; RFC 0007
+> itself is Draft for its own §2.1 `Copy` removal, which nothing here
+> depends on, so no
 > prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
@@ -289,7 +291,9 @@ constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
 unchanged and equivalent to the default configuration. The exact public
 shape — constructor signature, field set, naming, and
 construction/validation style — is fixed by the separate `RuntimeConfig`
-RFC (Implemented; section 6), so the load-control implementation PR could
+RFC (its delegated surface is implemented; the RFC itself is Draft for
+its own §2.1 `Copy` removal — section 6), so the load-control
+implementation PR could
 start. The verdict here needs only the additivity argument, which holds
 for any shape that keeps `Runtime::new` unchanged. Bounded behavior
 activates only through that surface:
@@ -324,7 +328,8 @@ load-control implementation (sections 4–6) lands after 0.10.0 behind
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
-(Implemented; section 3.2) — carries the three controls below. That RFC
+(delegated surface implemented; the RFC itself Draft for its own §2.1
+`Copy` removal — section 3.2) — carries the three controls below. That RFC
 adopts these names unchanged and groups the frame rate into the same
 config, so `Runtime::with_config(flags, config)` takes the frame rate
 inside `config`; the semantics stated here are the contract.
@@ -503,10 +508,17 @@ as INV-L13 (section 5):
   distinct for every runtime in the process and never reused within the
   process lifetime, with no meaning attached to its magnitude or
   ordering: it is an equality key for partitioning, not a sequence, and
-  it is carried on every gauge firing. `seq` is a counter initialized
-  per `runtime_id` and incremented once per emitted gauge
-  event — a `u64`, monotone within its instance; wraparound would take ~2^64
-  events and does not occur in practice — and captured with the same
+  it is carried on every gauge firing. Non-reuse carries a structural
+  requirement for the implementation: an identifier allocator must fail
+  before it can reuse a value within the process lifetime — exhaustion
+  must not wrap into reuse, so a bare wrapping counter is
+  non-conforming past exhaustion; the failure mechanism is not pinned.
+  Each gauge event carries a `u64` `seq`: for a given `runtime_id`,
+  emitted `seq` values are strictly increasing. The initial value,
+  contiguity, and the counter's allocation or storage mechanism are not
+  pinned — a per-instance counter and a process-global one are equally
+  conforming; wraparound would take ~2^64
+  events and does not occur in practice. The `seq` is captured with the same
   snapshot as the four counts, so a greater `seq` always carries a gauge
   state reached no earlier than any lesser `seq` of the same
   `runtime_id`. The current-value rule is per instance: the *current*
@@ -1201,12 +1213,13 @@ the check that realizes it; the implementation realizes those checks.
   admission wait, and the producer-gauge event's `runtime_id` the
   emitting instance's process-local opaque identifier — carried on
   every gauge firing, never reused within the process lifetime, with no
-  magnitude or ordering meaning — with `seq` a monotone counter
-  initialized per `runtime_id` that fixes each gauge's current value,
-  per instance, as the greatest-`seq` event's among that
-  `runtime_id`'s events, so gauge-event arrival order is not part of
-  the contract and cross-instance `seq` comparison carries no meaning
-  (section 4.4). The instance field is gauge-only: the batch and
+  magnitude or ordering meaning — with `seq` a `u64` strictly
+  increasing among events of a given `runtime_id` (initial value,
+  contiguity, and counter allocation or storage unpinned) that fixes
+  each gauge's current value, per instance, as the greatest-`seq`
+  event's among that `runtime_id`'s events, so gauge-event arrival
+  order is not part of the contract and cross-instance `seq`
+  comparison carries no meaning (section 4.4). The instance field is gauge-only: the batch and
   capacity-wait events carry no `runtime_id` (section 4.4). The schema
   is contract surface: renaming,
   dropping, or repurposing any part of it is an amendment to this RFC, not
@@ -1467,8 +1480,10 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 ## 6. Open questions (all resolved)
 
-Every question below is resolved — in this RFC, or by the now-Implemented
-`RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
+Every question below is resolved — in this RFC, or by the `RuntimeConfig`
+RFC, whose delegated decisions are implemented (that RFC is itself
+Draft for its own §2.1 `Copy` removal, which no question here waits
+on) and which fixes the public `RuntimeConfig` API (and with
 it questions 1, 5, and the default-value half of 2), the section 5.1
 bounded-run parameters (configuration under test, backlog depths, trial
 counts), and the CI smoke-profile decision. No open question remains as a

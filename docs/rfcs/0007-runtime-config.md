@@ -560,11 +560,21 @@ channel occupancy, per the note on that distinction below the table:
   and `quit_keyed_bounded` rows) reads the *current* value of the
   `blocked` gauge at the quit instant, and the harness's teardown barrier
   (`await_quiescence`, `benches/runtime_load.rs`) reads the current gauge
-  sum returning to zero. "Current value" is RFC 0006 §4.4's contract term:
-  the value on the gauge event with the greatest `seq`, not the value on
+  sum returning to zero. "Current value" is RFC 0006 §4.4's contract term,
+  and it is per runtime instance: the value on the gauge event with the
+  greatest `seq` *among events carrying that instance's `runtime_id`*,
+  not the value on
   the most recently *arrived* event — the schema does not order gauge
-  events by arrival. The harness therefore consumes these gauges by
-  greatest `seq`, discarding any event whose `seq` does not advance, so a
+  events by arrival, and a general consumer partitions by `runtime_id`
+  before taking the greatest `seq`. This harness runs one runtime at a
+  time and its teardown barrier completes before the next runtime
+  starts, so exactly one partition is ever active; its scalar
+  high-water read is the single-partition degenerate form of that rule,
+  and parsing `runtime_id` is unnecessary here
+  (`benches/runtime_load.rs`). The harness therefore consumes these
+  gauges by
+  greatest `seq` within the one active instance, discarding any event
+  whose `seq` does not advance, so a
   reordered stale gauge event can corrupt neither a predicate reading nor
   the barrier. This dependency is stated explicitly because it is
   otherwise easy to miss: gauge events are dispatched off the runtime's
