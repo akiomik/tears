@@ -39,9 +39,9 @@ land on that architecture without replacing it.
   on.
 - **Reference contract**: the Accepted RFCs 0001–0009 plus this
   bundle's texts — the Draft RFCs (RFC 0006, RFC 0007, RFC 0011,
-  RFC 0012) and the branch-amended texts of the Implemented RFCs,
-  whose Status is unchanged because their amendments are
-  semantics-neutral; each file's own Status header is the source of
+  RFC 0012) and the Implemented RFCs, which where amended on this
+  branch carry only semantics-neutral amendments and keep their
+  Status; each file's own Status header is the source of
   truth. Audit verdicts are measured against this combined corpus, not
   against the baseline implementation alone.
 
@@ -244,14 +244,16 @@ parts:
    landed work, superseded shapes cited as current, and absolute
    claims later scoped by other documents.
 
-The pre-drafting gate completed 2026-07-30/31. Part 1 found the
+The pre-drafting gate completed 2026-07-30. Part 1 found the
 baseline advance had touched only the dependency lockfile — zero
 contact with the scanned paths, so no audit rows required re-running
 from the code delta. Part 2 swept all eleven RFCs, the RFC index, and
 the code documentation they cite (the `RuntimeConfig` rustdoc, the
-load-harness comments); findings were fixed in place per document, and
-two independent cold-read rescans of the full corpus closed the gate
-with zero remaining findings. The pre-acceptance gate runs **both
+load-harness comments); findings were fixed in place per document,
+then an independent cold-read rescan of the full corpus — split
+across two reviewers — surfaced three residual instances, whose fixes
+were verified by section-whole sweeps and a full re-read of the
+affected RFC; the gate closed at zero remaining findings. The pre-acceptance gate runs **both
 parts** again over the final bundle before the simultaneous acceptance
 of §1.8.
 
