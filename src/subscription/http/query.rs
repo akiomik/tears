@@ -163,9 +163,10 @@ impl QueryClient {
             // `client_id` is an identity component — subscription identity is
             // `(client_id, TypeId, QueryKey)` (RFC 0001) — so reusing an id
             // would collide distinct clients' identities. The allocator fails
-            // before it can reuse a value: `checked_add` leaves the counter
-            // saturated at `u64::MAX`, making this and every later allocation
-            // panic instead of wrapping into reuse.
+            // before it can reuse a value: on exhaustion the failed
+            // `fetch_update` stores nothing, leaving the counter saturated at
+            // `u64::MAX`, so this and every later allocation panics instead of
+            // wrapping into reuse.
             client_id: NEXT_QUERY_CLIENT_ID
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .expect(

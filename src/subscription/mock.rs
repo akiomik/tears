@@ -150,9 +150,9 @@ impl<T: Clone + 'static> MockSource<T> {
             sender: tx,
             // The key is exact identity and must be unique within the process
             // (RFC 0005 §8.3), so the allocator fails before it can reuse a
-            // value: `checked_add` leaves the counter saturated at `u64::MAX`,
-            // making this and every later allocation panic instead of wrapping
-            // into reuse.
+            // value: on exhaustion the failed `fetch_update` stores nothing,
+            // leaving the counter saturated at `u64::MAX`, so this and every
+            // later allocation panics instead of wrapping into reuse.
             key: NEXT_MOCK_SOURCE_ID
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .expect(
