@@ -1591,15 +1591,11 @@ fn run_smoke(runtime: &TokioRuntime) -> bool {
 // and read as spurious extra admission — the run asserts no keyed message ever
 // reaches `update` and that every raw yield is exactly `capacity + 1`.
 //
-// One deviation from RFC 0007 §5.3's letter, noted for reconciliation: its
-// shared probe is worded as a producer started *after* the keyed saturation,
-// admitting its first `app_channel_capacity` sends into an empty shared channel.
-// That is not realizable here — the shared channel must stay full throughout to
-// keep the keyed channels from draining (shared-first), so it cannot be empty at
-// a later probe start. The shared producer therefore runs throughout as both the
-// saturation enabler and the shared probe, and its full-capacity admission is
-// verified concurrently with the held keyed saturation, which carries the same
-// isolation evidence.
+// Per RFC 0007 §5.3, the shared producer runs throughout as both the
+// saturation enabler and the shared probe — the shared channel must stay full
+// to keep the keyed channels from draining (shared-first) — and its
+// full-capacity admission is verified concurrently with the held keyed
+// saturation.
 
 /// Saturated keyed channels held before the probe starts.
 const ISO_SATURATED_KEYS: usize = 8;

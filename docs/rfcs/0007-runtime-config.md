@@ -718,18 +718,19 @@ channel occupancy, per the note on that distinction below the table:
 
 ## 6. CI smoke profile
 
-**Resolved: yes — CI runs a smoke profile of the harness, replacing the
-full-scenario run it performs today.** RFC 0006 fixed that CI gates on no
-latency criterion. CI already builds and runs the full harness on every
-push: `ci.yml`'s Benchmarks job runs `cargo test --bench runtime_load`,
-and the harness's custom `main` ignores `cargo test`'s filtering and
-executes its full scenarios (the job's own comment records this). The
+**Resolved: yes — CI runs a smoke profile of the harness, in place of a
+full-scenario run.** RFC 0006 fixed that CI gates on no
+latency criterion. At this question's resolution CI built and ran the
+full harness on every push (`cargo test --bench runtime_load`, whose
+custom `main` ignored `cargo test`'s filtering); the
 open question was therefore never *whether* the harness runs in CI but
 *which profile*: the full scenarios' wall time grows with every
 statistical row this RFC adds (200-trial quit runs, the bounded matrix
 re-runs) while their latency numbers gate nothing on a CI machine. The
-resolution: the Benchmarks job's `runtime_load` invocation switches to
-the smoke profile, and the full scenarios leave CI: they run as
+resolution, landed in `ci.yml`: the Benchmarks job runs the
+latency-assertion-free smoke profile via `just bench-smoke` (so local
+and CI invocations are identical), gating on completion, and the full
+scenarios stay out of CI: they run as
 deliberate acceptance or regression runs (§5), on any machine, with RFC
 0006 §5.1's scoping unchanged — a full run carries acceptance force only
 on the reference machine, and runs on other machines are
