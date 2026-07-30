@@ -37,11 +37,13 @@ land on that architecture without replacing it.
 - **Baseline**: `main` at commit `daa8bd1` — the reproducibility anchor
   every implementation-fact citation in this consolidation is defined
   on.
-- **Reference contract**: the Accepted RFCs 0001–0009 plus the Draft
-  bodies of this bundle — RFC 0011, RFC 0012, and the amended texts of
-  RFC 0002, RFC 0003, RFC 0006, and RFC 0007. Audit verdicts are
-  measured against this combined corpus, not against the baseline
-  implementation alone.
+- **Reference contract**: the Accepted RFCs 0001–0009 plus this
+  bundle's texts — the Draft RFCs (RFC 0006, RFC 0007, RFC 0011,
+  RFC 0012) and the branch-amended texts of the Implemented RFCs,
+  whose Status is unchanged because their amendments are
+  semantics-neutral; each file's own Status header is the source of
+  truth. Audit verdicts are measured against this combined corpus, not
+  against the baseline implementation alone.
 
 ### 1.2 Normativity classes
 
@@ -150,9 +152,17 @@ vocabulary:
     contract or the core topology.
   - **X — intentionally excluded**: an anti-catalog decision; the
     feature is deliberately not supported.
-- **Interaction rows** — verdicts `pass` / `fail` / `excluded`; an
-  excluded row records the decision that excludes it (its
-  `excluded_by`), so exclusion is traceable, never silent.
+- **Interaction rows** — verdicts `pass` / `fail` / `excluded`. An
+  interaction row may terminate as `excluded` only when a constituent
+  fixture's `X` (or an anti-catalog decision's `adopted(X)`) is
+  settled and the joint question thereby loses its subject; the row
+  records `excluded_by=<fixture id>` — a single representative id,
+  with further affected fixtures in the row's note when one decision
+  spans several. Remaining-leg rule: when the interaction among the
+  row's surviving constituents still has independent audit value, a
+  new interaction row is filed append-only, or the surviving fixture
+  row is sharpened to carry it — an exclusion never silently discards
+  a live question.
 - **Anti-catalog decisions** — verdicts `adopted(X)` / `rejected` /
   `delegated`.
 
@@ -208,27 +218,42 @@ Ergonomic and aesthetic concerns are recorded but never reopen a
 judgment. Every return to a root judgment is journaled in one line —
 which decision, changed from what to what, by which counterexample —
 and a return that changes no decision is forbidden (no polish loops).
-Grade-(ii) counterexamples that reach the event loop's phase selection
-or termination ordering reopen the lifecycle root alongside the
-execution-model root; policy-only counterexamples reopen the
-scheduling-policy root alone.
+**Only the affected root judgments reopen.** A policy-only
+counterexample reopens the scheduling-policy root alone. A grade-(ii)
+counterexample (owner/topology break) reopens the execution-model root
+and/or the lifecycle root it actually broke — a counterexample
+reaching the event loop's phase selection or termination ordering is
+the lifecycle root's — and the scheduling-policy root joins a
+grade-(ii) reopen only when the policy itself is simultaneously
+affected. This keeps returns from over-widening.
 
 ### 1.10 Drift gates
 
-Because the audit measures against the combined document corpus
-(§1.1), the corpus itself must not drift from the code it describes.
-Two gates bracket this RFC:
+Because the audit measures against the combined document corpus at a
+fixed baseline (§1.1), two drift gates bracket this RFC — before
+drafting and before the bundle acceptance — and each gate has two
+parts:
 
-- **Pre-drafting scan (completed 2026-07-30/31).** All eleven RFCs,
-  the RFC index, and the code documentation they cite (the
-  `RuntimeConfig` rustdoc, the load-harness comments) were swept for
-  completed-state drift — pre-implementation present tense, future
-  forms for landed work, superseded shapes cited as current, and
-  absolute claims later scoped by other documents. Findings were fixed
-  in place per document, and two independent cold-read rescans of the
-  full corpus closed the gate with zero remaining findings.
-- **Pre-acceptance scan.** The same sweep runs again over the final
-  bundle before the simultaneous acceptance of §1.8.
+1. **Baseline code-delta scan.** Changes since baseline `daa8bd1` to
+   `docs/rfcs`, `src/runtime`, `src/command`, and `src/subscription`
+   are scanned; the fixtures and ledger rows those changes affect are
+   appended to the audit (append-only — no renumbering), and only the
+   affected root judgments and audit rows are re-run.
+2. **Claim scan.** Every document claim is checked against the code it
+   describes — pre-implementation present tense, future forms for
+   landed work, superseded shapes cited as current, and absolute
+   claims later scoped by other documents.
+
+The pre-drafting gate completed 2026-07-30/31. Part 1 found the
+baseline advance had touched only the dependency lockfile — zero
+contact with the scanned paths, so no audit rows required re-running
+from the code delta. Part 2 swept all eleven RFCs, the RFC index, and
+the code documentation they cite (the `RuntimeConfig` rustdoc, the
+load-harness comments); findings were fixed in place per document, and
+two independent cold-read rescans of the full corpus closed the gate
+with zero remaining findings. The pre-acceptance gate runs **both
+parts** again over the final bundle before the simultaneous acceptance
+of §1.8.
 
 ## 2. Reference architecture (informative)
 
@@ -314,7 +339,7 @@ implementation shape, free to change under their cited contracts.
 | subscription forwarder | `SubscriptionManager.running` | unified task-policy wrapper; reconcile algorithm unchanged, admission per the quiescence barrier | RFC 0005 INV-8–INV-13; re-evaluation phase: RFC 0011; admission: RFC 0012 §4 |
 | task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | single policy owner (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3 |
 | frame ownership | `FrameScheduler` + `PendingWork` + runtime | unchanged; parking premise informative | RFC 0011 INV-LC1/INV-LC2 and §7's premises |
-| gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | an entry-owned RAII guard shape is under evaluation behind a gauge-transcript-identity gate; the count-based mechanism stands unless that gate passes (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
+| gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the entry-owned RAII guard shape is the consolidated mechanism choice (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
 | time | `tokio::time`, single axis | unchanged | RFC 0009 |
 | identity | `StructuralKey` / `ScopePath` | unchanged | RFC 0005 |
 
@@ -341,7 +366,8 @@ The §1.5 checks close on this architecture:
 
 The reaffirmation ledger — every invariant, unnumbered normative
 clause, negative-space statement, and implicit contract extracted from
-RFCs 0001–0009, 531 rows — was replayed row by row against §1.1's
+RFCs 0001–0009 and from the runtime's previously unnumbered implicit
+contracts, 531 rows — was replayed row by row against §1.1's
 reference contract. As of 2026-07-31:
 
 - **Reaffirmed 523 / redesigned 8 / delegated 0 / open counterexamples
@@ -353,14 +379,17 @@ reference contract. As of 2026-07-31:
   RFC 0007); reaffirmed rows record their preservation or
   canonicalization site.
 - **Two counterexamples arose during consolidation and are resolved**,
-  each with its one-line journal entry per §1.9: a joint
+  each with its one-line journal entry per §1.9: a grade-(ii) joint
   unsatisfiability between the supersession and admission-point rules
-  and the lifecycle phase contract (resolved by unifying admission on
-  the deferred, frame-pass shape — RFC 0012 §4 with RFC 0011 §2.1's
-  second dirty source), and a grade-(i) wording contradiction between
+  and the lifecycle phase contract — a counterexample reaching phase
+  selection (the dirty-source set), so per §1.9 it reopened the
+  lifecycle root alone — resolved by unifying admission on the
+  deferred, frame-pass shape (RFC 0012 §4 with RFC 0011 §2.1's second
+  dirty source); and a grade-(i) wording contradiction between
   load control's producer-admission invariant and the quiescence
-  barrier (resolved by rescoping RFC 0006 INV-L8 to load-control
-  non-interference). Neither reopened beyond its affected roots
+  barrier — policy-only, so it reopened the scheduling-policy root
+  alone — resolved by rescoping RFC 0006 INV-L8 to load-control
+  non-interference. Neither reopened beyond its affected roots
   (§1.9's rule).
 
 The full row-level snapshot, with verdicts and grounds, is §8's
