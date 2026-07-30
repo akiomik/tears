@@ -153,12 +153,14 @@ rejection is mechanical, not aesthetic:
 event; a redraw policy is not, so it lives on the command as a field.
 
 > **Out of scope (mentioned for context).** Unifying the *public* vocabulary so
-> that every runtime directive is a `Command` constructor — abolishing the
-> public `Action` type and replacing `Command::effect(Action::Quit)` with
+> that every runtime directive is a `Command` constructor — retiring the public
+> `Action` type and replacing `Command::effect(Action::Quit)` with
 > `Command::quit()` — is a natural consistency cleanup that this design's
-> reasoning motivates. It is a **separate breaking change** and not required for
-> `without_redraw()` (which is additive on its own), so it is deliberately left
-> out of this RFC. See §9.
+> reasoning motivates. It was a **separate breaking change**, not required for
+> `without_redraw()` (which is additive on its own), and was deliberately left
+> out of this RFC; it has since landed — `Action` is crate-private
+> (`src/command.rs`) and the public surface closes over `Command` constructors
+> alone. See §9.
 
 ## 5. Design
 
@@ -473,28 +475,30 @@ Additive (like this RFC):
   (a rendered-buffer cache) and separable; whole-frame suppression is the first
   step.
 
-Breaking (separate scope, motivated but not required by this RFC):
+Breaking (separate scope, motivated but not required by this RFC; since
+landed):
 
-- **Unify the public directive vocabulary on `Command`.** Abolish the public
-  `Action` type and replace `Command::effect(Action::Quit)` with
-  `Command::quit()`, keeping the stream's item type private. `Action::Message`
-  is already redundant with `Command::message()`, so `effect` goes with it and
-  the public surface closes over `Command` constructors alone. The primary
-  motivation is **forward-compatibility, not consistency**: while `Action` is
-  public, every new internal directive is a breaking change, so privatizing the
-  stream's item type is what lets the directive set grow without further
-  breaks — so it is best landed **before** an extension that genuinely needs a
-  new `Action` variant, not merely "someday." (Cancellation needed no new
-  variant: RFC 0003 carries it as command lifecycle metadata — see the Axis B
-  notes below.) §4's
-  framing (`Command` is the directive channel; `Quit` and a redraw policy are
-  directives of different shapes) is a secondary argument, and `without_redraw()`
-  is additive and independent of this. Migration is cheap and mechanical:
-  pre-1.0, few users, and no loss of expressiveness — provided the redesign
-  preserves both quit delivery contracts now pinned: unkeyed quit's
-  backlog-independent dedicated-channel delivery (RFC 0006 R4/INV-L4) and
-  keyed quit's in-band cancellable delivery (RFC 0003 INV-9, RFC 0006
-  INV-L10), plus the cancellation-metadata lowering path.
+- **Unify the public directive vocabulary on `Command`.** Landed: the public
+  `Action` type is retired — `Action` is crate-private (`src/command.rs`) —
+  `Command::effect(Action::Quit)` is replaced by `Command::quit()`, and
+  `Command::message()` covers what `Action::Message` did, so `effect` went
+  with it and the public surface closes over `Command` constructors alone. The
+  primary motivation was **forward-compatibility, not consistency**, and that
+  property now stands: with the stream's item type private, a new internal
+  directive is no longer a breaking change, so the directive set can grow
+  without further breaks. The ordering constraint — land this before an
+  extension that genuinely needs a new `Action` variant — was met: the
+  privatization landed first, and no extension has needed a new variant
+  (cancellation needed none: RFC 0003 carries it as command lifecycle
+  metadata — see the Axis B notes below). The preservation conditions hold as
+  pinned contracts: unkeyed quit's backlog-independent dedicated-channel
+  delivery (RFC 0006 R4/INV-L4), keyed quit's in-band cancellable delivery
+  (RFC 0003 INV-9, RFC 0006 INV-L10), and the cancellation-metadata lowering
+  path (RFC 0003, `RuntimeCommandParts`). §4's framing (`Command` is the
+  directive channel; `Quit` and a redraw policy are directives of different
+  shapes) was a secondary argument, and `without_redraw()` is additive and
+  independent of it. The migration was cheap and mechanical: pre-1.0, few
+  users, no loss of expressiveness.
 
 ### The modifier form as a deliberate extension point
 
