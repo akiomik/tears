@@ -2,13 +2,16 @@
 
 - Status: Draft (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
-  0.10.0 (additive)
+  0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
+  at 0.11.0 (a schema change, hence a contract change under INV-L13 —
+  section 4.4)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
   under load; the delivery contract of every runtime-owned channel
 - Feature flag: none
 - CHANGELOG: `Added` entry lands at the load-control implementation release
   (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
-  RFC (see section 3)
+  RFC (see section 3). `Changed` — the producer-gauge load event gains a
+  `runtime_id` field (a schema change under INV-L13); lands at 0.11.0
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > RFC that 0.10.0 depends on, and it is final unless the contract design in
@@ -487,23 +490,35 @@ as INV-L13 (section 5):
   this event's firing condition; adding a separate aggregate event
   alongside it is additive and does not require revisiting this choice.
 - **Producer gauges** — target `tears::runtime::load`, level `debug`,
-  fired whenever any counted value changes. Fields: `seq` (the ordering
+  fired whenever any counted value changes. Fields: `runtime_id` (the
+  emitting instance's identifier defined below), `seq` (the ordering
   counter defined below), `subscriptions` (active forwarding tasks),
   `unkeyed_commands` (running unkeyed command tasks), `keyed_commands`
   (active keyed entries), and `blocked` (producers currently awaiting
   capacity; always 0 in unbounded mode). These gauges are how the
   application-owned producer-count premise stays observable rather than
   enforced (section 4.5), including the blocked-producer anti-pattern named
-  there. `seq` is a per-runtime counter incremented once per emitted gauge
-  event — a `u64`, monotone within a run; wraparound would take ~2^64
+  there. `runtime_id` is a process-local opaque identifier of the
+  emitting runtime instance — a `u64` assigned at runtime construction,
+  distinct for every runtime in the process and never reused within the
+  process lifetime, with no meaning attached to its magnitude or
+  ordering: it is an equality key for partitioning, not a sequence, and
+  it is carried on every gauge firing. `seq` is a counter initialized
+  per `runtime_id` and incremented once per emitted gauge
+  event — a `u64`, monotone within its instance; wraparound would take ~2^64
   events and does not occur in practice — and captured with the same
   snapshot as the four counts, so a greater `seq` always carries a gauge
-  state reached no earlier than any lesser `seq`. It fixes the *current*
-  value of each gauge as the value on the gauge event with the greatest
-  `seq` a subscriber has observed — **gauge-event arrival order is not part
-  of this contract**, so a consumer that reads "the value on the most
-  recently *arrived* event" is relying on an ordering the schema does not
-  provide. Ordering by an explicit `seq` rather than by arrival is
+  state reached no earlier than any lesser `seq` of the same
+  `runtime_id`. The current-value rule is per instance: the *current*
+  value of each gauge of a given runtime is the value on the gauge
+  event with the greatest `seq` a subscriber has observed *among events
+  carrying that `runtime_id`* — a subscriber observing several runtimes
+  in one process partitions by `runtime_id` first and applies the
+  max-`seq` rule within each partition, and comparing `seq` across
+  different `runtime_id`s is meaningless. **Gauge-event arrival order
+  is not part of this contract**, so a consumer that reads "the value
+  on the most recently *arrived* event" is relying on an ordering the
+  schema does not provide. Ordering by an explicit `seq` rather than by arrival is
   deliberate: it lets the runtime dispatch a gauge event without holding
   the gauge lock across the `tracing` dispatch — the snapshot-and-`seq`
   capture stays atomic under the lock while only the dispatch moves off
@@ -515,13 +530,22 @@ as INV-L13 (section 5):
   recurse without bound under a global `tracing` dispatcher, or have its
   nested event silently dropped by a scoped dispatcher's re-entrancy guard
   (breaking value fidelity); the runtime instead delivers a nested change
-  as its own `seq`-carrying event, never nested inside a `tracing`
-  dispatch, so value fidelity and `seq` ordering both hold across
+  as its own `seq`-carrying event under the same `runtime_id`, never
+  nested inside a `tracing`
+  dispatch, so value fidelity and per-instance `seq` ordering both hold
+  across
   re-entrancy. How that delivery is arranged is an implementation concern,
   not part of this schema. Because dispatch is off the lock, the schema
   does not guarantee arrival order matches `seq` order — a current-value
-  read must order gauge events by `seq`, never by arrival, even where an
-  implementation happens to deliver them in `seq` order.
+  read must order gauge events by `seq` within their `runtime_id`, never
+  by arrival, even where an
+  implementation happens to deliver them in `seq` order. The instance
+  field is deliberately gauge-only: the batch and capacity-wait events
+  carry no `runtime_id`, so they remain uncorrelatable across runtime
+  instances in one process — a multi-runtime subscriber can attribute
+  only gauge events to an instance. Adding instance fields to the other
+  two events later is additive headroom this contract leaves open
+  without exercising.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness
@@ -563,13 +587,20 @@ an integration run (where the real producers raise and lower them):
   layer, where it rises when a producer begins awaiting capacity, falls
   when the send is accepted, and also falls when a blocked producer is
   aborted by cancellation (section 4.3) — the decrement must not depend on
-  the send ever completing. The gauge event's `seq` is checked at the
-  gauge layer where the emitted sequence is deterministic: a scripted
-  series of gauge changes emits one event per change with a strictly
-  increasing `seq`, so a subscriber ordering by `seq` recovers each
+  the send ever completing. The gauge event's `seq` and `runtime_id`
+  are checked at the gauge layer where the emitted sequence is
+  deterministic: a scripted series of gauge changes emits one event per
+  change with a strictly increasing `seq` under one `runtime_id`, so a
+  subscriber ordering by `seq` within that `runtime_id` recovers each
   gauge's current value without relying on arrival order — an
   implementation that omits `seq`, repeats it, or lets it run backward
-  fails.
+  fails. The instance half: every gauge event carries the emitting
+  runtime's `runtime_id`; two runtimes constructed in the same scripted
+  process emit distinct `runtime_id`s, and a subscriber partitioning by
+  `runtime_id` and applying the max-`seq` rule per partition recovers
+  each instance's current values — an implementation that omits the
+  field, shares one id across live instances, or reuses a torn-down
+  runtime's id within the scripted process fails.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -1167,10 +1198,17 @@ the check that realizes it; the implementation realizes those checks.
   capacity-wait event — and the field values carry the stated meanings:
   `pulled` is INV-L12's counted unit, `shared_pending` the
   shared-channel occupancy at batch end, `wait_us` the blocked send's
-  admission wait, and the producer-gauge event's `seq` a per-runtime
-  monotone counter that fixes each gauge's current value as the
-  greatest-`seq` event's, so gauge-event arrival order is not part of the
-  contract (section 4.4). The schema is contract surface: renaming,
+  admission wait, and the producer-gauge event's `runtime_id` the
+  emitting instance's process-local opaque identifier — carried on
+  every gauge firing, never reused within the process lifetime, with no
+  magnitude or ordering meaning — with `seq` a monotone counter
+  initialized per `runtime_id` that fixes each gauge's current value,
+  per instance, as the greatest-`seq` event's among that
+  `runtime_id`'s events, so gauge-event arrival order is not part of
+  the contract and cross-instance `seq` comparison carries no meaning
+  (section 4.4). The instance field is gauge-only: the batch and
+  capacity-wait events carry no `runtime_id` (section 4.4). The schema
+  is contract surface: renaming,
   dropping, or repurposing any part of it is an amendment to this RFC, not
   an implementation detail. Behavioral check across the layered section 4.4
   definition-of-done tests, each with a `tracing` subscriber and value
@@ -1180,8 +1218,12 @@ the check that realizes it; the implementation realizes those checks.
   runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
   the `blocked` gauge's cancellation-abort decrement at the bounded-send
   layer; the `subscriptions`/`unkeyed_commands`/`keyed_commands`
-  gauge transitions end-to-end over an integration run; and the
-  gauge event's strictly increasing `seq` at the gauge layer.
+  gauge transitions end-to-end over an integration run; and, at the
+  gauge layer, the gauge event's strictly increasing per-instance
+  `seq` together with its `runtime_id` — present on every firing,
+  distinct for two runtimes constructed in the same scripted process,
+  not reused after a runtime's teardown within it (the section 4.4
+  instance half).
 - **INV-L14**: in bounded mode, a ready keyed output may be delivered
   before a cancelling input that has not yet been admitted to the
   shared channel — the permitted execution the section 4.3 cancellation
