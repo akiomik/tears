@@ -525,8 +525,10 @@ as INV-L13 (section 5):
   emitted `seq` values are strictly increasing. The initial value,
   contiguity, and the counter's allocation or storage mechanism are not
   pinned — a per-instance counter and a process-global one are equally
-  conforming; wraparound would take ~2^64
-  events and does not occur in practice. The `seq` is captured with the same
+  conforming. Wraparound is excluded by the strict-increase requirement
+  itself — a wrapped `seq` is smaller, so emitting it is non-conforming
+  regardless of the counter's starting value — and no practical run
+  approaches the 2^64 emissions that would exhaust a counter. The `seq` is captured with the same
   snapshot as the four counts, so a greater `seq` always carries a gauge
   state reached no earlier than any lesser `seq` of the same
   `runtime_id`. The current-value rule is per instance: the *current*
