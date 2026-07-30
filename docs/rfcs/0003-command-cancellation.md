@@ -9,7 +9,8 @@
 
 ## Summary
 
-`Command` tasks are currently spawned into one unkeyed `JoinSet<()>`. The runtime
+Before this RFC, `Command` tasks were all spawned into one unkeyed
+`JoinSet<()>`. The runtime
 can abort all command tasks on shutdown, but it cannot cancel one in-flight
 effect's output lifecycle. Applications that need "latest search wins", "cancel
 the request when leaving this screen", or "ignore a second submit while the
@@ -48,8 +49,8 @@ The current command path is:
    `quit_tx`.
 
 Application messages are already routed through the internal `AppInputs` mux.
-Today it contains only `AppInput::Shared`, wrapping the shared message receiver;
-this RFC extends that mux with keyed command output.
+Before this RFC it contained only `AppInput::Shared`, wrapping the shared
+message receiver; this RFC extends that mux with keyed command output.
 
 That model intentionally tracks tasks so shutdown and panic unwinding abort them,
 but it forgets per-command identity after spawn. In contrast,
@@ -178,7 +179,9 @@ impl std::hash::Hash for CommandId { /* TypeId + erased Hash */ }
 
 The type namespace is part of equality. `CommandId::new("search")` and
 `CommandId::new(String::from("search"))` are different ids because their Rust
-types differ. A borrowed field such as `self.query.as_str()` is rejected unless
+types differ. (RFC 0005 later added a scope component to the same
+identity — equality now also includes `ScopePath`; the structural half
+stated here is unchanged.) A borrowed field such as `self.query.as_str()` is rejected unless
 the borrow is actually `'static`; use an owned value or a small marker enum:
 
 ```rust
@@ -314,7 +317,10 @@ The task wrapper owns the only sender. User code never sees it. The wrapper
 translates `Action::Message` and `Action::Quit` into `CommandOutput` before they
 reach the runtime.
 
-`CommandReceiver` wraps `mpsc::UnboundedReceiver<CommandOutput<Msg>>`. When the
+`CommandReceiver` wraps the runtime's channel receiver for
+`CommandOutput<Msg>` (the `channel::Receiver` wrapper — unbounded by
+default, bounded under RFC 0006's `keyed_channel_capacity`;
+`src/runtime/keyed_commands.rs`). When the
 inner receiver is closed and empty, it yields `ReceiverEvent::Closed` instead of
 returning `None`, then parks pending until the runtime removes it. This avoids a
 `StreamMap` footgun: inner streams that return `None` are silently removed
@@ -335,8 +341,8 @@ accounting. `KeyedCommands` samples them immediately after an `Output` item is
 pulled, applies the lifecycle transition, and only then returns the payload
 toward `update()`. They are not a cleanup event; they tell the lifecycle whether
 the just-delivered item was the last possible item from that sender. The
-implementation reads `sender_closed` from
-`mpsc::UnboundedReceiver::is_closed()` and `buffered` from `len()`:
+implementation reads `sender_closed` from the receiver wrapper's
+`is_closed()` and `buffered` from its `len()`:
 
 - `sender_closed && buffered == 0` releases the id before `update()` can return
   same-id work (INV-7).
@@ -441,8 +447,10 @@ the previous run no longer owns deliverable output.
 
 ### 4.3 Dispatching a Command
 
-The current runtime already lowers `Command` into `RuntimeCommandParts` before
-enqueueing:
+The runtime lowers `Command` into `RuntimeCommandParts` before
+enqueueing; at this RFC's drafting the parts carried one optional folded
+stream (the sketches below use that shape — since superseded by a leaf
+vector folded at the spawn site, RFC 0008 §4.1/INV-T3):
 
 ```text
 dispatch_update_command(cmd):
@@ -453,7 +461,7 @@ dispatch_update_command(cmd):
 enqueue_command(parts):
   if parts.stream is None:
       return
-  spawn_unkeyed(parts.stream)   // current behavior
+  spawn_unkeyed(parts.stream)   // pre-RFC behavior
 ```
 
 RFC 0003 extends the same parts value with `cancels` and `key`, then changes the
@@ -464,16 +472,16 @@ enqueue_command(parts):
   app_inputs.reconcile_keyed_available()
   for id in parts.cancels:
       app_inputs.cancel_keyed(id)
-  if parts.stream is None:
-      return
+  if parts.stream is None:      // landed form: fold_leaves(parts.leaves)
+      return                    //   yields nothing to spawn
   if parts.key is None:
-      spawn_unkeyed(parts.stream)   // current behavior
+      spawn_unkeyed(parts.stream)
   else:
       app_inputs.spawn_keyed(parts.key.id, parts.key.policy, parts.stream)
 ```
 
-The stream-less early return happens after cancels are applied. A command with
-neither cancels nor a stream still takes today's no-op path. Enqueue-time
+The effect-less early return happens after cancels are applied. A command with
+neither cancels nor an effect still takes the no-op path. Enqueue-time
 reconciliation remains necessary for cancel-only commands; it only drains
 currently ready `JoinSet` exits and does not scan every live keyed receiver.
 
@@ -489,14 +497,15 @@ enum AppInput<Msg> {
 }
 
 struct AppInputs<Msg> {
-    shared: mpsc::UnboundedReceiver<Msg>,
-    keyed: KeyedCommands<Msg>,
+    shared: channel::Receiver<Msg>,   // unbounded by default; bounded
+                                      // under RFC 0006's capacities
+    keyed: KeyedCommands<Msg>,        // holds keyed_capacity + observer
 }
 
 impl<Msg: Send + 'static> AppInputs<Msg> {
     fn try_next_ready(&mut self) -> Option<AppInput<Msg>>;
     fn reconcile_keyed_available(&mut self);
-    fn cancel_keyed(&mut self, id: CommandId);
+    fn cancel_keyed(&mut self, id: &CommandId);
     fn spawn_keyed(
         &mut self,
         id: CommandId,
@@ -546,7 +555,9 @@ the former `process_message_batch`; today it only drains shared messages and
 returns `()`. RFC 0003 extends it to also drain keyed receiver events and to
 return `BatchOutcome::Quit` only for keyed `Quit`, otherwise
 `BatchOutcome::Continue`. It keeps the existing 100 microsecond micro-batch
-window. The control contract is:
+window; a batch additionally ends at RFC 0006's `batch_max_messages`
+pull cap when one is configured (RFC 0006 INV-L12). The control contract
+is:
 
 ```text
 process_input_batch(first_input):
@@ -674,11 +685,16 @@ directives, and the optional effect stream are observed together:
 ```rust
 struct RuntimeCommandParts<Msg: Send + 'static> {
     directives: RuntimeDirectives,
-    stream: Option<BoxStream<'static, Action<Msg>>>,
+    stream: Option<BoxStream<'static, Action<Msg>>>,  // drafting-time shape
     cancels: Vec<CommandId>,
     key: Option<CancellableCommand>,
 }
 ```
+
+(The `stream` field is the drafting-time shape; the landed parts carry
+`leaves: Vec<BoxStream<'static, Action<Msg>>>`, folded only at the
+runtime's spawn site — superseded by RFC 0008 §4.1/INV-T3's single
+lowering boundary; `src/command/runtime_parts.rs`.)
 
 Construction rules:
 
@@ -755,8 +771,12 @@ struct TypedCommandId<T>(T);
 `eq_erased` uses `other.as_any().downcast_ref::<T>()` and compares the stored
 value. `hash_erased` hashes `TypeId::of::<T>()` and the stored value directly
 with `&mut state`; std's `Hasher` implementation for `&mut H` makes that work
-with `&mut dyn Hasher`. The public `CommandId` is
-`Arc<dyn ErasedCommandId>`.
+with `&mut dyn Hasher`. This sketch is the drafting-time shape — the
+landed erasure is the shared `StructuralKey` (also used by
+`SubscriptionId`), and `CommandId` is `{ inner: StructuralKey, scope:
+ScopePath }`, its equality including the scope component — superseded by
+RFC 0005's structural-identity unification
+(`src/command/cancellation.rs`, `src/structural_key.rs`).
 
 ### 5.4 Keyed Command Manager
 
@@ -833,7 +853,9 @@ Keyed runs use their own `JoinSet<TaskExit>`, separate from unkeyed
 `command_tasks`. The spawn path:
 
 1. Allocate a fresh `RunToken`.
-2. Create a private unbounded channel.
+2. Create the run's private channel (`channel::channel_observed` —
+   unbounded by default, bounded under RFC 0006's
+   `keyed_channel_capacity`; RFC 0006 INV-L2/INV-L9).
 3. Spawn the translation task into `tasks` and keep the returned `AbortHandle`.
 4. Insert `KeyedEntry { receiver, run: KeyRun::Running { token, abort } }` into
    `entries` under the `CommandId`.
@@ -920,7 +942,8 @@ existing command-task shutdown guarantee.
 
 ### 7.1 Command Unit Tests
 
-White-box tests in `src/command.rs`:
+White-box tests in `src/command/cancellation.rs` (cancellation.rs:89)
+and `src/command/core.rs` (core.rs:636):
 
 - `CommandId` equality is structural: same type and equal value match; distinct
   types do not match; hash collisions do not imply equality.
