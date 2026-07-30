@@ -526,12 +526,13 @@ as INV-L13 (section 5):
   contiguity, and the counter's allocation or storage mechanism are not
   pinned — a per-instance counter and a process-global one are equally
   conforming. The requirement constrains emissions, not the counter: a
-  wrap is non-conforming only where it would make a `runtime_id`'s next
+  wrap is non-conforming only where it makes a `runtime_id`'s next
   emitted `seq` fail to exceed that `runtime_id`'s greatest
   already-emitted `seq`; a wrap that never surfaces as such an emission
   — crossed between emissions, or reaching only a fresh `runtime_id` —
-  is harmless under the current-value rule below. The `seq` is captured with the same
-  snapshot as the four counts, so a greater `seq` always carries a gauge
+  is harmless under the current-value rule below. The `seq` is
+  captured with the same snapshot as the four counts, so a greater
+  `seq` always carries a gauge
   state reached no earlier than any lesser `seq` of the same
   `runtime_id`. The current-value rule is per instance: the *current*
   value of each gauge of a given runtime is the value on the gauge
