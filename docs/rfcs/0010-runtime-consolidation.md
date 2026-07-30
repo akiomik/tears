@@ -37,8 +37,9 @@ land on that architecture without replacing it.
 - **Baseline**: `main` at commit `daa8bd1` — the reproducibility anchor
   every implementation-fact citation in this consolidation is defined
   on.
-- **Reference contract**: the union of three sets, each defined
-  separately —
+- **Reference contract**: the combination of three layers — they
+  overlap, so each is defined separately rather than as disjoint
+  sets —
   1. the **existing contract corpus**: the bodies of RFCs 0001–0009 as
      they stand on this branch;
   2. the **semantics-bearing Draft overlay**: RFC 0006, RFC 0007,
@@ -115,14 +116,14 @@ not by per-feature argument alone.
 
 Additivity is also audited in the removal direction: the completed form
 minus a feature must still be the small core. The projection applies to
-removing **surfaces the audit itself classifies as optional or
-support** — a surface the audit rules an unconditional constituent (or
-whose removal it excludes by an `X` verdict) is outside the
+removing **surfaces whose removal the audit admits** — a surface the
+audit rules an unconditional constituent (or whose removal it excludes
+by an `X` verdict) is outside the
 projection's quantifier, and the exclusion is recorded on the audit
 row, not assumed.
 
-- Disabling sources, backends, or observability the audit classes as
-  optional must leave the same core owners and event topology.
+- Disabling sources, backends, or observability whose removal the
+  audit admits must leave the same core owners and event topology.
 - An unkeyed command must be the *same* execution path without identity
   and cancellation policy — not a second runtime.
 - The TEA facade must be an adapter over a single-feature reducer — not
@@ -259,22 +260,30 @@ parts:
    landed work, superseded shapes cited as current, and absolute
    claims later scoped by other documents.
 
-The pre-drafting gate completed 2026-07-30. Part 1 scanned upstream
+The pre-drafting gate completed 2026-07-30/31. Part 1 scanned upstream
 `main` over `daa8bd1..89ea872` and found the
 baseline advance had touched only the dependency lockfile — zero
 contact with the scanned paths, so no audit rows required re-running
 from the code delta. Part 2 swept all eleven RFCs, the RFC index, and
 the code documentation they cite (the `RuntimeConfig` rustdoc, the
-load-harness comments); findings were fixed in place per document,
-then an independent cold-read rescan of the full corpus — split
-across two reviewers — surfaced three residual instances, and the
-closing reviews surfaced five further document instances plus two
-implementation-conformance fixes (identifier allocators now fail
-before any reuse); with those fixes verified by section-whole sweeps
-and a full re-read of the affected RFC, the gate closed at zero
-remaining findings. The pre-acceptance gate runs **both
-parts** again over the final bundle before the simultaneous acceptance
-of §1.8.
+load-harness comments), and its corrections ran to closure in three
+classes:
+
+- **document retensing** — completed-state and superseded-shape drift
+  fixed in place per document, with residual instances surfaced by an
+  independent two-reviewer cold read and swept section-whole;
+- **implementation conformance** — the two identifier allocators made
+  fail-before-reuse where document contracts pin non-reuse; and
+- **numeric-claim precision** — the constructor panic documentation
+  freed of an off-by-one allocation count, and RFC 0006's wraparound
+  absolute restated as a consequence of per-instance strict increase
+  and then twice sharpened (same-instance scope; the equal-`seq`
+  case).
+
+The correction endpoint is commit `ab313b2`; at that endpoint the
+claim scan records zero remaining findings. The pre-acceptance gate
+runs **both parts** again over the final bundle before the
+simultaneous acceptance of §1.8.
 
 ## 2. Reference architecture (informative)
 
@@ -362,9 +371,9 @@ change under their cited contracts.
 | unkeyed command task | `command_tasks: JoinSet<()>` | shared spawn path and typed-exit task set; anonymous tasks are exit-only — no per-id entry (*mechanism*) | behavior unchanged under RFC 0003 INV-1 |
 | keyed task + lifecycle FSM | `KeyedCommands` (map + task set + run tokens) | single authoritative structure, O(1) lookup; no double bookkeeping (*mechanism*) | RFC 0003 INV-2–INV-16, unchanged |
 | subscription forwarder | `SubscriptionManager.running` | unified task-policy wrapper; reconcile algorithm unchanged, admission per the quiescence barrier | RFC 0005 INV-8–INV-13; re-evaluation phase: RFC 0011; admission: RFC 0012 §4 |
-| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3 |
+| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3; send handling: RFC 0006 §4.3; quit translation: unkeyed — RFC 0006 R4/INV-L4, keyed — RFC 0003 INV-9 / RFC 0006 INV-L10 |
 | frame ownership | `FrameScheduler` + `PendingWork` + runtime | unchanged; parking premise informative | RFC 0011 INV-LC1/INV-LC2 and §7's premises |
-| gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the entry-owned RAII guard shape is the consolidated mechanism choice (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
+| gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the **keyed** gauge moves to an entry-owned guard held by the keyed entry; the subscription, unkeyed-command, and blocked gauges keep their task-held guards (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
 | time | `tokio::time`, single axis | unchanged | RFC 0009 |
 | identity | `StructuralKey` / `ScopePath` | unchanged | RFC 0005 |
 
@@ -433,33 +442,43 @@ content; this summary is the tally the §1.8 gate is measured on.
 *Stub — verdict chapter for unifying the unkeyed/keyed execution
 mechanism — one spawn, task-ownership, and exit-reap path, per-id
 lifecycle entries for keyed runs only — with the two delivery classes
-preserved, and for the scheduling-policy root (shared-first pull,
-fairness, traffic classes) decided jointly with it; contract impact
-rides RFC 0003 and RFC 0006. Each verdict chapter names the root
-judgments it owns, completing §1.9's membership test.*
+preserved, and for the scheduling policy (shared-first pull, fairness,
+traffic classes) decided jointly with it; contract impact rides
+RFC 0003 and RFC 0006. Owns the root judgments: `root-A1` (the
+execution model) and `root-SCHED` (the scheduling policy). Each
+verdict chapter names the root judgments it owns, so §1.9's
+membership test closes mechanically over §3–§7's lists.*
 
 ## 4. Lifecycle and termination
 
 *Stub — verdict chapter for the lifecycle phase machine and the
-two-route termination model; the contract body is owned by RFC 0011.*
+two-route termination model; the contract body is owned by RFC 0011.
+Owns the root judgment: `root-K51J46` (the lifecycle root).*
 
 ## 5. Identity and the composition axiom
 
 *Stub — verdict chapter for the composition-owns-the-identity-boundary
 axiom and the requirements handed to the composition RFC; identity
-contract bodies stay in RFC 0005.*
+contract bodies stay in RFC 0005. Owns the root judgment: `root-CMP`
+(the identity/composition root).*
 
 ## 6. Effect and subscription execution boundary
 
-*Stub — verdict chapter for source execution, the quiescence barrier,
-and the effect-DI negative space; the contract body is owned by
-RFC 0012.*
+*Stub — verdict chapter for the command directive/effect axis
+placement (output treatment vs. execution lifecycle, settled in
+RFC 0002 §9), source execution, the quiescence barrier, and the
+effect-DI negative space; contract bodies are owned by RFC 0002 §9's
+settled axes and by RFC 0012. Owns the root judgments: `root-B7` (the
+axis placement) and `root-D18` (subscription execution and the
+effect-DI boundary).*
 
 ## 7. Public API boundary and contour
 
 *Stub — verdict chapter for the `Message` bound freeze and the
 leaf-level API decisions (RFC 0007's derive set, RFC 0006's gauge
-instance field).*
+instance field). Owns the root judgment: `root-I40` (the `Message`
+boundary), together with the independent leaf judgments this chapter
+records.*
 
 ## 8. Reaffirmation ledger (snapshot)
 
