@@ -446,8 +446,9 @@ fn key(&self) -> Self::Key {
 ```
 
 The RFC does not promise `Arc`, one allocation per constructor, pointer-sized
-storage, or O(1) cloning. The initial implementation is expected to use shared
-erasure and is benchmarked as described in section 7.
+storage, or O(1) cloning. The initial implementation uses shared
+erasure (`src/structural_key.rs`) and was benchmarked as described in
+section 7.
 
 ### 3.3 No compatibility constructor
 
@@ -925,9 +926,11 @@ reducing manager clones. They must preserve every identity invariant and remain
 internal. Reintroducing a pre-hashed equality surrogate is not a permitted
 optimization.
 
-Phase B adds a separate scoped steady-state case before its implementation is
-declared complete. It should compare empty, one-segment, and representative
-nested scope paths without making a particular path representation public.
+Phase B added the separate scoped steady-state case
+(`subscription_reconcile_steady_scoped`, `benches/subscription.rs`),
+comparing the unscoped baseline, a single composition boundary, and
+representative nested scope paths without making a particular path
+representation public.
 
 ## 8. Implementation guide
 
@@ -996,8 +999,9 @@ Each built-in source must expose its actual lifecycle inputs as its associated
   `QueryKey` inputs;
 - `MockSource`: one clone-stable per-instance token stored by the source. The
   token's value is now exact identity, so its generation must be unique within
-  the process — for example a monotonically increasing atomic counter. Do not
-  keep the current timestamp-plus-type-name digest as the token value: two
+  the process — landed as a monotonically increasing atomic counter
+  (`src/subscription/mock.rs`). The pre-RFC timestamp-plus-type-name
+  digest could not be kept as the token value: two
   instances created in the same clock tick would alias, reproducing the old
   collision semantics through the new trait shape; and
 - benchmark/test sources: their caller-controlled logical key.
@@ -1139,7 +1143,7 @@ author — constructs the scoped value.
 
 ### Add scope only to subscriptions
 
-Rejected at the identity-model level. The current subscription failure is more
+Rejected at the identity-model level. The pre-RFC subscription failure was more
 immediate, but `CommandId` has the same multiple-child aliasing problem. Defining
 one scope algebra now prevents incompatible command and subscription composition
 rules. Phase delivery may still be staged.
@@ -1185,10 +1189,11 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-Follow-up order is:
+The follow-up order was, with items 1–2 since completed and the rest
+remaining design work:
 
-1. implement Phase A for 0.10.0;
-2. evaluate and, when scheduled, implement Phase B additively;
+1. implement Phase A for 0.10.0 (done);
+2. evaluate and, when scheduled, implement Phase B additively (done);
 3. design per-effect command cancellation/batch composition;
 4. use scoped identity and deterministic effect testing as inputs to the
    reducer composition RFC; and
