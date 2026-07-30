@@ -21,11 +21,13 @@
 
 ## Summary
 
-`SubscriptionId` currently stores `{ TypeId, u64 }`. A subscription source
-hashes its logical identity before constructing the ID, so two unequal logical
-keys with the same 64-bit hash become equal to the runtime. The
-`SubscriptionManager` then keeps only the first declaration, continues or
-restarts the wrong lifecycle, and can retain the wrong message mapping. This is
+Before this RFC, `SubscriptionId` stored `{ TypeId, u64 }`. A
+subscription source
+hashed its logical identity before constructing the ID, so two unequal logical
+keys with the same 64-bit hash became equal to the runtime. The
+`SubscriptionManager` then kept only the first declaration, continued or
+restarted the wrong lifecycle, and could retain the wrong message
+mapping. That was
 a correctness failure, not merely an unlikely `HashMap` performance collision.
 
 This RFC replaces the pre-hashed surrogate with a framework-owned erased
@@ -56,9 +58,9 @@ contracts.
 
 ## 1. Context and constraints
 
-### 1.1 Current subscription identity
+### 1.1 Pre-RFC subscription identity
 
-The current public shape is:
+The public shape this RFC replaced was:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -943,9 +945,10 @@ trait ErasedKey: Send + Sync {
 }
 ```
 
-A private `StructuralKey` can own `Arc<dyn ErasedKey>` and implement `Clone`,
-typed equality, hashing, and diagnostic type names once. `CommandId` can migrate
-to that helper without changing RFC 0003 behavior. `SubscriptionId` adds the
+A private `StructuralKey` owns the erased key and implements `Clone`,
+typed equality, hashing, and diagnostic type names once; `CommandId`
+migrated to that helper without changing RFC 0003 behavior (landed as
+`ErasedStructuralKey` — `src/structural_key.rs`). `SubscriptionId` adds the
 `TypeId` selected by `Subscription::new<Source>` around the same key primitive.
 The private subscription-ID constructor accepts `Source::Key`; it is not
 reachable from downstream source implementations.
