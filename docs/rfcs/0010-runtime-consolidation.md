@@ -290,7 +290,7 @@ classes:
 The correction endpoint is commit `ab313b2`; at that endpoint the
 claim scan records zero remaining findings. The pre-acceptance gate
 runs **both parts** again over the final bundle before the
-simultaneous acceptance of §1.8.
+bundle acceptance of §1.8.
 
 ## 2. Reference architecture (informative)
 
@@ -811,7 +811,7 @@ backend.
 is the gauge instance field.** Downgrading the capacity-wait event was
 rejected: RFC 0007 §5.2's `quit_overload` valid-trial predicate
 consumes it normatively (at least two shared-channel capacity-wait
-events in the 5 ms window before the quit), so a best-effort emission would
+events in the 5ms window before the quit), so a best-effort emission would
 leave a conforming RFC 0006 implementation unable to run RFC 0007's
 acceptance rows. The single schema change — the gauge event's
 `runtime_id` — is carried by the RFC 0006 Draft amendment (INV-L13).
