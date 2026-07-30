@@ -38,15 +38,19 @@ Commands with no `CommandId` continue to use the existing unkeyed path.
 
 ### 1.1 Background
 
-The current command path is:
+The unkeyed command path — pre-RFC the only path, and still the
+default — is:
 
 1. `Application::update` returns a `Command`.
 2. `Runtime::dispatch_update_command` lowers it once with
    `Command::into_runtime_parts()`.
 3. The runtime reads redraw from `RuntimeCommandParts`, then
-   `RuntimeCore::enqueue_command` consumes the optional stream.
-4. If a stream exists, the runtime spawns one task into
-   `command_tasks: JoinSet<()>`.
+   `RuntimeCore::enqueue_command` consumes the effect (at drafting a
+   single optional folded stream; the landed parts carry a leaf vector
+   folded at the spawn site — §5.1, RFC 0008 §4.1/INV-T3).
+4. If the effect yields anything to spawn, the runtime spawns one task
+   into `command_tasks: JoinSet<()>` (`fold_leaves`,
+   `src/runtime/core.rs`).
 5. The task forwards `Action::Message` into `msg_tx` and `Action::Quit` into
    `quit_tx`.
 
