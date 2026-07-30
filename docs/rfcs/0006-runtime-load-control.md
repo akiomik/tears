@@ -527,10 +527,10 @@ as INV-L13 (section 5):
   pinned — a per-instance counter and a process-global one are equally
   conforming. The requirement constrains emissions, not the counter: a
   wrap is non-conforming only where it would make a `runtime_id`'s next
-  emitted `seq` smaller than one that `runtime_id` already emitted; a
-  wrap no emission observes — crossed between emissions, or first
-  observed by a fresh `runtime_id` — is harmless under the per-instance
-  recovery rule below. The `seq` is captured with the same
+  emitted `seq` fail to exceed that `runtime_id`'s greatest
+  already-emitted `seq`; a wrap that never surfaces as such an emission
+  — crossed between emissions, or reaching only a fresh `runtime_id` —
+  is harmless under the current-value rule below. The `seq` is captured with the same
   snapshot as the four counts, so a greater `seq` always carries a gauge
   state reached no earlier than any lesser `seq` of the same
   `runtime_id`. The current-value rule is per instance: the *current*
