@@ -146,7 +146,19 @@ impl<T: Clone + 'static> MockSource<T> {
         let (tx, _rx) = broadcast::channel(capacity);
         Self {
             sender: tx,
-            key: NEXT_MOCK_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
+            // The key is exact identity and must be unique within the process
+            // (RFC 0005 §8.3), so the allocator fails before it can reuse a
+            // value: `checked_add` leaves the counter saturated at `u64::MAX`,
+            // making this and every later allocation panic instead of wrapping
+            // into reuse.
+            key: NEXT_MOCK_SOURCE_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    n.checked_add(1)
+                })
+                .expect(
+                    "MockSource key space exhausted; keys are never reused \
+                     within a process (RFC 0005 §8.3)",
+                ),
         }
     }
 

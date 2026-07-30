@@ -146,7 +146,20 @@ impl QueryClient {
     #[must_use]
     pub fn with_config(config: QueryConfig) -> Self {
         Self {
-            client_id: NEXT_QUERY_CLIENT_ID.fetch_add(1, Ordering::Relaxed),
+            // `client_id` is an identity component — subscription identity is
+            // `(client_id, TypeId, QueryKey)` (RFC 0001) — so reusing an id
+            // would collide distinct clients' identities. The allocator fails
+            // before it can reuse a value: `checked_add` leaves the counter
+            // saturated at `u64::MAX`, making this and every later allocation
+            // panic instead of wrapping into reuse.
+            client_id: NEXT_QUERY_CLIENT_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    n.checked_add(1)
+                })
+                .expect(
+                    "QueryClient id space exhausted; client ids are never \
+                     reused within a process (RFC 0001 subscription identity)",
+                ),
             cells: Arc::new(DashMap::new()),
             config,
         }
