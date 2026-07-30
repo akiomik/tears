@@ -273,9 +273,9 @@ classes:
   fixed in place per document, with residual instances surfaced by an
   independent two-reviewer cold read and swept section-whole;
 - **implementation conformance** — the two identifier allocators made
-  fail-before-reuse where document contracts pin non-reuse, and the two
-  guidance notes RFC 0007 §3.3 records as landed added to the
-  runtime-configuration rustdoc; and
+  fail-before-reuse where document contracts pin non-reuse, and the
+  two previously missing of the three guidance notes RFC 0007 §3.3
+  records as landed added to the `RuntimeConfig` rustdoc; and
 - **numeric-claim precision** — the constructor panic documentation
   freed of an off-by-one allocation count, and RFC 0006's wraparound
   absolute restated as a consequence of per-instance strict increase
