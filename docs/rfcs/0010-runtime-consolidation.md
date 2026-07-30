@@ -211,10 +211,15 @@ Accepted only when all of the following hold:
 - **`B`'s criterion** is "breaks the *post-consolidation* contract".
   Changes already carried on the 0.11.0 breaking budget (the
   composition work itself included) are baseline, not `B`.
-- **Bundle acceptance.** This RFC is Accepted only simultaneously with
-  every contract document marked `blocks composition = yes` in §10. If
-  an amendment's semantics change during the bundle review, the change
-  is a counterexample and returns to the audit before acceptance.
+- **Bundle acceptance.** This RFC is Accepted only together with the
+  bundle its Target names: RFC 0011, RFC 0012, and the blocking
+  amendments (the RFC 0006 and RFC 0007 Draft overlays). If an
+  amendment's semantics change during the bundle review, the change is
+  a counterexample and returns to the audit before acceptance. The
+  §10 register's `blocks composition = yes` flag means something
+  else — the delegated document gates the *future composition RFC*,
+  which it must precede or accompany — and is not a condition on this
+  RFC's acceptance.
 
 ### 1.9 Counterexample grades and the reopen rule
 
@@ -373,7 +378,7 @@ change under their cited contracts.
 | unkeyed command task | `command_tasks: JoinSet<()>` | shared spawn path and typed-exit task set; anonymous tasks are exit-only — no per-id entry (*mechanism*) | behavior unchanged under RFC 0003 INV-1 |
 | keyed task + lifecycle FSM | `KeyedCommands` (map + task set + run tokens) | single authoritative structure, O(1) lookup; no double bookkeeping (*mechanism*) | RFC 0003 INV-2–INV-16, unchanged |
 | subscription forwarder | `SubscriptionManager.running` | unified task-policy wrapper; reconcile algorithm unchanged, admission per the quiescence barrier | RFC 0005 INV-8–INV-13; re-evaluation phase: RFC 0011; admission: RFC 0012 §4 |
-| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3; send handling: RFC 0006 §4.3; quit translation: unkeyed — RFC 0006 R4/INV-L4, keyed — RFC 0003 INV-9 / RFC 0006 INV-L10/INV-L11 |
+| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the item vocabulary (the stream's output type), sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3; send handling: RFC 0006 §4.3; quit translation: unkeyed — RFC 0006 R4/INV-L4, keyed — RFC 0003 INV-9 / RFC 0006 INV-L10/INV-L11 |
 | frame ownership | `FrameScheduler` + `PendingWork` + runtime | unchanged; parking premise informative | RFC 0011 INV-LC1/INV-LC2 and §7's premises |
 | gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the **keyed** gauge moves to an entry-owned guard held by the keyed entry; the subscription, unkeyed-command, and blocked gauges keep their task-held guards (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
 | time | `tokio::time`, single axis | unchanged | RFC 0009 |
@@ -463,12 +468,15 @@ task-ownership set with typed exits, one exit-reap path, per-id
 lifecycle entries for keyed runs only with anonymous tasks exit-only,
 O(1) bookkeeping under a single authoritative owner (no double
 bookkeeping), the task-body policy's *definition site* in one owner
-module with sink, quit translation, panic-log form, and reporting per
+module with item vocabulary (the stream's output type), sink shape,
+quit translation, panic-log form, and completion reporting per
 kind, and the keyed gauge entry-owned after its transcript-identity
 gate passed (§2.2). All of this is mechanism — informative here and in
-§2 — and a staged implementation of all four stages on this branch
+§2 — and a staged spike of all four stages on a separate spike branch
 demonstrated feasibility with every contract suite green and no
-contract test rewritten (no grade-(i) counterexample). Per-leaf
+contract test rewritten (no grade-(i) counterexample); the spike's
+adoption is decided together with this amendment bundle, not assumed
+by it. Per-leaf
 provenance headroom (a leaf-metadata seam) is recorded as future
 room, deliberately unimplemented (§1.6).
 
@@ -493,7 +501,10 @@ Shared-first pull is reaffirmed with **RFC 0003 INV-14 as its sole
 canonical statement** — RFC 0006 INV-L11 is its keyed-quit
 application, and RFC 0008's ordering text maps it under that RFC's
 citation rule. The fairness question stays resolved against any
-policy (RFC 0006 §4.7), reaffirmed. Two existing behaviors are
+policy (RFC 0006 §4.7), reaffirmed. Bounded delivery mode stays
+non-default, reaffirmed — RFC 0006 §3.1's position, with any future
+default flip remaining that RFC's deliberate later decision, not
+judged here. Two existing behaviors are
 numbered without semantic change: bounded mode's narrowed cancellation
 immediacy (RFC 0006 INV-L14) and the traffic-class negative space
 (RFC 0006 INV-L15), the latter with internal class metadata explicitly
@@ -545,7 +556,7 @@ RFC 0011 §7, and the normative content is restricted to observables.
 preservation and controlled-route quiescence — resolve at
 implementation design in that RFC's body; both are strengthenings its
 invariants already hold under. Graceful drain is pinned only as the
-zero-grace degenerate frame; its substance is future work outside this
+zero-grace degenerate form; its substance is future work outside this
 bundle (blocks composition: no).
 
 **Contract impact.** RFC 0011 (Draft overlay) owns the contract body
@@ -799,8 +810,8 @@ backend.
 **Verdict: the three load-event kinds stay contract; the one change
 is the gauge instance field.** Downgrading the capacity-wait event was
 rejected: RFC 0007 §5.2's `quit_overload` valid-trial predicate
-consumes it normatively (two shared-channel capacity-wait events in
-the 5 ms window before the quit), so a best-effort emission would
+consumes it normatively (at least two shared-channel capacity-wait
+events in the 5 ms window before the quit), so a best-effort emission would
 leave a conforming RFC 0006 implementation unable to run RFC 0007's
 acceptance rows. The single schema change — the gauge event's
 `runtime_id` — is carried by the RFC 0006 Draft amendment (INV-L13).
