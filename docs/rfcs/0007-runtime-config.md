@@ -793,10 +793,10 @@ invocation is unchanged.
   at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
   current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
   same — and the smoke run fails when any scenario times out. That
-  timeout-failure rule is part of the profile's definition, not
-  something the harness fully provides today: quit trials already fail
-  the run on timeout, but a timed-out load scenario is currently
-  report-only, so the smoke implementation promotes it to a failure —
+  timeout-failure rule is part of the profile's definition, and the two
+  paths divide it: on the full-run path, quit trials fail the run on
+  timeout while a timed-out load scenario stays report-only; the smoke
+  path promotes a timed-out load scenario to a failure —
   the sequence-integrity assertion alone does not cover it, because a run
   that hangs after processing its last scripted message times out with the
   full sequence `0..total` already delivered, so the assertion has nothing
