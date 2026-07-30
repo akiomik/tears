@@ -267,9 +267,12 @@ from the code delta. Part 2 swept all eleven RFCs, the RFC index, and
 the code documentation they cite (the `RuntimeConfig` rustdoc, the
 load-harness comments); findings were fixed in place per document,
 then an independent cold-read rescan of the full corpus — split
-across two reviewers — surfaced three residual instances, whose fixes
-were verified by section-whole sweeps and a full re-read of the
-affected RFC; the gate closed at zero remaining findings. The pre-acceptance gate runs **both
+across two reviewers — surfaced three residual instances, and the
+closing reviews surfaced five further document instances plus two
+implementation-conformance fixes (identifier allocators now fail
+before any reuse); with those fixes verified by section-whole sweeps
+and a full re-read of the affected RFC, the gate closed at zero
+remaining findings. The pre-acceptance gate runs **both
 parts** again over the final bundle before the simultaneous acceptance
 of §1.8.
 
@@ -308,7 +311,7 @@ sketch.
      that ran update marks subscriptions dirty (RFC 0003 §4.4)
   B. frame pass (current state; RFC 0011 INV-LC1/INV-LC2): render if
      redraw pending, then — after a successful render; a render error
-     terminates instead (RFC 0011 §4.2) — subscription re-evaluation
+     terminates instead (RFC 0011 §2.2, §4.1) — subscription re-evaluation
      if dirty; both steps observe the same state; no individual state
      is promised a render
   C. dedicated unkeyed-quit branch (never-bounded channel —
@@ -430,7 +433,10 @@ content; this summary is the tally the §1.8 gate is measured on.
 *Stub — verdict chapter for unifying the unkeyed/keyed execution
 mechanism — one spawn, task-ownership, and exit-reap path, per-id
 lifecycle entries for keyed runs only — with the two delivery classes
-preserved; contract impact rides RFC 0003 and RFC 0006.*
+preserved, and for the scheduling-policy root (shared-first pull,
+fairness, traffic classes) decided jointly with it; contract impact
+rides RFC 0003 and RFC 0006. Each verdict chapter names the root
+judgments it owns, completing §1.9's membership test.*
 
 ## 4. Lifecycle and termination
 
