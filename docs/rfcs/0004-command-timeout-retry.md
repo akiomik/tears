@@ -69,23 +69,30 @@ keeps that boundary as a normative constraint.
 
 ### 1.2 Model and terms
 
-`Command<Msg>` contains an effect and runtime directives:
+`Command<Msg>` contains an effect, runtime directives, and — since
+RFC 0003 — cancellation metadata:
 
 ```rust
 pub struct Command<Msg: Send + 'static> {
-    effect: Effect<Msg>,
+    effect: Effect<Msg>,          // pub(super) in the landed code
     directives: RuntimeDirectives,
+    cancellation: CommandCancellation,   // RFC 0003
 }
 ```
 
-`Effect<Msg>` is either `None` or a flat sequence of leaf streams. The leaves
-are folded with `select_all` only at the `into_stream()` boundary.
+`Effect<Msg>` is an empty-or-flat sequence of leaf streams (landed as a
+struct holding `leaves: Vec<BoxStream>`; this RFC's enum-flavored
+`Effect::None` / `Effect::Leaves` vocabulary names the empty and
+non-empty shapes of the same concept). The leaves are folded only at the
+runtime's spawn boundary (`into_runtime_parts()` → `into_leaves()`, then
+`fold_leaves` at the spawn site — `src/command/runtime_parts.rs`;
+`into_stream()` survives as a `#[cfg(test)]` helper).
 
 This RFC uses the following terms:
 
 | Term | Meaning |
 | --- | --- |
-| Effect leaf | One independent stream stored in `Effect::Leaves` before folding |
+| Effect leaf | One independent stream held in the effect's leaf sequence before folding |
 | Target command | The command consumed by a `.timeout()` call |
 | Per call | One contract shared by all leaves wrapped by that invocation |
 | Effect-local | State that exists only for one effect execution, not across updates |
@@ -360,7 +367,8 @@ process.
 
 ### 3.5 API rationale and naming
 
-Retry is a constructor rather than a modifier because `Effect::Leaves` retains
+Retry is a constructor rather than a modifier because the effect's leaf
+sequence retains
 only streams, not the factory needed to create a new future. Each attempt must
 invoke the supplied operation again. In addition, an arbitrary `Command<Msg>`
 has no error channel from which retry could classify failures.
@@ -412,8 +420,9 @@ effect and never removes directives.
 
 ### 4.2 RFC 0003 integration
 
-[RFC 0003](./0003-command-cancellation.md) is implemented separately. Once its
-metadata exists, these forward-integration contracts apply:
+[RFC 0003](./0003-command-cancellation.md) is Implemented and its
+metadata (`CommandCancellation`) exists; these forward-integration
+contracts apply:
 
 - `timeout` preserves cancellation metadata as well as directives.
 - `.timeout(...).cancellable(id)` and
@@ -611,11 +620,11 @@ exact test locations and representative cases are verification guidance.
 ### B.3 Test strategy
 
 Time-dependent tests use `#[tokio::test(start_paused = true)]` and
-`tokio::time::advance`. Tokio's `test-util` feature is already a
-dev-dependency.
+`tokio::time::advance`. Tokio's `test-util` feature is an unconditional
+dependency feature (RFC 0009 §5.1).
 
 - Timeout unit tests in
-  [`src/command.rs`](../../src/command.rs) and
+  [`src/command/core.rs`](../../src/command/core.rs) and
   [`src/command/effect.rs`](../../src/command/effect.rs) cover T1–T10,
   including pending and early-completing futures, multiple stream messages,
   `map` on either side of timeout, batch factory consumption (completed and
@@ -653,8 +662,10 @@ Timeout comes first because it changes `effect.rs`. Retry can be built on
 
 ### C.2 Timeout sketch
 
-`Effect::timeout(duration, on_timeout)` can return `Effect::None` unchanged and
-wrap every `Effect::Leaves` entry in a stateful `timeout_leaf` stream.
+`Effect::timeout(duration, on_timeout)` can return an empty effect
+unchanged and
+wrap every leaf entry in a stateful `timeout_leaf` stream (the landed
+form — `TimeoutLeaf`, `src/command/effect.rs`).
 
 One implementation shares `on_timeout` as `Arc<Mutex<Option<F>>>`. The first
 leaf to reach its deadline takes the `FnOnce`, satisfying T3. The mutex keeps
@@ -758,8 +769,8 @@ contexts.
   treatment versus execution lifecycle.
 - [RFC 0003: Command Cancellation](./0003-command-cancellation.md) — keyed
   lifecycle and private receivers.
-- [`src/command.rs`](../../src/command.rs) and
-  [`src/command/effect.rs`](../../src/command/effect.rs) — current `Command`
+- [`src/command/core.rs`](../../src/command/core.rs) and
+  [`src/command/effect.rs`](../../src/command/effect.rs) — the `Command`
   and `Effect` representation.
 - [`src/subscription/time.rs`](../../src/subscription/time.rs) and
   [`src/runtime/frame_rate.rs`](../../src/runtime/frame_rate.rs) — validation
