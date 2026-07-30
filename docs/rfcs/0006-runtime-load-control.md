@@ -8,7 +8,7 @@
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
   under load; the delivery contract of every runtime-owned channel
 - Feature flag: none
-- CHANGELOG: `Added` entry lands at the load-control implementation release
+- CHANGELOG: `Added` entry landed at the load-control implementation release
   (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
   RFC (see section 3). `Changed` — the producer-gauge load event gains a
   `runtime_id` field (a schema change under INV-L13); lands at 0.11.0
@@ -328,7 +328,7 @@ guarantee, so offering a bounded mode contradicts no published contract.
 
 **This RFC requires no additional breaking change in 0.10.0.** The 0.10.0
 release proceeds with the breaking changes already on `main`; the
-load-control implementation (sections 4–6) lands after 0.10.0 behind
+load-control implementation (sections 4–6) landed after 0.10.0 behind
 `RuntimeConfig`.
 
 ## 4. Contract design (post-0.10.0, direction fixed)
@@ -832,8 +832,9 @@ Consequences:
   since resolved that question against any policy (section 4.7), which
   also settles the quit-shaped form: reopening either is one and the same
   new RFC.
-- **Documentation guidance** (lands with open question 1's
-  recommended-defaults documentation): use unkeyed `Command::quit()` for
+- **Documentation guidance** (landed in the recommended-defaults
+  rustdoc — RFC 0007 §3.3, `src/runtime/config.rs`): use unkeyed
+  `Command::quit()` for
   a prompt unconditional quit; `.cancellable(id)` on a quit buys
   suppression at the cost of waiting behind pending inputs under load.
 
@@ -978,8 +979,8 @@ Consequences:
   This resolution adds no per-key claim.
 - **The keyed-probe scenario is permanently measurement-only.** F4's
   numbers are the unbounded regression baseline; the bounded run is
-  recorded when the implementation lands, under the capacity and load
-  the `RuntimeConfig` RFC pins (section 5.1). No keyed-delivery latency cell ever becomes an acceptance
+  recorded in section 5.1's measured acceptance results, under the
+  capacity and load the `RuntimeConfig` RFC pins. No keyed-delivery latency cell ever becomes an acceptance
   bound under this contract.
 - **Reopening requires a new RFC, not a knob.** If field experience ever
   makes bounded keyed-delivery latency a requirement, the change is a
@@ -987,8 +988,9 @@ Consequences:
   (INV-14), with the candidate inventory above as its starting point and
   the quit exemption's interaction with INV-L10/INV-L11 as the first
   problem it must solve.
-- **Documentation guidance** (lands with open question 1's
-  recommended-defaults documentation, extending section 4.6's): keying a
+- **Documentation guidance** (landed in the recommended-defaults
+  rustdoc — RFC 0007 §3.3, `src/runtime/config.rs` — extending section
+  4.6's): keying a
   command buys cancellation and suppression at the cost of delivery
   deferral behind ready shared inputs under load; put liveness-critical
   output in unkeyed commands. For keyed outputs, liveness under load
@@ -1433,7 +1435,7 @@ measurement rather than an implementation-time choice:
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
 | `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); named here are the unbounded rows, and the bounded rows this criterion applies to are the `RuntimeConfig` RFC's redefined ones (blocked-producer count and channel-full churn, not the `quit_backlog_*` depths — reproducibility rules above), not these names reused unchanged; the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
-| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement when the implementation lands, under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
+| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement in the measured acceptance results below (`quit_keyed_bounded`, p50 13.07 s), under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), the two probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared) — the keyed probe is started only after the eight are held saturated, while the shared producer runs throughout as the saturation enabler (it cannot be idled and re-probed without letting the keyed channels drain under shared-first pull; RFC 0007 §5.3). The keyed→shared gate is the shared occupancy sampled only during the window when all nine keyed channels are concurrently saturated, which must reach `app_channel_capacity + 1` — the *simultaneous* value, not a whole-run maximum a shared pool could reach before the keyed channels start; admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
@@ -1635,7 +1637,7 @@ prerequisite of the implementation PR (section 3.2).
    actively refilling overload, and a keyed-quit control — with per-trial
    tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
    matrix is defined in section 5.1 with the unbounded column measured; the
-   bounded column is filled when the implementation lands, under the
+   bounded column's measured results are recorded there, under the
    parameters the `RuntimeConfig` RFC pins (section 5.1). F6 is the
    measurement basis on which INV-L4 has since been resolved to its
    statistical formulation (section 5); F7 is the quantified
