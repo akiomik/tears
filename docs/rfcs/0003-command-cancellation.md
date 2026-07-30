@@ -11,10 +11,12 @@
 
 Before this RFC, `Command` tasks were all spawned into one unkeyed
 `JoinSet<()>`. The runtime
-can abort all command tasks on shutdown, but it cannot cancel one in-flight
-effect's output lifecycle. Applications that need "latest search wins", "cancel
+could abort all command tasks on shutdown, but it could not cancel one
+in-flight
+effect's output lifecycle. Applications that needed "latest search wins",
+"cancel
 the request when leaving this screen", or "ignore a second submit while the
-first is running" must build their own task registry outside the TEA loop.
+first is running" had to build their own task registry outside the TEA loop.
 
 This RFC adds an opt-in keyed lifecycle for command output:
 
@@ -54,9 +56,11 @@ message receiver; this RFC extends that mux with keyed command output.
 
 That model intentionally tracks tasks so shutdown and panic unwinding abort them,
 but it forgets per-command identity after spawn. In contrast,
-`SubscriptionManager` already uses `SubscriptionId` to reconcile a keyed set of
-long-lived streams. Commands need the same lifecycle discipline for short-lived
-effects whose validity can be superseded by later application state.
+`SubscriptionManager` already used `SubscriptionId` to reconcile a keyed set of
+long-lived streams. Commands needed the same lifecycle discipline for
+short-lived
+effects whose validity can be superseded by later application state — the
+keyed lifecycle this RFC adds.
 
 ### 1.2 Non-Negotiables
 
@@ -550,11 +554,12 @@ because no shared message was ready, a later shared message does not
 retroactively precede it. A continuous stream of ready shared inputs can delay
 keyed output; that cancellation-safety tradeoff is accepted for this RFC.
 
-`process_input_batch` already exists on `main` as the prerequisite rename of
-the former `process_message_batch`; today it only drains shared messages and
-returns `()`. RFC 0003 extends it to also drain keyed receiver events and to
+`process_input_batch` predated this RFC as the prerequisite rename of
+the former `process_message_batch`; at drafting it drained only shared
+messages and
+returned `()`. This RFC extended it to also drain keyed receiver events and to
 return `BatchOutcome::Quit` only for keyed `Quit`, otherwise
-`BatchOutcome::Continue`. It keeps the existing 100 microsecond micro-batch
+`BatchOutcome::Continue` — the landed shape (`src/runtime.rs`). It keeps the existing 100 microsecond micro-batch
 window; a batch additionally ends at RFC 0006's `batch_max_messages`
 pull cap when one is configured (RFC 0006 INV-L12). The control contract
 is:
