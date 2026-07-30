@@ -562,7 +562,7 @@ RFC 0011 §7, and the normative content is restricted to observables.
 
 **Conditions.** RFC 0011's two open questions — panic-reason
 preservation and controlled-route quiescence — resolve at
-implementation design in that RFC's body; both are strengthenings its
+implementation design in that RFC's body; both are resolutions its
 invariants already hold under. Graceful drain is pinned only as the
 zero-grace degenerate form; its substance is future work outside this
 bundle (blocks composition: no).
@@ -615,7 +615,8 @@ The composition RFC must satisfy, and is reviewed against, this list
   phase machine; it introduces no second lifecycle.
 - **(e) `cancel_scope` precedence.** A `cancel_scope` design (the
   RFC 0005 §4.5 questions) precedes or accompanies the composition
-  RFC — the schedule constraint RFC 0005 records.
+  RFC — the prerequisite RFC 0005 records, widened to
+  precede-or-accompany by this consolidation's delegation record.
 - **(f) Quiescence-barrier non-interference.** The adapter aggregates
   child declarations into one desired set and neither observes nor
   awaits quiescence (RFC 0012 §4.4); a composition design that needs
@@ -765,8 +766,8 @@ guarantee, no calendar scheduler as framework contract.
 
 **Verdict: the limitation is already canonical — cited, not
 re-owned.** The resource envelope tears manages is the queue-slot
-occupancy of tears-owned channels, exactly as RFC 0006 R1/INV-L1/§4.5
-state it: bounded mode does not bound process memory, and upstream
+occupancy of tears-owned channels, exactly as RFC 0006
+R1/INV-L1/§4.2/§4.5 state it: bounded mode does not bound process memory, and upstream
 buffers, source-internal queues, identity counts, and producer counts
 stay application-owned. No unified task/queue/memory/CPU budget is
 provided, and no owner seats are reserved for future budgets (§1.6).
