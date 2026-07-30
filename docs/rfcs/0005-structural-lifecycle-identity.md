@@ -74,7 +74,7 @@ impl SubscriptionId {
 }
 ```
 
-Custom and built-in sources typically use it like this:
+Custom and built-in sources typically used it like this:
 
 ```rust
 fn id(&self) -> SubscriptionId {
@@ -84,20 +84,19 @@ fn id(&self) -> SubscriptionId {
 }
 ```
 
-This performs two conceptually different operations too early:
+This performed two conceptually different operations too early:
 
-1. it chooses a hash function and compresses a logical key to 64 bits; and
-2. it treats the compressed value as exact identity.
+1. it chose a hash function and compressed a logical key to 64 bits; and
+2. it treated the compressed value as exact identity.
 
 A `HashMap` is collision-safe because it uses `Hash` to find a bucket and `Eq`
-to distinguish entries in that bucket. The current API discards the value
-needed for the second step, so the manager cannot recover correctness after a
-collision.
+to distinguish entries in that bucket. That API discarded the value
+needed for the second step, so the manager could not recover correctness after
+a collision.
 
-The impact is observable. `SubscriptionManager::update` builds one desired set
+The impact was observable. `SubscriptionManager::update` builds one desired set
 from the IDs, retains the first subscription for each ID, removes running IDs
-that are no longer desired, and starts absent IDs. A false equality can
-therefore:
+that are no longer desired, and starts absent IDs — so a false equality could:
 
 - suppress a distinct stream before it starts;
 - keep a prior stream when a different one is requested;
@@ -894,10 +893,13 @@ sleeps.
 
 ## 7. Performance evaluation
 
-The current `SubscriptionId` is two inline machine values and `Copy`.
-Structural erasure is expected to add allocation, indirection, dynamic equality,
-and explicit clones. Subscription reconciliation is a per-message hot path, so
-the change must be measured even though collision-safe equality is mandatory.
+The pre-replacement `SubscriptionId` was two inline machine values and
+`Copy`; structural erasure adds allocation, indirection, dynamic
+equality, and explicit clones. Subscription reconciliation is a
+per-message hot path, so the change had to be measured even though
+collision-safe equality is mandatory — Phase B recorded the comparison
+on the Criterion subscription benchmark (`benches/subscription.rs`:
+steady, churn, and scoped reconcile).
 
 The existing Criterion subscription benchmark remains the primary comparison:
 
