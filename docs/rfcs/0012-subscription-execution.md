@@ -378,16 +378,32 @@ continuing-exemption rules** — only the newest desired set is admitted
 (INV-SE4) and continuing subscriptions are untouched (INV-SE2).
 (§4.4's composition transparency is unaffected on either side: a rate
 policy is as invisible to declaring layers as the barrier is.) What
-an adopted policy may relax is exactly the *promptness* half of the
-schedule: INV-SE3's immediate admission for a re-evaluation with no
-outstanding stopped task, INV-SE5's admission at the *next* frame pass
-after quiescence (a policy may push it to a later re-evaluation point,
-never off one), §4.3's undelayed pure restart of a finished
-subscription, and RFC 0005 INV-13's restart "on the next
-re-evaluation". Those promptness clauses are stated for policy-off
+an adopted policy may relax is narrower than promptness in general: it
+is the promptness of **re-admission only** — admitting a new run for
+an identity that has already had a run admitted in this runtime
+(INV-SE1's "admitted run"), and only for subscriptions the adopted
+policy targets. Re-admission covers both shapes, deliberately: the
+restart of an already-finished subscription (§4.3; RFC 0005 INV-13's
+restart "on the next re-evaluation") *and* a replacement — a stop
+followed by a new run's admission under the same identity — because
+the policy's purposes, backoff after failures and minimum restart
+intervals, apply to the whole re-admission path, not to the
+finished-restart shape alone. For those re-admissions the promptness
+clauses bend: INV-SE3's immediate admission and INV-SE5's admission at
+the *next* frame pass after quiescence may move to a later
+re-evaluation point, never off one. Preserved under any policy,
+alongside the barrier, phase, and supersession rules above: **pure
+first admission** — the first admission of an identity that has never
+had a run in this runtime, bootstrap's initial admissions included —
+stays immediate, so the CHANGELOG's "pure additions … admit
+immediately" is unconditional and stays so; and a subscription outside
+the adopted policy's target set keeps every promptness clause — a
+policy touches no schedule but its targets'. The promptness clauses
+are stated for policy-off
 operation — the only mode that exists today — and the rate-policy
-RFC's precondition is to amend them, in this RFC and in RFC 0005, to
-be explicitly scoped to policy-off operation before its delays become
+RFC's precondition is to amend exactly their re-admission half, in
+this RFC and in RFC 0005 (INV-13), to be explicitly scoped to
+policy-off operation before its delays become
 conforming; until such an amendment lands, any admission delay beyond
 quiescence is a contract violation, not an anticipated policy. A rate
 policy's added delay is likewise
