@@ -441,46 +441,383 @@ content; this summary is the tally the §1.8 gate is measured on.
 
 ## 3. Execution-model consolidation
 
-*Stub — verdict chapter for unifying the unkeyed/keyed execution
-mechanism — one spawn, task-ownership, and exit-reap path, per-id
-lifecycle entries for keyed runs only — with the two delivery classes
-preserved, and for the scheduling policy (shared-first pull, fairness,
-traffic classes) decided jointly with it; contract impact rides
-RFC 0003 and RFC 0006. Owns the root judgments: `root-A1` (the
-execution model) and `root-SCHED` (the scheduling policy). Each
-verdict chapter names the root judgments it owns, so §1.9's
-membership test closes mechanically over §3–§7's lists.*
+Owns the root judgments: `root-A1` (the execution model) and
+`root-SCHED` (the scheduling policy). Each verdict chapter names the
+root judgments it owns, so §1.9's membership test closes mechanically
+over §3–§7's lists.
+
+### 3.1 `root-A1` — verdict: redesign of the mechanism, reaffirmation of the delivery contract
+
+The unkeyed and keyed command paths are unified into **one execution
+mechanism with two preserved delivery classes**. Full unification —
+making unkeyed an anonymous-key keyed command, private channel
+included — was rejected: unkeyed output leaving the shared FIFO would
+fall behind INV-14's shared-first pull, breaking RFC 0003 INV-1 (the
+default path is unchanged) and RFC 0006's liveness split
+(liveness-critical output belongs in unkeyed commands), and
+shared-first is itself the physical cancel-before-delivery mechanism
+(RFC 0006 §4.7). What unifies instead is everything that was
+meaningless duplication: one spawn path branching only on the presence
+of identity (`CommandId` + policy) — the §2.2 shape: one
+task-ownership set with typed exits, one exit-reap path, per-id
+lifecycle entries for keyed runs only with anonymous tasks exit-only,
+O(1) bookkeeping under a single authoritative owner (no double
+bookkeeping), the task-body policy's *definition site* in one owner
+module with sink, quit translation, panic-log form, and reporting per
+kind, and the keyed gauge entry-owned after its transcript-identity
+gate passed (§2.2). All of this is mechanism — informative here and in
+§2 — and a staged implementation of all four stages on this branch
+demonstrated feasibility with every contract suite green and no
+contract test rewritten (no grade-(i) counterexample). Per-leaf
+provenance headroom (a leaf-metadata seam) is recorded as future
+room, deliberately unimplemented (§1.6).
+
+**Conditions.** The send-on-closed-channel rule is normalized to
+break-on-close for every task kind: for a bounded-mode sender blocked
+in `send`, that is a conformance fix owed to RFC 0006 §4.3's existing
+requirement; for the immediate- and unbounded-close observations it is
+a uniform policy choice inside non-guaranteed territory, recorded as
+such in the terminal-matrix tests rather than as owner contract.
+
+**Contract impact.** None on the contract documents for the mechanism
+itself: the behavior contracts ride RFC 0003 (INV-1, INV-2–INV-16)
+and RFC 0006 (the two delivery classes, INV-L9/INV-L10) unchanged, and
+the ledger replay reaffirmed every affected row (§2.4).
+
+**Reopen targets.** Counterexamples breaking the execution model's
+owners or topology (grade (ii)) reopen `root-A1`; none has occurred.
+
+### 3.2 `root-SCHED` — verdict: reaffirmation, canonicalization, and two numberings
+
+Shared-first pull is reaffirmed with **RFC 0003 INV-14 as its sole
+canonical statement** — RFC 0006 INV-L11 is its keyed-quit
+application, and RFC 0008's ordering text maps it under that RFC's
+citation rule. The fairness question stays resolved against any
+policy (RFC 0006 §4.7), reaffirmed. Two existing behaviors are
+numbered without semantic change: bounded mode's narrowed cancellation
+immediacy (RFC 0006 INV-L14) and the traffic-class negative space
+(RFC 0006 INV-L15), the latter with internal class metadata explicitly
+mechanism — pinned in neither direction, compatible with the
+leaf-metadata headroom above. After return #2 (below), load control's
+admission invariant is rescoped to non-interference (RFC 0006 INV-L8):
+admissibility and admission timing belong to their owners.
+
+**Conditions.** None remaining; reopening fairness is a new RFC
+amending RFC 0003 INV-14 (RFC 0006 §4.7's reopening rule).
+
+**Contract impact.** Carried by the RFC 0006 Draft overlay (§1.1):
+the INV-L14/INV-L15 numberings and the INV-L8 rescope. The RFC 0003
+cross-reference sync is semantics-neutral.
+
+**Reopen targets.** Policy-only counterexamples reopen `root-SCHED`
+alone. **Practiced return #2**: a grade-(i) wording contradiction —
+the unscoped "never blocks, rejects, or defers producer admission"
+against RFC 0012 §4's quiescence barrier — reopened `root-SCHED`
+alone (policy-only; no owner/topology break), resolved by the INV-L8
+rescope with the §4.5 derivations and enforcement text synced, and
+closed. Recorded in the §1.9 journal.
 
 ## 4. Lifecycle and termination
 
-*Stub — verdict chapter for the lifecycle phase machine and the
-two-route termination model; the contract body is owned by RFC 0011.
-Owns the root judgment: `root-K51J46` (the lifecycle root).*
+Owns the root judgment: `root-K51J46` (the lifecycle root).
+
+### 4.1 Verdict: redesign — a new owner contract for the fourth spine
+
+The lifecycle phase machine and termination model — previously implicit
+in every RFC and owned by none — are redesigned into an owner
+contract, **RFC 0011**, which this chapter records but does not
+restate: steady-state phase order (frame-granularity rendering and
+re-evaluation, render before subscription start, both on the pass's
+current state); the bootstrap contract with **inert construction** —
+the constructor spawns no runtime-owned task, polls no effect, starts
+no source, a 0.11.0 behavior change — and the in-`run()` order with
+first-render eligibility rather than a render promise; subscription
+dirtiness with two sources (a batch that ran `update`; the quiescence
+of a steady-state-stopped task, reaching an idle driver as a
+wake-capable input — the shape return #1 settled); termination as two
+routes (controlled and abrupt) converging on two-stage postconditions
+(immediate; quiescent); panic containment for runtime-owned tasks with
+application code fail-fast; and driver exclusivity as a property.
+Premises other RFCs' invariants rest on are recorded informatively in
+RFC 0011 §7, and the normative content is restricted to observables.
+
+**Conditions.** RFC 0011's two open questions — panic-reason
+preservation and controlled-route quiescence — resolve at
+implementation design in that RFC's body; both are strengthenings its
+invariants already hold under. Graceful drain is pinned only as the
+zero-grace degenerate frame; its substance is future work outside this
+bundle (blocks composition: no).
+
+**Contract impact.** RFC 0011 (Draft overlay) owns the contract body
+and the construction-dispatch `Changed` entry; the second dirty
+source's behavior change is carried by RFC 0012's `Changed` entry
+(RFC 0011's header says so); the RFC 0003 §4.4 cross-reference and the
+RFC 0008 §5.2 first-frame wording sync are semantics-neutral.
+
+**Reopen targets.** Counterexamples reaching the event loop's phase
+selection or termination ordering reopen `root-K51J46`. **Practiced
+return #1**: a grade-(ii) joint unsatisfiability — supersession
+(INV-SE4) × the admission-point rule (INV-SE5) × batch-only dirtiness
+(INV-LC1) admitted no implementation — reached phase selection (the
+dirty-source set), so it reopened `root-K51J46` alone, narrowly
+scoped to that set; resolved by unifying deferred re-admission on the
+next frame-pass re-evaluation and adding the quiescence dirty source
+(RFC 0011 §2.1, RFC 0012 §4), and closed. Recorded in the §1.9
+journal.
 
 ## 5. Identity and the composition axiom
 
-*Stub — verdict chapter for the composition-owns-the-identity-boundary
-axiom and the requirements handed to the composition RFC; identity
-contract bodies stay in RFC 0005. Owns the root judgment: `root-CMP`
-(the identity/composition root).*
+Owns the root judgment: `root-CMP` (the identity/composition root).
+
+### 5.1 Verdict: axiom adopted
+
+**The composition layer owns the identity boundary.** The concrete
+shape: a future composition core implements the existing `Application`
+boundary as a **single aggregate `Application` adapter** — no second
+runtime, no second identity model — sharing RFC 0011's phase machine
+(§2.3's projection). Identity contract bodies stay in RFC 0005; the
+axiom is this RFC's own verdict and creates no change to any current
+contract document.
+
+### 5.2 Requirements handed to the composition RFC
+
+The composition RFC must satisfy, and is reviewed against, this list
+(the audit's `C-15` register), stated here self-contained:
+
+- **(a) Automatic scope application.** Scopes are applied to child
+  instances by the composition machinery itself, structurally removing
+  the manual-scoping footguns (a child's IDs unscoped or doubly
+  scoped by hand).
+- **(b) Identity-law preservation.** RFC 0005's scope laws
+  (INV-14–INV-21) hold through the adapter unchanged.
+- **(c) TestStore reuse.** The adapter is testable by the existing
+  store (RFC 0008 §1.2's expectation) — no second harness.
+- **(d) Phase-machine sharing.** The adapter runs under RFC 0011's
+  phase machine; it introduces no second lifecycle.
+- **(e) `cancel_scope` precedence.** A `cancel_scope` design (the
+  RFC 0005 §4.5 questions) precedes or accompanies the composition
+  RFC — the schedule constraint RFC 0005 records.
+- **(f) Quiescence-barrier non-interference.** The adapter aggregates
+  child declarations into one desired set and neither observes nor
+  awaits quiescence (RFC 0012 §4.4); a composition design that needs
+  quiescence observation is a change to RFC 0012's contract and
+  returns here as a counterexample.
+
+### 5.3 Reaffirmation, delegation, contract impact, reopen targets
+
+**Reaffirmed**: the public identity types stay non-unified —
+`CommandId` and `SubscriptionId` remain distinct public types
+(RFC 0005 INV-7). **Delegated**: `cancel_scope` — owned by its own
+future RFC, constrained to precede or accompany the composition RFC
+per (e); **blocks composition: yes** (a scheduling block, not a
+semantic one). **Contract impact**: none now; implementation lands in
+the future composition and `cancel_scope` RFCs. **Reopen targets**:
+counterexamples breaking the identity model or requiring its
+re-migration reopen `root-CMP`; none has occurred.
 
 ## 6. Effect and subscription execution boundary
 
-*Stub — verdict chapter for the command directive/effect axis
-placement (output treatment vs. execution lifecycle, settled in
-RFC 0002 §9), source execution, the quiescence barrier, and the
-effect-DI negative space; contract bodies are owned by RFC 0002 §9's
-settled axes and by RFC 0012. Owns the root judgments: `root-B7` (the
-axis placement) and `root-D18` (subscription execution and the
-effect-DI boundary).*
+Owns the root judgments: `root-B7` (the directive/effect axis
+placement) and `root-D18` (subscription execution and the effect-DI
+boundary).
+
+### 6.1 `root-B7` — verdict: reaffirmation and canonicalization of the axis split
+
+The Axis A/B scope split — output treatment as passive folded
+directives vs. execution lifecycle on the effect — is reaffirmed with
+**RFC 0002 §9 as its canonical statement**, and Axis B's settled
+composition is canonicalized: `timeout`/`retry` are per-effect
+effect/stream transformations (RFC 0004), and cancellation is command
+lifecycle metadata lowered by the runtime (RFC 0003) — settled without
+any new internal action variant, so the closedness position is
+reaffirmed (new directives go to the directives side, per RFC 0002's
+frame). The `Action`-privatization ordering constraint was met by
+completion.
+
+**Conditions and delegations.** Axis A's terminal home (modifier vs. a
+future update-outcome type) and the quit-directive surface question
+are delegated to the composition RFC under explicit preservation
+conditions: unkeyed quit's backlog-independent dedicated-channel
+delivery (RFC 0006 R4/INV-L4), keyed quit's in-band cancellable
+delivery (RFC 0003 INV-9; RFC 0006 INV-L10/INV-L11), and the
+cancellation-metadata lowering path — no representation choice may
+weaken any of the three. A re-evaluation-policy directive is delegated
+to a future RFC 0002-extension RFC (blocks composition: no).
+
+**Contract impact.** Semantics-neutral only: RFC 0002 §9's sync to the
+settled forms. **Reopen targets**: axis-placement counterexamples
+reopen `root-B7`; none has occurred.
+
+### 6.2 `root-D18` — verdict: redesign — a new owner contract for source execution
+
+Subscription execution — the third piece of the Timer contract split
+(identity RFC 0005, timing RFC 0009) — is redesigned into an owner
+contract, **RFC 0012**: the source execution template (effect-free
+declaration, spawner-at-admission start, forwarder-paced polling), the
+three-boundary stop vocabulary with the uniform quiescence barrier and
+its admission rules, `subscriptions()` purity as owner of record
+(INV-SE6), the source-side injection contract with RFC 0008's
+non-execution boundary preserved (a driving store is a future RFC 0008
+amendment), source-internal state legalized **without** generalizing
+update-side external mutation (RFC 0001 §5.5 stays that RFC's scoped
+deviation), and the effect-DI negative space owned there (INV-SE8; the
+time axis stays RFC 0009's). The behavior change is two-faced —
+re-admission waits for quiescence, and re-evaluation gains a
+message-independent trigger — carried by RFC 0012's `Changed` entry at
+0.11.0.
+
+**Conditions and delegations.** Restart *rate* control is delegated to
+a future opt-in policy RFC under RFC 0012 §8's partitioned frame
+(blocks composition: no): the barrier, phase placement, and
+supersession rules are invariant under any policy; only re-admission
+promptness may relax, and only after that RFC amends the promptness
+clauses in RFC 0012 and RFC 0005 to policy-off scope. The stage-3
+driving-store API is delegated to a future RFC 0008 amendment gated on
+RFC 0012's acceptance (blocks composition: no).
+
+**Contract impact.** RFC 0012 (Draft overlay) owns the contract body;
+the RFC 0011 §2.1 dirty-source amendment is part of the same Draft
+overlay; the `Application::subscriptions` rustdoc update is an
+implementation deliverable RFC 0012 lists.
+
+**Reopen targets.** Source-execution or effect-DI boundary
+counterexamples reopen `root-D18`. Return #1 arose from RFC 0012's
+admission rules but its counterexample affected the lifecycle root's
+decision (the dirty-source set), so per §1.9 it reopened `root-K51J46`
+and not `root-D18` — recorded here because this chapter's rules were
+the trigger.
 
 ## 7. Public API boundary and contour
 
-*Stub — verdict chapter for the `Message` bound freeze and the
-leaf-level API decisions (RFC 0007's derive set, RFC 0006's gauge
-instance field). Owns the root judgment: `root-I40` (the `Message`
-boundary), together with the independent leaf judgments this chapter
-records.*
+Owns the root judgment: `root-I40` (the `Message` boundary), together
+with the independent leaf judgments this chapter records
+(§7.2–§7.8). The remaining small-grain leaf items (the pending-work
+test-access cleanup, the visibility lint-dodge inventory, and the
+bulk reaffirmation checks) belong to §8's ledger frame and are
+recorded there.
+
+### 7.1 `root-I40` — verdict: freeze reaffirmed
+
+`Message: Send + 'static` stays exactly as it is — RFC 0008 INV-T1
+remains the canonical statement, and no breaking budget is consumed.
+Pressure in the addition direction (features wanting stricter bounds,
+e.g. serializable or comparable messages) is absorbed by API-local
+opt-in generic bounds on the features that need them — additive, never
+a bound on `Message` itself. Pressure in the removal direction
+(`!Send` executors, single-threaded wasm) is intentionally excluded,
+subordinate to the executor verdict (§7.2). No amendment anywhere.
+
+### 7.2 Executor premise (leaf-K56)
+
+**Verdict: reaffirmed, and the alternate-executor question is closed
+as an adopted anti-catalog decision.** The crate offers no public
+compatibility surface for alternate async executors, keeps its `Send`
+bounds, and its implementation may depend on Tokio; Tokio's internal
+types are not thereby contract (RFC 0011 §7 pins none of those
+shapes). Consequently non-Tokio runtime support is intentionally
+excluded; `!Send`-executor and wasm fixtures are excluded with it; and
+the external-driving half of the replacement question stays
+conditional on a future driving-surface RFC, which this exclusion does
+not block. Trimming the enabled Tokio feature set is contract-neutral
+build hygiene (§8 backlog).
+
+### 7.3 Time axes (leaf-N57)
+
+**Verdict: monotonic-only, excluded as a second axis.** The core's
+one normative time axis is RFC 0009's virtualizable monotonic clock;
+no wall-calendar axis is added and RFC 0009 needs no amendment (its
+§1.2 already places calendar time out of scope with application-side
+injection). Calendar and wall-clock needs — daily refetch, clock
+widgets, timezone-jump tracking — are ordinary subscription sources
+under RFC 0012 §2's template: nondeterministic inputs like any other
+I/O, touching none of RFC 0009's determinism contracts. Excluded
+scope: no second normative time axis in core, no clock-jump tracking
+guarantee, no calendar scheduler as framework contract.
+
+### 7.4 Resource envelope (leaf-K55)
+
+**Verdict: the limitation is already canonical — cited, not
+re-owned.** The resource envelope tears manages is the queue-slot
+occupancy of tears-owned channels, exactly as RFC 0006 R1/INV-L1/§4.5
+state it: bounded mode does not bound process memory, and upstream
+buffers, source-internal queues, identity counts, and producer counts
+stay application-owned. No unified task/queue/memory/CPU budget is
+provided, and no owner seats are reserved for future budgets (§1.6).
+No `update`/`view` execution-time ceiling or preemption is provided
+either: a synchronous transition that never returns never reaches a
+point where the runtime could observe a deadline while serial
+transitions (RFC 0011 INV-LC9) are preserved; observing overrun after
+completion is the observability side's affair (§7.8).
+
+### 7.5 `RuntimeConfig` derives (leaf-I41)
+
+**Verdict: `Copy` is removed at 0.11.0; `Clone` stays; `FrameRate`
+keeps `Copy`.** Carried by the RFC 0007 Draft (its §2.1, `Changed`
+breaking entry, and four-part implementation deliverable). The
+removal clears the type-level obstacle to future non-`Copy`
+configuration fields (policy objects, callbacks) without settling any
+such feature — those stay conditional on their own seams, exactly as
+§1.6 requires.
+
+### 7.6 Core / non-core boundary (leaf-G35)
+
+**Verdict: the boundary is decided; no minimal-profile contract is
+introduced.** Unconditional core — removable by no build profile: the
+phase machine and runtime, the channel and load layer (INV-L13
+emission included), identity (RFC 0005), the clock (RFC 0009),
+TestStore with the unconditional `test-util` feature (the no-flag
+decisions of RFC 0008 §3.3 and RFC 0009 §5.1 stand), the terminal
+driving surface, the mock source (RFC 0012 §6's reference seam), and
+the dependency-free signal/time sources. Non-core — feature-gateable:
+sources conforming to RFC 0012 §2's template that carry additional
+external dependencies (the HTTP module, WebSocket, TLS selection,
+future sources) — gating them changes no contract surface because the
+template is the contract. This is the audit exclusion §2.3 cites: no
+build profile removing core constituents is offered. Feature-inventory
+tidying within this boundary is contract-neutral cleanup (§8
+backlog).
+
+### 7.7 Terminal coupling (leaf-G36)
+
+**Verdict: no backend abstraction is designed**, and the
+terminal-specific contract surface is declared as a closed five-point
+inventory: (1) `Application::view`'s `ratatui::Frame` parameter;
+(2) `Runtime::run`'s `ratatui::Terminal<B: Backend>` argument —
+already backend-generic, so half the separability exists today;
+(3) the terminal-events driving source and its input-occupancy
+signals; (4) the panic-hook terminal restore; (5) suspend/resume
+terminal ownership. The phase machine itself is backend-independent,
+and the separation seam for any future work is recorded: the render
+step inside the frame pass, preserving pending-work flag consumption,
+with `view`'s `Frame` surface included in the separation subject.
+Sanitization and raw-escape policy for untrusted text is not owned by
+the runtime — it belongs to the application, the widget layer, and the
+backend.
+
+### 7.8 Observability contour (leaf-I42)
+
+**Verdict: the three load-event kinds stay contract; the one change
+is the gauge instance field.** Downgrading the capacity-wait event was
+rejected: RFC 0007 §5.2's `quit_overload` valid-trial predicate
+consumes it normatively (two shared-channel capacity-wait events in
+the 5 ms window before the quit), so a best-effort emission would
+leave a conforming RFC 0006 implementation unable to run RFC 0007's
+acceptance rows. The single schema change — the gauge event's
+`runtime_id` — is carried by the RFC 0006 Draft amendment (INV-L13).
+The consumer-side negative space is declared: tears provides no
+slow-subscriber or panicking-subscriber isolation, no event-queue
+bound or overflow policy, and no subscriber panic containment —
+tracing-consumer responsibility; and no common redaction framework —
+each content-bearing observation owner, the existing module tracing
+included, owns its redact-or-omit policy. State-level inspection and
+transcript instrumentation remain conditional on a future transcript
+RFC (blocks composition: no); this chapter adds no observation
+surface.
+
+**§7 reopen targets.** Boundary or contour counterexamples reopen
+`root-I40`; a counterexample against an individual leaf decision is
+re-judged in this chapter under the same §1.9 grades. None has
+occurred.
 
 ## 8. Reaffirmation ledger (snapshot)
 
@@ -501,18 +838,26 @@ task and blocks-composition flag, and the post-bundle follow-ups.*
 
 ## 11. References
 
+- RFC 0001 — HTTP module redesign: §5.5, the scoped update-side
+  deviation §6.2 keeps scoped.
 - RFC 0002 — redraw suppression: the redraw OR-fold and directive
-  independence §2.1 summarizes.
-- RFC 0003 — command cancellation: INV-1/INV-2–INV-16, INV-10, INV-14,
-  §4.4, §7.3.
-- RFC 0005 — structural lifecycle identity: INV-8–INV-13 and the
-  identity surface of §2.2.
-- RFC 0006 — runtime load control: R4, INV-L4, INV-L8,
-  INV-L9/INV-L10/INV-L11,
-  INV-L12, INV-L13.
-- RFC 0007 — RuntimeConfig: the derive-set decision §7 will record.
-- RFC 0009 — Clock DI: the single time axis.
-- RFC 0011 — runtime lifecycle: §2, §3, §4, INV-LC1–INV-LC9.
-- RFC 0012 — subscription execution: §4, §5 (INV-SE6), §8, §9.
+  independence §2.1 summarizes; §9, the axis canon §6.1 reaffirms.
+- RFC 0003 — command cancellation: INV-1/INV-2–INV-16, INV-9, INV-10,
+  INV-14, §4.4, §7.3.
+- RFC 0004 — command timeout and retry: the per-effect transformation
+  form §6.1 canonicalizes.
+- RFC 0005 — structural lifecycle identity: INV-7, INV-8–INV-13,
+  INV-14–INV-21, §4.5, and the identity surface of §2.2.
+- RFC 0006 — runtime load control: R4, §4.3, §4.5, §4.7, INV-L4,
+  INV-L8, INV-L9/INV-L10/INV-L11, INV-L12, INV-L13,
+  INV-L14/INV-L15.
+- RFC 0007 — RuntimeConfig: §2.1 (the derive decision §7.5 records)
+  and §5.2 (the valid-trial predicate behind §7.8).
+- RFC 0008 — TestStore: INV-T1 (the `Message` canon §7.1 keeps),
+  §1.2, §3.3, §5.2.
+- RFC 0009 — Clock DI: the single time axis; §1.2 and §5.1.
+- RFC 0011 — runtime lifecycle: §2, §3, §4, §7, INV-LC1–INV-LC9.
+- RFC 0012 — subscription execution: §2, §4, §5 (INV-SE6), §6, §8,
+  §9 (INV-SE8).
 - `docs/rfcs/pre-review-checklist.md` — the review method §1 builds
   its gate on.
