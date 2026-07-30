@@ -37,12 +37,19 @@ land on that architecture without replacing it.
 - **Baseline**: `main` at commit `daa8bd1` — the reproducibility anchor
   every implementation-fact citation in this consolidation is defined
   on.
-- **Reference contract**: the Accepted RFCs 0001–0009 plus this
-  bundle's texts — the Draft RFCs (RFC 0006, RFC 0007, RFC 0011,
-  RFC 0012) and the Implemented RFCs, which where amended on this
-  branch carry only semantics-neutral amendments and keep their
-  Status; each file's own Status header is the source of
-  truth. Audit verdicts are measured against this combined corpus, not
+- **Reference contract**: the union of three sets, each defined
+  separately —
+  1. the **existing contract corpus**: the bodies of RFCs 0001–0009 as
+     they stand on this branch;
+  2. the **semantics-bearing Draft overlay**: RFC 0006, RFC 0007,
+     RFC 0011, and RFC 0012 — the documents whose amendments or new
+     contracts change semantics, and which are Draft for exactly that
+     reason; and
+  3. the **semantics-neutral amendments** to Implemented documents,
+     which keep their Status — each file's own Status header is the
+     source of truth.
+
+  Audit verdicts are measured against this combined corpus, not
   against the baseline implementation alone.
 
 ### 1.2 Normativity classes
@@ -107,17 +114,22 @@ not by per-feature argument alone.
 ### 1.5 Removal projection
 
 Additivity is also audited in the removal direction: the completed form
-minus a feature must still be the small core.
+minus a feature must still be the small core. The projection applies to
+removing **surfaces the audit itself classifies as optional or
+support** — a surface the audit rules an unconditional constituent (or
+whose removal it excludes by an `X` verdict) is outside the
+projection's quantifier, and the exclusion is recorded on the audit
+row, not assumed.
 
-- Disabling optional sources, backends, or observability must leave the
-  same core owners and event topology.
+- Disabling sources, backends, or observability the audit classes as
+  optional must leave the same core owners and event topology.
 - An unkeyed command must be the *same* execution path without identity
   and cancellation policy — not a second runtime.
 - The TEA facade must be an adapter over a single-feature reducer — not
   a second core.
-- A headless or minimal build must be the feature-removed projection of
-  the same phase machine — not a bundle of placeholder implementations
-  and no-op branches.
+- A headless or minimal build, where the audit admits one, must be the
+  feature-removed projection of the same phase machine — not a bundle
+  of placeholder implementations and no-op branches.
 
 If removing a feature reveals a different state machine, the feature's
 presence is encoded as an architecture fork, and the fixture is a fail
@@ -218,14 +230,14 @@ Ergonomic and aesthetic concerns are recorded but never reopen a
 judgment. Every return to a root judgment is journaled in one line —
 which decision, changed from what to what, by which counterexample —
 and a return that changes no decision is forbidden (no polish loops).
-**Only the affected root judgments reopen.** A policy-only
-counterexample reopens the scheduling-policy root alone. A grade-(ii)
-counterexample (owner/topology break) reopens the execution-model root
-and/or the lifecycle root it actually broke — a counterexample
-reaching the event loop's phase selection or termination ordering is
-the lifecycle root's — and the scheduling-policy root joins a
-grade-(ii) reopen only when the policy itself is simultaneously
-affected. This keeps returns from over-widening.
+**Whatever its grade, a counterexample reopens only the §3–§7 root
+judgments it affects** — any of them, the identity/composition and
+subscription-execution roots included, and no others. Illustrations,
+not a closed list: a policy-only counterexample reopens the
+scheduling-policy root alone; a counterexample reaching the event
+loop's phase selection or termination ordering is the lifecycle
+root's; a root joins a reopen only when the counterexample affects its
+own decisions. This keeps returns from over-widening.
 
 ### 1.10 Drift gates
 
@@ -234,17 +246,21 @@ fixed baseline (§1.1), two drift gates bracket this RFC — before
 drafting and before the bundle acceptance — and each gate has two
 parts:
 
-1. **Baseline code-delta scan.** Changes since baseline `daa8bd1` to
-   `docs/rfcs`, `src/runtime`, `src/command`, and `src/subscription`
-   are scanned; the fixtures and ledger rows those changes affect are
-   appended to the audit (append-only — no renumbering), and only the
-   affected root judgments and audit rows are re-run.
+1. **Baseline code-delta scan.** Changes on the upstream `main`
+   branch since baseline `daa8bd1` to `docs/rfcs`, `src/runtime`,
+   `src/command`, and `src/subscription` are scanned; the fixtures and
+   ledger rows those changes affect are appended to the audit
+   (append-only — no renumbering), and only the affected root
+   judgments and audit rows are re-run. This bundle's own branch
+   diffs are not this scan's subject: they enter the audit through the
+   ledger replay itself.
 2. **Claim scan.** Every document claim is checked against the code it
    describes — pre-implementation present tense, future forms for
    landed work, superseded shapes cited as current, and absolute
    claims later scoped by other documents.
 
-The pre-drafting gate completed 2026-07-30. Part 1 found the
+The pre-drafting gate completed 2026-07-30. Part 1 scanned upstream
+`main` over `daa8bd1..89ea872` and found the
 baseline advance had touched only the dependency lockfile — zero
 contact with the scanned paths, so no audit rows required re-running
 from the code delta. Part 2 swept all eleven RFCs, the RFC index, and
@@ -291,9 +307,10 @@ sketch.
      redraw directives OR-fold into pending work (RFC 0002); a batch
      that ran update marks subscriptions dirty (RFC 0003 §4.4)
   B. frame pass (current state; RFC 0011 INV-LC1/INV-LC2): render if
-     redraw pending, then subscription re-evaluation if dirty — both
-     steps observe the same state; no individual state is promised a
-     render
+     redraw pending, then — after a successful render; a render error
+     terminates instead (RFC 0011 §4.2) — subscription re-evaluation
+     if dirty; both steps observe the same state; no individual state
+     is promised a render
   C. dedicated unkeyed-quit branch (never-bounded channel —
      RFC 0006 R4/INV-L4)
   input delivery: one shared FIFO (subscription output, unkeyed
@@ -325,10 +342,13 @@ sketch.
 
 Consolidated direction for the execution model: **one execution
 mechanism, two delivery classes** — unkeyed and keyed commands share
-one spawn path and one bookkeeping shape, differing only in identity
-(none vs. `CommandId` + policy) and output routing (shared FIFO vs.
-private channel). Rows marked *mechanism* are informative
-implementation shape, free to change under their cited contracts.
+one spawn path, one task-ownership set, and one exit-reap path,
+differing in identity (none vs. `CommandId` + policy) and output
+routing (shared FIFO vs. private channel). Per-id lifecycle entries
+exist for keyed runs only: an anonymous (unkeyed) task holds no
+per-id entry and is reaped exit-only from the shared task set. Rows
+marked *mechanism* are informative implementation shape, free to
+change under their cited contracts.
 
 | Resource | Owner at baseline | Consolidated | Contract owner |
 | --- | --- | --- | --- |
@@ -336,10 +356,10 @@ implementation shape, free to change under their cited contracts.
 | shared message channel | `msg_tx` / `AppInputs.shared` | unchanged (delivery class 1) | RFC 0006 (capacity, losslessness); RFC 0003 INV-14 (pull order) |
 | dedicated quit channel | `quit_tx`/`quit_rx`, plain unbounded | unchanged (never bounded) | RFC 0006 R4/INV-L4 |
 | keyed private channels | one per `KeyedCommands` entry | unchanged (delivery class 2) | RFC 0003; RFC 0006 INV-L9/INV-L10 |
-| unkeyed command task | `command_tasks: JoinSet<()>` | unified entry bookkeeping with anonymous identity (*mechanism*) | behavior unchanged under RFC 0003 INV-1 |
+| unkeyed command task | `command_tasks: JoinSet<()>` | shared spawn path and typed-exit task set; anonymous tasks are exit-only — no per-id entry (*mechanism*) | behavior unchanged under RFC 0003 INV-1 |
 | keyed task + lifecycle FSM | `KeyedCommands` (map + task set + run tokens) | single authoritative structure, O(1) lookup; no double bookkeeping (*mechanism*) | RFC 0003 INV-2–INV-16, unchanged |
 | subscription forwarder | `SubscriptionManager.running` | unified task-policy wrapper; reconcile algorithm unchanged, admission per the quiescence barrier | RFC 0005 INV-8–INV-13; re-evaluation phase: RFC 0011; admission: RFC 0012 §4 |
-| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | single policy owner (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3 |
+| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3 |
 | frame ownership | `FrameScheduler` + `PendingWork` + runtime | unchanged; parking premise informative | RFC 0011 INV-LC1/INV-LC2 and §7's premises |
 | gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the entry-owned RAII guard shape is the consolidated mechanism choice (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
 | time | `tokio::time`, single axis | unchanged | RFC 0009 |
@@ -347,16 +367,23 @@ implementation shape, free to change under their cited contracts.
 
 ### 2.3 Removal projection
 
-The §1.5 checks close on this architecture:
+The §1.5 checks close on this architecture, within §1.5's own scope
+rule — the minimal-profile leg is outside the projection's subject by
+the audit's exclusion verdict: the observability layer, the test
+surface, and the terminal driving surface are unconditional
+constituents, so no minimal profile is offered and none is audited for
+removability.
 
-- **Unkeyed = the same path minus policy.** The unified execution
-  model makes an unkeyed command literally the keyed path without
-  identity and cancellation policy — no second runtime exists to
-  remove.
+- **Unkeyed = the same spawn, ownership, and reap path minus
+  identity.** The unified execution model runs an unkeyed command
+  through the same spawn path, task-ownership set, and exit-reap path
+  as a keyed one, with no identity, no cancellation policy, and no
+  per-id lifecycle entry — no second runtime exists to remove.
 - **Feature removal is degeneration, not forking.** Bounded mode off,
   keyed commands unused, or no subscriptions declared each degrade the
-  same phase machine — channels unbounded, entries anonymous-only,
-  reconciles empty — and no alternative state machine appears.
+  same phase machine — channels unbounded, the per-id entry set empty
+  with only exit-only anonymous tasks, reconciles empty — and no
+  alternative state machine appears.
 - **Composition shares the phase machine.** RFC 0011 states the phase
   machine over the `Application` boundary (`new`/`update`/`view`/
   `subscriptions`); a composition core implements that boundary as a
@@ -385,9 +412,10 @@ reference contract. As of 2026-07-31:
   unsatisfiability between the supersession and admission-point rules
   and the lifecycle phase contract — a counterexample reaching phase
   selection (the dirty-source set), so per §1.9 it reopened the
-  lifecycle root alone — resolved by unifying admission on the
-  deferred, frame-pass shape (RFC 0012 §4 with RFC 0011 §2.1's second
-  dirty source); and a grade-(i) wording contradiction between
+  lifecycle root alone — resolved by unifying *deferred re-admission*
+  on the next frame-pass re-evaluation (RFC 0012 §4 with RFC 0011
+  §2.1's second dirty source), the bootstrap reconcile's immediate
+  admissions kept; and a grade-(i) wording contradiction between
   load control's producer-admission invariant and the quiescence
   barrier — policy-only, so it reopened the scheduling-policy root
   alone — resolved by rescoping RFC 0006 INV-L8 to load-control
@@ -400,8 +428,9 @@ content; this summary is the tally the §1.8 gate is measured on.
 ## 3. Execution-model consolidation
 
 *Stub — verdict chapter for unifying the unkeyed/keyed execution
-mechanism into one entry path with two preserved delivery classes;
-contract impact rides RFC 0003 and RFC 0006.*
+mechanism — one spawn, task-ownership, and exit-reap path, per-id
+lifecycle entries for keyed runs only — with the two delivery classes
+preserved; contract impact rides RFC 0003 and RFC 0006.*
 
 ## 4. Lifecycle and termination
 
