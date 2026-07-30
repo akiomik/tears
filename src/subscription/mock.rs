@@ -140,8 +140,9 @@ impl<T: Clone + 'static> MockSource<T> {
     /// # Panics
     ///
     /// Panics if `capacity` is zero, or if the process-wide key space is
-    /// exhausted (`u64::MAX` sources already created): the key is exact
-    /// identity, so keys are never reused within a process (RFC 0005 §8.3).
+    /// exhausted (the allocator counter has reached `u64::MAX`): the key is
+    /// exact identity, so keys are never reused within a process
+    /// (RFC 0005 §8.3).
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
@@ -165,9 +166,9 @@ impl<T: Clone + 'static> MockSource<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the process-wide key space is exhausted (`u64::MAX` sources
-    /// already created): the key is exact identity, so keys are never reused
-    /// within a process (RFC 0005 §8.3).
+    /// Panics if the process-wide key space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): the key is exact identity, so keys are
+    /// never reused within a process (RFC 0005 §8.3).
     #[must_use]
     pub fn new() -> Self {
         Self::with_capacity(100)

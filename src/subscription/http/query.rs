@@ -140,9 +140,10 @@ impl QueryClient {
     ///
     /// # Panics
     ///
-    /// Panics if the process-wide client-id space is exhausted (`u64::MAX`
-    /// clients already created): `client_id` is a component of subscription
-    /// identity, so ids are never reused within a process (RFC 0001).
+    /// Panics if the process-wide client-id space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): `client_id` is a component of
+    /// subscription identity, so ids are never reused within a process
+    /// (RFC 0001).
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(QueryConfig::default())
@@ -152,9 +153,10 @@ impl QueryClient {
     ///
     /// # Panics
     ///
-    /// Panics if the process-wide client-id space is exhausted (`u64::MAX`
-    /// clients already created): `client_id` is a component of subscription
-    /// identity, so ids are never reused within a process (RFC 0001).
+    /// Panics if the process-wide client-id space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): `client_id` is a component of
+    /// subscription identity, so ids are never reused within a process
+    /// (RFC 0001).
     #[must_use]
     pub fn with_config(config: QueryConfig) -> Self {
         Self {
