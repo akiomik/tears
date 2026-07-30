@@ -56,7 +56,7 @@ A source-level study of the profiled app confirmed the win is real but reframed
 
 - **The dominant redraw source is nostui's own frame-rate `Tick`, not relay
   events.** A `Timer` subscription fires ~16×/s and its update returns
-  `Command::none()`, so today's unconditional `needs_redraw` re-dirties **every
+  `Command::none()`, so the default redraw directive re-dirties **every
   frame regardless of Nostr activity**. This also **defeats the
   `should_process_frame` idle gating**: the loop never goes idle even on a
   static screen. So `Tick` is the poster-child opt-out — and it is exactly
@@ -83,14 +83,16 @@ opt-out.
 ## 2. Non-negotiables
 
 **(A) Default behavior is unchanged.** Returning `Command::none()` /
-`perform` / `message` from `update` must still redraw exactly as today.
+`perform` / `message` from `update` must still redraw exactly as before
+this RFC.
 Suppression is opt-out only, so no existing application changes behavior.
 
 **(B) Redraw suppression and subscription re-evaluation are separate
 concerns.** `subscriptions()` is a pure function of application state and may
 change even for a message that does not alter the visible view. Suppressing a
 redraw must **not** suppress subscription re-evaluation. This RFC gates only
-`needs_redraw`; `subscriptions_dirty` remains unconditional (§5.3). A future,
+`needs_redraw`; subscription dirtiness stays independent of the
+directive — when a batch records it is RFC 0003 §4.4's rule (§5.3). A future,
 separately-opted-out subscription-skip is possible but out of scope (§9).
 
 ## 3. Goals and Non-Goals
