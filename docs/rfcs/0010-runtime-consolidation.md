@@ -273,7 +273,9 @@ classes:
   fixed in place per document, with residual instances surfaced by an
   independent two-reviewer cold read and swept section-whole;
 - **implementation conformance** — the two identifier allocators made
-  fail-before-reuse where document contracts pin non-reuse; and
+  fail-before-reuse where document contracts pin non-reuse, and the two
+  guidance notes RFC 0007 §3.3 records as landed added to the
+  runtime-configuration rustdoc; and
 - **numeric-claim precision** — the constructor panic documentation
   freed of an off-by-one allocation count, and RFC 0006's wraparound
   absolute restated as a consequence of per-instance strict increase
@@ -371,7 +373,7 @@ change under their cited contracts.
 | unkeyed command task | `command_tasks: JoinSet<()>` | shared spawn path and typed-exit task set; anonymous tasks are exit-only — no per-id entry (*mechanism*) | behavior unchanged under RFC 0003 INV-1 |
 | keyed task + lifecycle FSM | `KeyedCommands` (map + task set + run tokens) | single authoritative structure, O(1) lookup; no double bookkeeping (*mechanism*) | RFC 0003 INV-2–INV-16, unchanged |
 | subscription forwarder | `SubscriptionManager.running` | unified task-policy wrapper; reconcile algorithm unchanged, admission per the quiescence barrier | RFC 0005 INV-8–INV-13; re-evaluation phase: RFC 0011; admission: RFC 0012 §4 |
-| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3; send handling: RFC 0006 §4.3; quit translation: unkeyed — RFC 0006 R4/INV-L4, keyed — RFC 0003 INV-9 / RFC 0006 INV-L10 |
+| task body policy (panic capture, send handling, quit translation) | duplicated across three task kinds | the *definition site* is unified into a single owner module; the sink shape, quit translation, panic-log form, and completion reporting stay per kind (*mechanism*) | panic containment: RFC 0011 INV-LC8; keyed-panic log occurrence: RFC 0003 §7.3; send handling: RFC 0006 §4.3; quit translation: unkeyed — RFC 0006 R4/INV-L4, keyed — RFC 0003 INV-9 / RFC 0006 INV-L10/INV-L11 |
 | frame ownership | `FrameScheduler` + `PendingWork` + runtime | unchanged; parking premise informative | RFC 0011 INV-LC1/INV-LC2 and §7's premises |
 | gauges / load events | `LoadObserver` funnel; guard-based and count-based gauges | the gauge-transcript-identity gate passed (2026-07-28), so the **keyed** gauge moves to an entry-owned guard held by the keyed entry; the subscription, unkeyed-command, and blocked gauges keep their task-held guards (*mechanism*) | RFC 0006 INV-L13 (schema, `runtime_id`/`seq`) either way |
 | time | `tokio::time`, single axis | unchanged | RFC 0009 |
@@ -505,7 +507,8 @@ task and blocks-composition flag, and the post-bundle follow-ups.*
   §4.4, §7.3.
 - RFC 0005 — structural lifecycle identity: INV-8–INV-13 and the
   identity surface of §2.2.
-- RFC 0006 — runtime load control: R4, INV-L4, INV-L8, INV-L9/INV-L10,
+- RFC 0006 — runtime load control: R4, INV-L4, INV-L8,
+  INV-L9/INV-L10/INV-L11,
   INV-L12, INV-L13.
 - RFC 0007 — RuntimeConfig: the derive-set decision §7 will record.
 - RFC 0009 — Clock DI: the single time axis.
