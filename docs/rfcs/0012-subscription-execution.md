@@ -367,9 +367,30 @@ rules of §3/§4. Restart *rate* policy — backoff after failures,
 minimum restart intervals, safety fuses — is an opt-in policy a future
 RFC owns, consistent with the standing position that `RuntimeConfig`
 carries no restart-rate field (RFC 0007 §4, RFC 0006 open question 5).
-The delegation frame is fixed here: a rate policy may delay an
-admission beyond quiescence; it may never admit before quiescence, and
-it changes none of §4's rules. A rate policy's added delay is likewise
+The delegation frame is fixed here as a partition of §4's rules, not a
+blanket preservation claim. Under any rate policy, three things are
+invariant: the **quiescence barrier** — no admission ever happens
+before the stopped tasks' quiescence (§4.1, INV-SE3's barrier half);
+the **phase placement** — an admission still executes only at a
+subscription re-evaluation (INV-SE5), and a rate policy introduces no
+new admission trigger of its own; and the **supersession and
+continuing-exemption rules** — only the newest desired set is admitted
+(INV-SE4) and continuing subscriptions are untouched (INV-SE2).
+(§4.4's composition transparency is unaffected on either side: a rate
+policy is as invisible to declaring layers as the barrier is.) What
+an adopted policy may relax is exactly the *promptness* half of the
+schedule: INV-SE3's immediate admission for a re-evaluation with no
+outstanding stopped task, INV-SE5's admission at the *next* frame pass
+after quiescence (a policy may push it to a later re-evaluation point,
+never off one), §4.3's undelayed pure restart of a finished
+subscription, and RFC 0005 INV-13's restart "on the next
+re-evaluation". Those promptness clauses are stated for policy-off
+operation — the only mode that exists today — and the rate-policy
+RFC's precondition is to amend them, in this RFC and in RFC 0005, to
+be explicitly scoped to policy-off operation before its delays become
+conforming; until such an amendment lands, any admission delay beyond
+quiescence is a contract violation, not an anticipated policy. A rate
+policy's added delay is likewise
 outside RFC 0006 INV-L8's load-control non-interference guarantee:
 like this RFC's quiescence barrier, it is an owned admission-timing
 contract on its own axis — the delegated frame here — not load-control
