@@ -8,7 +8,7 @@
 
 ## Summary
 
-Today every processed message unconditionally forces a redraw. On
+Before this RFC, every processed message unconditionally forced a redraw. On
 high-message-rate applications (e.g. a Nostr TUI client) most incoming events
 change off-screen or background state and do not affect the visible viewport,
 yet each one triggers a full `view()` rebuild on the next frame tick. This RFC
@@ -32,8 +32,11 @@ per `terminal.draw()` (a subset of the render cost, not additive to it). The
 whole 89% scales with the **number of frames rendered**, so gating the redraw
 shrinks the `view()` build and the `/dev/tty` queries together.
 
-The root is in `process_message_batch` (`src/runtime.rs`): after calling
-`update()` it sets `needs_redraw = true` unconditionally. The application has no
+The root was in the runtime's batch path (`src/runtime.rs`): after calling
+`update()` it set `needs_redraw = true` unconditionally — the gating this RFC
+adds now lives in the dispatch path (`dispatch_update_command` →
+`record_redraw`; the old `process_message_batch` survives as a `#[cfg(test)]`
+wrapper). The application had no
 way to say "this message did not change the visible view." Relay events stream
 in continuously; most append to off-screen timeline, update metadata, or feed
 background aggregation, but every one still forces a full `view()` rebuild.
@@ -136,7 +139,8 @@ This is why an **`Action::SkipRedraw` variant is rejected** (see §8), and the
 rejection is mechanical, not aesthetic:
 
 - **Timing.** `needs_redraw` is set **synchronously** right after `update()`
-  returns in `process_message_batch` (`src/runtime.rs`), *before* the command's
+  returns, in the dispatch path (`dispatch_update_command` →
+  `record_redraw`, `src/runtime.rs`), *before* the command's
   stream is spawned. An `Action` is drained **asynchronously** later in the
   detached task inside `enqueue_command`. A skip signal delivered as an `Action`
   arrives after the redraw decision (and possibly the frame) has already
@@ -166,8 +170,11 @@ event; a redraw policy is not, so it lives on the command as a field.
 
 ### 5.1 API surface
 
-`Command<Msg>` gains a private `redraw: bool` field (default `true`) and a
-consuming builder:
+`Command<Msg>` gains a private redraw directive (default: redraw) and a
+consuming builder. The sketch below is the design-time `bool` form; the
+landed representation is `directives: RuntimeDirectives` carrying
+`redraw: RedrawPolicy` (`src/command/core.rs`,
+`src/command/runtime_directives.rs`), with the same algebra:
 
 ```rust
 impl<Msg: Send + 'static> Command<Msg> {
@@ -199,13 +206,17 @@ Command::perform(fetch_offscreen(), Msg::Loaded).without_redraw()
 The field is private, so the addition is non-breaking and the default
 (`redraw = true`) preserves current behavior. `Action` is **unchanged**.
 
-**Implementation invariant (independence from `stream`).** `redraw` must be
-tracked **independently of whether `stream` is `Some`/`None`**. Every place that
-short-circuits on `stream.is_none()` — the `filter_map(|cmd| cmd.stream)` in
-`batch` (`command.rs:196`) and the `map_or_else(Command::none, …)` in `map`
-(`command.rs:298`) — currently rebuilds via `Command::none()` and would silently
-reset `redraw` to the default `true`. Both must instead carry the `redraw` bit
-through. This single rule is the root fix for §5.4 (`batch`) and §5.5 (`map`).
+**Implementation invariant (independence from the effect).** The redraw
+directive must be tracked **independently of whether the command carries
+an effect**. At drafting, every place that short-circuited on the absent
+stream — the `filter_map(|cmd| cmd.stream)` in the then-`batch` and the
+`map_or_else(Command::none, …)` in the then-`map` — rebuilt via
+`Command::none()` and would have silently reset `redraw` to the default.
+The landed representation removes the hazard at the root: `Command`
+holds `effect`, `directives`, and `cancellation` as separate fields
+(`src/command/core.rs`), so `batch` (core.rs:503) and `map` (core.rs:619)
+carry the directive through regardless of the effect's presence. This
+single rule is the root fix for §5.4 (`batch`) and §5.5 (`map`).
 
 **Single default-initialization point.** `redraw` is the first field beyond
 `stream`, so adding it touches every constructor (`none` / `future` / `message`
@@ -263,9 +274,11 @@ attributes" (§5.6). Leaving them unchanged would let users read `is_none()` as
 
 ### 5.2 Runtime gating
 
-In `process_message_batch`, replace the unconditional
-`self.needs_redraw = true` with an OR over the batch: a redraw is needed if
+In the batch path, the unconditional `self.needs_redraw = true` becomes
+an OR over the batch: a redraw is needed if
 **any** message in the micro-batch returned a command that still redraws.
+The design-time sketch (the landed form reads the directive through
+`dispatch_update_command` → `record_redraw`, `src/runtime.rs`):
 
 ```rust
 // per processed message:
@@ -275,24 +288,28 @@ if cmd.redraw {                       // read before enqueue_command consumes cm
 }
 self.state.enqueue_command(cmd);
 
-// ... after the batch loop, unchanged from today (§5.3):
-self.subscriptions_dirty = true;      // still unconditional — NOT gated by redraw
+// ... after the batch loop: subscription dirtiness recorded
+// independently of redraw (§5.3) — NOT gated by the directive
 ```
 
-Only the `needs_redraw = true` line becomes conditional; the existing
-unconditional `self.subscriptions_dirty = true` at the end of the batch
-(`runtime.rs:302-304`) stays exactly as-is (§5.3).
+Only the `needs_redraw` recording is gated by the directive; the batch's
+subscription-dirtiness recording is independent of it (§5.3).
 
-`needs_redraw` is a persistent flag cleared after render in
-`process_frame_tick`; leaving it untouched when all messages opt out means a
+`needs_redraw` is a persistent flag cleared after render in the frame
+pass (held in `PendingWork` behind the `FrameScheduler` —
+`src/runtime/pending_work.rs`); leaving it untouched when all messages opt out means a
 batch whose every message returned `without_redraw()` performs no redraw, while
 a mixed batch redraws (correct: one visible change in the batch warrants a
 frame).
 
-### 5.3 Subscriptions stay unconditional
+### 5.3 Subscriptions stay independent of the directive
 
-`subscriptions_dirty` continues to be set to `true` for every processed batch,
-per non-negotiable (B). `without_redraw()` never touches it. This keeps the
+Subscription dirtiness is never gated by `without_redraw()`, per
+non-negotiable (B): a suppressed batch still marks subscriptions dirty
+exactly as an unsuppressed one does. *When* a batch marks dirtiness is
+not this RFC's rule — RFC 0003 §4.4 owns it (a batch dirties
+subscriptions when at least one input ran `update`; `src/runtime.rs`).
+This keeps the
 subscription set always-correct and confines this RFC to the redraw axis.
 
 ### 5.4 `Command::batch`
@@ -307,13 +324,15 @@ children's `redraw`, computed independently of the stream filtering** (per the
 - **Empty fallback applies only to a truly empty input** (zero children):
   `Command::batch([])` keeps the default `true` (matching `Command::none()`).
 
-The distinction matters because a child can carry `redraw = false` while having
-`stream == None` (e.g. `Command::none().without_redraw()`). The current
-implementation (`command.rs:196-204`) filters children by `stream` and falls
-back to `Self::none()` when `streams.is_empty()`, which would return
+The distinction matters because a child can carry `redraw = false` while
+carrying no effect (e.g. `Command::none().without_redraw()`). The pre-RFC
+implementation filtered children by `stream` and fell
+back to `Self::none()` when no streams remained, which would have returned
 `redraw = true` for `Command::batch([Command::none().without_redraw()])` —
-**violating INV-5b**. The fix computes `redraw` over the *children* before the
-stream filter, and only the zero-children case falls back to the default:
+**violating INV-5b**. The landed fix computes the directive over the
+*children* independently of the effect filter (`src/command/core.rs`,
+core.rs:503), and only the zero-children case falls back to the default —
+the design-time sketch:
 
 ```rust
 pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
@@ -340,11 +359,14 @@ pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
 ### 5.5 `Command::map`
 
 `map` rebuilds the `Command`, so it must **carry `redraw` through both
-branches** (§5.1). The current implementation
-(`command.rs:298-306`) drops it: the `None` branch resets to `Command::none()`
-(`redraw = true`) and the `Some` branch rebuilds `Command { stream: … }` without
-the field. Both must preserve `self.redraw`, so that `without_redraw().map(f)`
-and `map(f).without_redraw()` both end with `redraw = false`:
+branches** (§5.1). The pre-RFC implementation
+dropped it: the `None` branch reset to `Command::none()`
+(`redraw = true`) and the `Some` branch rebuilt the command without
+the field. The landed `map` preserves the directive regardless of the
+effect's presence (`src/command/core.rs`, core.rs:619), so
+`without_redraw().map(f)`
+and `map(f).without_redraw()` both end suppressed — the design-time
+sketch:
 
 ```rust
 pub fn map<T>(self, f: …) -> Command<T> {
@@ -361,10 +383,12 @@ pub fn map<T>(self, f: …) -> Command<T> {
 
 ### 5.6 `is_none` / `is_some` and the public docs
 
-`is_none()` / `is_some()` **stay stream-based** and are *not* changed to consider
-`redraw`. This is deliberate: the two fields are read by different consumers —
-`enqueue_command` inspects `stream` to decide whether to spawn a task
-(`runtime.rs:536`), and `process_message_batch` inspects `redraw` to decide
+`is_none()` / `is_some()` **stay effect-based** and are *not* changed to consider
+`redraw`. This is deliberate: the two are read by different consumers —
+the runtime's dispatch inspects the effect's leaves to decide what to
+spawn (`RuntimeCore::enqueue_command`, `src/runtime/core.rs`, folding
+them via `fold_leaves` — `src/command/runtime_parts.rs`), and the batch
+path reads the redraw directive to decide
 whether to draw. They are independent by design.
 
 The consequence is a new, valid state: a command with **`stream == None` and
@@ -373,8 +397,9 @@ The consequence is a new, valid state: a command with **`stream == None` and
 `is_none() == true` **and yet it carries a runtime directive** (suppress the
 redraw that would otherwise happen).
 
-Because of that, this RFC requires updating the doc comments that currently
-equate `none`/`is_none` with "does nothing", so a stream-less command is not
+Because of that, this RFC requires updating the doc comments that had
+equated `none`/`is_none` with "does nothing" (delivered with the
+implementation), so an effect-less command is not
 read as droppable:
 
 - **`Command` (type):** frame it as "a side-effect stream *plus* runtime
@@ -424,12 +449,13 @@ read as droppable:
 
 ## 7. Testing strategy
 
-- **Internal unit tests (deterministic, primary).** `redraw` is a **private
-  field**, so these live in `src/command.rs`'s `#[cfg(test)]` module (which can
+- **Internal unit tests (deterministic, primary).** The redraw directive
+  is **private**, so these live in `src/command/core.rs`'s `#[cfg(test)]`
+  module (core.rs:636, which can
   read it) — they are white-box tests of the algebra, not public-API tests. They
   assert: each constructor defaults to `true`; `without_redraw()` flips it;
-  `batch` ORs over children independently of `stream` (INV-1, INV-5a); the two
-  edge cases the algebra gets wrong today — `batch([none().without_redraw()])`
+  `batch` ORs over children independently of the effect (INV-1, INV-5a); the two
+  edge cases the pre-RFC algebra got wrong — `batch([none().without_redraw()])`
   and `…without_redraw().map(f)` — are `redraw == false` (INV-5b, INV-6); and
   `is_none() == true` coexists with `redraw == false` (INV-8, via the public
   `is_none()` plus the private field). Timing-independent, most stable.
@@ -513,18 +539,21 @@ avoid.
   spawned (§4 timing), so it cannot be baked into the stream; it must be a
   field. It generalizes cleanly: `batch` OR-folds it, `map` carries it
   (§5.4/§5.5), and the private-bool + builder + INV pattern reuses at ~zero cost.
-  `without_subscription_update` is the direct confirmation — `subscriptions_dirty`
-  is set at the same synchronous point (`runtime.rs:302-304`) and folds
+  `without_subscription_update` is the direct confirmation —
+  subscription dirtiness is recorded at the same synchronous point (the
+  batch's dirtiness rule, RFC 0003 §4.4) and would fold
   identically. **This is the axis the "minimal `bool`/enum attribute set" image
   describes; it does not describe Axis B.**
 - **Axis B — execution lifecycle = per-effect stream transformation
   (`timeout`, `retry`) or dedicated lifecycle metadata (`cancellable`), never
   an Axis-A-style passive field.**
-  `.timeout(d)` must wrap `self.stream`
-  at call time (e.g. `tokio::time::timeout`), because `batch` combines child
-  streams via `select_all` (`command.rs:196-204`) and per-child timeouts must
-  stay independent — a single outer `Option<Duration>` field cannot represent
-  `batch([a.timeout(1s), b.timeout(2s)])`. A bonus of the eager-wrap form: `map`
+  `.timeout(d)` must wrap the effect
+  at call time — the landed form wraps each effect leaf individually
+  (`src/command/effect.rs`) — because `batch` merely concatenates child
+  leaves and the runtime folds them only at its spawn site
+  (`fold_leaves`, `src/command/runtime_parts.rs`), so per-child timeouts
+  must stay independent — a single outer `Option<Duration>` field cannot
+  represent `batch([a.timeout(1s), b.timeout(2s)])`. A bonus of the eager-wrap form: `map`
   and `batch` preserve it for free (it is already in the stream), unlike Axis A
   fields which must be threaded explicitly. Cancellation is the settled
   exception to the stream-transformation form: RFC 0003 carries
