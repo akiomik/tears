@@ -202,7 +202,13 @@ Accepted only when all of the following hold:
 - **No internal `C`.** No conditional verdict waits on a root judgment
   this consolidation itself decides. The only `C`s that may remain are
   delegations to external RFCs, and each records its owning task and
-  whether it blocks the composition RFC.
+  two flags, defined separately: **`blocks composition`** — `yes`
+  means the delegated contract document must be Accepted together with
+  this RFC in the bundle below (the register currently marks none
+  `yes`); and **`gates the composition RFC`** — `yes` means the
+  delegated document must precede or accompany the *future composition
+  RFC*: a scheduling constraint on that RFC, never a condition on this
+  RFC's acceptance.
 - **No unprocessed `B`.** Every in-scope `B` is dispatched one of three
   ways: (a) the affected root judgment is reopened; (b) the row is
   demoted to `X` with the reason and the simplification actually
@@ -212,14 +218,12 @@ Accepted only when all of the following hold:
   Changes already carried on the 0.11.0 breaking budget (the
   composition work itself included) are baseline, not `B`.
 - **Bundle acceptance.** This RFC is Accepted only together with the
-  bundle its Target names: RFC 0011, RFC 0012, and the blocking
-  amendments (the RFC 0006 and RFC 0007 Draft overlays). If an
+  bundle its Target names — RFC 0011, RFC 0012, and the blocking
+  amendments (the RFC 0006 and RFC 0007 Draft overlays) — and with any
+  delegation's contract document marked `blocks composition = yes`
+  (none at present, so the bundle is exactly the Target's list). If an
   amendment's semantics change during the bundle review, the change is
-  a counterexample and returns to the audit before acceptance. The
-  §10 register's `blocks composition = yes` flag means something
-  else — the delegated document gates the *future composition RFC*,
-  which it must precede or accompany — and is not a condition on this
-  RFC's acceptance.
+  a counterexample and returns to the audit before acceptance.
 
 ### 1.9 Counterexample grades and the reopen rule
 
@@ -492,8 +496,11 @@ itself: the behavior contracts ride RFC 0003 (INV-1, INV-2–INV-16)
 and RFC 0006 (the two delivery classes, INV-L9/INV-L10) unchanged, and
 the ledger replay reaffirmed every affected row (§2.4).
 
-**Reopen targets.** Counterexamples breaking the execution model's
-owners or topology (grade (ii)) reopen `root-A1`; none has occurred.
+**Reopen targets.** A counterexample of any §1.9 grade that affects
+`root-A1`'s decisions reopens it — a delivery-compatibility break
+(grade (i)) or a removal-projection fail (grade (iii)) can reach this
+root as readily as an owner/topology break (grade (ii)); none has
+occurred.
 
 ### 3.2 `root-SCHED` — verdict: reaffirmation, canonicalization, and two numberings
 
@@ -538,8 +545,9 @@ The lifecycle phase machine and termination model — previously implicit
 in every RFC and owned by none — are redesigned into an owner
 contract, **RFC 0011**, which this chapter records but does not
 restate: steady-state phase order (frame-granularity rendering and
-re-evaluation, render before subscription start, both on the pass's
-current state); the bootstrap contract with **inert construction** —
+re-evaluation on the pass's current state — with a redraw pending the
+render precedes re-evaluation, with none pending re-evaluation
+proceeds with no preceding render: RFC 0011 §2.2's conditional form); the bootstrap contract with **inert construction** —
 the constructor spawns no runtime-owned task, polls no effect, starts
 no source, a 0.11.0 behavior change — and the in-`run()` order with
 first-render eligibility rather than a render promise; subscription
@@ -619,9 +627,11 @@ The composition RFC must satisfy, and is reviewed against, this list
 **Reaffirmed**: the public identity types stay non-unified —
 `CommandId` and `SubscriptionId` remain distinct public types
 (RFC 0005 INV-7). **Delegated**: `cancel_scope` — owned by its own
-future RFC, constrained to precede or accompany the composition RFC
-per (e); **blocks composition: yes** (a scheduling block, not a
-semantic one). **Contract impact**: none now; implementation lands in
+future RFC; **blocks composition: no** (this consolidation only sets
+its direction, so the document does not join this RFC's bundle);
+**gates the composition RFC: yes** (it must precede or accompany that
+RFC per (e) — a scheduling constraint on the composition RFC, §1.8's
+second flag). **Contract impact**: none now; implementation lands in
 the future composition and `cancel_scope` RFCs. **Reopen targets**:
 counterexamples breaking the identity model or requiring its
 re-migration reopen `root-CMP`; none has occurred.
@@ -673,16 +683,22 @@ amendment), source-internal state legalized **without** generalizing
 update-side external mutation (RFC 0001 §5.5 stays that RFC's scoped
 deviation), and the effect-DI negative space owned there (INV-SE8; the
 time axis stays RFC 0009's). The behavior change is two-faced —
-re-admission waits for quiescence, and re-evaluation gains a
+admission of new and restarted subscriptions waits for outstanding
+stopped tasks' quiescence (pure additions with no outstanding stops
+admit immediately as today), and re-evaluation gains a
 message-independent trigger — carried by RFC 0012's `Changed` entry at
 0.11.0.
 
 **Conditions and delegations.** Restart *rate* control is delegated to
 a future opt-in policy RFC under RFC 0012 §8's partitioned frame
 (blocks composition: no): the barrier, phase placement, and
-supersession rules are invariant under any policy; only re-admission
-promptness may relax, and only after that RFC amends the promptness
-clauses in RFC 0012 and RFC 0005 to policy-off scope. The stage-3
+supersession rules are invariant under any policy; what may relax is
+only the re-admission promptness of subscriptions the adopted policy
+targets — pure first admission (bootstrap's initial admissions
+included) and every promptness clause of subscriptions outside the
+policy's target set are preserved under any policy — and only after
+that RFC amends the re-admission promptness clauses in RFC 0012 and
+RFC 0005 to policy-off scope. The stage-3
 driving-store API is delegated to a future RFC 0008 amendment gated on
 RFC 0012's acceptance (blocks composition: no).
 
@@ -845,7 +861,8 @@ demonstrating §1.8's gate.*
 ## 10. Delegations and follow-up work
 
 *Stub — the delegation register: each delegated item with its owning
-task and blocks-composition flag, and the post-bundle follow-ups.*
+task and its two flags (`blocks composition`; `gates the composition
+RFC` — §1.8's definitions), and the post-bundle follow-ups.*
 
 ## 11. References
 
