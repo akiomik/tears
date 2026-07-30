@@ -1,15 +1,20 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Implemented
+- Status: Draft (the §2.1 `Copy` removal is the open deliverable;
+  everything else is implemented)
 - Target: the prerequisite RFC 0006 delegated to a separate document
-  (RFC 0006 sections 3.2, 6)
+  (RFC 0006 sections 3.2, 6); plus one breaking change for 0.11.0
+  decided here — `RuntimeConfig` drops its `Copy` derive (§2.1)
 - Scope: the public `RuntimeConfig` surface (type, construction, constructor
   integration), the recommended-defaults documentation, the restart-rate
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
   and the CI smoke-profile decision
 - Feature flag: none
 - CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`) land
-  at the load-control implementation release, not with this RFC
+  at the load-control implementation release, not with this RFC.
+  `Changed` (breaking) — `RuntimeConfig` no longer implements `Copy`;
+  `Clone`, `Debug`, `Eq`, and `PartialEq` remain, and `FrameRate` stays
+  `Copy`. Lands at 0.11.0 with the §2.1 derive-removal deliverable
 
 > **Decision scope.** This RFC fixes only what RFC 0006 delegated to it. The
 > load-control semantics themselves — what each control means, the
@@ -89,7 +94,7 @@ of the three controls (RFC 0006 §4.1, INV-L12) and every acceptance
 ///
 /// With the load controls unset, the configuration reproduces the
 /// unbounded delivery mode exactly (RFC 0006 INV-L6).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     frame_rate: FrameRate,
     app_channel_capacity: Option<NonZeroUsize>,
@@ -133,18 +138,25 @@ impl RuntimeConfig {
   one inside a `Default` would smuggle a policy value into a derive.
   Should a default frame rate ever be adopted, adding `Default` then is
   additive.
-- **Consuming-call misuse guard**: `RuntimeConfig` is `Copy`, so a
-  consuming setter call whose return value is discarded compiles silently
-  and leaves the original, unmodified value in play — the caller's
-  in-hand `config` is untouched, and a chained
-  `Runtime::with_config(flags, config)` after a discarded setter call
-  silently uses an unbounded (or otherwise unintended) configuration.
-  `new` and every setter therefore carry `#[must_use]`, each setter with
-  an explanatory message, matching the crate's existing consuming-modifier
-  convention (`RetryPolicy::with_backoff`, `RetryPolicy::with_fixed_backoff`
-  — `src/command/retry.rs`); `Runtime::with_config` carries `#[must_use]`
-  too, matching `Runtime::new`'s existing attribute. Pinned as INV-C6
-  (§7).
+- **Consuming-call misuse guard**: a setter call whose return value is
+  discarded must never leave the caller silently running an unintended
+  configuration. Without `Copy` (Derives below), the compiler closes
+  the main shape itself: a consuming setter *moves* the config, so
+  discarding its result and then using the original is a use-after-move
+  error, not a silent stale read. Two discard shapes remain
+  expressible — a setter called on a `clone()` with the result dropped,
+  and a discarded chain whose original is never touched again — and for
+  those `new` and every setter carry `#[must_use]`, each setter with an
+  explanatory message, matching the crate's existing consuming-modifier
+  convention (`RetryPolicy::with_backoff`,
+  `RetryPolicy::with_fixed_backoff` — `src/command/retry.rs`);
+  `Runtime::with_config` carries `#[must_use]` too, matching
+  `Runtime::new`'s existing attribute. While the `Copy` derive is still
+  present (the open deliverable, Derives below), a discarded setter
+  call additionally compiles with the original left usable in play —
+  the `#[must_use]` warning is the only guard for that shape today, and
+  the derive removal is what converts its compile-time half into an
+  error. Pinned as INV-C6 (§7).
 - **Validation style**: none, by construction. Every capacity is
   `NonZeroUsize`, so a zero capacity is unrepresentable, and the frame
   rate arrives as the already-validated `FrameRate` type — validation
@@ -155,11 +167,27 @@ impl RuntimeConfig {
   unavailable outside the crate, so adding a field later is additive
   without `#[non_exhaustive]`. No getters are provided initially; adding
   them is additive.
-- **Derives**: `Copy` is included deliberately — `FrameRate` is `Copy` and
-  the load controls are word-sized options, and `Copy` keeps harness and
-  test code free of clones. Adding a non-`Copy` field later would require
-  removing the derive, which is a breaking change; that cost is accepted
-  and recorded here.
+- **Derives**: `Clone`, `Debug`, `Eq`, `PartialEq` — deliberately not
+  `Copy`. This RFC positions `RuntimeConfig` as the aggregation point
+  for future runtime knobs, and a `Copy` config turns every future
+  non-`Copy` field — a policy object, a callback — into a breaking
+  derive removal deferred onto whoever adds it. 0.11.0 already carries
+  committed breaking budget, so the removal is taken there, while the
+  config is small and the churn minimal; after it, config growth is
+  non-breaking on this axis. What `Copy` bought — harness and test code
+  free of explicit clones — is recoverable with `Clone` at the cost of
+  a visible `clone()`. `FrameRate` keeps `Copy`: it is word-sized with
+  no growth ambition (`src/runtime/frame_rate.rs`). The current code
+  still derives `Copy` (`src/runtime/config.rs`); removing it is this
+  amendment's implementation deliverable, in four parts: (a) the derive
+  change itself; (b) updating the rustdoc that leans on copy idioms
+  (the "returns a modified copy" / "does not mutate in place" phrasing,
+  `src/runtime/config.rs`), which describes a move-and-return builder
+  once `Copy` is gone; (c) an inventory of implicit-`Copy` uses —
+  assignments and by-value passes that copy silently today — migrated
+  to `clone()` or borrows; (d) a public-API diff check at
+  implementation time confirming the only surface change is the `Copy`
+  implementation's removal.
 
 ### 2.2 Constructor integration
 
