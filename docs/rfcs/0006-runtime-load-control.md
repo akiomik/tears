@@ -33,9 +33,12 @@
 
 ## Summary
 
-Every runtime-owned channel is unbounded and every sender completes
-immediately. Under sustained overload — producers faster than the update loop
-— pending messages, memory, and input-to-screen latency all grow without
+Under the default configuration every runtime-owned channel is unbounded
+and every sender completes
+immediately (bounded mode, this RFC's §4, is the opt-in alternative).
+Under sustained overload — producers faster than the update loop
+— pending messages, memory, and input-to-screen latency in that default
+all grow without
 bound, and outputs of keyed (cancellable) commands are starved for as long as
 the shared queue stays non-empty. Full-loop measurements
 (`benches/runtime_load.rs`) confirm each of these failure modes and also
@@ -57,7 +60,9 @@ This RFC defines the load-control contract in two steps:
 
 ### 1.1 Channel and scheduling inventory
 
-The runtime owns these channels and scheduling mechanisms today:
+The runtime owns these channels and scheduling mechanisms (the table
+describes the default, unbounded configuration; §4.1's capacities bound
+the first four rows' app-facing members):
 
 | Input | Channel | Capacity | Sender behavior |
 | --- | --- | --- | --- |
@@ -81,7 +86,9 @@ Scheduling facts that interact with load:
   frame interval (`MissedTickBehavior::Skip`); the quit branch is always
   armed.
 - Message micro-batching drains additional ready inputs for up to 100µs after
-  the first one. The window is time-capped but not count-capped.
+  the first one. The window is time-capped and, by default, not
+  count-capped (`batch_max_messages`, this RFC's INV-L12, adds the
+  opt-in count cap).
 - `AppInputs` polls the shared receiver before keyed receivers at every pull
   point. This is RFC 0003's INV-14: a ready shared cancel message must be able
   to suppress a ready keyed output before delivery. RFC 0003 already notes
@@ -107,7 +114,8 @@ Scheduling facts that interact with load:
   premise, section 4.5). "Active" here means an entry exists in the keyed
   map, including a finished-but-undrained run: a keyed channel outlives
   its command's completion until its buffered output is drained and the
-  id released for retry (RFC 0005,
+  id released for retry (RFC 0003 INV-7's contract, whose behavioral
+  anchor is
   `delivering_the_closed_senders_last_item_releases_the_id_for_retry`), so
   such a run still counts toward `m` and still occupies its
   `keyed_channel_capacity` share. Nor is this a bound on all pending-work memory:
