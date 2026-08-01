@@ -615,8 +615,10 @@ The composition RFC must satisfy, and is reviewed against, this list
   phase machine; it introduces no second lifecycle.
 - **(e) `cancel_scope` precedence.** A `cancel_scope` design (the
   RFC 0005 §4.5 questions) precedes or accompanies the composition
-  RFC — the prerequisite RFC 0005 records, widened to
-  precede-or-accompany by this consolidation's delegation record.
+  RFC. RFC 0005 already records this relation — before or together
+  with collection (`forEach`-style) composition — and this
+  consolidation generalizes its object from that concrete client to
+  the composition RFC as a whole.
 - **(f) Quiescence-barrier non-interference.** The adapter aggregates
   child declarations into one desired set and neither observes nor
   awaits quiescence (RFC 0012 §4.4); a composition design that needs
