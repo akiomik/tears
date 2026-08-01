@@ -1642,9 +1642,134 @@ simplification; interaction rows record `excluded_by=<fixture id>`.
 
 ## 10. Delegations and follow-up work
 
-*Stub — the delegation register: each delegated item with its owning
-task and its two flags (`blocks composition`; `gates the composition
-RFC` — §1.8's definitions), and the post-bundle follow-ups.*
+This chapter is normative (§1.2): it is the delegation register, the
+anti-catalog adoptions, the non-gating follow-ups, and this RFC's
+Implemented criterion.
+
+### 10.1 Delegation register
+
+Every audit row that terminated `C` names its owning task and both
+§1.8 flags on its own row (§9). This register is the canonical
+grouping of those owners into delegated documents — where §9 rows
+name the same slot under slightly different working titles, the entry
+below is the canonical name and the rows are listed once. Per §1.8,
+**every entry is `blocks composition = no`**: none of these documents
+joins this RFC's acceptance bundle (the bundle is exactly the
+Target's list). The only scheduling constraint is `cancel_scope`'s
+`gates the composition RFC = yes`. The bundle's own documents
+(RFC 0011, RFC 0012, and the RFC 0006/0007 amendments) are acceptance
+material under §1.8, not register entries.
+
+| Delegated document | Audit rows | Gates | Scope handed over |
+|---|---|---|---|
+| composition RFC | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4 | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
+| `cancel_scope` RFC (`C-16`, §5.3) | N30, N40 (N40 jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5) | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
+| driving surface RFC (with its subordinate conformance kit) | N7, N15, N24, N45, N48, N49, P12 | no | external driving of the runtime: pacing/latency step mapping, parking premise, bootstrap/termination intake, backend/terminal separation, the contour declaration's inventory of signals the driving surface exclusively holds (POSIX signal handling), source/backend conformance kit |
+| RFC 0008 stage-3 driving-store amendment | TS-1, TS-3, TS-6 | no | driving-store test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
+| graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, cleanup hook seam (window inside RFC 0012 §3's stop-requested→quiesced interval) |
+| supervision/rate RFC (the S8a slot) | N25, N36, S8a; the restart-storm half of N54 | no | opt-in restart-rate policy in RFC 0012 §8's delegation slot (one of the two recorded forms, with the immediacy-amendment precondition), startup-failure cause observation |
+| suspend-time contract RFC | N54 (production half) | no | production suspend-time behavior: fill or pin as negative space what RFC 0009 leaves open beyond monotonic passthrough |
+| batching/load-control RFC | P10 | no | batching strategies beyond the current batch semantics, via RFC 0006 INV-L12 amendment; reopens `root-SCHED` per §1.9 |
+| state-observation / transcript RFC (the N47 slot) | N14, N47, P8 | no | full-runtime transcript (phase-machine-hook seam), state/inspector observation surface, profiling hooks beyond INV-L13 |
+| RFC 0002 extension RFC (`B-10`, §6.1) | TCA-3 | no | subscription re-evaluation-policy directive |
+| RuntimeConfig input-coalescing policy RFC | N1 | no | opt-in terminal-input coalescing policy |
+| terminal suspend/resume RFC | N4 | no | suspend/resume over the settled quiesce→restart, terminal-ownership, and suspend-entry closedness seams |
+| runtime-config update RFC | N20 | no | post-startup configuration change: information flow, synchronization, public control surface |
+| first-paint policy RFC | N22 | no | opt-in first-paint gating (home candidates recorded on the row; INV-LC4 default preserved) |
+| test-harness arbitration RFC | N46 | no | harness-side deterministic-interleaving injection seam (production scheduler stays uninstrumented) |
+| content-bearing owner RFCs (meta-entry) | N52 | no | redaction/omission policy, owned per content-bearing surface (the transcript and inspector documents above, any future persistence surface for N12's opt-in bounds, and module tracing docs) |
+
+Name normalization: §9's working titles map onto these entries as
+follows — N45's "conformance kit RFC (N48 frame)" and N48's "driving
+surface RFC" are the driving-surface entry; N25's "supervision/rate
+RFC (S8a co-located)", N36's "supervision RFC", and S8a's "S8a rate
+policy RFC" are the single S8a-slot entry; N54's owner splits between
+the suspend-time entry and the S8a-slot entry as its row records;
+N14's "state-observation RFC (seated with the N47 transcript RFC)"
+is the N47-slot entry. The per-row flags in §9 are unchanged by this
+grouping.
+
+### 10.2 Anti-catalog adoptions
+
+The fifteen `adopted(X)` decisions are normative negative space: each
+names the simplification it buys, and reversing one is a contract
+change on the owner surface it protects (reopening per §1.9 where a
+root is named).
+
+- **AC1 — no hot code reload.** No reserved type-erasure or re-entry
+  seams; the phase machine and the single state owner stay
+  monomorphic.
+- **AC2 — no multi-process / distributed state sync.** The
+  single-process, single-runtime boundary remains a precondition of
+  the lifecycle contract.
+- **AC3 — no non-Tokio executor surface.** No public compatibility
+  surface for alternate executors; `Send` bounds are kept; the
+  implementation may depend on Tokio, whose internal shapes stay
+  unpinned.
+- **AC4 — no bundled widget library.** Widgets stay with the ratatui
+  ecosystem; tears remains a runtime-contract crate.
+- **AC5 — no parallel `update`.** Serial, non-reentrant update
+  (RFC 0011 INV-LC9) keeps the single state owner.
+- **AC6 — no exactly-once execution, no automatic rollback, and no
+  atomicity between external effects and message delivery.** Retries
+  may run non-idempotent external effects more than once (RFC 0004
+  §3.2), while a retry chain still yields at most one final message.
+- **AC7 — no general actor system.** The supervision contour is
+  capped at panic isolation; typed causes stay non-contractual.
+- **AC8 — no scheduler plugin API.** The scheduler is a fixed
+  mechanism; its statistical contracts stay simple.
+- **AC9 — no dynamic native plugins / stable ABI.** No dynamic
+  loading surface; composition stays static (the enum path is the
+  composition RFC's, §10.1).
+- **AC10 — no `no_std` / bare-metal.** The `std` + Tokio precondition
+  is preserved; build reductions stay within `std` (N50).
+- **AC-E1 — no SwiftUI-style observation import.** No
+  observation/dependency-tracking layer; invalidation flows through
+  explicit messages and the declared-set re-evaluation (whose purity
+  RFC 0012 INV-SE6 pins), with RFC 0001 §5.5's `invalidate()` as the
+  sole recorded deviation.
+- **AC-E2 — no macro-heavy DSL.** The public API stays plain Rust
+  traits and types; there is no macro surface to version.
+- **AC-E3 — no timer-jitter injection surface.** Timer delivery
+  determinism stays RFC 0009's; P14 terminates on this decision.
+- **AC-E4 — no dual runtime.** One runtime semantics; the
+  TCA-comparison imports (the TCA rows) enter only through the
+  audited delegation slots above.
+- **AC-E5 — no ambient dependency registry.** DI stays the Flags /
+  environment path plus source-side injection (RFC 0012 §6).
+
+### 10.3 Non-gating follow-ups
+
+None of these conditions acceptance; they are tracked here so the
+Implemented criterion (§10.4) can close over them.
+
+- Pending-work test-path consolidation (§8.2): move the test path
+  onto transition methods or a test-only helper, privatize the
+  fields, sync the doc comments.
+- Tokio feature-set trim (§7.2) and feature-inventory tidying (§7.6).
+- Flags-convention documentation and example, including app-level
+  clock injection — the docs remainder TS-2 records and TS-5 routes.
+- Informative rustdoc cross-references from owner RFCs for the
+  shared-vocabulary concepts (§8.1).
+
+### 10.4 Breaking budget, and from Accepted to Implemented
+
+Breaking budget: no delegated `B` entered a breaking budget — §1.8's
+third dispatch arm was never exercised. The bundle's own breaking
+changes are already carried on the 0.11.0 budget as baseline (§1.8),
+enumerated in §2.4.
+
+This RFC becomes Implemented when the work §10 enumerates is closed:
+
+- each §10.1 entry's document is Accepted or explicitly withdrawn,
+  with the disposition of its audit rows recorded;
+- code conformance to the redesigned contracts (the bundle's
+  amendments) has merged to main on the 0.11.0 breaking budget
+  (§1.8);
+- the simplifications promised by `X` and `adopted(X)` verdicts are
+  applied, and no reserved seam excluded by §10.2 has been
+  reintroduced;
+- the §10.3 follow-ups are done.
 
 ## 11. References
 
