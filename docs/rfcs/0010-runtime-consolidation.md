@@ -1,6 +1,6 @@
 # RFC 0010: Runtime Consolidation
 
-- Status: Draft
+- Status: Accepted (2026-08-05)
 - Target: 0.11.0 — the consolidation bundle: this RFC is Accepted only
   together with RFC 0011, RFC 0012, and the blocking amendments to
   existing RFCs (§1.8)
@@ -44,8 +44,9 @@ land on that architecture without replacing it.
      they stand on this branch;
   2. the **semantics-bearing Draft overlay**: RFC 0006, RFC 0007,
      RFC 0011, and RFC 0012 — the documents whose amendments or new
-     contracts change semantics, and which are Draft for exactly that
-     reason; and
+     contracts change semantics, and which carried Draft status
+     through the audit for exactly that reason (transitioned together
+     at the bundle acceptance, per §1.8); and
   3. the **semantics-neutral amendments** to Implemented documents,
      which keep their Status — each file's own Status header is the
      source of truth.

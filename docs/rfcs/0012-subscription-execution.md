@@ -1,6 +1,6 @@
 # RFC 0012: Subscription Execution
 
-- Status: Draft
+- Status: Accepted
 - Target: 0.11.0 — one behavior change with two faces (restart and
   replacement admission waits for the stopped task's quiescence, and
   subscription re-evaluation gains a message-independent trigger, §4);

@@ -1,6 +1,6 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Draft (the §2.1 `Copy` removal is the open deliverable;
+- Status: Accepted (the §2.1 `Copy` removal is the open deliverable;
   everything else is implemented)
 - Target: the prerequisite RFC 0006 delegated to a separate document
   (RFC 0006 sections 3.2, 6); plus one breaking change for 0.11.0

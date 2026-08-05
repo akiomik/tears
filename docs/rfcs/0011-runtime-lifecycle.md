@@ -1,6 +1,6 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Draft
+- Status: Accepted
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through

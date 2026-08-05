@@ -1,6 +1,6 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Draft (section 5.1 records the bounded acceptance results)
+- Status: Accepted (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
   at 0.11.0 (a schema change, hence a contract change under INV-L13 —
