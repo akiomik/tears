@@ -171,16 +171,10 @@ impl RuntimeConfig {
   non-breaking on this axis. What `Copy` bought — harness and test code
   free of explicit clones — is recoverable with `Clone` at the cost of
   a visible `clone()`. `FrameRate` keeps `Copy`: it is word-sized with
-  no growth ambition (`src/runtime/frame_rate.rs`). The derive is
-  removed (`src/runtime/config.rs`); the amendment's implementation
-  deliverable had four parts: (a) the derive change itself; (b) the
-  rustdoc that leaned on copy idioms (the "returns a modified copy" /
-  "does not mutate in place" phrasing, `src/runtime/config.rs`)
-  rewritten to describe a move-and-return builder; (c) an inventory of
-  implicit-`Copy` uses — assignments and by-value passes that copied
-  silently — migrated to `clone()` or borrows; (d) a public-API diff
-  check confirming the only surface change is the `Copy`
-  implementation's removal.
+  no growth ambition (`src/runtime/frame_rate.rs`). `RuntimeConfig` does
+  not derive `Copy` (`src/runtime/config.rs`); its rustdoc describes a
+  move-and-return builder, and the public surface differs from the
+  `Copy` era only by that implementation's removal.
 
 ### 2.2 Constructor integration
 
