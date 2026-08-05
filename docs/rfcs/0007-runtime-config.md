@@ -1,7 +1,6 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Accepted (the §2.1 `Copy` removal is the open deliverable;
-  everything else is implemented)
+- Status: Implemented
 - Target: the prerequisite RFC 0006 delegated to a separate document
   (RFC 0006 sections 3.2, 6); plus one breaking change for 0.11.0
   decided here — `RuntimeConfig` drops its `Copy` derive (§2.1)
@@ -10,8 +9,8 @@
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
   and the CI smoke-profile decision
 - Feature flag: none
-- CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`) land
-  at the load-control implementation release, not with this RFC.
+- CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`)
+  landed at the load-control implementation release, not with this RFC.
   `Changed` (breaking) — `RuntimeConfig` no longer implements `Copy`;
   `Clone`, `Debug`, `Eq`, and `PartialEq` remain, and `FrameRate` stays
   `Copy`. Lands at 0.11.0 with the §2.1 derive-removal deliverable
@@ -104,13 +103,13 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     #[must_use]
-    pub fn new(frame_rate: FrameRate) -> Self;
-    #[must_use = "app_channel_capacity returns a modified config and does not mutate in place"]
-    pub fn app_channel_capacity(self, capacity: NonZeroUsize) -> Self;
-    #[must_use = "keyed_channel_capacity returns a modified config and does not mutate in place"]
-    pub fn keyed_channel_capacity(self, capacity: NonZeroUsize) -> Self;
-    #[must_use = "batch_max_messages returns a modified config and does not mutate in place"]
-    pub fn batch_max_messages(self, max: NonZeroUsize) -> Self;
+    pub const fn new(frame_rate: FrameRate) -> Self;
+    #[must_use = "app_channel_capacity consumes the config and returns the modified value"]
+    pub const fn app_channel_capacity(self, capacity: NonZeroUsize) -> Self;
+    #[must_use = "keyed_channel_capacity consumes the config and returns the modified value"]
+    pub const fn keyed_channel_capacity(self, capacity: NonZeroUsize) -> Self;
+    #[must_use = "batch_max_messages consumes the config and returns the modified value"]
+    pub const fn batch_max_messages(self, max: NonZeroUsize) -> Self;
 }
 ```
 
@@ -151,12 +150,7 @@ impl RuntimeConfig {
   convention (`RetryPolicy::with_backoff`,
   `RetryPolicy::with_fixed_backoff` — `src/command/retry.rs`);
   `Runtime::with_config` carries `#[must_use]` too, matching
-  `Runtime::new`'s existing attribute. While the `Copy` derive is still
-  present (the open deliverable, Derives below), a discarded setter
-  call additionally compiles with the original left usable in play —
-  the `#[must_use]` warning is the only guard for that shape today, and
-  the derive removal is what converts its compile-time half into an
-  error. Pinned as INV-C6 (§7).
+  `Runtime::new`'s existing attribute. Pinned as INV-C6 (§7).
 - **Validation style**: none, by construction. Every capacity is
   `NonZeroUsize`, so a zero capacity is unrepresentable, and the frame
   rate arrives as the already-validated `FrameRate` type — validation
@@ -177,22 +171,16 @@ impl RuntimeConfig {
   non-breaking on this axis. What `Copy` bought — harness and test code
   free of explicit clones — is recoverable with `Clone` at the cost of
   a visible `clone()`. `FrameRate` keeps `Copy`: it is word-sized with
-  no growth ambition (`src/runtime/frame_rate.rs`). The current code
-  still derives `Copy` (`src/runtime/config.rs`); removing it is this
-  amendment's implementation deliverable, in four parts: (a) the derive
-  change itself; (b) updating the rustdoc that leans on copy idioms
-  (the "returns a modified copy" / "does not mutate in place" phrasing,
-  `src/runtime/config.rs`), which describes a move-and-return builder
-  once `Copy` is gone; (c) an inventory of implicit-`Copy` uses —
-  assignments and by-value passes that copy silently today — migrated
-  to `clone()` or borrows; (d) a public-API diff check at
-  implementation time confirming the only surface change is the `Copy`
-  implementation's removal.
+  no growth ambition (`src/runtime/frame_rate.rs`). `RuntimeConfig` does
+  not derive `Copy` (`src/runtime/config.rs`); its rustdoc describes a
+  move-and-return builder, and the public surface differs from the
+  `Copy` era only by that implementation's removal.
 
 ### 2.2 Constructor integration
 
 ```rust
 impl<App: Application> Runtime<App> {
+    #[must_use]
     pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self;   // unchanged
     #[must_use]
     pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self;  // new
