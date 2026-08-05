@@ -10,6 +10,7 @@ use tokio_stream::StreamMap;
 
 use crate::command::{Action, CancelPolicy, CommandId};
 use crate::noop_waker::noop_context;
+use crate::panic::contained_producer;
 
 use super::channel;
 use super::load::{Channel, LoadObserver};
@@ -303,7 +304,10 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
         let task_id = id.clone();
 
         let abort = self.tasks.spawn(async move {
-            let result = AssertUnwindSafe(async move {
+            // `contained_producer` marks the body so the panic hook leaves the
+            // terminal of the still-running application alone (RFC 0011
+            // INV-LC8); the panic itself is caught and logged below.
+            let result = AssertUnwindSafe(contained_producer(async move {
                 futures::pin_mut!(stream);
                 while let Some(action) = stream.next().await {
                     match action {
@@ -330,7 +334,7 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
                         }
                     }
                 }
-            })
+            }))
             .catch_unwind()
             .await;
 

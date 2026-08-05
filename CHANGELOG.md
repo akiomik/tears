@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order; the batch and capacity-wait events are unchanged and carry neither
   field
 
+### Fixed
+
+- `install_panic_hook` no longer restores the terminal for panics the runtime
+  contains. A panic inside a runtime-owned producer task — an unkeyed command
+  task, a keyed command task, or a subscription forwarder — is caught by the
+  runtime and leaves the application running (RFC 0011 §5, INV-LC8), so the
+  hook now delegates to the previously installed hook without leaving raw mode
+  or the alternate screen, and the still-running application keeps drawing.
+  Panics on the application's own driving path — `update`, `view`,
+  `subscriptions`, a subscription's source constructor — still restore the
+  terminal exactly as before
+
 ## [0.10.2] - 2026-07-26
 
 ### Fixed

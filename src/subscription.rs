@@ -157,6 +157,7 @@ use tokio::sync::mpsc;
 
 pub(crate) use core::{Subscription, SubscriptionId, SubscriptionSource};
 
+use crate::panic::contained_producer;
 use crate::runtime::channel;
 use crate::runtime::load::LoadObserver;
 
@@ -258,7 +259,10 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             let _subscription_guard = subscription_guard;
             // Catch panics in the subscription's stream so a bug in a source is
             // logged instead of vanishing into a detached task.
-            let result = AssertUnwindSafe(async move {
+            // `contained_producer` marks the body so the panic hook leaves the
+            // terminal of the still-running application alone (RFC 0011
+            // INV-LC8).
+            let result = AssertUnwindSafe(contained_producer(async move {
                 while let Some(msg) = stream.next().await {
                     // Awaiting the send applies backpressure in bounded mode: the
                     // forwarding task stops polling the source stream until the
@@ -268,7 +272,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
                         break;
                     }
                 }
-            })
+            }))
             .catch_unwind()
             .await;
 

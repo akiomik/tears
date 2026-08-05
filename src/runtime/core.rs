@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 
 use crate::application::Application;
 use crate::command::{Action, RuntimeCommandParts, fold_leaves};
+use crate::panic::contained_producer;
 use crate::subscription::SubscriptionManager;
 
 use super::app_input::AppInputs;
@@ -183,7 +184,10 @@ impl<App: Application> RuntimeCore<App> {
                 let _command_guard = command_guard;
                 // Catch panics in the command's stream so a bug in a fetcher or
                 // effect is logged instead of vanishing into a detached task.
-                let result = AssertUnwindSafe(async move {
+                // `contained_producer` marks the body so the panic hook leaves
+                // the terminal of the still-running application alone
+                // (RFC 0011 INV-LC8).
+                let result = AssertUnwindSafe(contained_producer(async move {
                     futures::pin_mut!(stream);
                     while let Some(action) = stream.next().await {
                         match action {
@@ -207,7 +211,7 @@ impl<App: Application> RuntimeCore<App> {
                             }
                         }
                     }
-                })
+                }))
                 .catch_unwind()
                 .await;
 
