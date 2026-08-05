@@ -1997,10 +1997,11 @@ mod tests {
     // --- RFC 0011 steady-state phase order ----------------------------------
     //
     // The white-box seam RFC 0011 §8 names for INV-LC1/INV-LC2: drive
-    // `process_input_batch`/`process_frame_tick` directly with a recording
-    // application whose `view` and `subscriptions` append the state they
-    // observed to a shared log, so the phase sequence of a batch and of a frame
-    // pass is asserted rather than inferred from the pending flags.
+    // `process_message_batch` (the test wrapper over `process_input_batch`) and
+    // `process_frame_tick` directly with a recording application whose `view`
+    // and `subscriptions` append the state they observed to a shared log, so the
+    // phase sequence of a batch and of a frame pass is asserted rather than
+    // inferred from the pending flags.
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Phase {
@@ -2121,6 +2122,11 @@ mod tests {
         let log = PhaseLog::default();
         let mut runtime = phase_runtime(&log);
         let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        // Clear the bootstrap redraw so the pass's single render is
+        // attributable to the redraw the batch below records, not to the flag
+        // the constructor set.
+        runtime.scheduler.pending.needs_redraw = false;
 
         for _ in 0..2 {
             runtime

@@ -62,13 +62,23 @@ struct Transitions {
     subscriptions: Arc<AtomicUsize>,
 }
 
+/// One reading of [`Transitions`]. Named after the counters rather than
+/// positionally indexed, so a violated postcondition names the transition that
+/// ran instead of an index into a triple.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TransitionCounts {
+    updates: usize,
+    views: usize,
+    subscriptions: usize,
+}
+
 impl Transitions {
-    fn snapshot(&self) -> [usize; 3] {
-        [
-            self.updates.load(Ordering::SeqCst),
-            self.views.load(Ordering::SeqCst),
-            self.subscriptions.load(Ordering::SeqCst),
-        ]
+    fn snapshot(&self) -> TransitionCounts {
+        TransitionCounts {
+            updates: self.updates.load(Ordering::SeqCst),
+            views: self.views.load(Ordering::SeqCst),
+            subscriptions: self.subscriptions.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -93,10 +103,24 @@ impl Drop for DropFlag {
 /// The producer gauges RFC 0006 §4.4 defines and RFC 0011 INV-LC7 reads.
 const PRODUCER_GAUGES: [&str; 3] = ["subscriptions", "unkeyed_commands", "keyed_commands"];
 
-fn producer_gauges_are_zero(recorder: &TraceRecorder) -> bool {
-    PRODUCER_GAUGES
-        .iter()
-        .all(|field| matches!(recorder.u64_values(field).last(), None | Some(&0)))
+/// Whether every producer gauge has reached its terminal reading.
+///
+/// A gauge whose producer the row actually starts (`expected_active`) must read
+/// zero: "no event ever" is not a settled gauge but a silenced instrument, and
+/// accepting `None` there would let a mutation that stops the emission
+/// altogether — a renamed target or field, a lowered level, an emission moved
+/// off the teardown path — satisfy INV-LC7 on iteration zero. A gauge the row
+/// never raises has no event of its own to wait for, so `None` and a trailing
+/// zero both count for it.
+fn producer_gauges_are_zero(recorder: &TraceRecorder, expected_active: &[&str]) -> bool {
+    PRODUCER_GAUGES.iter().all(|field| {
+        let last = recorder.u64_values(field).last().copied();
+        if expected_active.contains(field) {
+            last == Some(0)
+        } else {
+            matches!(last, None | Some(0))
+        }
+    })
 }
 
 fn no_producer_gauge_event_fired(recorder: &TraceRecorder) -> bool {
@@ -136,6 +160,14 @@ const SETTLE_STEPS: usize = 1_000;
 /// fixed pass count: abort is a request, and the aborted task's future (with the
 /// RAII state it holds) is dropped on a later executor poll (RFC 0011 §4.4).
 ///
+/// `expected_active` names the gauges this row's application actually raises.
+/// Each is asserted to have risen *before* the settle loop starts, so the "the
+/// producers wound down" half cannot be satisfied by producers that were never
+/// observed running: without that positive half a silenced gauge reads as
+/// permanently settled and the loop returns on its first iteration. The gauges
+/// outside the set are the ones the row genuinely never raises, and they are
+/// held to the weaker `None`-or-zero reading.
+///
 /// `dismantled` names the task futures whose drop flags must all have flipped by
 /// the time the loop exits. They are checked alongside the gauges because the
 /// keyed gauge is count-based and publishes zero at the owner's drop, ahead of
@@ -144,16 +176,26 @@ const SETTLE_STEPS: usize = 1_000;
 async fn assert_two_stage_postconditions(
     recorder: &TraceRecorder,
     transitions: &Transitions,
-    immediate: [usize; 3],
+    immediate: TransitionCounts,
+    expected_active: &[&str],
     dismantled: &[(&str, &Arc<AtomicBool>)],
 ) {
+    for field in expected_active {
+        let values = recorder.u64_values(field);
+        assert!(
+            values.iter().any(|&value| value > 0),
+            "the {field} gauge must have risen while this row's producer ran, \
+             or its fall to zero witnesses nothing: {values:?}"
+        );
+    }
+
     for _ in 0..SETTLE_STEPS {
         assert_eq!(
             transitions.snapshot(),
             immediate,
             "no update/view/subscriptions call may run after the terminating operation"
         );
-        if producer_gauges_are_zero(recorder)
+        if producer_gauges_are_zero(recorder, expected_active)
             && dismantled
                 .iter()
                 .all(|(_, flag)| flag.load(Ordering::SeqCst))
@@ -164,7 +206,7 @@ async fn assert_two_stage_postconditions(
     }
 
     assert!(
-        producer_gauges_are_zero(recorder),
+        producer_gauges_are_zero(recorder, expected_active),
         "every producer gauge must settle to zero: subscriptions={:?} unkeyed={:?} keyed={:?}",
         recorder.u64_values("subscriptions"),
         recorder.u64_values("unkeyed_commands"),
@@ -191,49 +233,91 @@ enum QuitMessage {
     Tick,
 }
 
-/// Keeps all three producer kinds running until the quit arrives: a keyed
-/// parked effect from `new`, an unkeyed parked effect from the first processed
-/// message, and a `Timer` subscription that supplies the messages.
-struct QuitApp {
+#[derive(Clone)]
+struct QuitFlags {
     transitions: Transitions,
     route: QuitRoute,
+    keyed_effect_dropped: Arc<AtomicBool>,
+    unkeyed_effect_dropped: Arc<AtomicBool>,
+}
+
+impl QuitFlags {
+    fn new(route: QuitRoute) -> Self {
+        Self {
+            transitions: Transitions::default(),
+            route,
+            keyed_effect_dropped: Arc::new(AtomicBool::new(false)),
+            unkeyed_effect_dropped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The parked effects this app leaves running, as settle-loop witnesses.
+    fn parked_effects(&self) -> Vec<(&str, &Arc<AtomicBool>)> {
+        vec![
+            ("the keyed init effect", &self.keyed_effect_dropped),
+            (
+                "the unkeyed effect the first update started",
+                &self.unkeyed_effect_dropped,
+            ),
+        ]
+    }
+}
+
+/// Keeps all three producer kinds running until the quit arrives: a keyed
+/// parked effect from `new`, an unkeyed parked effect from the first processed
+/// message, and a `Timer` subscription that supplies the messages. Both parked
+/// effects carry a drop witness, so a controlled termination is held to
+/// dismantling them and not merely to publishing zeroed gauges.
+struct QuitApp {
+    flags: QuitFlags,
     ticks: usize,
 }
 
 impl Application for QuitApp {
     type Message = QuitMessage;
-    type Flags = (Transitions, QuitRoute);
+    type Flags = QuitFlags;
 
-    fn new((transitions, route): Self::Flags) -> (Self, Command<Self::Message>) {
-        (
-            Self {
-                transitions,
-                route,
-                ticks: 0,
-            },
-            Command::future(pending::<QuitMessage>()).cancellable(CommandId::new("parked-keyed")),
-        )
+    fn new(flags: QuitFlags) -> (Self, Command<Self::Message>) {
+        // Armed on the future value, outside the `async move` body — see
+        // [`DropFlag`] for why a body-constructed guard cannot witness a task
+        // cancelled before its first poll.
+        let guard = DropFlag(Arc::clone(&flags.keyed_effect_dropped));
+        let command = Command::future(async move {
+            let _guard = guard;
+            pending::<QuitMessage>().await
+        })
+        .cancellable(CommandId::new("parked-keyed"));
+
+        (Self { flags, ticks: 0 }, command)
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
-        self.transitions.updates.fetch_add(1, Ordering::SeqCst);
+        self.flags
+            .transitions
+            .updates
+            .fetch_add(1, Ordering::SeqCst);
         self.ticks += 1;
         if self.ticks == 1 {
-            return Command::future(pending::<QuitMessage>());
+            let guard = DropFlag(Arc::clone(&self.flags.unkeyed_effect_dropped));
+            return Command::future(async move {
+                let _guard = guard;
+                pending::<QuitMessage>().await
+            });
         }
 
-        match self.route {
+        match self.flags.route {
             QuitRoute::Unkeyed => Command::quit(),
             QuitRoute::Keyed => Command::quit().cancellable(CommandId::new("keyed-quit")),
         }
     }
 
     fn view(&self, _frame: &mut Frame<'_>) {
-        self.transitions.views.fetch_add(1, Ordering::SeqCst);
+        self.flags.transitions.views.fetch_add(1, Ordering::SeqCst);
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-        self.transitions
+        self.flags
+            .transitions
             .subscriptions
             .fetch_add(1, Ordering::SeqCst);
         vec![timer_subscription(|| QuitMessage::Tick)]
@@ -244,9 +328,9 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let transitions = Transitions::default();
+    let flags = QuitFlags::new(route);
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<QuitApp>::new((transitions.clone(), route), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -256,13 +340,23 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
         outcome.is_ok(),
         "a {route:?} quit classifies the run as Ok(())"
     );
-    let immediate = transitions.snapshot();
+    let immediate = flags.transitions.snapshot();
     assert!(
-        immediate[0] >= 2,
+        immediate.updates >= 2,
         "the run should reach the quitting message: {immediate:?}"
     );
 
-    assert_two_stage_postconditions(&recorder, &transitions, immediate, &[]).await;
+    // A run that reaches its second message has started all three producer
+    // kinds: the keyed init effect, the `Timer` subscription that delivered the
+    // messages, and the unkeyed effect the first update returned.
+    assert_two_stage_postconditions(
+        &recorder,
+        &flags.transitions,
+        immediate,
+        &PRODUCER_GAUGES,
+        &flags.parked_effects(),
+    )
+    .await;
 
     Ok(())
 }
@@ -359,10 +453,9 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let transitions = Transitions::default();
+    let flags = QuitFlags::new(QuitRoute::Unkeyed);
     let mut terminal = Terminal::new(FailingBackend::new())?;
-    let runtime =
-        Runtime::<QuitApp>::new((transitions.clone(), QuitRoute::Unkeyed), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -372,13 +465,30 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
         outcome.is_err(),
         "a render error classifies the run as Err: {outcome:?}"
     );
-    let immediate = transitions.snapshot();
+    let immediate = flags.transitions.snapshot();
     assert!(
-        immediate[1] >= 1,
+        immediate.views >= 1,
         "the failing render step invoked view before the backend rejected the draw: {immediate:?}"
     );
+    // Not a contract claim — it pins this row's arrangement, and with it the
+    // producer set below. The runtime's first frame deadline is already elapsed
+    // when the loop starts, so the failing render precedes the subscription's
+    // first 10ms tick: `update` never runs, and the unkeyed effect it would have
+    // returned is never created. If that ordering ever changes this assertion
+    // fires, rather than the row silently under-checking a producer it started.
+    assert_eq!(
+        immediate.updates, 0,
+        "the render fails before any message is delivered: {immediate:?}"
+    );
 
-    assert_two_stage_postconditions(&recorder, &transitions, immediate, &[]).await;
+    assert_two_stage_postconditions(
+        &recorder,
+        &flags.transitions,
+        immediate,
+        &["subscriptions", "keyed_commands"],
+        &[("the keyed init effect", &flags.keyed_effect_dropped)],
+    )
+    .await;
 
     Ok(())
 }
@@ -433,6 +543,9 @@ impl SubscriptionSource for ProbeSource {
     type Key = ();
 
     fn stream(&self) -> BoxStream<'static, Self::Output> {
+        // Every deliberate panic in this section is phrased as a failing
+        // assertion on the condition that selects the row: it reads as the
+        // negated precondition it is, and it keeps `clippy::panic` unengaged.
         assert!(
             !self.panic_in_constructor,
             "deliberate panic: a subscription's lazy source constructor, on the driving task"
@@ -454,10 +567,6 @@ struct AbruptApp {
     flags: AbruptFlags,
 }
 
-#[expect(
-    clippy::panic,
-    reason = "`subscriptions` panics deliberately to exercise INV-LC6's two subscriptions rows"
-)]
 impl Application for AbruptApp {
     type Message = AbruptMessage;
     type Flags = AbruptFlags;
@@ -504,17 +613,16 @@ impl Application for AbruptApp {
             .transitions
             .subscriptions
             .fetch_add(1, Ordering::SeqCst);
-        match self.flags.site {
-            PanicSite::SubscriptionsBootstrap => {
-                panic!("deliberate panic: subscriptions, at the bootstrap call site");
-            }
-            // The bootstrap call is the first one; a later call can only come
-            // from a re-evaluation after a processed message.
-            PanicSite::SubscriptionsSteady if previous >= 1 => {
-                panic!("deliberate panic: subscriptions, at the steady call site");
-            }
-            _ => {}
-        }
+        assert!(
+            self.flags.site != PanicSite::SubscriptionsBootstrap,
+            "deliberate panic: subscriptions, at the bootstrap call site"
+        );
+        // The bootstrap call is the first one; a later call can only come from a
+        // re-evaluation after a processed message.
+        assert!(
+            self.flags.site != PanicSite::SubscriptionsSteady || previous == 0,
+            "deliberate panic: subscriptions, at the steady call site"
+        );
 
         vec![Subscription::new(ProbeSource {
             dropped: Arc::clone(&self.flags.source_dropped),
@@ -550,15 +658,27 @@ async fn assert_transition_panic_tears_down(site: PanicSite, source_starts: bool
         "the {site:?} panic must propagate to run()'s caller"
     );
 
+    // `AbruptApp` starts a keyed init effect and, once a stream exists, one
+    // subscription; its `update` returns `Command::none()`, so the
+    // `unkeyed_commands` gauge is never raised on any of these rows.
+    let mut expected_active = vec!["keyed_commands"];
     let mut dismantled = vec![("the keyed init effect", &flags.keyed_effect_dropped)];
     if source_starts {
+        expected_active.push("subscriptions");
         // Once the stream is dropped it can never be polled again — a stronger
         // witness than counting polls over a finite window.
         dismantled.push(("the subscription's stream", &flags.source_dropped));
     }
 
     let immediate = flags.transitions.snapshot();
-    assert_two_stage_postconditions(&recorder, &flags.transitions, immediate, &dismantled).await;
+    assert_two_stage_postconditions(
+        &recorder,
+        &flags.transitions,
+        immediate,
+        &expected_active,
+        &dismantled,
+    )
+    .await;
 
     Ok(())
 }
@@ -590,6 +710,9 @@ async fn dropping_the_run_future_reaches_both_postconditions() -> Result<()> {
         &recorder,
         &flags.transitions,
         immediate,
+        // The run got far enough to start its subscription; `AbruptApp` never
+        // returns an unkeyed command.
+        &["keyed_commands", "subscriptions"],
         &[
             ("the keyed init effect", &flags.keyed_effect_dropped),
             ("the subscription's stream", &flags.source_dropped),
@@ -702,10 +825,19 @@ impl Application for InertApp {
     }
 }
 
+/// How many run-queue drains [`drain_executor`] performs.
+///
+/// Unlike [`SETTLE_STEPS`] this is not a bound on waiting for something to
+/// happen but a fixed budget for proving that nothing does: there is no event to
+/// poll for, so the count is simply a number of complete `current_thread` run
+/// queue drains (see [`SETTLE_STEPS`] for why one `yield_now` is one drain)
+/// after which no further transition may appear.
+const DRAIN_PASSES: usize = 32;
+
 /// Gives the executor every chance to poll a task that a conforming
 /// construction never spawned.
 async fn drain_executor() {
-    for _ in 0..32 {
+    for _ in 0..DRAIN_PASSES {
         yield_now().await;
     }
 }
