@@ -435,7 +435,7 @@ RFCs 0001–0009 and from the runtime's previously unnumbered implicit
 contracts, 531 rows — was replayed row by row against §1.1's
 reference contract. As of 2026-07-31:
 
-- **Reaffirmed 523 / redesigned 8 / delegated 0 / open counterexamples
+- **Reaffirmed 522 / redesigned 9 / delegated 0 / open counterexamples
   0.** Redesigned rows are exactly those whose semantics the bundle
   changes, each recording its destination (the bootstrap
   construction-dispatch change and termination model, RFC 0011; the
@@ -798,7 +798,7 @@ completion is the observability side's affair (§7.8).
 ### 7.5 `RuntimeConfig` derives (leaf-I41)
 
 **Verdict: `Copy` is removed at 0.11.0; `Clone` stays; `FrameRate`
-keeps `Copy`.** Carried by the RFC 0007 Draft (its §2.1, `Changed`
+keeps `Copy`.** Carried by RFC 0007 (its §2.1, `Changed`
 breaking entry, and four-part implementation deliverable). The
 removal clears the type-level obstacle to future non-`Copy`
 configuration fields (policy objects, callbacks) without settling any
@@ -849,7 +849,7 @@ consumes it normatively (at least two shared-channel capacity-wait
 events in the 5ms window before the quit), so a best-effort emission would
 leave a conforming RFC 0006 implementation unable to run RFC 0007's
 acceptance rows. The single schema change — the gauge event's
-`runtime_id` — is carried by the RFC 0006 Draft amendment (INV-L13).
+`runtime_id` — is carried by the RFC 0006 amendment (INV-L13).
 The consumer-side negative space is declared: tears provides no
 slow-subscriber or panicking-subscriber isolation, no event-queue
 bound or overflow policy, and no subscriber panic containment —
@@ -874,7 +874,7 @@ is the 531 ledger rows extracted from RFCs 0001–0009 and the runtime's
 previously unnumbered implicit contracts: 478 rows whose source
 document is the statement's normative owner, and 53 pointer rows (a
 document restating or importing another document's contract). Replay
-outcome, as in §2.4: **reaffirmed 523 / redesigned 8 / delegated 0 /
+outcome, as in §2.4: **reaffirmed 522 / redesigned 9 / delegated 0 /
 open counterexamples 0**. Row notes write **Δ** as shorthand for the
 branch delta against §1.1's baseline corpus — the Draft overlay plus
 the semantics-neutral syncs; a row's note may scope Δ to the
@@ -1326,14 +1326,14 @@ changes a contract.
 | LG-0006-067 | owner | root-SCHED,leaf-K55 | unnumbered norm (measurement contract) | Depth definition: `produced - processed`. Observable bound = `capacity + concurrent producers` | reaffirmed | preserved_in=0006 §5.1 | - |
 | LG-0006-068 | owner | root-SCHED | unnumbered norm (scenario contract) | `keyed_isolation` scenario: admission only, delivery excluded; a regression check, not a proof of pool absence | reaffirmed | preserved_in=0006 §5.1 | - |
 | LG-0006-069 | owner | root-K51J46,root-SCHED | negative space + threshold | F7's full-drain p50 (≈1.30s @ ~50k) is a regression check **for the unbounded default only** | reaffirmed | preserved_in=0006 §5.1 | - |
-| LG-0006-070 | owner | root-SCHED,root-K51J46 | threshold (recorded acceptance) | Measured acceptance results (2026-07-24, reference machine): depth 1025; no drops in any burst/overload case; update p99 flattens at 28.0ms; quit rows p99 0.61/0.91/0.92/0.65ms; `keyed_isolation`: 17 admits per key, 0 keyed deliveries, concurrent shared occupancy 1025 | reaffirmed | preserved_in=0006 §5.1 | The recorded acceptance values are preserved in §5.1. Status reads Draft while the amendment is in progress, but the record's semantics are unchanged |
+| LG-0006-070 | owner | root-SCHED,root-K51J46 | threshold (recorded acceptance) | Measured acceptance results (2026-07-24, reference machine): depth 1025; no drops in any burst/overload case; update p99 flattens at 28.0ms; quit rows p99 0.61/0.91/0.92/0.65ms; `keyed_isolation`: 17 admits per key, 0 keyed deliveries, concurrent shared occupancy 1025 | reaffirmed | preserved_in=0006 §5.1 | The recorded acceptance values are preserved in §5.1. Status read Draft while the amendment was in progress, but the record's semantics are unchanged |
 | LG-0006-071 | owner | root-SCHED,root-K51J46 | negative space | Measurement-only rows: bounded `keyed_overload` keyed p50 13.0s, `quit_keyed_bounded` p50 13.07s — recorded, not gated | reaffirmed | preserved_in=0006 §5.1 | - |
 | LG-0006-072 | owner | root-D18,leaf-I41 | negative space (rejection) | OQ5 rejection content: restart-rate control stays a subscription-level policy — `RuntimeConfig` has no restart-rate field and reserves no name for one | reaffirmed | preserved_in=0006 §6 | Not affected — 0012 §8, in fixing the restart-rate delegation slot, cites and preserves the OQ5 rejection (rate is subscription-level; `RuntimeConfig` has no field; 0007 §4) as a standing position. The added slot (a rate policy may delay admission past quiescence but never advance it) does not contradict the rejection and reserves no field |
 | LG-0006-073 | pointer | leaf-I41 | unnumbered norm (delegation) | OQ1/OQ2: recommended default values are in RFC 0007 §3.1 | reaffirmed | preserved_in=0006 §6; resolved_via=0007 §3.1 | The canon for the recommended default values is 0007 §3.1 |
 | LG-0006-074 | owner | root-CMP,root-D18 | unnumbered norm | `BenchSubscriptionManager::new` is bench-internals gated, `#[doc(hidden)]`, and outside semver | reaffirmed | preserved_in=0006 §3.2 | Not affected — 0012 changes the manager's admission timing, but no delta touches the 0006 §3.2 declaration that `BenchSubscriptionManager::new` is bench-internals gated, `#[doc(hidden)]`, and outside semver |
 | LG-0007-001 | pointer | root-SCHED | unnumbered norm (meta, subordination) | Subordination declaration: this RFC decides only matters delegated by RFC 0006; load-control semantics, the backpressure contract, and all INV-L are incorporated by reference and no clause of this RFC can revise them; on conflict RFC 0006 wins and the conflict is a defect of this RFC | reaffirmed | preserved_in=0007 Decision scope; resolved_via=0006 §4/§5 (INV-L1–L15) | The 0006 delta's addition of INV-L14/L15 does not change the subordination relation (reference consistency only) |
 | LG-0007-002 | pointer | root-SCHED,root-A1,root-K51J46 | unnumbered norm (boundary) | Clauses outside the delegation (the semantics of the 3 controls, RFC 0006 §4.1/INV-L12, and the acceptance *criterion*) remain in RFC 0006 | reaffirmed | preserved_in=0007 §1; resolved_via=0006 §4.1/§5.1 | - |
-| LG-0007-003 | owner | leaf-I41 | unnumbered norm (API shape) | `RuntimeConfig` has private fields and derives `Clone, Copy, Debug, Eq, PartialEq`; its fields are frame_rate + the 3 controls (`Option<NonZeroUsize>`) only | redesigned | changed_to=0007 §2.1 | Adoption of the leaf-I41 verdict — the `Copy` derive on `RuntimeConfig` is removed in 0.11.0 (Clone/Debug/Eq/PartialEq kept; `FrameRate` keeps `Copy`). 0007 is set to Status Draft and §2.1 Derives/misuse-guard is re-derived (4 deliverables enumerated). Redesign under the 1 ID = 1 verdict rule because this row's "Copy derive" content changed semantically. Private fields, the other derives, and the field set are preserved |
+| LG-0007-003 | owner | leaf-I41 | unnumbered norm (API shape) | `RuntimeConfig` has private fields and derives `Clone, Copy, Debug, Eq, PartialEq`; its fields are frame_rate + the 3 controls (`Option<NonZeroUsize>`) only | redesigned | changed_to=0007 §2.1 | Adoption of the leaf-I41 verdict — the `Copy` derive on `RuntimeConfig` is removed in 0.11.0 (Clone/Debug/Eq/PartialEq kept; `FrameRate` keeps `Copy`). §2.1 Derives/misuse-guard is re-derived (4 deliverables enumerated). Redesign under the 1 ID = 1 verdict rule because this row's "Copy derive" content changed semantically. Private fields, the other derives, and the field set are preserved |
 | LG-0007-004 | pointer | root-SCHED | unnumbered norm (reference incorporation) | A configuration with no load controls set exactly reproduces the unbounded delivery mode | reaffirmed | preserved_in=0007 §2.1/§2.2; resolved_via=LG-0006-055 | The structural check of INV-L6 is preserved in the §2.2 owner table (channel construction unchanged) |
 | LG-0007-005 | owner | leaf-I41 | unnumbered norm + negative space (no Default) | `RuntimeConfig::new(frame_rate)` is the only constructor; there is deliberately no `Default` impl (the crate has no default frame rate; adding one later is additive) | reaffirmed | preserved_in=0007 §2.1 | - |
 | LG-0007-006 | owner | leaf-I41 | INV-C1 | INV-C1: `Runtime::new` is a literal delegation to `Self::with_config(flags, RuntimeConfig::new(frame_rate))`; there is exactly one construction path | reaffirmed | preserved_in=0007 §2.2/§7 | Literal delegation and the single construction path are unchanged even after the removal of construction dispatch in 0011 §3.4 (an implementation-seam change only) |
@@ -1342,7 +1342,7 @@ changes a contract.
 | LG-0007-009 | owner | leaf-I41 | INV-C4 | INV-C4: the public surface is only the frame rate + the 3 controls of RFC 0006 §4.1 (no restart-rate field); `tears::RuntimeConfig` is reachable, but not via `tears::prelude::*` | reaffirmed | preserved_in=0007 §2.1/§2.3/§4/§7 | - |
 | LG-0007-010 | owner | leaf-I41 | INV-C5 | INV-C5: `with_config` builds the `FrameScheduler` from `config.frame_rate`; it never silently creates a scheduler at a rate different from the caller-supplied value | reaffirmed | preserved_in=0007 §2.2/§7 | - |
 | LG-0007-011 | owner | leaf-I41 | INV-C6 | INV-C6: `RuntimeConfig::new` + the 3 setters + `Runtime::with_config` are `#[must_use]` (setters with an explanatory message) | reaffirmed | preserved_in=0007 §2.1/§7 | - |
-| LG-0007-012 | owner | leaf-I41 | unnumbered norm (compatibility acceptance) | The `Copy` derive is intentional; adding a non-`Copy` field later is breaking, and that cost is recorded as knowingly accepted | reaffirmed | preserved_in=0007 §2.1 | - |
+| LG-0007-012 | owner | leaf-I41 | unnumbered norm (compatibility acceptance) | The `Copy` derive is intentional; adding a non-`Copy` field later is breaking, and that cost is recorded as knowingly accepted | redesigned | changed_to=0007 §2.1 | Adoption of the leaf-I41 verdict overturns this row's content — the `Copy` derive is removed in 0.11.0, so the recorded acceptance (non-`Copy` field additions being breaking, the cost knowingly accepted) is dissolved by the removal rather than preserved. Redesign under the 1 ID = 1 verdict rule because this row's compatibility-acceptance content changed semantically |
 | LG-0007-013 | owner | leaf-I41 | unnumbered norm (compatibility) | Private fields make later field additions additive without `#[non_exhaustive]`; getters are not provided initially and can be added later additively | reaffirmed | preserved_in=0007 §2.1 | - |
 | LG-0007-014 | owner | leaf-I41 | unnumbered norm | `Runtime::new`'s signature and semantics are unchanged; no other constructors are added and no existing signature changes | reaffirmed | preserved_in=0007 §2.2 | 0011 INV-LC3 (making construction inert) is a 0011-owned bootstrap change (U2); this row's contract surface (signature, constructor set, construction path) is preserved |
 | LG-0007-015 | owner | leaf-I41 | unnumbered norm | Each constructor receives the frame rate exactly once | reaffirmed | preserved_in=0007 §2.2 | - |
@@ -1531,7 +1531,7 @@ simplification; interaction rows record `excluded_by=<fixture id>`.
 | N13 | Property-based testing | active | **A** | Same judgment as N12 (API-local `Arbitrary` boundary). A real client of the 0008/0009 determinism contracts |
 | N14 | Dev inspector | active | **C** | Per leaf-I42: condition = future design of a state/inspector observation surface (co-located with the N47 transcript RFC). leaf-I42's contract surface (the 3 INV-L13 kinds + instance field) is load observation only and does not satisfy the fixture's state-observation requirement. owner: state-observation RFC (seated with the N47 transcript RFC) — blocks composition = no / gates the composition RFC = no |
 | N15 | Headless runtime | active | **C** | Condition: leaf-G36's backend/terminal separation seam. The 0011 phase machine is preserved as a render degeneration (consistent with §1.5's removal projection). owner: driving surface RFC (backend/terminal separation) — blocks composition = no / gates the composition RFC = no |
-| N16 | Multiple runtime instances | active | **A** | Condition resolved: adding runtime_id to the gauge schema is drafted as the RFC 0006 gauge-schema amendment (§2.4) — the reference contract (§1.1) includes the Draft amendments, so the remaining observability condition (instance correlation) is satisfied. Instance-owned nature of core resources is confirmed; INV-LC9 preserved. Per-instance reconstruction is possible via partition→max-seq (batch/capacity-wait remain uncorrelatable — as contracted) |
+| N16 | Multiple runtime instances | active | **A** | Condition resolved: adding runtime_id to the gauge schema is drafted as the RFC 0006 gauge-schema amendment (§2.4) — the reference contract (§1.1) includes the bundle amendments, so the remaining observability condition (instance correlation) is satisfied. Instance-owned nature of core resources is confirmed; INV-LC9 preserved. Per-instance reconstruction is possible via partition→max-seq (batch/capacity-wait remain uncorrelatable — as contracted) |
 | N17 | wasm / web backend | active | **X** | Consequence of adopting leaf-K56/AC3 + the root-I40 freeze — `Send` bound maintained and no alternate-executor compatibility surface provided, so the bound-removal direction is excluded |
 | N18 | State persistence | active | **A** | Same judgment as N12 (`Serialize` is a local boundary on the opt-in feature side). Saving after the 0011 termination postcondition + INV-LC3 inert construction makes restoration contractually clean too (consistent with N26) |
 | N19 | Crash recovery | active | **A** | 0011 §4.3/INV-LC6 already contract unwind-synchronous teardown + panic propagation. Terminal restoration is existing opt-in; display is additive via caller-side catch |
