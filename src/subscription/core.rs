@@ -135,7 +135,7 @@ impl<Msg: 'static> Subscription<Msg> {
     ///     .map(move |_| Message::Tick(pane_id))
     ///     .scoped(pane_id);
     /// ```
-    #[must_use = "scoped returns a modified subscription and does not mutate in place"]
+    #[must_use = "scoped consumes the subscription and returns the modified value"]
     pub fn scoped<Scope>(mut self, scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,

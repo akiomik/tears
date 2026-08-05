@@ -154,7 +154,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// Side effects still run. This is an optimization hint rather than a
     /// guarantee: the runtime may still redraw for other reasons, such as an
     /// initial frame or another message in the same batch.
-    #[must_use = "without_redraw returns a modified command and does not mutate in place"]
+    #[must_use = "without_redraw consumes the command and returns the modified value"]
     pub const fn without_redraw(mut self) -> Self {
         self.directives = self.directives.without_redraw();
         self
@@ -191,7 +191,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     .scoped("pane-1")
     ///     .cancellable(CommandId::new("load"));
     /// ```
-    #[must_use = "cancellable returns a modified command and does not mutate in place"]
+    #[must_use = "cancellable consumes the command and returns the modified value"]
     pub fn cancellable(self, id: CommandId) -> Self {
         self.cancellable_with(id, CancelPolicy::CancelInFlight)
     }
@@ -227,7 +227,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     .scoped("pane-1")
     ///     .cancellable_with(CommandId::new("load"), CancelPolicy::KeepInFlight);
     /// ```
-    #[must_use = "cancellable_with returns a modified command and does not mutate in place"]
+    #[must_use = "cancellable_with consumes the command and returns the modified value"]
     pub fn cancellable_with(mut self, id: CommandId, policy: CancelPolicy) -> Self {
         self.cancellation.key = Some(CancellableCommand { id, policy });
         self
@@ -268,7 +268,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd: Command<i32> = Command::cancel(CommandId::new("load")).scoped("pane-1");
     /// ```
-    #[must_use = "scoped returns a modified command and does not mutate in place"]
+    #[must_use = "scoped consumes the command and returns the modified value"]
     pub fn scoped<Scope>(mut self, scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,
@@ -327,7 +327,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd = Command::perform(async { "data".to_string() }, Message::Loaded)
     ///     .timeout(Duration::from_secs(5), || Message::TimedOut);
     /// ```
-    #[must_use = "timeout returns a modified command and does not mutate in place"]
+    #[must_use = "timeout consumes the command and returns the modified value"]
     pub fn timeout(
         mut self,
         duration: Duration,

@@ -40,14 +40,14 @@ impl RetryPolicy {
     }
 
     /// Replace the delay strategy.
-    #[must_use = "with_backoff returns a modified policy and does not mutate in place"]
+    #[must_use = "with_backoff consumes the policy and returns the modified value"]
     pub const fn with_backoff(mut self, backoff: RetryBackoff) -> Self {
         self.backoff = backoff;
         self
     }
 
     /// Use the same delay before every subsequent attempt.
-    #[must_use = "with_fixed_backoff returns a modified policy and does not mutate in place"]
+    #[must_use = "with_fixed_backoff consumes the policy and returns the modified value"]
     pub const fn with_fixed_backoff(self, delay: Duration) -> Self {
         self.with_backoff(RetryBackoff::fixed(delay))
     }
