@@ -764,6 +764,10 @@ mod tests {
 
     use std::any::Any;
     use std::future::pending;
+    #[cfg(all(not(loom), unix))]
+    use std::io::stdin;
+    #[cfg(all(not(loom), not(unix)))]
+    use std::net::UdpSocket as StdUdpSocket;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -774,10 +778,12 @@ mod tests {
     use futures::channel::oneshot;
     use futures::stream;
     use ratatui::Frame;
-    // `tokio::net` is compiled out under `--cfg loom` (tokio gates it), so
-    // the I/O-dependent leaf helper and its tests are too.
-    #[cfg(not(loom))]
-    use tokio::net::TcpStream;
+    // Tokio's I/O resources are compiled out under `--cfg loom` (tokio gates
+    // them), so the I/O-dependent leaf helper and its tests are too.
+    #[cfg(all(not(loom), unix))]
+    use tokio::io::unix::AsyncFd;
+    #[cfg(all(not(loom), not(unix)))]
+    use tokio::net::UdpSocket;
     use tracing::Level;
 
     use crate::command::{Command, RetryPolicy};
@@ -849,17 +855,51 @@ mod tests {
         StartQuit,
     }
 
+    /// Registers an I/O resource with the runtime's I/O driver — the step
+    /// that panics inside the store's time-only context (RFC 0008 §4.3).
+    ///
+    /// Registration is deliberately the *first* fallible step: an already
+    /// open descriptor is registered as it is, so no syscall of the leaf's
+    /// own can fail ahead of the driver lookup. A leaf that opens its own
+    /// socket first is not so ordered — when the socket syscall fails
+    /// synchronously (a sandbox denying networking, an exhausted descriptor
+    /// table) the leaf completes with `Err` without ever reaching the
+    /// driver, and its mapped message is delivered instead of the expected
+    /// panic.
+    #[cfg(all(not(loom), unix))]
+    fn register_with_io_driver() {
+        drop(AsyncFd::new(stdin()).expect(
+            "registering an fd should not have reached a fallible step in the store's context",
+        ));
+    }
+
+    /// The non-Unix counterpart: no descriptor-registration API is
+    /// available there, so the resource is created first — a creation
+    /// failure panics here, with a message of its own, instead of
+    /// completing the leaf with a delivered message. Note that CI lints
+    /// only on Linux, so this branch is compiled by the Windows test job
+    /// but never clippy-checked.
+    #[cfg(all(not(loom), not(unix)))]
+    fn register_with_io_driver() {
+        let socket =
+            StdUdpSocket::bind("127.0.0.1:0").expect("binding a local UDP socket should succeed");
+        socket
+            .set_nonblocking(true)
+            .expect("setting non-blocking mode should succeed");
+        drop(
+            UdpSocket::from_std(socket)
+                .expect("registering without an I/O driver should have panicked"),
+        );
+    }
+
     /// A leaf that needs the I/O driver: polling it inside the store's
     /// time-only context fails the test (RFC 0008 §4.3), so it stands in
     /// for the would-fail-if-polled class.
     #[cfg(not(loom))]
     fn io_command() -> Command<Msg> {
-        Command::perform(
-            async {
-                drop(TcpStream::connect("127.0.0.1:9").await);
-            },
-            |()| Msg::N(99),
-        )
+        Command::perform(async { register_with_io_driver() }, |()| {
+            unreachable!("the I/O-dependent leaf must fail the test before completing")
+        })
     }
 
     /// A `Command::timeout` leaf over a never-ready future: deliverable
