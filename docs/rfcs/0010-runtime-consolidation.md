@@ -304,7 +304,9 @@ vocabulary over the final bundle text and found zero new findings:
 the status lines carry §1.1's Draft-overlay scheme, no completed-state
 or superseded-shape claim has reappeared, and the code-state claims
 verified at `ab313b2` still describe the unchanged code. Both drift
-gates are closed at endpoint `5c05011`.
+gates are closed: the code-side endpoint is upstream `5c05011`, and
+the part-2 subject text is the bundle as of commit `a6ce2d1` (this
+paragraph's anchor is recorded one commit later, as `ab313b2`'s was).
 
 ## 2. Reference architecture (informative)
 
