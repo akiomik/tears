@@ -76,6 +76,7 @@
     reason = "metric reporting casts counters and nanosecond values to floating point for human-readable output; precision loss there is irrelevant"
 )]
 
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::process::ExitCode;
@@ -518,20 +519,19 @@ static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
 /// scenario's slot.
 static LIVE_PRODUCERS: AtomicU64 = AtomicU64::new(0);
 
-/// The producer-gauge partition currently being read — the emitting runtime's
-/// `runtime_id` and the newest `seq` applied from it; `None` before the first
-/// gauge event (RFC 0006 §4.4). A gauge event's values reach [`LIVE_PRODUCERS`]
+/// Per-`runtime_id` high-water marks of the newest `seq` applied from each
+/// partition (RFC 0006 §4.4). A gauge event's values reach [`LIVE_PRODUCERS`]
 /// and [`Metrics::blocked_live`] only when its `seq` advances the high-water
 /// mark *of its own `runtime_id`*, so a reordered stale gauge event never
 /// supersedes the current value — the schema orders gauge events by `seq` within
 /// a `runtime_id`, never by arrival, and comparing `seq` across instances is
-/// meaningless. An event from a different `runtime_id` therefore opens a fresh
-/// partition rather than being ranked against the old one: scenarios run one
-/// runtime at a time behind [`await_quiescence`], so that is the next runtime
-/// taking over. It is a `Mutex`, not an atomic, so the advance and the value
-/// stores it guards happen as one step even if a future runtime dispatches gauge
-/// events off several producer threads at once.
-static GAUGE_PARTITION_SEEN: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+/// meaningless. Keeping a mark per id (rather than only the newest partition)
+/// makes that hold structurally even for a straggler from an already-drained
+/// runtime; the runs never contend anyway, since scenarios run one runtime at a
+/// time behind [`await_quiescence`]. It is a `Mutex`, not an atomic, so the
+/// advance and the value stores it guards happen as one step even if a future
+/// runtime dispatches gauge events off several producer threads at once.
+static GAUGE_PARTITION_SEEN: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
 /// Waits until the current runtime's producers have fully torn down (the gauge
 /// sum returns to 0) before the caller starts the next runtime — the teardown
@@ -551,9 +551,10 @@ async fn await_quiescence() {
          refusing to reuse the trial slot with a teardown still in flight",
     );
     // No high-water reset is needed here: the next runtime starts a fresh
-    // `LoadObserver` with its own `runtime_id`, so its gauge events open their
-    // own partition in [`GAUGE_PARTITION_SEEN`] instead of being ranked against
-    // the drained runtime's `seq` (RFC 0006 §4.4).
+    // `LoadObserver` with its own `runtime_id`, so its gauge events rank
+    // against their own entry in [`GAUGE_PARTITION_SEEN`], and a straggler
+    // from the drained runtime stays behind its partition's mark
+    // (RFC 0006 §4.4).
 }
 
 /// Records the instant the event loop's quit branch fires.
@@ -629,10 +630,11 @@ impl Subscriber for QuitDeliverySubscriber {
             let mut seen = GAUGE_PARTITION_SEEN
                 .lock()
                 .expect("gauge partition high-water mark poisoned");
-            if seen.is_some_and(|(seen_id, seen_seq)| seen_id == runtime_id && seq <= seen_seq) {
+            let mark = seen.entry(runtime_id).or_insert(0);
+            if seq <= *mark {
                 return;
             }
-            *seen = Some((runtime_id, seq));
+            *mark = seq;
             LIVE_PRODUCERS.store(visitor.gauge_sum(), Ordering::Relaxed);
             if let (Some(metrics), Some(blocked)) = (slot, visitor.blocked) {
                 metrics.blocked_live.store(blocked, Ordering::Relaxed);

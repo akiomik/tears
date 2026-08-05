@@ -149,8 +149,11 @@ impl Default for LoadObserver {
 // a by-value copy (`let mut g = *guard; g.capture()`) would bump a throwaway
 // while the shared `seq` stalled — the exact silently-dropped update this
 // ordering exists to prevent. The `pending` queue makes `Copy` impossible on its
-// own, but the rule is stated for `capture` regardless.
-#[derive(Default)]
+// own, but the rule is stated for `capture` regardless. Deliberately not
+// `Default` either: a defaulted `Gauges` would carry the placeholder
+// `runtime_id` `0` — a value the allocator never hands out — so construction
+// goes through `Gauges::new` and an id-less `Gauges` is unrepresentable
+// (INV-L13's distinct-per-instance requirement, held structurally).
 struct Gauges {
     /// This observer's process-local instance identifier, carried on every gauge
     /// event as `runtime_id` and fixed for the observer's lifetime. Held here
@@ -182,6 +185,22 @@ struct Gauges {
 }
 
 impl Gauges {
+    /// Builds the zero-count gauge state for the instance identified by
+    /// `runtime_id`. The only construction path, so a `Gauges` without an
+    /// allocated identifier cannot exist.
+    const fn new(runtime_id: u64) -> Self {
+        Self {
+            runtime_id,
+            seq: 0,
+            subscriptions: 0,
+            unkeyed_commands: 0,
+            keyed_commands: 0,
+            blocked: 0,
+            pending: VecDeque::new(),
+            draining: false,
+        }
+    }
+
     /// Bumps `seq` and captures the four counts plus that `seq` as one snapshot.
     /// Takes `&mut self` so the bump lands in the shared state; the caller holds
     /// the lock, fixing the counts and `seq` together at the serialization
@@ -259,8 +278,11 @@ impl Field {
 impl LoadObserver {
     /// Creates an observer with fresh, all-zero gauges and a newly allocated
     /// `runtime_id` — the identifier every gauge event this observer emits
-    /// carries (RFC 0006 §4.4, INV-L13). The runtime builds exactly one and
-    /// clones it to its producers, so one observer is one runtime instance.
+    /// carries (RFC 0006 §4.4, INV-L13). On the production path the runtime
+    /// builds exactly one and clones it to its producers, so one observer is
+    /// one runtime instance; test helpers may also build throwaway observers
+    /// shared with no runtime (`channel::channel`), which consume ids but
+    /// keep the distinct/non-reuse contract intact.
     ///
     /// # Panics
     ///
@@ -277,19 +299,14 @@ impl LoadObserver {
             // failed `fetch_update` stores nothing, leaving the counter
             // saturated at `u64::MAX`, so this and every later allocation
             // panics instead of wrapping into reuse.
-            //
-            // The remaining fields take `Gauges::default()`'s zero state. This
-            // is the only site that builds a `Gauges`, so nothing can observe
-            // the placeholder `runtime_id` that `Default` leaves behind.
-            gauges: Arc::new(Mutex::new(Gauges {
-                runtime_id: NEXT_RUNTIME_ID
+            gauges: Arc::new(Mutex::new(Gauges::new(
+                NEXT_RUNTIME_ID
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                     .expect(
                         "runtime id space exhausted; gauge runtime ids are never \
                          reused within a process (RFC 0006 §4.4)",
                     ),
-                ..Gauges::default()
-            })),
+            ))),
         }
     }
 
