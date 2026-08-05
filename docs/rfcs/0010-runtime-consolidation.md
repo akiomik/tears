@@ -294,8 +294,17 @@ classes:
 
 The correction endpoint is commit `ab313b2`; at that endpoint the
 claim scan records zero remaining findings. The pre-acceptance gate
-runs **both parts** again over the final bundle before the
-bundle acceptance of §1.8.
+ran **both parts** again over the final bundle (below), per §1.8.
+
+The pre-acceptance gate completed 2026-08-05. Part 1 scanned upstream
+`main` over `89ea872..5c05011` and found only another dependency
+lockfile advance — zero contact with the scanned paths, so no audit
+rows required re-running. Part 2 re-swept the same subject
+vocabulary over the final bundle text and found zero new findings:
+the status lines carry §1.1's Draft-overlay scheme, no completed-state
+or superseded-shape claim has reappeared, and the code-state claims
+verified at `ab313b2` still describe the unchanged code. Both drift
+gates are closed at endpoint `5c05011`.
 
 ## 2. Reference architecture (informative)
 
