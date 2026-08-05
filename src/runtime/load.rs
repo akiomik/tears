@@ -8,6 +8,13 @@
 //! fields, firing conditions) is pinned as RFC 0006 INV-L13; changing it is a
 //! contract change.
 //!
+//! Every gauge event also carries the emitting instance's `runtime_id`, a
+//! process-local `u64` allocated once per [`LoadObserver`] — that is, once per
+//! runtime, since the runtime builds one observer and clones it to every
+//! producer. It is an equality key for partitioning a multi-runtime process's
+//! gauge events, with no meaning in its magnitude or ordering, and it is never
+//! reused within the process lifetime ([`LoadObserver::new`]).
+//!
 //! The gauge counters live behind one mutex. Each change updates a field, bumps
 //! a monotone `seq`, and snapshots the field set together under that lock, then
 //! releases the lock before dispatching the snapshot to `tracing`. Two separate
@@ -19,8 +26,11 @@
 //!   reached and superseded before its own snapshot re-reads the counters — a
 //!   lone atomic would let a subscriber's high-water mark miss a peak. This
 //!   guarantee is about the snapshot, not about arrival order.
-//! - **Ordering** is carried by `seq`, not by arrival: the current value of each
-//!   gauge is the value on the greatest-`seq` event (RFC 0006 §4.4, INV-L13).
+//! - **Ordering** is carried by `seq`, not by arrival, and is per instance: the
+//!   current value of each gauge is the value on the greatest-`seq` event
+//!   *among events carrying that `runtime_id`* — a consumer partitions by
+//!   `runtime_id` first, and comparing `seq` across instances is meaningless
+//!   (RFC 0006 §4.4, INV-L13).
 //!   Dispatch happens off the lock, so the contract does not promise arrival
 //!   order matches `seq` order — consumers must order by `seq`. The single-
 //!   drainer funnel below does in fact serialize dispatch in `seq` order today,
@@ -65,8 +75,11 @@
 //! lint.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
 /// `channel` field (`"shared"` or `"keyed"`).
@@ -117,12 +130,19 @@ pub fn capacity_wait(channel: Channel, waited: Duration) {
 
 /// Shared handle over the runtime's producer-count gauges (RFC 0006 §4.4).
 ///
-/// Cloning shares the same counters; every producer holds a clone and updates
-/// its own field, so a single subscriber sees the aggregate. All four counts
-/// are emitted together under `tears::runtime::load` whenever any one changes.
-#[derive(Clone, Default)]
+/// Cloning shares the same counters — and the same `runtime_id` — so every
+/// producer holds a clone, updates its own field, and a single subscriber sees
+/// the aggregate. All four counts are emitted together under
+/// `tears::runtime::load` whenever any one changes.
+#[derive(Clone)]
 pub struct LoadObserver {
     gauges: Arc<Mutex<Gauges>>,
+}
+
+impl Default for LoadObserver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // Deliberately not `Copy`/`Clone`: `capture` bumps `seq` through `&mut self`, so
@@ -132,11 +152,18 @@ pub struct LoadObserver {
 // own, but the rule is stated for `capture` regardless.
 #[derive(Default)]
 struct Gauges {
+    /// This observer's process-local instance identifier, carried on every gauge
+    /// event as `runtime_id` and fixed for the observer's lifetime. Held here
+    /// rather than on [`LoadObserver`] so [`Gauges::capture`] builds the whole
+    /// snapshot from the state it already has under the lock, and so every clone
+    /// necessarily reports the same identifier (RFC 0006 §4.4, INV-L13).
+    runtime_id: u64,
     /// Monotone per-observer counter, bumped once per captured gauge event and
     /// carried on it as `seq`. Captured under the same lock as the four counts,
     /// so a greater `seq` never carries an older value; a subscriber reads the
-    /// current value of each gauge from the greatest-`seq` event, so arrival
-    /// order is not load-bearing (RFC 0006 §4.4, INV-L13).
+    /// current value of each gauge from the greatest-`seq` event *of this
+    /// `runtime_id`*, so arrival order is not load-bearing (RFC 0006 §4.4,
+    /// INV-L13).
     seq: u64,
     subscriptions: usize,
     unkeyed_commands: usize,
@@ -159,12 +186,13 @@ impl Gauges {
     /// Takes `&mut self` so the bump lands in the shared state; the caller holds
     /// the lock, fixing the counts and `seq` together at the serialization
     /// point, so the snapshot reports the state that was reached (never a later
-    /// re-read) and its `seq` orders it against every other gauge event without
-    /// relying on arrival order. Dispatch to `tracing` happens later, off the
-    /// lock (`GaugeSnapshot::dispatch`).
+    /// re-read) and its `seq` orders it against every other gauge event of this
+    /// `runtime_id` without relying on arrival order. Dispatch to `tracing`
+    /// happens later, off the lock (`GaugeSnapshot::dispatch`).
     const fn capture(&mut self) -> GaugeSnapshot {
         self.seq = self.seq.wrapping_add(1);
         GaugeSnapshot {
+            runtime_id: self.runtime_id,
             seq: self.seq,
             subscriptions: self.subscriptions,
             unkeyed_commands: self.unkeyed_commands,
@@ -174,11 +202,12 @@ impl Gauges {
     }
 }
 
-/// One producer-gauge event's payload — the four counts and their ordering
-/// `seq` — captured under the lock and dispatched to `tracing` after the lock is
-/// released (RFC 0006 §4.4).
+/// One producer-gauge event's payload — the four counts, the emitting
+/// instance's `runtime_id`, and their ordering `seq` — captured under the lock
+/// and dispatched to `tracing` after the lock is released (RFC 0006 §4.4).
 #[derive(Clone, Copy)]
 struct GaugeSnapshot {
+    runtime_id: u64,
     seq: u64,
     subscriptions: usize,
     unkeyed_commands: usize,
@@ -198,6 +227,7 @@ impl GaugeSnapshot {
     fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
+            runtime_id = self.runtime_id,
             seq = self.seq,
             subscriptions = self.subscriptions,
             unkeyed_commands = self.unkeyed_commands,
@@ -227,6 +257,42 @@ impl Field {
 }
 
 impl LoadObserver {
+    /// Creates an observer with fresh, all-zero gauges and a newly allocated
+    /// `runtime_id` — the identifier every gauge event this observer emits
+    /// carries (RFC 0006 §4.4, INV-L13). The runtime builds exactly one and
+    /// clones it to its producers, so one observer is one runtime instance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide `runtime_id` space is exhausted (the
+    /// allocator counter has reached `u64::MAX`): the identifier partitions a
+    /// subscriber's gauge events by emitting instance, so ids are never reused
+    /// within a process (RFC 0006 §4.4).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            // Reusing an id would merge two runtimes' gauge events into one
+            // partition, and their independent `seq` streams with them. The
+            // allocator fails before it can reuse a value: on exhaustion the
+            // failed `fetch_update` stores nothing, leaving the counter
+            // saturated at `u64::MAX`, so this and every later allocation
+            // panics instead of wrapping into reuse.
+            //
+            // The remaining fields take `Gauges::default()`'s zero state. This
+            // is the only site that builds a `Gauges`, so nothing can observe
+            // the placeholder `runtime_id` that `Default` leaves behind.
+            gauges: Arc::new(Mutex::new(Gauges {
+                runtime_id: NEXT_RUNTIME_ID
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                    .expect(
+                        "runtime id space exhausted; gauge runtime ids are never \
+                         reused within a process (RFC 0006 §4.4)",
+                    ),
+                ..Gauges::default()
+            })),
+        }
+    }
+
     /// Tracks one active subscription forwarding task: the returned guard raises
     /// the `subscriptions` gauge now and lowers it when dropped (task end or
     /// abort).
@@ -473,9 +539,10 @@ mod tests {
     use crate::test_support::{TraceRecorder, set_default_subscriber, with_silent_panic_hook};
 
     // INV-L13: every producer-gauge event carries the full field set together —
-    // the four gauges plus their ordering `seq` — so a subscriber reads a
-    // complete, ordered snapshot from any one event. The per-field recorder
-    // views flatten across events and cannot see this; the field-set view can.
+    // the four gauges plus the emitting instance's `runtime_id` and their
+    // ordering `seq` — so a subscriber reads a complete, attributable, ordered
+    // snapshot from any one event. The per-field recorder views flatten across
+    // events and cannot see this; the field-set view can.
     #[test]
     fn gauge_event_carries_the_full_field_set() {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
@@ -494,6 +561,7 @@ mod tests {
         assert!(!gauge_events.is_empty(), "gauge events should have fired");
         for fields in gauge_events {
             for required in [
+                "runtime_id",
                 "seq",
                 "subscriptions",
                 "unkeyed_commands",
@@ -510,7 +578,8 @@ mod tests {
 
     // INV-L13 (ordering): every gauge event carries a monotone `seq`, one per
     // emission, so a subscriber orders the events by `seq` rather than by
-    // arrival — the current value of each gauge is the greatest-`seq` event's.
+    // arrival — the current value of each gauge is the greatest-`seq` event's
+    // among that `runtime_id`'s events.
     #[test]
     fn each_gauge_change_carries_a_monotone_seq() {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
@@ -527,6 +596,95 @@ mod tests {
             vec![1, 2, 3, 4],
             "each of the four gauge changes emits one event with the next `seq`"
         );
+    }
+
+    // INV-L13 (instance identity): each runtime instance gets its own
+    // `runtime_id` and carries it on every gauge event, so a subscriber
+    // watching several runtimes in one process can attribute each event to its
+    // emitter. One observer is one runtime — the runtime builds exactly one and
+    // clones it to its producers, so a clone must report the same id rather
+    // than looking like a second runtime.
+    #[test]
+    fn each_observer_gets_its_own_runtime_id() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let first = LoadObserver::default();
+        let second = LoadObserver::default();
+        let first_clone = first.clone();
+        drop(first.track_subscription());
+        drop(second.track_subscription());
+        drop(first_clone.track_subscription());
+
+        let ids = recorder.u64_values("runtime_id");
+        assert_eq!(
+            ids.len(),
+            6,
+            "every gauge event carries a runtime_id: {ids:?}"
+        );
+        let (first_id, second_id) = (ids[0], ids[2]);
+        assert_ne!(
+            first_id, second_id,
+            "two runtime instances must not share a runtime_id: {ids:?}"
+        );
+        assert_eq!(
+            ids,
+            vec![first_id, first_id, second_id, second_id, first_id, first_id],
+            "each event carries its emitter's id, and a clone is the same \
+             instance rather than a new one: {ids:?}"
+        );
+    }
+
+    // INV-L13 (per-instance ordering): `seq` is strictly increasing among a
+    // given `runtime_id`'s events and runs independently per instance, so a
+    // subscriber partitions by `runtime_id` before applying the greatest-`seq`
+    // rule. Emissions are interleaved here, so neither arrival order nor a
+    // cross-instance `seq` comparison could stand in for that.
+    #[test]
+    fn gauge_seq_strictly_increases_within_each_runtime_id() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let first = LoadObserver::default();
+        let second = LoadObserver::default();
+        let held = first.track_subscription();
+        second.set_keyed_entries(1);
+        let also_held = first.track_subscription();
+        second.set_keyed_entries(2);
+        drop(held);
+        drop(also_held);
+
+        // One `runtime_id` and one `seq` per gauge event, each log in arrival
+        // order, so the two line up index by index — the other two event kinds
+        // carry neither field, so nothing else can enter either log.
+        let ids = recorder.u64_values("runtime_id");
+        let seqs = recorder.u64_values("seq");
+        assert_eq!(ids.len(), 6, "six gauge changes fired: {ids:?}");
+        assert_eq!(
+            seqs.len(),
+            ids.len(),
+            "every gauge event carries both fields: {ids:?} / {seqs:?}"
+        );
+
+        let mut partitions: Vec<(u64, Vec<u64>)> = Vec::new();
+        for (id, seq) in ids.iter().zip(&seqs) {
+            match partitions.iter_mut().find(|(known, _)| known == id) {
+                Some((_, known_seqs)) => known_seqs.push(*seq),
+                None => partitions.push((*id, vec![*seq])),
+            }
+        }
+        assert_eq!(
+            partitions.len(),
+            2,
+            "two runtime instances must yield two partitions: {ids:?}"
+        );
+        for (id, seqs) in partitions {
+            assert!(
+                seqs.windows(2).all(|pair| pair[0] < pair[1]),
+                "runtime {id}'s seq must strictly increase across its own \
+                 events: {seqs:?}"
+            );
+        }
     }
 
     // Fast-path correctness: while nothing is listening for

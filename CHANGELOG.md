@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   let runtime = Runtime::<MyApp>::with_config((), config);
   ```
 
+- The `tears::runtime::load` producer-gauge event gained a `runtime_id` field —
+  the emitting runtime instance's process-local identifier, never reused within
+  the process — and the existing `seq` ordering counter (added in 0.10.1) is
+  now scoped per instance. The current value of each gauge is the value on the
+  greatest-`seq` event *among events carrying that `runtime_id`*, so a consumer
+  partitions by `runtime_id` first and never reads gauge events in arrival
+  order; the batch and capacity-wait events are unchanged and carry neither
+  field
+
 ## [0.10.2] - 2026-07-26
 
 ### Fixed
