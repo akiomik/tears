@@ -4,7 +4,8 @@
 
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use futures::FutureExt;
@@ -57,6 +58,92 @@ impl Drop for SilentPanicHook {
 /// then resumed. Cancellation also restores the hook through the internal drop
 /// guard. This helper is for `current_thread` tests because it holds
 /// [`PANIC_HOOK_GUARD`] across `.await`.
+/// Records how a [`compose_hook`](crate::panic::compose_hook)-composed hook
+/// classified each panic, counting only panics raised on threads whose name
+/// starts with the installing test's prefix.
+///
+/// Unlike [`with_silent_panic_hook`] (current-thread, async), this probe also
+/// serves multi-thread runtimes and non-async tests; callers hold
+/// [`PANIC_HOOK_GUARD`] for their whole critical section themselves. That
+/// serializes the hook swaps but not the rest of the test binary: a test that
+/// panics without taking the guard would still reach this hook. The
+/// thread-name filter keeps such a panic out of the counts — libtest names
+/// each test's thread after the test's full path, and multi-thread tests
+/// stamp their runtime workers with their own prefix.
+pub struct HookProbe {
+    restores: Arc<AtomicUsize>,
+    delegations: Arc<AtomicUsize>,
+    previous: Option<PanicHook>,
+}
+
+impl HookProbe {
+    pub fn install(thread_prefix: &'static str) -> Self {
+        let restores = Arc::new(AtomicUsize::new(0));
+        let delegations = Arc::new(AtomicUsize::new(0));
+
+        let restore_counter = Arc::clone(&restores);
+        let delegation_counter = Arc::clone(&delegations);
+        let next: PanicHook = Box::new(move |_info| {
+            if on_thread(thread_prefix) {
+                delegation_counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let hook = crate::panic::compose_hook(
+            move || {
+                if on_thread(thread_prefix) {
+                    restore_counter.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+            next,
+        );
+
+        let previous = panic::take_hook();
+        panic::set_hook(hook);
+        Self {
+            restores,
+            delegations,
+            previous: Some(previous),
+        }
+    }
+
+    /// The `(restores, delegations)` counts so far.
+    pub fn counts(&self) -> (usize, usize) {
+        (
+            self.restores.load(Ordering::SeqCst),
+            self.delegations.load(Ordering::SeqCst),
+        )
+    }
+
+    /// Reinstalls the previous hook. Assertions run only after this, so a
+    /// failing assertion still reports through the normal hook.
+    pub fn finish(mut self) {
+        self.restore_previous();
+    }
+
+    fn restore_previous(&mut self) {
+        if let Some(hook) = self.previous.take() {
+            panic::set_hook(hook);
+        }
+    }
+}
+
+impl Drop for HookProbe {
+    fn drop(&mut self) {
+        // `set_hook` panics when called from a panicking thread, so an
+        // unwinding test leaves the probe hook installed rather than
+        // aborting the process; the next test's `install` replaces it.
+        if !thread::panicking() {
+            self.restore_previous();
+        }
+    }
+}
+
+fn on_thread(prefix: &str) -> bool {
+    thread::current()
+        .name()
+        .is_some_and(|name| name.starts_with(prefix))
+}
+
 #[expect(
     clippy::await_holding_lock,
     clippy::future_not_send,

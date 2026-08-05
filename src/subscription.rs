@@ -1326,4 +1326,62 @@ mod tests {
 
         Ok(())
     }
+
+    struct PanickingSource;
+
+    impl SubscriptionSource for PanickingSource {
+        type Output = i32;
+        type Key = ();
+
+        fn stream(&self) -> BoxStream<'static, i32> {
+            stream::once(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                0
+            })
+            .boxed()
+        }
+
+        fn key(&self) -> Self::Key {}
+    }
+
+    // Guards the wiring, not the mechanism: `spawn_subscription` must wrap the
+    // forwarder body in `contained_producer`, so the panic hook skips the
+    // terminal restore for a panic the runtime contains (RFC 0011 INV-LC8).
+    // The mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "driving the panic hook requires a real panic in the source stream"
+    )]
+    async fn a_panicking_subscription_forwarder_skips_the_terminal_restore() {
+        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let probe = crate::test_support::HookProbe::install(
+            "subscription::tests::a_panicking_subscription_forwarder_skips_the_terminal_restore",
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
+        manager.update(vec![Subscription::new(PanickingSource)]);
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "a subscription forwarder panic must delegate without restoring"
+        );
+    }
 }

@@ -1075,6 +1075,53 @@ mod tests {
         assert!(!contains_id);
     }
 
+    // Guards the wiring, not the mechanism: `start_run` must wrap the keyed
+    // task body in `contained_producer`, so the panic hook skips the terminal
+    // restore for a panic the runtime contains (RFC 0011 INV-LC8). The
+    // mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "driving the panic hook requires a real panic in the task body"
+    )]
+    async fn a_panicking_keyed_command_task_skips_the_terminal_restore() {
+        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let probe = crate::test_support::HookProbe::install(
+            "runtime::keyed_commands::tests::a_panicking_keyed_command_task_skips_the_terminal_restore",
+        );
+
+        let id = CommandId::new("panic-restore");
+        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        manager.spawn(
+            id,
+            CancelPolicy::CancelInFlight,
+            command_stream(Command::future(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                1
+            })),
+        );
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "a keyed command task panic must delegate without restoring"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_aborts_keyed_tasks() {
         struct AbortGuard(Arc<AtomicBool>);

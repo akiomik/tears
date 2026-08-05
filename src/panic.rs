@@ -57,8 +57,18 @@ tokio::task_local! {
 /// terminate the application (RFC 0011 §5, INV-LC8): the event loop keeps
 /// running and keeps drawing. Restoring the terminal for such a panic would
 /// drop a live UI out of raw mode and off the alternate screen, so the hook
-/// only delegates to the previous hook in that case, leaving the reporting
-/// unchanged.
+/// only delegates to the previous hook in that case.
+///
+/// The delegated report of a contained panic is therefore written while the
+/// terminal is still in raw mode and on the alternate screen: line breaks
+/// stair-step, and the report's cells linger until the next redraw happens to
+/// touch them. An application that wants contained-panic reports to stay
+/// readable should point its panic reporter at a file or log target rather
+/// than stderr.
+///
+/// Containment presupposes unwinding. Under `panic = "abort"` no panic is
+/// contained — every panic ends the process — so the hook restores the
+/// terminal unconditionally there, exactly as it does for driving-path panics.
 ///
 /// Call it only once. Each call wraps the previous hook, so repeated calls
 /// would restore the terminal multiple times (harmless, but pointless).
@@ -101,13 +111,16 @@ fn in_contained_producer() -> bool {
 /// `restore` is skipped for a panic unwinding out of a [`contained_producer`]
 /// poll, because the application it would restore the terminal away from is
 /// still running (INV-LC8); the delegation to `next` is unconditional either
-/// way.
+/// way. Under `panic = "abort"` the spawn sites' `catch_unwind` cannot contain
+/// anything and the process is about to die, so the restore is unconditional
+/// — the guard below is compile-time and untestable from this (necessarily
+/// unwinding) test suite.
 ///
 /// Extracted from [`install_panic_hook`] so the chaining order can be tested
 /// without touching a real terminal.
-fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook) -> PanicHook {
+pub fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook) -> PanicHook {
     Box::new(move |info| {
-        if !in_contained_producer() {
+        if cfg!(panic = "abort") || !in_contained_producer() {
             restore();
         }
         next(info);
@@ -116,102 +129,17 @@ fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::PANIC_HOOK_GUARD;
+    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD};
 
     use super::*;
 
     use std::future::pending;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
-    use std::thread;
 
     use futures::future::join_all;
     use tokio::runtime::Builder;
     use tokio::sync::oneshot;
     use tokio::task::yield_now;
-
-    /// Records how a composed hook classified each panic, counting only panics
-    /// raised on the installing test's own worker threads.
-    ///
-    /// `set_hook`/`take_hook` mutate process-global state, so every test here
-    /// holds [`PANIC_HOOK_GUARD`] for its whole critical section. That
-    /// serializes the hook swaps but not the rest of the test binary: a test
-    /// that panics without taking the guard would still reach this hook. The
-    /// thread-name filter keeps such a panic out of the counts, since each
-    /// probe stamps a unique name on the worker threads it panics from.
-    struct HookProbe {
-        restores: Arc<AtomicUsize>,
-        delegations: Arc<AtomicUsize>,
-        previous: Option<PanicHook>,
-    }
-
-    impl HookProbe {
-        fn install(thread_prefix: &'static str) -> Self {
-            let restores = Arc::new(AtomicUsize::new(0));
-            let delegations = Arc::new(AtomicUsize::new(0));
-
-            let restore_counter = Arc::clone(&restores);
-            let delegation_counter = Arc::clone(&delegations);
-            let next: PanicHook = Box::new(move |_info| {
-                if on_thread(thread_prefix) {
-                    delegation_counter.fetch_add(1, Ordering::SeqCst);
-                }
-            });
-            let hook = compose_hook(
-                move || {
-                    if on_thread(thread_prefix) {
-                        restore_counter.fetch_add(1, Ordering::SeqCst);
-                    }
-                },
-                next,
-            );
-
-            let previous = panic::take_hook();
-            panic::set_hook(hook);
-            Self {
-                restores,
-                delegations,
-                previous: Some(previous),
-            }
-        }
-
-        /// The `(restores, delegations)` counts so far.
-        fn counts(&self) -> (usize, usize) {
-            (
-                self.restores.load(Ordering::SeqCst),
-                self.delegations.load(Ordering::SeqCst),
-            )
-        }
-
-        /// Reinstalls the previous hook. Assertions run only after this, so a
-        /// failing assertion still reports through the normal hook.
-        fn finish(mut self) {
-            self.restore_previous();
-        }
-
-        fn restore_previous(&mut self) {
-            if let Some(hook) = self.previous.take() {
-                panic::set_hook(hook);
-            }
-        }
-    }
-
-    impl Drop for HookProbe {
-        fn drop(&mut self) {
-            // `set_hook` panics when called from a panicking thread, so an
-            // unwinding test leaves the probe hook installed rather than
-            // aborting the process; the next test's `install` replaces it.
-            if !thread::panicking() {
-                self.restore_previous();
-            }
-        }
-    }
-
-    fn on_thread(prefix: &str) -> bool {
-        thread::current()
-            .name()
-            .is_some_and(|name| name.starts_with(prefix))
-    }
 
     /// Yields enough times to give the multi-thread scheduler opportunities to
     /// move the task to another worker between polls.

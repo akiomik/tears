@@ -55,7 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or the alternate screen, and the still-running application keeps drawing.
   Panics on the application's own driving path — `update`, `view`,
   `subscriptions`, a subscription's source constructor — still restore the
-  terminal exactly as before
+  terminal exactly as before, as do all panics under `panic = "abort"`
+  builds, where nothing can be contained. A contained panic's report is
+  written on the alternate screen in raw mode, so applications that want it
+  readable should point their panic reporter at a file or log target
 
 ## [0.10.2] - 2026-07-26
 

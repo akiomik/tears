@@ -674,4 +674,49 @@ mod tests {
         )
         .await;
     }
+
+    // Guards the wiring, not the mechanism: `enqueue_command` must wrap the
+    // unkeyed task body in `contained_producer`, so the panic hook skips the
+    // terminal restore for a panic the runtime contains (RFC 0011 INV-LC8).
+    // The mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "driving the panic hook requires a real panic in the task body"
+    )]
+    async fn a_panicking_unkeyed_command_task_skips_the_terminal_restore() {
+        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let probe = crate::test_support::HookProbe::install(
+            "runtime::core::tests::a_panicking_unkeyed_command_task_skips_the_terminal_restore",
+        );
+
+        let mut core = RuntimeCore::<TestApp>::new(0);
+        core.enqueue_command(
+            Command::future(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                TestMessage::Increment
+            })
+            .into_runtime_parts(),
+        );
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "an unkeyed command task panic must delegate without restoring"
+        );
+    }
 }
