@@ -1586,7 +1586,7 @@ simplification; interaction rows record `excluded_by=<fixture id>`.
 | ID | Fixture | Status | Verdict | Note |
 |---|---|---|---|---|
 | AC1 | No hot code reload | active | **adopted(X)** | Hot reload not provided — not creating reserved seams (type erasure, reentrancy boundaries) preserves the simplicity of the phase machine / single state owner. Dynamic enable within a static set is split out to N43 (C) |
-| AC2 | No multi-process / distributed state synchronization | active | **adopted(X)** | Declared outside responsibility — same axis as AC7 (no actor-ization). The single-process, single-runtime boundary is a premise of the 0011 lifecycle contract |
+| AC2 | No multi-process / distributed state synchronization | active | **adopted(X)** | Out-of-responsibility declaration — same axis as AC7 (no actor-ization). Multiple runtime instances may coexist (N16 = A; 0006 requires a distinct runtime_id per runtime in the process). The negative space is that **no cross-instance / cross-process synchronization or consistency protocol is provided** — each runtime's state remains its own single owner's |
 | AC3 | No support for non-tokio async runtimes | active | **adopted(X)** | leaf-K56 verdict: no public compatibility surface for alternate executors; `Send` bounds are kept and the current implementation may depend on Tokio (Tokio-internal types are not made contractual — consistent with the shape non-pin of 0011 §7). The P12 promotion verdict is completed on the P12 row |
 | AC4 | No bundled general-purpose widget library | active | **adopted(X)** | leaf-G35/G36 settled: widgets are delegated to the ratatui ecosystem; a contour declaration that tears focuses on the runtime contract — same root as the X of N5/N58 |
 | AC5 | No parallel execution of reducer/update | active | **adopted(X)** | 0011 INV-LC9 pins serial, non-reentrant execution as the source of truth — declaring parallel update unsupported is what actually yields the single-state-owner simplification |
@@ -1652,7 +1652,9 @@ Every audit row that terminated `C` names its owning task and both
 §1.8 flags on its own row (§9). This register is the canonical
 grouping of those owners into delegated documents — where §9 rows
 name the same slot under slightly different working titles, the entry
-below is the canonical name and the rows are listed once. Per §1.8,
+below is the canonical name; each row is listed once per owning
+entry, and the multi-owner rows N40 and N54 appear once in each of
+their two entries. Per §1.8,
 **every entry is `blocks composition = no`**: none of these documents
 joins this RFC's acceptance bundle (the bundle is exactly the
 Target's list). The only scheduling constraint is `cancel_scope`'s
@@ -1662,8 +1664,8 @@ material under §1.8, not register entries.
 
 | Delegated document | Audit rows | Gates | Scope handed over |
 |---|---|---|---|
-| composition RFC | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4 | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
-| `cancel_scope` RFC (`C-16`, §5.3) | N30, N40 (N40 jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5) | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
+| composition RFC | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
+| `cancel_scope` RFC (`C-16`, §5.3) | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5) | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
 | driving surface RFC (with its subordinate conformance kit) | N7, N15, N24, N45, N48, N49, P12 | no | external driving of the runtime: pacing/latency step mapping, parking premise, bootstrap/termination intake, backend/terminal separation, the contour declaration's inventory of signals the driving surface exclusively holds (POSIX signal handling), source/backend conformance kit |
 | RFC 0008 stage-3 driving-store amendment | TS-1, TS-3, TS-6 | no | driving-store test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
 | graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, cleanup hook seam (window inside RFC 0012 §3's stop-requested→quiesced interval) |
@@ -1699,9 +1701,11 @@ root is named).
 - **AC1 — no hot code reload.** No reserved type-erasure or re-entry
   seams; the phase machine and the single state owner stay
   monomorphic.
-- **AC2 — no multi-process / distributed state sync.** The
-  single-process, single-runtime boundary remains a precondition of
-  the lifecycle contract.
+- **AC2 — no multi-process / distributed state sync.** No
+  cross-instance or cross-process synchronization or consistency
+  protocol is provided; multiple runtime instances may coexist
+  (N16; RFC 0006 requires a distinct `runtime_id` per runtime), and
+  each runtime's state remains its own single owner's.
 - **AC3 — no non-Tokio executor surface.** No public compatibility
   surface for alternate executors; `Send` bounds are kept; the
   implementation may depend on Tokio, whose internal shapes stay
@@ -1766,6 +1770,11 @@ This RFC becomes Implemented when the work §10 enumerates is closed:
 - code conformance to the redesigned contracts (the bundle's
   amendments) has merged to main on the 0.11.0 breaking budget
   (§1.8);
+- the mechanism unification §3.1 adopts has landed on main and
+  passed §3.1's preservation criterion (contract suites green, no
+  contract test rewritten, no grade-(i) counterexample) — the
+  `root-A1` rows §8 reaffirms hold on the unified mechanism, not
+  merely on the pre-unification paths;
 - the simplifications promised by `X` and `adopted(X)` verdicts are
   applied, and no reserved seam excluded by §10.2 has been
   reintroduced;
