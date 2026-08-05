@@ -21,11 +21,13 @@
 
 ## Summary
 
-`SubscriptionId` currently stores `{ TypeId, u64 }`. A subscription source
-hashes its logical identity before constructing the ID, so two unequal logical
-keys with the same 64-bit hash become equal to the runtime. The
-`SubscriptionManager` then keeps only the first declaration, continues or
-restarts the wrong lifecycle, and can retain the wrong message mapping. This is
+Before this RFC, `SubscriptionId` stored `{ TypeId, u64 }`. A
+subscription source
+hashed its logical identity before constructing the ID, so two unequal logical
+keys with the same 64-bit hash became equal to the runtime. The
+`SubscriptionManager` then kept only the first declaration, continued or
+restarted the wrong lifecycle, and could retain the wrong message
+mapping. That was
 a correctness failure, not merely an unlikely `HashMap` performance collision.
 
 This RFC replaces the pre-hashed surrogate with a framework-owned erased
@@ -56,9 +58,9 @@ contracts.
 
 ## 1. Context and constraints
 
-### 1.1 Current subscription identity
+### 1.1 Pre-RFC subscription identity
 
-The current public shape is:
+The public shape this RFC replaced was:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,7 +74,7 @@ impl SubscriptionId {
 }
 ```
 
-Custom and built-in sources typically use it like this:
+Custom and built-in sources typically used it like this:
 
 ```rust
 fn id(&self) -> SubscriptionId {
@@ -82,20 +84,19 @@ fn id(&self) -> SubscriptionId {
 }
 ```
 
-This performs two conceptually different operations too early:
+This performed two conceptually different operations too early:
 
-1. it chooses a hash function and compresses a logical key to 64 bits; and
-2. it treats the compressed value as exact identity.
+1. it chose a hash function and compressed a logical key to 64 bits; and
+2. it treated the compressed value as exact identity.
 
 A `HashMap` is collision-safe because it uses `Hash` to find a bucket and `Eq`
-to distinguish entries in that bucket. The current API discards the value
-needed for the second step, so the manager cannot recover correctness after a
-collision.
+to distinguish entries in that bucket. That API discarded the value
+needed for the second step, so the manager could not recover correctness after
+a collision.
 
-The impact is observable. `SubscriptionManager::update` builds one desired set
+The impact was observable. `SubscriptionManager::update` builds one desired set
 from the IDs, retains the first subscription for each ID, removes running IDs
-that are no longer desired, and starts absent IDs. A false equality can
-therefore:
+that are no longer desired, and starts absent IDs — so a false equality could:
 
 - suppress a distinct stream before it starts;
 - keep a prior stream when a different one is requested;
@@ -445,8 +446,9 @@ fn key(&self) -> Self::Key {
 ```
 
 The RFC does not promise `Arc`, one allocation per constructor, pointer-sized
-storage, or O(1) cloning. The initial implementation is expected to use shared
-erasure and is benchmarked as described in section 7.
+storage, or O(1) cloning. The initial implementation uses shared
+erasure (`src/structural_key.rs`) and was benchmarked as described in
+section 7.
 
 ### 3.3 No compatibility constructor
 
@@ -892,10 +894,13 @@ sleeps.
 
 ## 7. Performance evaluation
 
-The current `SubscriptionId` is two inline machine values and `Copy`.
-Structural erasure is expected to add allocation, indirection, dynamic equality,
-and explicit clones. Subscription reconciliation is a per-message hot path, so
-the change must be measured even though collision-safe equality is mandatory.
+The pre-replacement `SubscriptionId` was two inline machine values and
+`Copy`; structural erasure adds allocation, indirection, dynamic
+equality, and explicit clones. Subscription reconciliation is a
+per-message hot path, so the change had to be measured even though
+collision-safe equality is mandatory — Phase B recorded the comparison
+on the Criterion subscription benchmark (`benches/subscription.rs`:
+steady, churn, and scoped reconcile).
 
 The existing Criterion subscription benchmark remains the primary comparison:
 
@@ -921,9 +926,11 @@ reducing manager clones. They must preserve every identity invariant and remain
 internal. Reintroducing a pre-hashed equality surrogate is not a permitted
 optimization.
 
-Phase B adds a separate scoped steady-state case before its implementation is
-declared complete. It should compare empty, one-segment, and representative
-nested scope paths without making a particular path representation public.
+Phase B added the separate scoped steady-state case
+(`subscription_reconcile_steady_scoped`, `benches/subscription.rs`),
+comparing the unscoped baseline, a single composition boundary, and
+representative nested scope paths without making a particular path
+representation public.
 
 ## 8. Implementation guide
 
@@ -943,9 +950,10 @@ trait ErasedKey: Send + Sync {
 }
 ```
 
-A private `StructuralKey` can own `Arc<dyn ErasedKey>` and implement `Clone`,
-typed equality, hashing, and diagnostic type names once. `CommandId` can migrate
-to that helper without changing RFC 0003 behavior. `SubscriptionId` adds the
+A private `StructuralKey` owns the erased key and implements `Clone`,
+typed equality, hashing, and diagnostic type names once; `CommandId`
+migrated to that helper without changing RFC 0003 behavior (landed as
+`ErasedStructuralKey` — `src/structural_key.rs`). `SubscriptionId` adds the
 `TypeId` selected by `Subscription::new<Source>` around the same key primitive.
 The private subscription-ID constructor accepts `Source::Key`; it is not
 reachable from downstream source implementations.
@@ -991,8 +999,9 @@ Each built-in source must expose its actual lifecycle inputs as its associated
   `QueryKey` inputs;
 - `MockSource`: one clone-stable per-instance token stored by the source. The
   token's value is now exact identity, so its generation must be unique within
-  the process — for example a monotonically increasing atomic counter. Do not
-  keep the current timestamp-plus-type-name digest as the token value: two
+  the process — landed as a monotonically increasing atomic counter
+  (`src/subscription/mock.rs`). The pre-RFC timestamp-plus-type-name
+  digest could not be kept as the token value: two
   instances created in the same clock tick would alias, reproducing the old
   collision semantics through the new trait shape; and
 - benchmark/test sources: their caller-controlled logical key.
@@ -1134,7 +1143,7 @@ author — constructs the scoped value.
 
 ### Add scope only to subscriptions
 
-Rejected at the identity-model level. The current subscription failure is more
+Rejected at the identity-model level. The pre-RFC subscription failure was more
 immediate, but `CommandId` has the same multiple-child aliasing problem. Defining
 one scope algebra now prevents incompatible command and subscription composition
 rules. Phase delivery may still be staged.
@@ -1180,10 +1189,11 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-Follow-up order is:
+The follow-up order was, with items 1–2 since completed and the rest
+remaining design work:
 
-1. implement Phase A for 0.10.0;
-2. evaluate and, when scheduled, implement Phase B additively;
+1. implement Phase A for 0.10.0 (done);
+2. evaluate and, when scheduled, implement Phase B additively (done);
 3. design per-effect command cancellation/batch composition;
 4. use scoped identity and deterministic effect testing as inputs to the
    reducer composition RFC; and

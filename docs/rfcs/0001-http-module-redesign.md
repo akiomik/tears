@@ -142,7 +142,9 @@ pub enum FetchStatus { Idle, Fetching }
 - `fetch_status` only moves between `Idle`/`Fetching` in the core, but the type
   exists from the start so future features do not change user code.
 - **`is_stale` is a snapshot value taken at emit time.** Its definition depends
-  on wall-clock (`data_timestamp.elapsed() >= stale_time`), but the watch
+  on elapsed time on the virtualizable clock
+  (`data_timestamp.elapsed() >= stale_time` over `tokio::time::Instant` —
+  RFC 0009 §4.1), but the watch
   snapshot only updates on events such as observe/reconcile (timer-driven updates
   are a non-goal). So after fresh data is emitted, if `stale_time` elapses with
   no event, the subscriber keeps an `is_stale = false` snapshot until the next
@@ -179,7 +181,8 @@ check.
 ### 5.3 State cell and observe-and-reconcile (single source of truth)
 
 Per (TypeId, key) there is a **state cell** owned by the `QueryClient`, holding:
-`data`, `current_generation`, `data_generation`, `data_timestamp`, `status`,
+`data`, `error: Option<QueryError>`, `current_generation`,
+`data_generation`, `data_timestamp`, `status`,
 `fetch_status`, `in_flight_generation: Option<u64>`, and
 `last_error_generation: Option<u64>`. Each cell owns a typed
 `watch::channel::<QueryResult<T>>` used purely as a change notification.
@@ -241,7 +244,9 @@ active subscribers reconcile regardless of command execution order, and the time
 `T` in INV-1 is unambiguously the method-call time.
 
 - `invalidate()` returns nothing (no `Command`). Callers write it as a statement
-  inside `update()`: `self.client.invalidate(&key);`. The cell is `Arc`-shared
+  inside `update()`: `self.client.invalidate("user-123");` (the argument
+  is any `Into<QueryKey>` value — `src/subscription/http/query.rs`). The
+  cell is `Arc`-shared
   mutable state, so a `&self` method updates it directly.
 - Trade-off: this departs from "side effects go through `Command`" in TEA.
   However, the cell is already `Arc`-shared mutable state, and this is the same
@@ -344,8 +349,6 @@ Because both the value and the cell (which holds `data: Option<T>` and a typed
 trait AnyCell: Any + Send + Sync + 'static {
     fn into_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
     fn invalidate(&self, config: &QueryConfig);
-    fn subscriber_count(&self) -> usize;
-    fn inactive_since(&self) -> Option<Instant>;
     fn gc_inactive_data_and_should_evict(&self, cache_time: Duration) -> bool;
 }
 ```
@@ -354,8 +357,11 @@ trait AnyCell: Any + Send + Sync + 'static {
 - Typed access goes through `get_or_subscribe_cell::<T>()`, which downcasts via
   `Arc::downcast` (needed because it returns an owned `Arc`). Because `TypeId` is
   part of the key, the downcast always matches.
-- Operations that do not need `T` (GC, subscriber count, inactive time) are
+- Operations that do not need `T` — invalidation and GC — are
   `AnyCell` methods called directly on `Arc<dyn AnyCell>` with no downcast.
+  Subscriber count and inactive time are `#[cfg(test)]` introspection on
+  the typed `Cell<T>`, not part of the erased surface
+  (`src/subscription/http/cell.rs`).
 - The typed `watch` stays inside `Cell<T>`; the map holds `dyn AnyCell`. Updates
   are limited to atomic replace + `watch.send`.
 
@@ -477,8 +483,9 @@ Semantic breaks to call out in the migration guide:
 
 - **`invalidate` no longer returns a `Command`** and completes "generation bump +
   watch send" synchronously on call (§5.5). Rewrite
-  `return self.client.invalidate(&key);` as
-  `self.client.invalidate(&key); Command::none()`.
+  `return self.client.invalidate(key);` as
+  `self.client.invalidate(key); Command::none()` — the argument is any
+  `Into<QueryKey>` value, e.g. a `&str`.
 - **`QueryState` is removed** in favor of the rich `QueryResult` (§5.1). Match on
   the accessors (`is_loading()` / `is_success()` / `is_error()` / `data()` /
   `error()`) instead of the old enum.

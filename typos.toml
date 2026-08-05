@@ -1,2 +1,8 @@
 [default.extend-words]
 ratatui = "ratatui"
+
+[default.extend-identifiers]
+# Git commit hash cited as the RFC 0010 baseline anchor.
+daa8bd1 = "daa8bd1"
+# Git commit hash cited as the RFC 0010 pre-drafting drift-scan endpoint.
+89ea872 = "89ea872"

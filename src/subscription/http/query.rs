@@ -137,16 +137,42 @@ impl fmt::Debug for QueryClient {
 
 impl QueryClient {
     /// Creates a new query client with default configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide client-id space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): `client_id` is a component of
+    /// subscription identity, so ids are never reused within a process
+    /// (RFC 0001).
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(QueryConfig::default())
     }
 
     /// Creates a new query client with the given configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide client-id space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): `client_id` is a component of
+    /// subscription identity, so ids are never reused within a process
+    /// (RFC 0001).
     #[must_use]
     pub fn with_config(config: QueryConfig) -> Self {
         Self {
-            client_id: NEXT_QUERY_CLIENT_ID.fetch_add(1, Ordering::Relaxed),
+            // `client_id` is an identity component — subscription identity is
+            // `(client_id, TypeId, QueryKey)` (RFC 0001) — so reusing an id
+            // would collide distinct clients' identities. The allocator fails
+            // before it can reuse a value: on exhaustion the failed
+            // `fetch_update` stores nothing, leaving the counter saturated at
+            // `u64::MAX`, so this and every later allocation panics instead of
+            // wrapping into reuse.
+            client_id: NEXT_QUERY_CLIENT_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .expect(
+                    "QueryClient id space exhausted; client ids are never \
+                     reused within a process (RFC 0001 subscription identity)",
+                ),
             cells: Arc::new(DashMap::new()),
             config,
         }

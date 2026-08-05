@@ -106,6 +106,14 @@ impl RuntimeConfig {
     /// uniquely; `512` or `2048` are defensible on the same data. Applications
     /// with larger expected bursts scale up by the same rule; the cost of
     /// undersizing is producer wait, never message loss (RFC 0006 INV-L2).
+    ///
+    /// One anti-pattern deserves naming: an application that spawns a command
+    /// per processed message can, under bounded-mode overload, convert message
+    /// backlog into *blocked-producer* backlog — blocked command tasks each
+    /// holding one in-flight message — which no channel capacity bounds. The
+    /// producer gauges (`tears::runtime::load`, RFC 0006 §4.4) make that
+    /// pattern visible; restructure the effect flow rather than resizing the
+    /// channel (RFC 0006 §4.5).
     #[must_use = "app_channel_capacity returns a modified config and does not mutate in place"]
     pub const fn app_channel_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.app_channel_capacity = Some(capacity);
@@ -135,6 +143,13 @@ impl RuntimeConfig {
     /// shared inputs; liveness-critical output belongs in an unkeyed command,
     /// and keyed liveness under load comes from pacing hot sources, not from
     /// bounded mode (RFC 0006 §4.7).
+    ///
+    /// The same trade decides how to quit: use unkeyed
+    /// [`Command::quit`](crate::Command::quit) for a prompt, unconditional
+    /// quit with backlog-independent delivery; putting `.cancellable(id)` on a
+    /// quit buys suppression — a later cancel or supersede can still stop it —
+    /// at the cost of waiting behind pending inputs under load
+    /// (RFC 0006 §4.6).
     #[must_use = "keyed_channel_capacity returns a modified config and does not mutate in place"]
     pub const fn keyed_channel_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.keyed_channel_capacity = Some(capacity);

@@ -139,18 +139,36 @@ impl<T: Clone + 'static> MockSource<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is zero.
-    ///
+    /// Panics if `capacity` is zero, or if the process-wide key space is
+    /// exhausted (the allocator counter has reached `u64::MAX`): the key is
+    /// exact identity, so keys are never reused within a process
+    /// (RFC 0005 §8.3).
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
         Self {
             sender: tx,
-            key: NEXT_MOCK_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
+            // The key is exact identity and must be unique within the process
+            // (RFC 0005 §8.3), so the allocator fails before it can reuse a
+            // value: on exhaustion the failed `fetch_update` stores nothing,
+            // leaving the counter saturated at `u64::MAX`, so this and every
+            // later allocation panics instead of wrapping into reuse.
+            key: NEXT_MOCK_SOURCE_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .expect(
+                    "MockSource key space exhausted; keys are never reused \
+                     within a process (RFC 0005 §8.3)",
+                ),
         }
     }
 
     /// Creates a new mock subscription source with default capacity (100).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process-wide key space is exhausted (the allocator
+    /// counter has reached `u64::MAX`): the key is exact identity, so keys are
+    /// never reused within a process (RFC 0005 §8.3).
     #[must_use]
     pub fn new() -> Self {
         Self::with_capacity(100)

@@ -1,14 +1,17 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Implemented (section 5.1 records the bounded acceptance results)
+- Status: Accepted (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
-  0.10.0 (additive)
+  0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
+  at 0.11.0 (a schema change, hence a contract change under INV-L13 —
+  section 4.4)
 - Scope: bounded memory, backpressure, and latency behavior of the runtime
   under load; the delivery contract of every runtime-owned channel
 - Feature flag: none
-- CHANGELOG: `Added` entry lands at the load-control implementation release
+- CHANGELOG: `Added` entry landed at the load-control implementation release
   (opt-in `RuntimeConfig`); 0.10.0 itself needs no CHANGELOG entry for this
-  RFC (see section 3)
+  RFC (see section 3). `Changed` — the producer-gauge load event gains a
+  `runtime_id` field (a schema change under INV-L13); lands at 0.11.0
 
 > **Decision scope.** Section 3 (the release-gate verdict) is the part of this
 > RFC that 0.10.0 depends on, and it is final unless the contract design in
@@ -16,7 +19,9 @@
 > API. Sections 4–6 fix the load-control contract. The items this RFC
 > delegated to the separate `RuntimeConfig` RFC — capacity values,
 > recommended defaults, the section 5.1 bounded-run parameters, and the CI
-> smoke-profile question — are settled there; that RFC is Implemented, so no
+> smoke-profile question — are settled there and implemented; RFC 0007
+> itself is Accepted with its own §2.1 `Copy` removal as the open
+> deliverable, which nothing here depends on, so no
 > prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
@@ -28,9 +33,12 @@
 
 ## Summary
 
-Every runtime-owned channel is unbounded and every sender completes
-immediately. Under sustained overload — producers faster than the update loop
-— pending messages, memory, and input-to-screen latency all grow without
+Under the default configuration every runtime-owned channel is unbounded
+and every sender completes
+immediately (bounded mode, this RFC's §4, is the opt-in alternative).
+Under sustained overload — producers faster than the update loop
+— pending messages, memory, and input-to-screen latency in that default
+all grow without
 bound, and outputs of keyed (cancellable) commands are starved for as long as
 the shared queue stays non-empty. Full-loop measurements
 (`benches/runtime_load.rs`) confirm each of these failure modes and also
@@ -52,7 +60,9 @@ This RFC defines the load-control contract in two steps:
 
 ### 1.1 Channel and scheduling inventory
 
-The runtime owns these channels and scheduling mechanisms today:
+The runtime owns these channels and scheduling mechanisms (the table
+describes the default, unbounded configuration; §4.1's capacities bound
+the first four rows' app-facing members):
 
 | Input | Channel | Capacity | Sender behavior |
 | --- | --- | --- | --- |
@@ -76,7 +86,9 @@ Scheduling facts that interact with load:
   frame interval (`MissedTickBehavior::Skip`); the quit branch is always
   armed.
 - Message micro-batching drains additional ready inputs for up to 100µs after
-  the first one. The window is time-capped but not count-capped.
+  the first one. The window is time-capped and, by default, not
+  count-capped (`batch_max_messages`, this RFC's INV-L12, adds the
+  opt-in count cap).
 - `AppInputs` polls the shared receiver before keyed receivers at every pull
   point. This is RFC 0003's INV-14: a ready shared cancel message must be able
   to suppress a ready keyed output before delivery. RFC 0003 already notes
@@ -102,7 +114,8 @@ Scheduling facts that interact with load:
   premise, section 4.5). "Active" here means an entry exists in the keyed
   map, including a finished-but-undrained run: a keyed channel outlives
   its command's completion until its buffered output is drained and the
-  id released for retry (RFC 0005,
+  id released for retry (RFC 0003 INV-7's contract, whose behavioral
+  anchor is
   `delivering_the_closed_senders_last_item_releases_the_id_for_retry`), so
   such a run still counts toward `m` and still occupies its
   `keyed_channel_capacity` share. Nor is this a bound on all pending-work memory:
@@ -286,7 +299,9 @@ constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
 unchanged and equivalent to the default configuration. The exact public
 shape — constructor signature, field set, naming, and
 construction/validation style — is fixed by the separate `RuntimeConfig`
-RFC (Implemented; section 6), so the load-control implementation PR could
+RFC (its delegated surface is implemented; the RFC itself is Accepted
+with its own §2.1 `Copy` removal as the open deliverable — section 6),
+so the load-control implementation PR could
 start. The verdict here needs only the additivity argument, which holds
 for any shape that keeps `Runtime::new` unchanged. Bounded behavior
 activates only through that surface:
@@ -313,7 +328,7 @@ guarantee, so offering a bounded mode contradicts no published contract.
 
 **This RFC requires no additional breaking change in 0.10.0.** The 0.10.0
 release proceeds with the breaking changes already on `main`; the
-load-control implementation (sections 4–6) lands after 0.10.0 behind
+load-control implementation (sections 4–6) landed after 0.10.0 behind
 `RuntimeConfig`.
 
 ## 4. Contract design (post-0.10.0, direction fixed)
@@ -321,10 +336,12 @@ load-control implementation (sections 4–6) lands after 0.10.0 behind
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
-(Implemented; section 3.2) — carries the three controls below. That RFC
-adopts these names unchanged and groups the frame rate into the same
-config, so `Runtime::with_config(flags, config)` takes the frame rate
-inside `config`; the semantics stated here are the contract.
+(delegated surface implemented; the RFC itself Accepted with its own
+§2.1 `Copy` removal as the open deliverable — section 3.2) — carries the
+three controls below. That RFC adopts these names unchanged and groups
+the frame rate into the same config, so
+`Runtime::with_config(flags, config)` takes the frame rate inside
+`config`; the semantics stated here are the contract.
 
 - `app_channel_capacity: Option<NonZeroUsize>` — `None` (default) keeps the
   unbounded shared channel; `Some(n)` bounds it.
@@ -443,7 +460,7 @@ merged" are known.
   This is not an INV-14 violation (the input was never "ready" in the
   channel), but it does mean RFC 0003's practical goal of prompt
   cancellation is weaker in bounded mode than under the current unbounded
-  default.
+  default. Pinned as INV-L14 (section 5).
 - **Redraw suppression** (RFC 0002) and subscription re-evaluation gating:
   unchanged; they operate downstream of input delivery.
 - **Shutdown**: bounded channels close exactly like unbounded ones; senders
@@ -487,23 +504,47 @@ as INV-L13 (section 5):
   this event's firing condition; adding a separate aggregate event
   alongside it is additive and does not require revisiting this choice.
 - **Producer gauges** — target `tears::runtime::load`, level `debug`,
-  fired whenever any counted value changes. Fields: `seq` (the ordering
+  fired whenever any counted value changes. Fields: `runtime_id` (the
+  emitting instance's identifier defined below), `seq` (the ordering
   counter defined below), `subscriptions` (active forwarding tasks),
   `unkeyed_commands` (running unkeyed command tasks), `keyed_commands`
   (active keyed entries), and `blocked` (producers currently awaiting
   capacity; always 0 in unbounded mode). These gauges are how the
   application-owned producer-count premise stays observable rather than
   enforced (section 4.5), including the blocked-producer anti-pattern named
-  there. `seq` is a per-runtime counter incremented once per emitted gauge
-  event — a `u64`, monotone within a run; wraparound would take ~2^64
-  events and does not occur in practice — and captured with the same
-  snapshot as the four counts, so a greater `seq` always carries a gauge
-  state reached no earlier than any lesser `seq`. It fixes the *current*
-  value of each gauge as the value on the gauge event with the greatest
-  `seq` a subscriber has observed — **gauge-event arrival order is not part
-  of this contract**, so a consumer that reads "the value on the most
-  recently *arrived* event" is relying on an ordering the schema does not
-  provide. Ordering by an explicit `seq` rather than by arrival is
+  there. `runtime_id` is a process-local opaque identifier of the
+  emitting runtime instance — a `u64` assigned at runtime construction,
+  distinct for every runtime in the process and never reused within the
+  process lifetime, with no meaning attached to its magnitude or
+  ordering: it is an equality key for partitioning, not a sequence, and
+  it is carried on every gauge firing. Non-reuse carries a structural
+  requirement for the implementation: an identifier allocator must fail
+  before it can reuse a value within the process lifetime — exhaustion
+  must not wrap into reuse, so a bare wrapping counter is
+  non-conforming past exhaustion; the failure mechanism is not pinned.
+  Each gauge event carries a `u64` `seq`: for a given `runtime_id`,
+  emitted `seq` values are strictly increasing. The initial value,
+  contiguity, and the counter's allocation or storage mechanism are not
+  pinned — a per-instance counter and a process-global one are equally
+  conforming. The requirement constrains emissions, not the counter: a
+  wrap is non-conforming only where it makes a `runtime_id`'s next
+  emitted `seq` fail to exceed that `runtime_id`'s greatest
+  already-emitted `seq`; a wrap that never surfaces as such an emission
+  — crossed between emissions, or reaching only a fresh `runtime_id` —
+  is harmless under the current-value rule below. The `seq` is
+  captured with the same snapshot as the four counts, so a greater
+  `seq` always carries a gauge
+  state reached no earlier than any lesser `seq` of the same
+  `runtime_id`. The current-value rule is per instance: the *current*
+  value of each gauge of a given runtime is the value on the gauge
+  event with the greatest `seq` a subscriber has observed *among events
+  carrying that `runtime_id`* — a subscriber observing several runtimes
+  in one process partitions by `runtime_id` first and applies the
+  max-`seq` rule within each partition, and comparing `seq` across
+  different `runtime_id`s is meaningless. **Gauge-event arrival order
+  is not part of this contract**, so a consumer that reads "the value
+  on the most recently *arrived* event" is relying on an ordering the
+  schema does not provide. Ordering by an explicit `seq` rather than by arrival is
   deliberate: it lets the runtime dispatch a gauge event without holding
   the gauge lock across the `tracing` dispatch — the snapshot-and-`seq`
   capture stays atomic under the lock while only the dispatch moves off
@@ -515,13 +556,22 @@ as INV-L13 (section 5):
   recurse without bound under a global `tracing` dispatcher, or have its
   nested event silently dropped by a scoped dispatcher's re-entrancy guard
   (breaking value fidelity); the runtime instead delivers a nested change
-  as its own `seq`-carrying event, never nested inside a `tracing`
-  dispatch, so value fidelity and `seq` ordering both hold across
+  as its own `seq`-carrying event under the same `runtime_id`, never
+  nested inside a `tracing`
+  dispatch, so value fidelity and per-instance `seq` ordering both hold
+  across
   re-entrancy. How that delivery is arranged is an implementation concern,
   not part of this schema. Because dispatch is off the lock, the schema
   does not guarantee arrival order matches `seq` order — a current-value
-  read must order gauge events by `seq`, never by arrival, even where an
-  implementation happens to deliver them in `seq` order.
+  read must order gauge events by `seq` within their `runtime_id`, never
+  by arrival, even where an
+  implementation happens to deliver them in `seq` order. The instance
+  field is deliberately gauge-only: the batch and capacity-wait events
+  carry no `runtime_id`, so they remain uncorrelatable across runtime
+  instances in one process — a multi-runtime subscriber can attribute
+  only gauge events to an instance. Adding instance fields to the other
+  two events later is additive headroom this contract leaves open
+  without exercising.
 
 Definition of done for the observability slice: layered tests, each
 installing a `tracing` subscriber (the technique the `quit_*` harness
@@ -563,13 +613,20 @@ an integration run (where the real producers raise and lower them):
   layer, where it rises when a producer begins awaiting capacity, falls
   when the send is accepted, and also falls when a blocked producer is
   aborted by cancellation (section 4.3) — the decrement must not depend on
-  the send ever completing. The gauge event's `seq` is checked at the
-  gauge layer where the emitted sequence is deterministic: a scripted
-  series of gauge changes emits one event per change with a strictly
-  increasing `seq`, so a subscriber ordering by `seq` recovers each
+  the send ever completing. The gauge event's `seq` and `runtime_id`
+  are checked at the gauge layer where the emitted sequence is
+  deterministic: a scripted series of gauge changes emits one event per
+  change with a strictly increasing `seq` under one `runtime_id`, so a
+  subscriber ordering by `seq` within that `runtime_id` recovers each
   gauge's current value without relying on arrival order — an
   implementation that omits `seq`, repeats it, or lets it run backward
-  fails.
+  fails. The instance half: every gauge event carries the emitting
+  runtime's `runtime_id`; two runtimes constructed in the same scripted
+  process emit distinct `runtime_id`s, and a subscriber partitioning by
+  `runtime_id` and applying the max-`seq` rule per partition recovers
+  each instance's current values — an implementation that omits the
+  field, shares one id across live instances, or reuses a torn-down
+  runtime's id within the scripted process fails.
 
 The bounded run of the section 5.1 matrix records capacity-wait and
 blocked-producer numbers from these same events. Per-keyed-channel occupancy gauges are
@@ -586,7 +643,11 @@ question 3 asked whether the runtime should enforce that premise with an
 admission limit, upgrading R1/R3 from channel-buffer claims to
 total-pending-work guarantees. The resolution: **no admission limit — the
 premise stays with the application, and the runtime makes it observable
-instead of enforced.**
+instead of enforced.** (Lifecycle ordering is a different axis:
+RFC 0012 §4's quiescence barrier sequences subscription admission
+behind stopped tasks' quiescence — that is admission-timing contract
+owned there, not a producer-count or load-coupled limit, and it is
+outside this question's scope.)
 
 An admission limit is structurally unsound in this runtime:
 
@@ -639,7 +700,9 @@ total is `m × keyed_channel_capacity` with `m` — the number of active
 knob.
 
 The decision is captured in two invariants: INV-L8 (load control paces
-sends, never producer admission) and INV-L9 (keyed backpressure is
+sends and never intervenes in producer admission — admissibility and
+admission timing stay with their owners: RFC 0005 and RFC 0012 §4 for
+subscriptions, RFC 0003 for commands) and INV-L9 (keyed backpressure is
 isolated per command — the testable form of the no-shared-pool choice).
 
 ### 4.6 Keyed quit routing (open question 7 resolved)
@@ -775,8 +838,9 @@ Consequences:
   since resolved that question against any policy (section 4.7), which
   also settles the quit-shaped form: reopening either is one and the same
   new RFC.
-- **Documentation guidance** (lands with open question 1's
-  recommended-defaults documentation): use unkeyed `Command::quit()` for
+- **Documentation guidance** (landed in the recommended-defaults
+  rustdoc — RFC 0007 §3.3, `src/runtime/config.rs`): use unkeyed
+  `Command::quit()` for
   a prompt unconditional quit; `.cancellable(id)` on a quit buys
   suppression at the cost of waiting behind pending inputs under load.
 
@@ -921,8 +985,8 @@ Consequences:
   This resolution adds no per-key claim.
 - **The keyed-probe scenario is permanently measurement-only.** F4's
   numbers are the unbounded regression baseline; the bounded run is
-  recorded when the implementation lands, under the capacity and load
-  the `RuntimeConfig` RFC pins (section 5.1). No keyed-delivery latency cell ever becomes an acceptance
+  recorded in section 5.1's measured acceptance results, under the
+  capacity and load the `RuntimeConfig` RFC pins. No keyed-delivery latency cell ever becomes an acceptance
   bound under this contract.
 - **Reopening requires a new RFC, not a knob.** If field experience ever
   makes bounded keyed-delivery latency a requirement, the change is a
@@ -930,8 +994,9 @@ Consequences:
   (INV-14), with the candidate inventory above as its starting point and
   the quit exemption's interaction with INV-L10/INV-L11 as the first
   problem it must solve.
-- **Documentation guidance** (lands with open question 1's
-  recommended-defaults documentation, extending section 4.6's): keying a
+- **Documentation guidance** (landed in the recommended-defaults
+  rustdoc — RFC 0007 §3.3, `src/runtime/config.rs` — extending section
+  4.6's): keying a
   command buys cancellation and suppression at the cost of delivery
   deferral behind ready shared inputs under load; put liveness-critical
   output in unkeyed commands. For keyed outputs, liveness under load
@@ -1052,15 +1117,25 @@ the check that realizes it; the implementation realizes those checks.
   enforces — a future change that has the event loop inject a message
   directly into a shared or keyed channel it also drains would deadlock as
   soon as that channel fills.
-- **INV-L8**: The runtime never blocks, rejects, or defers producer
-  admission. Every subscription the reconciliation contract says should
-  run is started, and every command returned from `update` (or
-  `Application::new`) is dispatched, synchronously and unconditionally —
-  load control paces sends, never producer creation (section 4.5). This
-  protects the RFC 0005 reconciliation contract and effect delivery from a
-  future admission limit, and — because producers are created on the event
-  loop task — it is also what keeps INV-L7's no-self-deadlock argument
-  closed at spawn sites, not just send sites.
+- **INV-L8**: Load control never intervenes in producer admission: a
+  producer that the owning contracts make admissible is not
+  additionally blocked, rejected, or deferred by load-control
+  configuration, channel occupancy, or producer-count pressure.
+  Admission itself — whether and when a producer starts — belongs to
+  those owners, and INV-L8 adds no claim to either side: for
+  subscriptions, *which* producers are admissible is RFC 0005's
+  reconciliation contract and *when* they are admitted is RFC 0012
+  §4's quiescence barrier, so a lifecycle-ordering deferral under that
+  barrier is not an INV-L8 violation; for commands, every command
+  returned from `update` (or `Application::new`) is dispatched
+  synchronously and unconditionally, before the next input is pulled
+  (RFC 0003 INV-10) — RFC 0012 defers no command, and no load-control
+  state may delay that dispatch. Load control paces sends, never
+  admission (section 4.5). This protects the RFC 0005 reconciliation
+  contract and effect delivery from a future load-coupled admission
+  limit, and — because producers are created on the event loop task —
+  it is also what keeps INV-L7's no-self-deadlock argument closed at
+  spawn sites, not just send sites.
 - **INV-L9**: Keyed backpressure is isolated per command. A send blocked on
   one keyed channel's full capacity never delays admission into the shared
   channel or into any other keyed channel; each keyed channel's admission
@@ -1151,10 +1226,18 @@ the check that realizes it; the implementation realizes those checks.
   capacity-wait event — and the field values carry the stated meanings:
   `pulled` is INV-L12's counted unit, `shared_pending` the
   shared-channel occupancy at batch end, `wait_us` the blocked send's
-  admission wait, and the producer-gauge event's `seq` a per-runtime
-  monotone counter that fixes each gauge's current value as the
-  greatest-`seq` event's, so gauge-event arrival order is not part of the
-  contract (section 4.4). The schema is contract surface: renaming,
+  admission wait, and the producer-gauge event's `runtime_id` the
+  emitting instance's process-local opaque identifier — carried on
+  every gauge firing, never reused within the process lifetime, with no
+  magnitude or ordering meaning — with `seq` a `u64` strictly
+  increasing among events of a given `runtime_id` (initial value,
+  contiguity, and counter allocation or storage unpinned) that fixes
+  each gauge's current value, per instance, as the greatest-`seq`
+  event's among that `runtime_id`'s events, so gauge-event arrival
+  order is not part of the contract and cross-instance `seq`
+  comparison carries no meaning (section 4.4). The instance field is gauge-only: the batch and
+  capacity-wait events carry no `runtime_id` (section 4.4). The schema
+  is contract surface: renaming,
   dropping, or repurposing any part of it is an amendment to this RFC, not
   an implementation detail. Behavioral check across the layered section 4.4
   definition-of-done tests, each with a `tracing` subscriber and value
@@ -1164,11 +1247,92 @@ the check that realizes it; the implementation realizes those checks.
   runtime batch layer; the capacity-wait event's `channel`/`wait_us` and
   the `blocked` gauge's cancellation-abort decrement at the bounded-send
   layer; the `subscriptions`/`unkeyed_commands`/`keyed_commands`
-  gauge transitions end-to-end over an integration run; and the
-  gauge event's strictly increasing `seq` at the gauge layer.
+  gauge transitions end-to-end over an integration run; and, at the
+  gauge layer, the gauge event's strictly increasing per-instance
+  `seq` together with its `runtime_id` — present on every firing,
+  distinct for two runtimes constructed in the same scripted process,
+  not reused after a runtime's teardown within it (the section 4.4
+  instance half).
+- **INV-L14**: in bounded mode, a ready keyed output may be delivered
+  before a cancelling input that has not yet been admitted to the
+  shared channel — the permitted execution the section 4.3 cancellation
+  bullet describes, numbered here so later text is measured against it.
+  INV-14's literal guarantee is unchanged (a *ready* shared cancel
+  message suppresses a *ready* keyed output before delivery, and a
+  keyed producer blocked on a full private channel is aborted exactly
+  like a running one); what bounded mode removes is the unbounded
+  default's incidental strength that a cancelling input which has
+  occurred is, for all practical purposes, already ready: with bounded
+  channels the forwarding task carrying it can wait for admission —
+  outside the queue — for as long as the shared channel stays full, and
+  a keyed output racing during that admission window wins without
+  violating anything. Consequently no test or document may assert that
+  a not-yet-admitted cancel wins that race, or flag an admission-window
+  delivery as a regression — the section 5.1 bounded keyed-quit row
+  already records such deliveries as legal. Structural-only (the
+  exception stated below the invariant list): the invariant pins
+  permitted executions rather than behavior to produce, so its check is
+  review of dependent documents and of any test asserting cancellation
+  timing; the positive guarantee it leaves intact is INV-14's own,
+  imported by INV-L5 with its existing checks.
+- **INV-L15**: the runtime provides no traffic-class-specific policy
+  beyond the class-structural facts this contract already pins. Two
+  vocabularies, kept distinct: *source kinds* say who produced an
+  input — subscription output, unkeyed command output, keyed command
+  output, quit signals (sections 1.1, 4.2) — and *delivery-channel
+  classes* say which runtime-owned channel carries it — the shared
+  channel, the keyed private channels, the dedicated quit channel. The
+  already-pinned facts, each stated over delivery-channel classes: the
+  dedicated quit channel is never bounded and its select branch always
+  armed (R4, INV-L4); the shared channel is pulled before keyed
+  channels at every pull point (INV-14 via INV-L5; INV-L11 for keyed
+  quit); and capacity is configured per delivery-channel class —
+  `app_channel_capacity` for the shared channel,
+  `keyed_channel_capacity` for each keyed channel (section 4.1) — never
+  per source kind. Beyond those, neither vocabulary carries special
+  treatment: no reservation, priority, weight, or fairness policy, no
+  shedding or coalescing specific to a source kind or channel class
+  (RFC 0003's cancellation drops are per-command semantics, not a
+  load-shedding policy — the same carve-out INV-L2 makes), and no
+  inter-class delivery-ordering guarantee beyond the shared-first pull
+  and keyed-quit precedence just named. This weakens nothing already
+  pinned: INV-L2's lossless delivery, the per-source FIFO scopes of
+  section 4.3, and INV-14 hold exactly as stated. Whether the runtime
+  internally tracks an input's source kind is mechanism, pinned in
+  neither direction. The fairness clause restates open question 6's
+  resolution (section 4.7) in invariant form; the remainder —
+  reservation, weights, shedding, coalescing, and any further
+  inter-class order — is pinned here so a future class-aware design is
+  measured against a stated contract rather than a silent absence: a
+  change to shared-first delivery is an amendment to RFC 0003's INV-14
+  (section 4.7's reopening rule), while adding internal metadata alone
+  is additive. Structural-only (the exception stated below the
+  invariant list), at the seams a class policy would have to occupy —
+  the same seams as section 4.7's policy-absence check (the two
+  `AppInputs` pull points and the micro-batch loop) plus the
+  channel-construction and send sites where a reservation, shedding, or
+  coalescing policy would live; the shared-wins unit tests remain
+  regression checks, not proofs (this section's
+  bounded-test-against-unbounded-parameter argument).
 
-Each invariant gets a regression scenario in `benches/runtime_load.rs` or a
-unit, runtime-layer, or integration test. The overload scenario is the acceptance measurement for
+Each invariant except INV-L6, INV-L7, INV-L8, INV-L14, and INV-L15 gets
+a regression scenario in `benches/runtime_load.rs` or a unit,
+runtime-layer, or integration test. Those five are structural-only,
+each for a stated reason: INV-L6 because the checkable claim is the
+default code path's structural identity — its own statement rules the
+empirical alternative ("outputs are identical under load") not
+practically checkable, and its section 5.1 `steady_*` row is a
+code-inspection row, not a measurement; INV-L7 and INV-L8 because code
+review of every runtime-internal send and spawn site is the only
+defense — no finite scenario proves the absence of an event-loop send
+or of load-control intervention in admission (a load-coupled admission
+limit); and INV-L14 and INV-L15 because each pins
+negative space — a permitted execution and the absence of a policy — so
+there is no compliant behavior for a scenario to regress against, and
+no finite scenario can prove an absence (the same argument as INV-L9's
+pool case below). Their checks are the reviews declared with them; for
+INV-L15 the shared-wins unit tests remain the nearest behavioral
+neighbors, scoped as regression checks by section 4.7. The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
@@ -1211,15 +1375,17 @@ returns one ready element from whichever key is picked, so waiting for the
 probe's delivery may drain the saturated keys instead — and delivery
 latency carries no bound to check (open question 6 resolved against a
 fairness policy, section 4.7), which INV-L9 does not answer either way.
-INV-L7 and
-INV-L8 are structural rather than load-dependent and are checked by code
+INV-L6, INV-L7, and
+INV-L8 are structural-only per the exception stated above — INV-L6 by
+inspection of the default construction path, INV-L7 and INV-L8 by code
 review of every runtime-internal send and spawn site, not by a bench
 scenario; INV-L9 sits in both camps as described above, and so does
 INV-L10 — its routing half is structural at the keyed send site, its
 ordering half a unit-level test. INV-L11 and INV-L12 are behavioral at
 the unit layer, and INV-L13 across the runtime batch, bounded-send, and
-integration layers (the section 4.4 definition-of-done tests); none of
-INV-L10 through INV-L13 needs a bench scenario, and in particular the
+integration layers (the section 4.4 definition-of-done tests); INV-L14
+and INV-L15 are structural-only, per the exception stated above; none of
+INV-L10 through INV-L15 needs a bench scenario, and in particular the
 `quit_keyed_backlog_50k` latency numbers are not a check for either — see
 section 5.1's row for why bounded-mode keyed-quit latency cannot serve as
 a reroute detector.
@@ -1275,7 +1441,7 @@ measurement rather than an implementation-time choice:
 | `burst_200k` | peak backlog / drain | 193k peak, drains in 0.43s (F2) | backlog ≤ `capacity + 1` by the same depth accounting; producer waits instead; no message dropped (INV-L1, INV-L2) |
 | `keyed_overload` | keyed delivery p50 / max | 9.2s / 13.0s (F4) | no latency criterion — open question 6 resolved: no fairness policy and no keyed-delivery bound under this contract (section 4.7); the bounded run is recorded as a measurement (deferral persists while shared stays ready, and admission-window deliveries are legal, section 4.6), with the unbounded baseline the regression reference for F4 |
 | `quit_idle`, `quit_backlog_50k`, `quit_backlog_300k`, `quit_overload` | quit→delivered p99 | ≤ 0.71ms at every measured depth, depth-independent (F6; section 2 table) | quit→delivered p99 ≤ 1 ms at every measured depth over ≥ 200 trials per scenario — INV-L4's resolved statistical conditions, same criterion as the unbounded default because the quit channel is never bounded (R4); named here are the unbounded rows, and the bounded rows this criterion applies to are the `RuntimeConfig` RFC's redefined ones (blocked-producer count and channel-full churn, not the `quit_backlog_*` depths — reproducibility rules above), not these names reused unchanged; the keyed control `quit_keyed_backlog_50k` is outside INV-L4 (next row) |
-| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement when the implementation lands, under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
+| `quit_keyed_backlog_50k` | quit→delivered p50 | ≈ full shared drain, 1.30s (F7) | no latency criterion — keyed quit stays in the private channel (open question 7, section 4.6), but that contract is routing and delivery order (INV-L10/INV-L11, checked structurally and at the unit layer), not a latency number: in bounded mode a compliant implementation may deliver the keyed quit while producer backlog remains, because a pull can leave the shared channel momentarily empty while the woken producer's next send is still in flight (at `capacity = 1`, after every pull) — delivering the buffered keyed quit then outruns no *ready* input. F7's full-drain p50 therefore stays a regression check for the **unbounded default only** (re-run unbounded: p50 ≈ full shared drain); the bounded run is recorded as a statistical measurement in the measured acceptance results below (`quit_keyed_bounded`, p50 13.07 s), under the capacity, depth, and trial count the `RuntimeConfig` RFC pins (reproducibility rules above) |
 | `keyed_isolation` (new scenario, added with the implementation) | probe-key and shared send admission while several unrelated keyed channels are held full | trivially isolated — unbounded sends never wait | with several keyed channels at capacity and their next sends pending (saturating any modest hypothetical pool), the two probes are checked separately: a previously idle key's first `keyed_channel_capacity` sends complete with only its `capacity + 1`-th pending on its own occupancy (keyed→keyed), and the shared producer's first `app_channel_capacity` sends complete with only its next send pending on shared occupancy (keyed→shared) — the keyed probe is started only after the eight are held saturated, while the shared producer runs throughout as the saturation enabler (it cannot be idled and re-probed without letting the keyed channels drain under shared-first pull; RFC 0007 §5.3). The keyed→shared gate is the shared occupancy sampled only during the window when all nine keyed channels are concurrently saturated, which must reach `app_channel_capacity + 1` — the *simultaneous* value, not a whole-run maximum a shared pool could reach before the keyed channels start; admission only, regression check — the pool-absence proof is INV-L9's structural review (section 5), and delivery is excluded (the keyed `StreamMap` cannot drain a chosen key selectively — polling for the probe may drain the saturated keys instead; delivery latency carries no bound, open question 6 resolved, section 4.7) (INV-L9) |
 | `steady_20k`, `steady_200k` | default-config code path | current unbounded path | structurally identical default path, checked by code inspection, not by diffing load numbers (INV-L6) |
 
@@ -1330,12 +1496,15 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 ## 6. Open questions (all resolved)
 
-Every question below is resolved — in this RFC, or by the now-Implemented
-`RuntimeConfig` RFC, which fixes the public `RuntimeConfig` API (and with
-it questions 1, 5, and the default-value half of 2), the section 5.1
-bounded-run parameters (configuration under test, backlog depths, trial
-counts), and the CI smoke-profile decision. No open question remains as a
-prerequisite of the implementation PR (section 3.2).
+Every question below is resolved — in this RFC, or by the `RuntimeConfig`
+RFC, whose delegated decisions are implemented (that RFC is itself
+Accepted with its own §2.1 `Copy` removal as the open deliverable, which
+no question here waits on) and which fixes the public `RuntimeConfig`
+API (and with it questions 1, 5, and the default-value half of 2), the
+section 5.1 bounded-run parameters (configuration under test, backlog
+depths, trial counts), and the CI smoke-profile decision. No open
+question remains as a prerequisite of the implementation PR
+(section 3.2).
 
 1. Default capacity values to recommend in documentation (app capacity a
    measurement-informed margin choice; keyed capacity sized from the
@@ -1372,7 +1541,9 @@ prerequisite of the implementation PR (section 3.2).
    section 4.4). Keyed channels are bounded per command rather than by a
    shared pool, pinned as testable isolation (INV-L9, `keyed_isolation`
    scenario in section 5.1). Full rationale in section 4.5; the
-   no-admission-limit contract itself is INV-L8.
+   contract that load control never intervenes in admission is INV-L8
+   (admissibility and admission timing belong to their owners —
+   RFC 0005 and RFC 0012 §4 for subscriptions, RFC 0003 for commands).
 4. Where backpressure-wait telemetry lives (`tracing` only, or counters
    exposed by future profiling-hook work).
    **Resolved.** `tracing` only for the initial
@@ -1473,7 +1644,7 @@ prerequisite of the implementation PR (section 3.2).
    actively refilling overload, and a keyed-quit control — with per-trial
    tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
    matrix is defined in section 5.1 with the unbounded column measured; the
-   bounded column is filled when the implementation lands, under the
+   bounded column's measured results are recorded there, under the
    parameters the `RuntimeConfig` RFC pins (section 5.1). F6 is the
    measurement basis on which INV-L4 has since been resolved to its
    statistical formulation (section 5); F7 is the quantified
@@ -1489,4 +1660,6 @@ prerequisite of the implementation PR (section 3.2).
   cancel-before-delivery, INV-9 buffered-quit suppression; it states no
   FIFO invariant — keyed-quit delivery ordering is this RFC's INV-L10).
 - RFC 0005 — structural lifecycle identity (subscription reconciliation the
-  load path feeds).
+  load path feeds; the admissibility owner INV-L8 defers to).
+- RFC 0012 — subscription execution (§4's quiescence barrier, the
+  subscription admission-timing owner INV-L8 defers to).

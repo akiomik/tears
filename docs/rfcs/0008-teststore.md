@@ -663,7 +663,9 @@ transition, which is the granularity RFC 0002 defines them at.
 The init-command reading is TestStore-specific introspection and does
 *not* predict the production runtime's first render. The runtime
 enqueues the init command directly and never consults its redraw
-directive; its first frame always renders regardless
+directive at the first frame: the first render starts out eligible
+unconditionally, and when it happens it renders regardless of that
+directive — its occurrence itself is not promised (RFC 0011 §3.2)
 (`src/runtime/core.rs`, `src/runtime/pending_work.rs`). So
 `redraw_requested()` before the first step exposes the init command's
 folded directive as a `Command` property, not as a claim about whether

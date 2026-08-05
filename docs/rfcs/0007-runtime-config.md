@@ -1,15 +1,20 @@
 # RFC 0007: RuntimeConfig public API and load-control acceptance parameters
 
-- Status: Implemented
+- Status: Accepted (the §2.1 `Copy` removal is the open deliverable;
+  everything else is implemented)
 - Target: the prerequisite RFC 0006 delegated to a separate document
-  (RFC 0006 sections 3.2, 6)
+  (RFC 0006 sections 3.2, 6); plus one breaking change for 0.11.0
+  decided here — `RuntimeConfig` drops its `Copy` derive (§2.1)
 - Scope: the public `RuntimeConfig` surface (type, construction, constructor
   integration), the recommended-defaults documentation, the restart-rate
   interaction position, the RFC 0006 section 5.1 bounded-run parameters,
   and the CI smoke-profile decision
 - Feature flag: none
 - CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`) land
-  at the load-control implementation release, not with this RFC
+  at the load-control implementation release, not with this RFC.
+  `Changed` (breaking) — `RuntimeConfig` no longer implements `Copy`;
+  `Clone`, `Debug`, `Eq`, and `PartialEq` remain, and `FrameRate` stays
+  `Copy`. Lands at 0.11.0 with the §2.1 derive-removal deliverable
 
 > **Decision scope.** This RFC fixes only what RFC 0006 delegated to it. The
 > load-control semantics themselves — what each control means, the
@@ -89,7 +94,7 @@ of the three controls (RFC 0006 §4.1, INV-L12) and every acceptance
 ///
 /// With the load controls unset, the configuration reproduces the
 /// unbounded delivery mode exactly (RFC 0006 INV-L6).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     frame_rate: FrameRate,
     app_channel_capacity: Option<NonZeroUsize>,
@@ -133,18 +138,25 @@ impl RuntimeConfig {
   one inside a `Default` would smuggle a policy value into a derive.
   Should a default frame rate ever be adopted, adding `Default` then is
   additive.
-- **Consuming-call misuse guard**: `RuntimeConfig` is `Copy`, so a
-  consuming setter call whose return value is discarded compiles silently
-  and leaves the original, unmodified value in play — the caller's
-  in-hand `config` is untouched, and a chained
-  `Runtime::with_config(flags, config)` after a discarded setter call
-  silently uses an unbounded (or otherwise unintended) configuration.
-  `new` and every setter therefore carry `#[must_use]`, each setter with
-  an explanatory message, matching the crate's existing consuming-modifier
-  convention (`RetryPolicy::with_backoff`, `RetryPolicy::with_fixed_backoff`
-  — `src/command/retry.rs`); `Runtime::with_config` carries `#[must_use]`
-  too, matching `Runtime::new`'s existing attribute. Pinned as INV-C6
-  (§7).
+- **Consuming-call misuse guard**: a setter call whose return value is
+  discarded must never leave the caller silently running an unintended
+  configuration. Without `Copy` (Derives below), the compiler closes
+  the main shape itself: a consuming setter *moves* the config, so
+  discarding its result and then using the original is a use-after-move
+  error, not a silent stale read. Two discard shapes remain
+  expressible — a setter called on a `clone()` with the result dropped,
+  and a discarded chain whose original is never touched again — and for
+  those `new` and every setter carry `#[must_use]`, each setter with an
+  explanatory message, matching the crate's existing consuming-modifier
+  convention (`RetryPolicy::with_backoff`,
+  `RetryPolicy::with_fixed_backoff` — `src/command/retry.rs`);
+  `Runtime::with_config` carries `#[must_use]` too, matching
+  `Runtime::new`'s existing attribute. While the `Copy` derive is still
+  present (the open deliverable, Derives below), a discarded setter
+  call additionally compiles with the original left usable in play —
+  the `#[must_use]` warning is the only guard for that shape today, and
+  the derive removal is what converts its compile-time half into an
+  error. Pinned as INV-C6 (§7).
 - **Validation style**: none, by construction. Every capacity is
   `NonZeroUsize`, so a zero capacity is unrepresentable, and the frame
   rate arrives as the already-validated `FrameRate` type — validation
@@ -155,11 +167,27 @@ impl RuntimeConfig {
   unavailable outside the crate, so adding a field later is additive
   without `#[non_exhaustive]`. No getters are provided initially; adding
   them is additive.
-- **Derives**: `Copy` is included deliberately — `FrameRate` is `Copy` and
-  the load controls are word-sized options, and `Copy` keeps harness and
-  test code free of clones. Adding a non-`Copy` field later would require
-  removing the derive, which is a breaking change; that cost is accepted
-  and recorded here.
+- **Derives**: `Clone`, `Debug`, `Eq`, `PartialEq` — deliberately not
+  `Copy`. This RFC positions `RuntimeConfig` as the aggregation point
+  for future runtime knobs, and a `Copy` config turns every future
+  non-`Copy` field — a policy object, a callback — into a breaking
+  derive removal deferred onto whoever adds it. 0.11.0 already carries
+  committed breaking budget, so the removal is taken there, while the
+  config is small and the churn minimal; after it, config growth is
+  non-breaking on this axis. What `Copy` bought — harness and test code
+  free of explicit clones — is recoverable with `Clone` at the cost of
+  a visible `clone()`. `FrameRate` keeps `Copy`: it is word-sized with
+  no growth ambition (`src/runtime/frame_rate.rs`). The current code
+  still derives `Copy` (`src/runtime/config.rs`); removing it is this
+  amendment's implementation deliverable, in four parts: (a) the derive
+  change itself; (b) updating the rustdoc that leans on copy idioms
+  (the "returns a modified copy" / "does not mutate in place" phrasing,
+  `src/runtime/config.rs`), which describes a move-and-return builder
+  once `Copy` is gone; (c) an inventory of implicit-`Copy` uses —
+  assignments and by-value passes that copy silently today — migrated
+  to `clone()` or borrows; (d) a public-API diff check at
+  implementation time confirming the only surface change is the `Copy`
+  implementation's removal.
 
 ### 2.2 Constructor integration
 
@@ -532,11 +560,21 @@ channel occupancy, per the note on that distinction below the table:
   and `quit_keyed_bounded` rows) reads the *current* value of the
   `blocked` gauge at the quit instant, and the harness's teardown barrier
   (`await_quiescence`, `benches/runtime_load.rs`) reads the current gauge
-  sum returning to zero. "Current value" is RFC 0006 §4.4's contract term:
-  the value on the gauge event with the greatest `seq`, not the value on
+  sum returning to zero. "Current value" is RFC 0006 §4.4's contract term,
+  and it is per runtime instance: the value on the gauge event with the
+  greatest `seq` *among events carrying that instance's `runtime_id`*,
+  not the value on
   the most recently *arrived* event — the schema does not order gauge
-  events by arrival. The harness therefore consumes these gauges by
-  greatest `seq`, discarding any event whose `seq` does not advance, so a
+  events by arrival, and a general consumer partitions by `runtime_id`
+  before taking the greatest `seq`. This harness runs one runtime at a
+  time and its teardown barrier completes before the next runtime
+  starts, so exactly one partition is ever active; its scalar
+  high-water read is the single-partition degenerate form of that rule,
+  and parsing `runtime_id` is unnecessary here
+  (`benches/runtime_load.rs`). The harness therefore consumes these
+  gauges by
+  greatest `seq` within the one active instance, discarding any event
+  whose `seq` does not advance, so a
   reordered stale gauge event can corrupt neither a predicate reading nor
   the barrier. This dependency is stated explicitly because it is
   otherwise easy to miss: gauge events are dispatched off the runtime's
@@ -680,18 +718,19 @@ channel occupancy, per the note on that distinction below the table:
 
 ## 6. CI smoke profile
 
-**Resolved: yes — CI runs a smoke profile of the harness, replacing the
-full-scenario run it performs today.** RFC 0006 fixed that CI gates on no
-latency criterion. CI already builds and runs the full harness on every
-push: `ci.yml`'s Benchmarks job runs `cargo test --bench runtime_load`,
-and the harness's custom `main` ignores `cargo test`'s filtering and
-executes its full scenarios (the job's own comment records this). The
+**Resolved: yes — CI runs a smoke profile of the harness, in place of a
+full-scenario run.** RFC 0006 fixed that CI gates on no
+latency criterion. At this question's resolution CI built and ran the
+full harness on every push (`cargo test --bench runtime_load`, whose
+custom `main` ignored `cargo test`'s filtering); the
 open question was therefore never *whether* the harness runs in CI but
 *which profile*: the full scenarios' wall time grows with every
 statistical row this RFC adds (200-trial quit runs, the bounded matrix
 re-runs) while their latency numbers gate nothing on a CI machine. The
-resolution: the Benchmarks job's `runtime_load` invocation switches to
-the smoke profile, and the full scenarios leave CI: they run as
+resolution, landed in `ci.yml`: the Benchmarks job runs the
+latency-assertion-free smoke profile via `just bench-smoke` (so local
+and CI invocations are identical), gating on completion, and the full
+scenarios stay out of CI: they run as
 deliberate acceptance or regression runs (§5), on any machine, with RFC
 0006 §5.1's scoping unchanged — a full run carries acceptance force only
 on the reference machine, and runs on other machines are
@@ -754,10 +793,10 @@ invocation is unchanged.
   at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
   current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
   same — and the smoke run fails when any scenario times out. That
-  timeout-failure rule is part of the profile's definition, not
-  something the harness fully provides today: quit trials already fail
-  the run on timeout, but a timed-out load scenario is currently
-  report-only, so the smoke implementation promotes it to a failure —
+  timeout-failure rule is part of the profile's definition, and the two
+  paths divide it: on the full-run path, quit trials fail the run on
+  timeout while a timed-out load scenario stays report-only; the smoke
+  path promotes a timed-out load scenario to a failure —
   the sequence-integrity assertion alone does not cover it, because a run
   that hangs after processing its last scripted message times out with the
   full sequence `0..total` already delivered, so the assertion has nothing
