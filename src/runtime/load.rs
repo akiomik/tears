@@ -544,6 +544,7 @@ impl Drop for DrainGuard<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fmt::Debug;
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -709,22 +710,28 @@ mod tests {
         // subscriptions dropped, `second` with two keyed entries live.
         let subscriptions = recorder.u64_values("subscriptions");
         let keyed = recorder.u64_values("keyed_commands");
-        let mut current: Vec<(u64, u64, u64, u64)> = Vec::new();
-        for i in 0..ids.len() {
-            match current.iter_mut().find(|(id, ..)| *id == ids[i]) {
-                Some(entry) if seqs[i] > entry.1 => {
-                    *entry = (ids[i], seqs[i], subscriptions[i], keyed[i]);
-                }
-                Some(_) => {}
-                None => current.push((ids[i], seqs[i], subscriptions[i], keyed[i])),
+        for (name, values) in [
+            ("subscriptions", &subscriptions),
+            ("keyed_commands", &keyed),
+        ] {
+            assert_eq!(
+                values.len(),
+                ids.len(),
+                "every gauge event carries `{name}`: {ids:?} / {values:?}"
+            );
+        }
+        let mut current: BTreeMap<u64, (u64, u64, u64)> = BTreeMap::new();
+        for ((&id, &seq), (&subs, &keyed_now)) in
+            ids.iter().zip(&seqs).zip(subscriptions.iter().zip(&keyed))
+        {
+            let slot = current.entry(id).or_insert((seq, subs, keyed_now));
+            if seq > slot.0 {
+                *slot = (seq, subs, keyed_now);
             }
         }
         let recover = |id: u64| {
-            current
-                .iter()
-                .find(|(known, ..)| *known == id)
-                .map(|&(_, _, subs, keyed)| (subs, keyed))
-                .expect("both partitions were built above")
+            let &(_, subs, keyed_now) = current.get(&id).expect("both partitions were built above");
+            (subs, keyed_now)
         };
         assert_eq!(
             recover(ids[0]),

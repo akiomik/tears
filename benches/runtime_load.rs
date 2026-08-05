@@ -513,11 +513,11 @@ static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
 /// The current producer-gauge sum
 /// (`subscriptions + unkeyed_commands + keyed_commands + blocked`), updated by
 /// [`QuitDeliverySubscriber`] from the greatest-`seq` gauge event within its
-/// own `runtime_id` partition, regardless of the trial slot. Reaches 0 only when the *current* runtime has fully torn its
-/// producers down; scenarios run one runtime at a time, so [`await_quiescence`]
-/// can wait on it as a common teardown barrier before the next runtime starts,
-/// keeping a late gauge/capacity event from one scenario out of the next
-/// scenario's slot.
+/// own `runtime_id` partition, regardless of the trial slot. Reaches 0 only
+/// when the *current* runtime has fully torn its producers down; scenarios run
+/// one runtime at a time, so [`await_quiescence`] can wait on it as a common
+/// teardown barrier before the next runtime starts, keeping a late
+/// gauge/capacity event from one scenario out of the next scenario's slot.
 static LIVE_PRODUCERS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-`runtime_id` high-water marks of the newest `seq` applied from each
