@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 
 use crate::application::Application;
 use crate::command::{Action, RuntimeCommandParts, fold_leaves};
+use crate::panic::contained_producer;
 use crate::subscription::SubscriptionManager;
 
 use super::app_input::AppInputs;
@@ -183,7 +184,10 @@ impl<App: Application> RuntimeCore<App> {
                 let _command_guard = command_guard;
                 // Catch panics in the command's stream so a bug in a fetcher or
                 // effect is logged instead of vanishing into a detached task.
-                let result = AssertUnwindSafe(async move {
+                // `contained_producer` marks the body so the panic hook leaves
+                // the terminal of the still-running application alone
+                // (RFC 0011 INV-LC8).
+                let result = AssertUnwindSafe(contained_producer(async move {
                     futures::pin_mut!(stream);
                     while let Some(action) = stream.next().await {
                         match action {
@@ -207,7 +211,7 @@ impl<App: Application> RuntimeCore<App> {
                             }
                         }
                     }
-                })
+                }))
                 .catch_unwind()
                 .await;
 
@@ -261,8 +265,8 @@ mod tests {
 
     use std::future::pending;
     use std::num::{NonZeroU64, NonZeroUsize};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, PoisonError};
 
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
@@ -273,7 +277,7 @@ mod tests {
     use crate::runtime::AppInput;
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
-    use crate::test_support::{TestApp, TestMessage, wait_until};
+    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD, TestApp, TestMessage, wait_until};
 
     #[test]
     fn test_new() {
@@ -669,5 +673,54 @@ mod tests {
             "dropping the core should abort running keyed command tasks",
         )
         .await;
+    }
+
+    // Guards the wiring, not the mechanism: `enqueue_command` must wrap the
+    // unkeyed task body in `contained_producer`, so the panic hook skips the
+    // terminal restore for a panic the runtime contains (RFC 0011 INV-LC8).
+    // The mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "driving the panic hook requires a real panic in the task body"
+    )]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
+    )]
+    async fn a_panicking_unkeyed_command_task_skips_the_terminal_restore() {
+        let _hook_guard = PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let probe = HookProbe::install(
+            "runtime::core::tests::a_panicking_unkeyed_command_task_skips_the_terminal_restore",
+        );
+
+        let mut core = RuntimeCore::<TestApp>::new(0);
+        core.enqueue_command(
+            Command::future(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                TestMessage::Increment
+            })
+            .into_runtime_parts(),
+        );
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "an unkeyed command task panic must delegate without restoring"
+        );
     }
 }

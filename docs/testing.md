@@ -171,6 +171,16 @@ owns the guard, catches an unexpected panic long enough to restore the previous
 hook, and only then resumes unwinding. Its guard uses `std::sync::Mutex`, so the
 helper is restricted to `current_thread` tests.
 
+Tests that assert on how the composed hook *classified* a panic (terminal
+restore skipped or taken) use `crate::test_support::HookProbe` instead: it
+installs a counting hook built from the real `compose_hook`, serves
+multi-thread runtimes and non-async tests, and filters its counts by worker
+thread name so a concurrent unrelated panic cannot move them. Callers hold
+`PANIC_HOOK_GUARD` themselves — including across `block_on` in non-async
+tests. It is lib-only: it needs the crate-private `compose_hook`, so the
+integration copy under `tests/common/panic_hook.rs` deliberately has no
+equivalent.
+
 Integration tests cannot use crate-private test support, so they use the focused
 local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses
 `tokio::sync::Mutex` so it can be held across `.await` without blocking a runtime

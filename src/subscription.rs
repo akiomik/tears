@@ -157,6 +157,7 @@ use tokio::sync::mpsc;
 
 pub(crate) use core::{Subscription, SubscriptionId, SubscriptionSource};
 
+use crate::panic::contained_producer;
 use crate::runtime::channel;
 use crate::runtime::load::LoadObserver;
 
@@ -258,7 +259,10 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             let _subscription_guard = subscription_guard;
             // Catch panics in the subscription's stream so a bug in a source is
             // logged instead of vanishing into a detached task.
-            let result = AssertUnwindSafe(async move {
+            // `contained_producer` marks the body so the panic hook leaves the
+            // terminal of the still-running application alone (RFC 0011
+            // INV-LC8).
+            let result = AssertUnwindSafe(contained_producer(async move {
                 while let Some(msg) = stream.next().await {
                     // Awaiting the send applies backpressure in bounded mode: the
                     // forwarding task stops polling the source stream until the
@@ -268,7 +272,7 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
                         break;
                     }
                 }
-            })
+            }))
             .catch_unwind()
             .await;
 
@@ -357,7 +361,7 @@ mod tests {
 
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::task::Poll;
 
     use color_eyre::eyre::Result;
@@ -365,7 +369,7 @@ mod tests {
     use tokio::time::{Duration, sleep, timeout};
 
     use crate::subscription::mock::MockSource;
-    use crate::test_support::{TraceRecorder, wait_until};
+    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD, TraceRecorder, wait_until};
 
     struct OneshotSource {
         value: i32,
@@ -1321,5 +1325,67 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    struct PanickingSource;
+
+    impl SubscriptionSource for PanickingSource {
+        type Output = i32;
+        type Key = ();
+
+        #[expect(
+            clippy::panic,
+            reason = "the source exists to raise a real panic in the forwarder"
+        )]
+        fn stream(&self) -> BoxStream<'static, i32> {
+            stream::once(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                0
+            })
+            .boxed()
+        }
+
+        fn key(&self) -> Self::Key {}
+    }
+
+    // Guards the wiring, not the mechanism: `spawn_subscription` must wrap the
+    // forwarder body in `contained_producer`, so the panic hook skips the
+    // terminal restore for a panic the runtime contains (RFC 0011 INV-LC8).
+    // The mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
+    )]
+    async fn a_panicking_subscription_forwarder_skips_the_terminal_restore() {
+        let _hook_guard = PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let probe = HookProbe::install(
+            "subscription::tests::a_panicking_subscription_forwarder_skips_the_terminal_restore",
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
+        manager.update(vec![Subscription::new(PanickingSource)]);
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "a subscription forwarder panic must delegate without restoring"
+        );
     }
 }

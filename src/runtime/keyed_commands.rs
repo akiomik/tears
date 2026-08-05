@@ -10,6 +10,7 @@ use tokio_stream::StreamMap;
 
 use crate::command::{Action, CancelPolicy, CommandId};
 use crate::noop_waker::noop_context;
+use crate::panic::contained_producer;
 
 use super::channel;
 use super::load::{Channel, LoadObserver};
@@ -303,7 +304,10 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
         let task_id = id.clone();
 
         let abort = self.tasks.spawn(async move {
-            let result = AssertUnwindSafe(async move {
+            // `contained_producer` marks the body so the panic hook leaves the
+            // terminal of the still-running application alone (RFC 0011
+            // INV-LC8); the panic itself is caught and logged below.
+            let result = AssertUnwindSafe(contained_producer(async move {
                 futures::pin_mut!(stream);
                 while let Some(action) = stream.next().await {
                     match action {
@@ -330,7 +334,7 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
                         }
                     }
                 }
-            })
+            }))
             .catch_unwind()
             .await;
 
@@ -562,8 +566,8 @@ mod tests {
 
     use std::future::pending;
     use std::num::NonZeroUsize;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, PoisonError};
     use std::time::Duration;
 
     use futures::stream;
@@ -575,7 +579,9 @@ mod tests {
 
     use crate::Command;
     use crate::command::{RetryPolicy, fold_leaves};
-    use crate::test_support::{TraceRecorder, wait_until, with_silent_panic_hook};
+    use crate::test_support::{
+        HookProbe, PANIC_HOOK_GUARD, TraceRecorder, wait_until, with_silent_panic_hook,
+    };
 
     fn actions<I>(items: I) -> BoxStream<'static, Action<i32>>
     where
@@ -1069,6 +1075,57 @@ mod tests {
 
         assert_eq!(event_count, 1);
         assert!(!contains_id);
+    }
+
+    // Guards the wiring, not the mechanism: `start_run` must wrap the keyed
+    // task body in `contained_producer`, so the panic hook skips the terminal
+    // restore for a panic the runtime contains (RFC 0011 INV-LC8). The
+    // mechanism itself is covered in `crate::panic`; this row fails if a
+    // future rewrite of the spawn path drops the wrapper.
+    #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "driving the panic hook requires a real panic in the task body"
+    )]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
+    )]
+    async fn a_panicking_keyed_command_task_skips_the_terminal_restore() {
+        let _hook_guard = PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let probe = HookProbe::install(
+            "runtime::keyed_commands::tests::a_panicking_keyed_command_task_skips_the_terminal_restore",
+        );
+
+        let id = CommandId::new("panic-restore");
+        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        manager.spawn(
+            id,
+            CancelPolicy::CancelInFlight,
+            command_stream(Command::future(async {
+                panic!("boom");
+                #[expect(
+                    unreachable_code,
+                    reason = "the value follows an unconditional panic! that never returns, but types the async block"
+                )]
+                1
+            })),
+        );
+
+        wait_until(
+            || probe.counts().1 == 1,
+            "the contained panic should reach the delegated hook",
+        )
+        .await;
+        let counts = probe.counts();
+        probe.finish();
+        assert_eq!(
+            counts,
+            (0, 1),
+            "a keyed command task panic must delegate without restoring"
+        );
     }
 
     #[tokio::test]
