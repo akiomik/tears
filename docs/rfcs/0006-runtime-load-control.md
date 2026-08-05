@@ -22,13 +22,12 @@
 > smoke-profile question — are settled there and implemented; RFC 0007
 > is itself Implemented, so no prerequisite of the implementation PR
 > remains open (sections 3.2, 6). The three contracts flagged for
-> settling before the post-0.10.0
-> implementation — the exact scope of the memory bound (INV-L1), the quit
-> delivery path, and cross-channel fairness — are settled (open
-> questions 3, 7, and 6; sections 4.5, 4.6, and 4.7), as are the INV-L4
-> acceptance formulation, the `batch_max_messages` semantics, and the
-> observability schema (sections 4.1, 4.4, 5). None of them gated the 0.10.0
-> release.
+> settling before the post-0.10.0 implementation — the exact scope of
+> the memory bound (INV-L1), the quit delivery path, and cross-channel
+> fairness — are settled (open questions 3, 7, and 6; sections 4.5,
+> 4.6, and 4.7), as are the INV-L4 acceptance formulation, the
+> `batch_max_messages` semantics, and the observability schema
+> (sections 4.1, 4.4, 5). None of them gated the 0.10.0 release.
 
 ## Summary
 
@@ -335,9 +334,8 @@ load-control implementation (sections 4–6) landed after 0.10.0 behind
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
 (Implemented — section 3.2) — carries the three controls below. That
 RFC adopts these names unchanged and groups the frame rate into the
-same config, so
-`Runtime::with_config(flags, config)` takes the frame rate inside
-`config`; the semantics stated here are the contract.
+same config, so `Runtime::with_config(flags, config)` takes the frame
+rate inside `config`; the semantics stated here are the contract.
 
 - `app_channel_capacity: Option<NonZeroUsize>` — `None` (default) keeps the
   unbounded shared channel; `Some(n)` bounds it.
