@@ -549,8 +549,8 @@ mod tests {
     use std::future::pending;
     use std::hash::{Hash, Hasher};
     use std::num::NonZeroU32;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use futures::stream::{self, BoxStream, iter};
     use ratatui::backend::TestBackend;
@@ -1990,6 +1990,266 @@ mod tests {
             )
             .await;
         }
+
+        Ok(())
+    }
+
+    // --- RFC 0011 steady-state phase order ----------------------------------
+    //
+    // The white-box seam RFC 0011 §8 names for INV-LC1/INV-LC2: drive
+    // `process_input_batch`/`process_frame_tick` directly with a recording
+    // application whose `view` and `subscriptions` append the state they
+    // observed to a shared log, so the phase sequence of a batch and of a frame
+    // pass is asserted rather than inferred from the pending flags.
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Phase {
+        View(i32),
+        Subscriptions(i32),
+    }
+
+    #[derive(Clone, Default)]
+    struct PhaseLog(Arc<Mutex<Vec<Phase>>>);
+
+    impl PhaseLog {
+        fn push(&self, phase: Phase) {
+            self.0
+                .lock()
+                .expect("phase log mutex should not be poisoned")
+                .push(phase);
+        }
+
+        fn entries(&self) -> Vec<Phase> {
+            self.0
+                .lock()
+                .expect("phase log mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PhaseMessage {
+        Bump,
+        BumpWithoutRedraw,
+    }
+
+    struct PhaseApp {
+        state: i32,
+        log: PhaseLog,
+    }
+
+    impl Application for PhaseApp {
+        type Message = PhaseMessage;
+        type Flags = PhaseLog;
+
+        fn new(log: PhaseLog) -> (Self, Command<Self::Message>) {
+            // The init command opts out of a redraw deliberately: the runtime
+            // never consults that directive (RFC 0011 §3.2), so the first
+            // render still starts out pending — the eligibility half of
+            // INV-LC4 asserted below.
+            (Self { state: 0, log }, Command::none().without_redraw())
+        }
+
+        fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
+            self.state += 1;
+            match msg {
+                PhaseMessage::Bump => Command::none(),
+                PhaseMessage::BumpWithoutRedraw => Command::none().without_redraw(),
+            }
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {
+            self.log.push(Phase::View(self.state));
+        }
+
+        fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
+            self.log.push(Phase::Subscriptions(self.state));
+            vec![]
+        }
+    }
+
+    fn phase_runtime(log: &PhaseLog) -> Runtime<PhaseApp> {
+        Runtime::<PhaseApp>::new(log.clone(), frame_rate(60))
+    }
+
+    fn phase_counts(entries: &[Phase]) -> (usize, usize) {
+        let views = entries
+            .iter()
+            .filter(|phase| matches!(phase, Phase::View(_)))
+            .count();
+        let reevaluations = entries
+            .iter()
+            .filter(|phase| matches!(phase, Phase::Subscriptions(_)))
+            .count();
+        (views, reevaluations)
+    }
+
+    // INV-LC1: rendering and subscription re-evaluation are frame-phase
+    // activities — neither runs inside an input batch, however many messages
+    // the batch processes. The clock is paused so all three messages land in
+    // one batch.
+    #[tokio::test(start_paused = true)]
+    async fn input_batch_neither_renders_nor_reevaluates_subscriptions() {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+
+        for _ in 0..2 {
+            runtime
+                .core
+                .msg_tx
+                .try_send(PhaseMessage::Bump)
+                .expect("receiver should be open");
+        }
+        runtime.process_message_batch(PhaseMessage::Bump);
+
+        assert_eq!(
+            runtime.core.app.state, 3,
+            "the batch should process all three messages"
+        );
+        assert_eq!(
+            log.entries(),
+            Vec::<Phase>::new(),
+            "an input batch must perform no render and no subscription re-evaluation"
+        );
+    }
+
+    // INV-LC1: one frame pass consumes the pending work a batch recorded
+    // exactly once — at most one render and at most one re-evaluation — and a
+    // following pass with nothing pending performs neither.
+    #[tokio::test(start_paused = true)]
+    async fn frame_pass_renders_once_and_reevaluates_once_per_pending_batch() -> Result<()> {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        for _ in 0..2 {
+            runtime
+                .core
+                .msg_tx
+                .try_send(PhaseMessage::Bump)
+                .expect("receiver should be open");
+        }
+        runtime.process_message_batch(PhaseMessage::Bump);
+        runtime.process_frame_tick(&mut terminal)?;
+
+        let after_pass = log.entries();
+        assert_eq!(
+            phase_counts(&after_pass),
+            (1, 1),
+            "one frame pass performs at most one render and one re-evaluation: {after_pass:?}"
+        );
+
+        runtime.process_frame_tick(&mut terminal)?;
+        assert_eq!(
+            log.entries(),
+            after_pass,
+            "a frame pass with no pending work performs neither step"
+        );
+
+        Ok(())
+    }
+
+    // INV-LC2: within one frame pass the render step precedes subscription
+    // re-evaluation, and both steps observe the pass's current state — so the
+    // subscriptions this pass starts are those of a state it has just rendered.
+    #[tokio::test(start_paused = true)]
+    async fn frame_pass_renders_before_reevaluating_and_both_observe_the_same_state() -> Result<()>
+    {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        runtime.process_message_batch(PhaseMessage::Bump);
+        runtime.process_frame_tick(&mut terminal)?;
+
+        assert_eq!(
+            log.entries(),
+            vec![Phase::View(1), Phase::Subscriptions(1)],
+            "the render step must precede re-evaluation, both on the pass's current state"
+        );
+
+        Ok(())
+    }
+
+    // INV-LC2: pending work does not queue per state, so a state that requested
+    // a redraw is not itself promised a render. A redraw-requesting batch
+    // followed by a `without_redraw` batch leaves the redraw pending; the pass
+    // renders the newer state once and the intermediate state is never drawn.
+    #[tokio::test(start_paused = true)]
+    async fn frame_pass_renders_only_the_latest_state_after_a_superseding_batch() -> Result<()> {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        // Clear the bootstrap redraw so only the batches below decide whether a
+        // redraw is pending at the pass.
+        runtime.scheduler.pending.needs_redraw = false;
+
+        runtime.process_message_batch(PhaseMessage::Bump);
+        runtime.process_message_batch(PhaseMessage::BumpWithoutRedraw);
+        assert!(
+            runtime.scheduler.pending.needs_redraw,
+            "the suppressing batch must not clear the redraw the earlier batch requested"
+        );
+
+        runtime.process_frame_tick(&mut terminal)?;
+
+        assert_eq!(
+            log.entries(),
+            vec![Phase::View(2), Phase::Subscriptions(2)],
+            "exactly one render, of the latest state; the superseded state is never drawn"
+        );
+
+        Ok(())
+    }
+
+    // INV-LC2: a pass entered with no redraw pending re-evaluates subscriptions
+    // with no preceding render — suppression suppresses the redraw, never the
+    // re-evaluation (RFC 0002 non-negotiable B, seen from the lifecycle side).
+    #[tokio::test(start_paused = true)]
+    async fn frame_pass_with_no_redraw_pending_still_reevaluates_subscriptions() -> Result<()> {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        runtime.scheduler.pending.needs_redraw = false;
+        runtime.process_message_batch(PhaseMessage::BumpWithoutRedraw);
+        assert!(
+            !runtime.scheduler.pending.needs_redraw,
+            "the suppressing batch must leave no redraw pending"
+        );
+
+        runtime.process_frame_tick(&mut terminal)?;
+
+        assert_eq!(
+            log.entries(),
+            vec![Phase::Subscriptions(1)],
+            "re-evaluation must still run, with no preceding render"
+        );
+
+        Ok(())
+    }
+
+    // INV-LC4 (eligibility half): the first render starts out pending, so a
+    // freshly constructed runtime's first frame pass renders even though no
+    // message has been processed — unconditionally, and independently of the
+    // init command's redraw directive, which `PhaseApp` sets to
+    // `without_redraw` and the runtime never consults (RFC 0011 §3.2). The
+    // ordering half of INV-LC4 is structural: production exposes no stable
+    // observable phase between the init dispatch and its effect's first poll.
+    #[tokio::test(start_paused = true)]
+    async fn first_frame_pass_renders_without_any_message_processed() -> Result<()> {
+        let log = PhaseLog::default();
+        let mut runtime = phase_runtime(&log);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
+
+        runtime.process_frame_tick(&mut terminal)?;
+
+        assert_eq!(
+            log.entries(),
+            vec![Phase::View(0)],
+            "the first pass renders the initial state and re-evaluates nothing"
+        );
 
         Ok(())
     }
