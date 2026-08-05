@@ -702,6 +702,68 @@ mod tests {
                  events: {seqs:?}"
             );
         }
+
+        // The enforcement check's other half (RFC 0006 §4.4): partitioning by
+        // `runtime_id` and applying the max-`seq` rule per partition recovers
+        // each instance's current values — `first` ended with both
+        // subscriptions dropped, `second` with two keyed entries live.
+        let subscriptions = recorder.u64_values("subscriptions");
+        let keyed = recorder.u64_values("keyed_commands");
+        let mut current: Vec<(u64, u64, u64, u64)> = Vec::new();
+        for i in 0..ids.len() {
+            match current.iter_mut().find(|(id, ..)| *id == ids[i]) {
+                Some(entry) if seqs[i] > entry.1 => {
+                    *entry = (ids[i], seqs[i], subscriptions[i], keyed[i]);
+                }
+                Some(_) => {}
+                None => current.push((ids[i], seqs[i], subscriptions[i], keyed[i])),
+            }
+        }
+        let recover = |id: u64| {
+            current
+                .iter()
+                .find(|(known, ..)| *known == id)
+                .map(|&(_, _, subs, keyed)| (subs, keyed))
+                .expect("both partitions were built above")
+        };
+        assert_eq!(
+            recover(ids[0]),
+            (0, 0),
+            "first's max-seq event must report its current values"
+        );
+        let second_id = *ids.iter().find(|id| **id != ids[0]).expect("two ids");
+        assert_eq!(
+            recover(second_id),
+            (0, 2),
+            "second's max-seq event must report its current values"
+        );
+    }
+
+    // INV-L13 (instance identity, non-reuse): a torn-down runtime's
+    // `runtime_id` is never handed out again within the process lifetime, so a
+    // subscriber's partition for a dead instance can never be reopened by a
+    // later one. The allocator is process-global, so a reuse bug (a free-list
+    // returning the dropped id) is reliably detected only single-threaded —
+    // under parallel test runs another thread may take the freed id first;
+    // this is a regression guard, not a parallel-proof detector.
+    #[test]
+    fn a_torn_down_observers_runtime_id_is_not_reused() {
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _guard = recorder.set_default();
+
+        let first = LoadObserver::default();
+        drop(first.track_subscription());
+        drop(first);
+
+        let second = LoadObserver::default();
+        drop(second.track_subscription());
+
+        let ids = recorder.u64_values("runtime_id");
+        assert_eq!(ids.len(), 4, "four gauge changes fired: {ids:?}");
+        assert_ne!(
+            ids[0], ids[2],
+            "a torn-down runtime's id must not be reused: {ids:?}"
+        );
     }
 
     // Fast-path correctness: while nothing is listening for

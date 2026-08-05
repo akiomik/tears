@@ -77,6 +77,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::process::ExitCode;
@@ -511,8 +512,8 @@ static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
 
 /// The current producer-gauge sum
 /// (`subscriptions + unkeyed_commands + keyed_commands + blocked`), updated by
-/// [`QuitDeliverySubscriber`] from the greatest-`seq` gauge event regardless of
-/// the trial slot. Reaches 0 only when the *current* runtime has fully torn its
+/// [`QuitDeliverySubscriber`] from the greatest-`seq` gauge event within its
+/// own `runtime_id` partition, regardless of the trial slot. Reaches 0 only when the *current* runtime has fully torn its
 /// producers down; scenarios run one runtime at a time, so [`await_quiescence`]
 /// can wait on it as a common teardown barrier before the next runtime starts,
 /// keeping a late gauge/capacity event from one scenario out of the next
@@ -630,11 +631,19 @@ impl Subscriber for QuitDeliverySubscriber {
             let mut seen = GAUGE_PARTITION_SEEN
                 .lock()
                 .expect("gauge partition high-water mark poisoned");
-            let mark = seen.entry(runtime_id).or_insert(0);
-            if seq <= *mark {
-                return;
+            // `Vacant` — not a sentinel value — marks "never observed", so the
+            // first event of a partition is applied whatever its `seq`: the
+            // schema deliberately leaves the counter's initial value unpinned
+            // (RFC 0006 §4.4).
+            match seen.entry(runtime_id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(seq);
+                }
+                Entry::Occupied(mut mark) if seq > *mark.get() => {
+                    mark.insert(seq);
+                }
+                Entry::Occupied(_) => return,
             }
-            *mark = seq;
             LIVE_PRODUCERS.store(visitor.gauge_sum(), Ordering::Relaxed);
             if let (Some(metrics), Some(blocked)) = (slot, visitor.blocked) {
                 metrics.blocked_live.store(blocked, Ordering::Relaxed);
