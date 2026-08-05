@@ -868,15 +868,18 @@ mod tests {
     /// panic.
     #[cfg(all(not(loom), unix))]
     fn register_with_io_driver() {
-        drop(
-            AsyncFd::new(stdin()).expect("registering without an I/O driver should have panicked"),
-        );
+        drop(AsyncFd::new(stdin()).expect(
+            "registering an fd should not have reached a fallible step in the \
+                 store's context",
+        ));
     }
 
     /// The non-Unix counterpart: no descriptor-registration API is
     /// available there, so the resource is created first — a creation
     /// failure panics here, with a message of its own, instead of
-    /// completing the leaf with a delivered message.
+    /// completing the leaf with a delivered message. Note that CI lints
+    /// only on Linux, so this branch is compiled by the Windows test job
+    /// but never clippy-checked.
     #[cfg(all(not(loom), not(unix)))]
     fn register_with_io_driver() {
         let socket =
@@ -895,7 +898,9 @@ mod tests {
     /// for the would-fail-if-polled class.
     #[cfg(not(loom))]
     fn io_command() -> Command<Msg> {
-        Command::perform(async { register_with_io_driver() }, |()| Msg::N(99))
+        Command::perform(async { register_with_io_driver() }, |()| {
+            unreachable!("the I/O-dependent leaf must fail the test before completing")
+        })
     }
 
     /// A `Command::timeout` leaf over a never-ready future: deliverable
