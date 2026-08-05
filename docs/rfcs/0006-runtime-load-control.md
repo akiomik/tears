@@ -1,6 +1,6 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Accepted (section 5.1 records the bounded acceptance results)
+- Status: Implemented (section 5.1 records the bounded acceptance results)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
   at 0.11.0 (a schema change, hence a contract change under INV-L13 —
@@ -20,8 +20,7 @@
 > delegated to the separate `RuntimeConfig` RFC — capacity values,
 > recommended defaults, the section 5.1 bounded-run parameters, and the CI
 > smoke-profile question — are settled there and implemented; RFC 0007
-> itself is Accepted with its own §2.1 `Copy` removal as the open
-> deliverable, which nothing here depends on, so no
+> is itself Implemented, so no
 > prerequisite of the implementation PR remains open (sections 3.2, 6). The
 > three contracts flagged for settling before the post-0.10.0
 > implementation — the exact scope of the memory bound (INV-L1), the quit
@@ -299,9 +298,8 @@ constructor `Runtime::with_config(flags, config)`, with `Runtime::new`
 unchanged and equivalent to the default configuration. The exact public
 shape — constructor signature, field set, naming, and
 construction/validation style — is fixed by the separate `RuntimeConfig`
-RFC (its delegated surface is implemented; the RFC itself is Accepted
-with its own §2.1 `Copy` removal as the open deliverable — section 6),
-so the load-control implementation PR could
+RFC (its delegated surface is implemented; the RFC is itself
+Implemented — section 6), so the load-control implementation PR could
 start. The verdict here needs only the additivity argument, which holds
 for any shape that keeps `Runtime::new` unchanged. Bounded behavior
 activates only through that surface:
@@ -336,10 +334,9 @@ load-control implementation (sections 4–6) landed after 0.10.0 behind
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
-(delegated surface implemented; the RFC itself Accepted with its own
-§2.1 `Copy` removal as the open deliverable — section 3.2) — carries the
-three controls below. That RFC adopts these names unchanged and groups
-the frame rate into the same config, so
+(delegated surface implemented; the RFC is itself Implemented —
+section 3.2) — carries the three controls below. That RFC adopts these
+names unchanged and groups the frame rate into the same config, so
 `Runtime::with_config(flags, config)` takes the frame rate inside
 `config`; the semantics stated here are the contract.
 
@@ -1498,9 +1495,9 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 
 Every question below is resolved — in this RFC, or by the `RuntimeConfig`
 RFC, whose delegated decisions are implemented (that RFC is itself
-Accepted with its own §2.1 `Copy` removal as the open deliverable, which
-no question here waits on) and which fixes the public `RuntimeConfig`
-API (and with it questions 1, 5, and the default-value half of 2), the
+Implemented, and no question here waited on its §2.1 `Copy`-removal
+deliverable) and which fixes the public `RuntimeConfig` API (and with
+it questions 1, 5, and the default-value half of 2), the
 section 5.1 bounded-run parameters (configuration under test, backlog
 depths, trial counts), and the CI smoke-profile decision. No open
 question remains as a prerequisite of the implementation PR

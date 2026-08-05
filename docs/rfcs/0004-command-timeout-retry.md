@@ -522,9 +522,9 @@ impl RetryPolicy {
     pub const fn max_attempts(&self) -> NonZeroUsize;
     #[must_use]
     pub const fn backoff(&self) -> &RetryBackoff;
-    #[must_use = "with_backoff returns a modified policy and does not mutate in place"]
+    #[must_use = "with_backoff consumes the policy and returns the modified value"]
     pub const fn with_backoff(self, backoff: RetryBackoff) -> Self;
-    #[must_use = "with_fixed_backoff returns a modified policy and does not mutate in place"]
+    #[must_use = "with_fixed_backoff consumes the policy and returns the modified value"]
     pub const fn with_fixed_backoff(self, delay: Duration) -> Self;
 }
 
