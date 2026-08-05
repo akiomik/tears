@@ -237,7 +237,7 @@ mod tests {
     }
 
     // INV-C2/INV-C6: the setters chain, each independently, and every setter
-    // returns the modified config (`#[must_use]`) rather than mutating in place.
+    // consumes the config and returns the modified value (`#[must_use]`).
     #[test]
     fn setters_chain_independently() {
         let config = RuntimeConfig::new(frame_rate(30))
@@ -251,14 +251,15 @@ mod tests {
         assert_eq!(config.batch_max_messages, Some(cap(4)));
     }
 
-    // INV-C3: a setter called on a clone leaves the original untouched — the
-    // one discard shape that survives the move (the consuming-call misuse
-    // guard the `#[must_use]` messages warn about).
+    // INV-C6: a setter called on a clone — the one discard shape that survives
+    // the move (the consuming-call misuse guard the `#[must_use]` messages
+    // warn about) — modifies only the clone and leaves the original untouched.
     #[test]
-    fn discarded_setter_on_a_clone_leaves_original_unmodified() {
+    fn setter_on_a_clone_modifies_only_the_clone() {
         let config = RuntimeConfig::new(frame_rate(60));
-        let _ = config.clone().app_channel_capacity(cap(1024));
+        let modified = config.clone().app_channel_capacity(cap(1024));
 
+        assert_eq!(modified.app_channel_capacity, Some(cap(1024)));
         assert_eq!(config.app_channel_capacity, None);
     }
 }
