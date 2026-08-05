@@ -76,6 +76,8 @@
     reason = "metric reporting casts counters and nanosecond values to floating point for human-readable output; precision loss there is irrelevant"
 )]
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::process::ExitCode;
@@ -510,24 +512,27 @@ static TRIAL_METRICS: Mutex<Option<Arc<Metrics>>> = Mutex::new(None);
 
 /// The current producer-gauge sum
 /// (`subscriptions + unkeyed_commands + keyed_commands + blocked`), updated by
-/// [`QuitDeliverySubscriber`] from the greatest-`seq` gauge event regardless of
-/// the trial slot. Reaches 0 only when the *current* runtime has fully torn its
-/// producers down; scenarios run one runtime at a time, so [`await_quiescence`]
-/// can wait on it as a common teardown barrier before the next runtime starts,
-/// keeping a late gauge/capacity event from one scenario out of the next
-/// scenario's slot.
+/// [`QuitDeliverySubscriber`] from the greatest-`seq` gauge event within its
+/// own `runtime_id` partition, regardless of the trial slot. Reaches 0 only
+/// when the *current* runtime has fully torn its producers down; scenarios run
+/// one runtime at a time, so [`await_quiescence`] can wait on it as a common
+/// teardown barrier before the next runtime starts, keeping a late
+/// gauge/capacity event from one scenario out of the next scenario's slot.
 static LIVE_PRODUCERS: AtomicU64 = AtomicU64::new(0);
 
-/// Newest producer-gauge `seq` applied for the current runtime (RFC 0006 §4.4).
-/// A gauge event's values reach [`LIVE_PRODUCERS`] and [`Metrics::blocked_live`]
-/// only when its `seq` advances this high-water mark, so a reordered stale gauge
-/// event never supersedes the current value — the schema orders gauge events by
-/// `seq`, not by arrival. It is a `Mutex`, not an atomic, so the advance and the
-/// value stores it guards happen as one step even if a future runtime dispatches
-/// gauge events off several producer threads at once. [`await_quiescence`] resets
-/// it to 0 per runtime, since `seq` restarts at 0 with each new runtime's
-/// `LoadObserver`.
-static GAUGE_SEQ_SEEN: Mutex<u64> = Mutex::new(0);
+/// Per-`runtime_id` high-water marks of the newest `seq` applied from each
+/// partition (RFC 0006 §4.4). A gauge event's values reach [`LIVE_PRODUCERS`]
+/// and [`Metrics::blocked_live`] only when its `seq` advances the high-water
+/// mark *of its own `runtime_id`*, so a reordered stale gauge event never
+/// supersedes the current value — the schema orders gauge events by `seq` within
+/// a `runtime_id`, never by arrival, and comparing `seq` across instances is
+/// meaningless. Keeping a mark per id (rather than only the newest partition)
+/// makes that hold structurally even for a straggler from an already-drained
+/// runtime; the runs never contend anyway, since scenarios run one runtime at a
+/// time behind [`await_quiescence`]. It is a `Mutex`, not an atomic, so the
+/// advance and the value stores it guards happen as one step even if a future
+/// runtime dispatches gauge events off several producer threads at once.
+static GAUGE_PARTITION_SEEN: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
 
 /// Waits until the current runtime's producers have fully torn down (the gauge
 /// sum returns to 0) before the caller starts the next runtime — the teardown
@@ -546,13 +551,11 @@ async fn await_quiescence() {
         "harness fault: a scenario's producers did not quiesce within 5s; \
          refusing to reuse the trial slot with a teardown still in flight",
     );
-    // The next runtime starts a fresh `LoadObserver` whose gauge `seq` restarts
-    // at 0, so clear the high-water mark; the barrier above guarantees the
-    // drained runtime emits no further gauge event that this reset could let a
-    // stale reading through.
-    *GAUGE_SEQ_SEEN
-        .lock()
-        .expect("gauge seq high-water mark poisoned") = 0;
+    // No high-water reset is needed here: the next runtime starts a fresh
+    // `LoadObserver` with its own `runtime_id`, so its gauge events rank
+    // against their own entry in [`GAUGE_PARTITION_SEEN`], and a straggler
+    // from the drained runtime stays behind its partition's mark
+    // (RFC 0006 §4.4).
 }
 
 /// Records the instant the event loop's quit branch fires.
@@ -590,45 +593,57 @@ impl Subscriber for QuitDeliverySubscriber {
 
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
-    // The gauge high-water guard (`seen`) is deliberately held across the value
-    // stores below: releasing it after `*seen = seq` — the nursery lint's
-    // suggestion — would let a concurrent stale gauge event interleave its store
-    // between the check and the apply, the exact reorder the `seq` ordering
-    // exists to defeat (RFC 0006 §4.4).
+    // The gauge partition guard (`seen`) is deliberately held across the value
+    // stores below: releasing it after the high-water advance — the nursery
+    // lint's suggestion — would let a concurrent stale gauge event interleave
+    // its store between the check and the apply, the exact reorder the `seq`
+    // ordering exists to defeat (RFC 0006 §4.4).
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "the gauge high-water guard is deliberately held across the value stores so \"advance and apply\" is one step; tightening it would let a concurrent stale gauge event interleave a store between the check and the apply (RFC 0006 §4.4)"
+        reason = "the gauge partition guard is deliberately held across the value stores so \"advance and apply\" is one step; tightening it would let a concurrent stale gauge event interleave a store between the check and the apply (RFC 0006 §4.4)"
     )]
     fn event(&self, event: &Event<'_>) {
         let is_load = event.metadata().target() == "tears::runtime::load";
         let mut visitor = LoadVisitor::default();
         event.record(&mut visitor);
 
-        // A producer-gauge event is a load-target event carrying `seq` (and
-        // `blocked`). Match on the target too, not on `seq` alone: were a `seq`
-        // field ever added to a `tears::runtime` DEBUG event, matching on `seq`
-        // alone would swallow it here and skip the quit-delivery match below.
-        // Order these by `seq`, not by arrival: apply the event's values only
-        // when its `seq` advances the high-water mark, so a reordered stale
-        // gauge event never supersedes the current value (RFC 0006 §4.4).
-        // Holding the high-water lock across the value stores makes "advance and
-        // apply" one step, so concurrent dispatch cannot interleave a stale
-        // store between the check and the apply. This gates both the
+        // A producer-gauge event is a load-target event carrying `runtime_id`
+        // and `seq` (and `blocked`). Match on the target too, not on those
+        // fields alone: were a `seq` field ever added to a `tears::runtime`
+        // DEBUG event, matching on `seq` alone would swallow it here and skip
+        // the quit-delivery match below. Order these by `seq` within their
+        // `runtime_id`, not by arrival: apply the event's values only when its
+        // `seq` advances the high-water mark of its own instance, so a
+        // reordered stale gauge event never supersedes the current value, and
+        // an event from another instance opens its own partition rather than
+        // being ranked against a `seq` that means nothing to it (RFC 0006
+        // §4.4). Holding the partition lock across the value stores makes
+        // "advance and apply" one step, so concurrent dispatch cannot interleave
+        // a stale store between the check and the apply. This gates both the
         // slot-independent teardown barrier and the per-trial `blocked` reading.
-        // The trial slot is cloned out first, before the high-water lock, so the
+        // The trial slot is cloned out first, before the partition lock, so the
         // two locks are never held at once.
-        if is_load && let Some(seq) = visitor.seq {
+        if is_load && let (Some(runtime_id), Some(seq)) = (visitor.runtime_id, visitor.seq) {
             let slot = TRIAL_METRICS
                 .lock()
                 .expect("trial metrics slot poisoned")
                 .clone();
-            let mut seen = GAUGE_SEQ_SEEN
+            let mut seen = GAUGE_PARTITION_SEEN
                 .lock()
-                .expect("gauge seq high-water mark poisoned");
-            if seq <= *seen {
-                return;
+                .expect("gauge partition high-water mark poisoned");
+            // `Vacant` — not a sentinel value — marks "never observed", so the
+            // first event of a partition is applied whatever its `seq`: the
+            // schema deliberately leaves the counter's initial value unpinned
+            // (RFC 0006 §4.4).
+            match seen.entry(runtime_id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(seq);
+                }
+                Entry::Occupied(mut mark) if seq > *mark.get() => {
+                    mark.insert(seq);
+                }
+                Entry::Occupied(_) => return,
             }
-            *seen = seq;
             LIVE_PRODUCERS.store(visitor.gauge_sum(), Ordering::Relaxed);
             if let (Some(metrics), Some(blocked)) = (slot, visitor.blocked) {
                 metrics.blocked_live.store(blocked, Ordering::Relaxed);
@@ -669,9 +684,14 @@ impl Subscriber for QuitDeliverySubscriber {
 #[derive(Default)]
 struct LoadVisitor {
     matched_quit: bool,
+    /// Present only on a producer-gauge event: the emitting runtime instance's
+    /// process-local identifier (RFC 0006 §4.4). It partitions gauge events by
+    /// emitter — `seq` orders events only within one partition.
+    runtime_id: Option<u64>,
     /// Present only on a producer-gauge event: its monotone ordering counter
     /// (RFC 0006 §4.4). Its presence identifies the event as a gauge event, and
-    /// its value orders it against the other gauge events.
+    /// its value orders it against the other gauge events of the same
+    /// `runtime_id`.
     seq: Option<u64>,
     subscriptions: Option<u64>,
     unkeyed_commands: Option<u64>,
@@ -694,6 +714,7 @@ impl LoadVisitor {
 impl Visit for LoadVisitor {
     fn record_u64(&mut self, field: &Field, value: u64) {
         match field.name() {
+            "runtime_id" => self.runtime_id = Some(value),
             "seq" => self.seq = Some(value),
             "subscriptions" => self.subscriptions = Some(value),
             "unkeyed_commands" => self.unkeyed_commands = Some(value),

@@ -131,5 +131,45 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
         "the keyed_commands gauge must fall back to zero: {keyed:?}"
     );
 
+    // INV-L13: every gauge event a real run emits carries the emitting
+    // instance's `runtime_id` and its ordering `seq`, and one run is one
+    // instance — the runtime builds a single `LoadObserver` at construction and
+    // clones it to every producer, so all of these events share one id. The
+    // `seq` values are checked for distinctness rather than for arrival-order
+    // monotonicity: the schema orders gauge events by `seq`, not by arrival
+    // (their strict increase per instance is pinned at the unit layer, where the
+    // emission order is deterministic).
+    let gauge_events: Vec<_> = recorder
+        .field_name_sets()
+        .into_iter()
+        .filter(|fields| fields.iter().any(|name| name == "subscriptions"))
+        .collect();
+    assert!(!gauge_events.is_empty(), "gauge events should have fired");
+    for fields in &gauge_events {
+        for required in ["runtime_id", "seq"] {
+            assert!(
+                fields.iter().any(|name| name == required),
+                "a gauge event is missing `{required}`: {fields:?}"
+            );
+        }
+    }
+
+    let ids = recorder.u64_values("runtime_id");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "one run is one runtime instance, so its gauge events share one \
+         runtime_id: {ids:?}"
+    );
+
+    let mut seqs = recorder.u64_values("seq");
+    let emitted = seqs.len();
+    seqs.sort_unstable();
+    seqs.dedup();
+    assert_eq!(
+        seqs.len(),
+        emitted,
+        "no two gauge events of one runtime may share a seq: {seqs:?}"
+    );
+
     Ok(())
 }
