@@ -869,8 +869,7 @@ mod tests {
     #[cfg(all(not(loom), unix))]
     fn register_with_io_driver() {
         drop(AsyncFd::new(stdin()).expect(
-            "registering an fd should not have reached a fallible step in the \
-                 store's context",
+            "registering an fd should not have reached a fallible step in the store's context",
         ));
     }
 
