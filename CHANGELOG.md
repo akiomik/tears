@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; `Debug`, `Eq`,
+  and `PartialEq` remain, and `FrameRate` keeps its `Copy` (RFC 0007 §2.1)
+  - The type is the aggregation point for future runtime knobs, so a `Copy`
+    config would turn the first non-`Copy` field added later into a breaking
+    derive removal deferred onto whoever adds it; taking the removal now, while
+    the config is small, keeps that growth non-breaking
+  - The consuming setters now move the configuration, so discarding a setter's
+    return value and then using the original is a compile error rather than a
+    silent stale read
+  - Code that relied on the implicit copy adds an explicit `clone()`
+
+  Before:
+
+  ```rust
+  let config = RuntimeConfig::new(frame_rate);
+  let bounded = config.app_channel_capacity(capacity);
+  let runtime = Runtime::<MyApp>::with_config((), config);
+  ```
+
+  After:
+
+  ```rust
+  let config = RuntimeConfig::new(frame_rate);
+  let bounded = config.clone().app_channel_capacity(capacity);
+  let runtime = Runtime::<MyApp>::with_config((), config);
+  ```
+
 ## [0.10.2] - 2026-07-26
 
 ### Fixed

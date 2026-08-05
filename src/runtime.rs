@@ -260,6 +260,10 @@ impl<App: Application> Runtime<App> {
     /// let runtime = Runtime::<MyApp>::with_config((), config);
     /// ```
     #[must_use]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "RFC 0007 §2.2 pins the by-value signature"
+    )]
     pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self {
         // The single channel-construction path (RFC 0006 INV-L6): unset
         // capacities build the unchanged unbounded channels, `Some(n)` bound

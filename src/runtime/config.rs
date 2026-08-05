@@ -32,8 +32,10 @@ use super::frame_rate::FrameRate;
 /// [`keyed_channel_capacity`](Self::keyed_channel_capacity),
 /// [`batch_max_messages`](Self::batch_max_messages)) opt into bounded delivery
 /// and follow the crate's combinator convention (like
-/// [`Command::timeout`](crate::Command::timeout)); each returns a modified
-/// copy and does not mutate in place.
+/// [`Command::timeout`](crate::Command::timeout)); each consumes the
+/// configuration and returns the modified value. `RuntimeConfig` is [`Clone`]
+/// but not [`Copy`], so a configuration reused after a setter call is cloned
+/// explicitly.
 ///
 /// There is deliberately no [`Default`] impl: the crate has no default frame
 /// rate, so a value would have to be invented inside the derive.
@@ -54,7 +56,7 @@ use super::frame_rate::FrameRate;
 ///     .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
 ///     .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"));
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     /// Target frame rate for the runtime's frame scheduler.
     pub(crate) frame_rate: FrameRate,
@@ -114,7 +116,7 @@ impl RuntimeConfig {
     /// producer gauges (`tears::runtime::load`, RFC 0006 §4.4) make that
     /// pattern visible; restructure the effect flow rather than resizing the
     /// channel (RFC 0006 §4.5).
-    #[must_use = "app_channel_capacity returns a modified config and does not mutate in place"]
+    #[must_use = "app_channel_capacity consumes the config and returns the modified value"]
     pub const fn app_channel_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.app_channel_capacity = Some(capacity);
         self
@@ -150,7 +152,7 @@ impl RuntimeConfig {
     /// quit buys suppression — a later cancel or supersede can still stop it —
     /// at the cost of waiting behind pending inputs under load
     /// (RFC 0006 §4.6).
-    #[must_use = "keyed_channel_capacity returns a modified config and does not mutate in place"]
+    #[must_use = "keyed_channel_capacity consumes the config and returns the modified value"]
     pub const fn keyed_channel_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.keyed_channel_capacity = Some(capacity);
         self
@@ -169,7 +171,7 @@ impl RuntimeConfig {
     /// The **documented recommendation is to leave this unset**: the 100µs time
     /// cap alone holds the frame branch stable under overload (RFC 0006 F5), so
     /// the count cap is a diagnostic knob, not a default (RFC 0007 §3.1).
-    #[must_use = "batch_max_messages returns a modified config and does not mutate in place"]
+    #[must_use = "batch_max_messages consumes the config and returns the modified value"]
     pub const fn batch_max_messages(mut self, max: NonZeroUsize) -> Self {
         self.batch_max_messages = Some(max);
         self
@@ -235,7 +237,7 @@ mod tests {
     }
 
     // INV-C2/INV-C6: the setters chain, each independently, and every setter
-    // returns a modified copy (`#[must_use]`) rather than mutating in place.
+    // returns the modified config (`#[must_use]`) rather than mutating in place.
     #[test]
     fn setters_chain_independently() {
         let config = RuntimeConfig::new(frame_rate(30))
@@ -249,12 +251,13 @@ mod tests {
         assert_eq!(config.batch_max_messages, Some(cap(4)));
     }
 
-    // INV-C3: a discarded setter call leaves the original value untouched
-    // (the consuming-call misuse guard the `#[must_use]` messages warn about).
+    // INV-C3: a setter called on a clone leaves the original untouched — the
+    // one discard shape that survives the move (the consuming-call misuse
+    // guard the `#[must_use]` messages warn about).
     #[test]
-    fn discarded_setter_leaves_original_unmodified() {
+    fn discarded_setter_on_a_clone_leaves_original_unmodified() {
         let config = RuntimeConfig::new(frame_rate(60));
-        let _ = config.app_channel_capacity(cap(1024));
+        let _ = config.clone().app_channel_capacity(cap(1024));
 
         assert_eq!(config.app_channel_capacity, None);
     }
