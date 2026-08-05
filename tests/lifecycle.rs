@@ -76,6 +76,12 @@ impl Transitions {
 /// once the executor has processed the abort request, so this witnesses the
 /// quiescent stage rather than merely the request — and, for a subscription
 /// source, proves the stream can never be polled again.
+///
+/// A witness must be owned by the future *value*, never constructed in the
+/// future's body: a runtime-owned task can be cancelled before its first poll,
+/// and tokio dismantles such a task by dropping the un-started future without
+/// running a line of it. A body-constructed guard would then never exist, and
+/// no amount of settling could flip a flag that was never armed.
 struct DropFlag(Arc<AtomicBool>);
 
 impl Drop for DropFlag {
@@ -99,6 +105,27 @@ fn no_producer_gauge_event_fired(recorder: &TraceRecorder) -> bool {
         .all(|field| recorder.u64_values(field).is_empty())
 }
 
+/// How many settle steps [`assert_two_stage_postconditions`] may take before it
+/// reports the quiescent postcondition as unmet.
+///
+/// This counts executor drains, not intervals, so host load cannot consume it.
+/// One step is one `yield_now`, and under the `current_thread` scheduler that is
+/// a complete drain of the run queue: the caller's waker goes on the deferred
+/// list, so `block_on` keeps popping tasks until the queue is empty before it
+/// wakes the deferred wakers and polls the caller again. The teardown needs
+/// exactly one such drain — aborting a task leaves it queued and cancelled, and
+/// running it drops the future — so the bound carries three orders of magnitude
+/// of margin over the mechanism it waits on.
+///
+/// A step must not advance the paused clock, which rules out a
+/// `sleep`/`timeout` bound however appealing "settled or never will" sounds as a
+/// formulation. Advancing virtual time hands a producer that the teardown failed
+/// to cancel a second way to stop — its own timer firing into the channel whose
+/// receiver the teardown dropped — and these rows exist to catch exactly that
+/// failure. `yield_now` reschedules through the deferred list, which keeps the
+/// scheduler off the parking path and therefore keeps the clock still.
+const SETTLE_STEPS: usize = 1_000;
+
 /// INV-LC7's bounded settle loop, doubling as INV-LC6's re-checked
 /// no-further-transition assertion.
 ///
@@ -112,14 +139,15 @@ fn no_producer_gauge_event_fired(recorder: &TraceRecorder) -> bool {
 /// `dismantled` names the task futures whose drop flags must all have flipped by
 /// the time the loop exits. They are checked alongside the gauges because the
 /// keyed gauge is count-based and publishes zero at the owner's drop, ahead of
-/// the executor dismantling the task futures themselves.
+/// the executor dismantling the task futures themselves. Every such flag must be
+/// armed by the future *value* rather than by its body — see [`DropFlag`].
 async fn assert_two_stage_postconditions(
     recorder: &TraceRecorder,
     transitions: &Transitions,
     immediate: [usize; 3],
     dismantled: &[(&str, &Arc<AtomicBool>)],
 ) {
-    for _ in 0..1_000 {
+    for _ in 0..SETTLE_STEPS {
         assert_eq!(
             transitions.snapshot(),
             immediate,
@@ -435,9 +463,14 @@ impl Application for AbruptApp {
     type Flags = AbruptFlags;
 
     fn new(flags: AbruptFlags) -> (Self, Command<Self::Message>) {
-        let dropped = Arc::clone(&flags.keyed_effect_dropped);
+        // Armed here, outside the future's body, so the effect's future value
+        // owns the witness from the moment it exists. The init effect's task can
+        // be cancelled before its first poll — a bootstrap-time panic tears the
+        // runtime down without the executor ever reaching it — and tokio then
+        // dismantles it by dropping the un-started future.
+        let guard = DropFlag(Arc::clone(&flags.keyed_effect_dropped));
         let command = Command::future(async move {
-            let _guard = DropFlag(dropped);
+            let _guard = guard;
             pending::<AbruptMessage>().await
         })
         .cancellable(CommandId::new("parked-keyed"));
