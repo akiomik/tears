@@ -10,6 +10,8 @@ use std::thread;
 
 use futures::FutureExt;
 
+use crate::panic::compose_hook;
+
 /// Serializes tests that install a process-global panic hook or deliberately
 /// trigger panics.
 ///
@@ -52,12 +54,6 @@ impl Drop for SilentPanicHook {
     }
 }
 
-/// Runs a future with a no-op process-global panic hook installed.
-///
-/// Panics from the future are caught long enough to restore the previous hook,
-/// then resumed. Cancellation also restores the hook through the internal drop
-/// guard. This helper is for `current_thread` tests because it holds
-/// [`PANIC_HOOK_GUARD`] across `.await`.
 /// Records how a [`compose_hook`](crate::panic::compose_hook)-composed hook
 /// classified each panic, counting only panics raised on threads whose name
 /// starts with the installing test's prefix.
@@ -88,7 +84,7 @@ impl HookProbe {
                 delegation_counter.fetch_add(1, Ordering::SeqCst);
             }
         });
-        let hook = crate::panic::compose_hook(
+        let hook = compose_hook(
             move || {
                 if on_thread(thread_prefix) {
                     restore_counter.fetch_add(1, Ordering::SeqCst);
@@ -144,6 +140,12 @@ fn on_thread(prefix: &str) -> bool {
         .is_some_and(|name| name.starts_with(prefix))
 }
 
+/// Runs a future with a no-op process-global panic hook installed.
+///
+/// Panics from the future are caught long enough to restore the previous hook,
+/// then resumed. Cancellation also restores the hook through the internal drop
+/// guard. This helper is for `current_thread` tests because it holds
+/// [`PANIC_HOOK_GUARD`] across `.await`.
 #[expect(
     clippy::await_holding_lock,
     clippy::future_not_send,

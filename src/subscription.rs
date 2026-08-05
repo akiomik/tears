@@ -361,7 +361,7 @@ mod tests {
 
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::task::Poll;
 
     use color_eyre::eyre::Result;
@@ -369,7 +369,7 @@ mod tests {
     use tokio::time::{Duration, sleep, timeout};
 
     use crate::subscription::mock::MockSource;
-    use crate::test_support::{TraceRecorder, wait_until};
+    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD, TraceRecorder, wait_until};
 
     struct OneshotSource {
         value: i32,
@@ -1333,6 +1333,10 @@ mod tests {
         type Output = i32;
         type Key = ();
 
+        #[expect(
+            clippy::panic,
+            reason = "the source exists to raise a real panic in the forwarder"
+        )]
         fn stream(&self) -> BoxStream<'static, i32> {
             stream::once(async {
                 panic!("boom");
@@ -1355,14 +1359,14 @@ mod tests {
     // future rewrite of the spawn path drops the wrapper.
     #[tokio::test]
     #[expect(
-        clippy::panic,
-        reason = "driving the panic hook requires a real panic in the source stream"
+        clippy::await_holding_lock,
+        reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
     )]
     async fn a_panicking_subscription_forwarder_skips_the_terminal_restore() {
-        let _hook_guard = crate::test_support::PANIC_HOOK_GUARD
+        let _hook_guard = PANIC_HOOK_GUARD
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let probe = crate::test_support::HookProbe::install(
+            .unwrap_or_else(PoisonError::into_inner);
+        let probe = HookProbe::install(
             "subscription::tests::a_panicking_subscription_forwarder_skips_the_terminal_restore",
         );
 
