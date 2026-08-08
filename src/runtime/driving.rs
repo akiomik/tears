@@ -19,10 +19,12 @@
 //!   application-supplied effect and source bodies, and — for enqueue
 //!   ordering — at the crate's send-intent seam (`runtime::send_gate`):
 //!   producers parked at their intents proceed only when the script grants
-//!   them, so the enqueue order among simultaneously ready producers is the
-//!   scripted grant order by construction, independent of any executor
-//!   scheduling order (which Tokio does not guarantee). No manual polling,
-//!   no direct ingestion, no scheduler instrumentation.
+//!   them, and the sequential grant → `consumed` handshake scripts the
+//!   enqueue order under the verified conditions (default current-thread
+//!   executor, unbounded channels, send ready in the same poll as the seam
+//!   passage — `consumed` is a proxy that rises before the actual send; raw
+//!   grant call order guarantees nothing). No manual polling, no direct
+//!   ingestion, no scheduler instrumentation.
 //!
 //! Tests never claim the scripted order as a production ordering guarantee:
 //! production arbitration stays the unbiased select (RFC 0006 INV-L4) and is
@@ -920,10 +922,15 @@ async fn s3_run(a_first: bool, frame_first: bool) -> Vec<String> {
         // Face (i): release both oneshot gates; both producers run to their
         // send intents and park at the seam — the simultaneous-ready state
         // (both at intent, neither enqueued). From here the enqueue order is
-        // the scripted grant order BY CONSTRUCTION: only a granted producer
-        // can pass the seam, so no executor scheduling order — guaranteed or
-        // not — can reorder the enqueues (Tokio pins no task scheduling
-        // order; nothing here relies on one).
+        // scripted by the sequential handshake below (grant one producer,
+        // confirm its seam passage via `consumed`, then grant the other): an
+        // ungranted producer cannot pass the seam, and under this test's
+        // verified conditions — default current-thread executor, unbounded
+        // channels, so the send is Ready in the same poll as the seam
+        // passage — the confirmed passage stands proxy for the enqueue
+        // (`consumed` rises before the actual `send().await`). A raw
+        // `grant(A); grant(B)` with no confirmation between would leave the
+        // poll order to the executor and pins nothing.
         gate_a_tx
             .send(())
             .expect("producer A should be parked on its gate");
@@ -1011,8 +1018,9 @@ async fn s3_scripted_readiness_and_arbitration_replay_identically() {
     );
 
     // Face (i): the delivered order (the shared channel's FIFO) follows the
-    // scripted grant order — enqueue order by construction, since only a
-    // granted producer can pass the send-intent seam.
+    // scripted grant→consumed handshake order — the enqueue-order script
+    // under this test's verified conditions (see the seam comment in
+    // `s3_run`).
     assert!(
         position(&ab_frame, "update:1") < position(&ab_frame, "update:2"),
         "delivery must follow the scripted grant order"

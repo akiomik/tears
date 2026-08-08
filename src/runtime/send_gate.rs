@@ -9,12 +9,21 @@
 //! test-only scripted implementation can park a held producer at its intent
 //! until the driving script grants it.
 //!
-//! This makes the enqueue order among simultaneously ready producers a
-//! scripted decision by construction rather than an executor-scheduling
-//! outcome: with several producers parked at their intents, only the granted
-//! one can proceed, so no scheduling order — guaranteed or not — can reorder
-//! the enqueues. The phase executors, bookkeeping, and delivery are
-//! untouched; the production/test difference is confined to this seam.
+//! Ordering scope (what is and is not guaranteed): a producer parked at its
+//! intent cannot proceed without its grant, but a raw grant pins no order —
+//! a grant only adds allowance and wakes, so `grant(A); grant(B)` with no
+//! await between leaves the poll order to the executor. Enqueue order is
+//! scripted through the sequential handshake — grant one producer, confirm
+//! its seam passage via `consumed`, then grant the next — and `consumed`
+//! rises at the seam, *before* the actual `send().await`, so the handshake
+//! is a proxy for the enqueue itself. The verified conditions are the
+//! default current-thread test executor with unbounded channels, where the
+//! send completes in the same poll as the seam passage. Making the ordering
+//! executor-independent, or extending it to bounded channels, would need an
+//! acknowledgement issued after `send().await` returns `Ok` — not
+//! implemented; a contract-revision item. The phase executors, bookkeeping,
+//! and delivery are untouched; the production/test difference is confined
+//! to this seam.
 
 #[cfg(test)]
 use std::sync::Arc;
@@ -204,8 +213,10 @@ pub mod scripted {
                 .is_some_and(|producer| producer.at_intent)
         }
 
-        /// Grants one send to a held producer. Only granted producers can
-        /// pass the seam, so grant order is enqueue order by construction.
+        /// Grants one send to a held producer: allowance plus wake, nothing
+        /// more. A grant alone pins no ordering — script enqueue order with
+        /// the sequential grant → [`consumed`](SendGateController::consumed)
+        /// handshake under the module docs' verified conditions.
         #[expect(
             clippy::significant_drop_tightening,
             reason = "the lock guard is scoped so the waker fires after it is released"
