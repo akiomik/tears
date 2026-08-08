@@ -141,12 +141,15 @@ pub mod websocket;
 
 #[cfg(test)]
 use std::any::TypeId;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{
     collections::{HashMap, HashSet},
     panic::AssertUnwindSafe,
 };
 
 use futures::{FutureExt, StreamExt, stream::BoxStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 // `mpsc` is no longer used on the production message path (that is now
@@ -163,6 +166,69 @@ use crate::runtime::load::LoadObserver;
 
 struct RunningSubscription {
     handle: JoinHandle<()>,
+    /// Identifies this admitted run in the stop tracker (RFC 0012 §3's
+    /// per-run vocabulary: one token per admitted run).
+    token: u64,
+}
+
+/// Stop-requested, not-yet-quiesced forwarder runs, plus the
+/// message-independent dirty signal their quiescence produces.
+///
+/// RFC 0012 prototype (§3, §4): "stop requested" is recorded here when a
+/// re-evaluation aborts a run; "quiesced" is confirmed by the task future's
+/// destruction (the [`QuiesceGuard`]'s drop). The barrier (INV-SE3) reads
+/// the `stopping` set; the quiescence of a stop-requested run bumps the
+/// `quiesced` watch — the second dirty source (INV-SE5), which the frame
+/// scheduler observes and records as subscription dirt itself (a conforming
+/// mechanism choice; INV-SE5 leaves the recording task unpinned).
+struct StopTracker {
+    /// Tokens of stop-requested runs whose task futures are not yet dropped.
+    stopping: Mutex<HashSet<u64>>,
+    /// Version counter bumped on each stop-requested run's quiescence. The
+    /// frame scheduler holds a receiver: a parked loop is woken (INV-SE5's
+    /// wake-capable event) and a busy loop picks the signal up on its next
+    /// frame-branch poll — watch versioning loses neither case.
+    quiesced: watch::Sender<u64>,
+    /// Termination-driven quiescence marks no dirt (INV-SE5): set before
+    /// shutdown or drop aborts the running set, checked by every guard.
+    terminating: AtomicBool,
+}
+
+impl StopTracker {
+    /// Confirms one run's quiescence: removes it from the stopping set and,
+    /// if it was stop-requested by a steady-state re-evaluation, publishes
+    /// the dirty signal. Runs that finished without a stop request (natural
+    /// completion) are not in the set and mark nothing — natural finish is
+    /// not a dirty source (RFC 0011 §2.1's two sources).
+    fn record_quiescence(&self, token: u64) {
+        if self.terminating.load(Ordering::SeqCst) {
+            return;
+        }
+        let removed = self
+            .stopping
+            .lock()
+            .expect("stop tracker lock should not be poisoned")
+            .remove(&token);
+        if removed {
+            self.quiesced
+                .send_modify(|version| *version = version.wrapping_add(1));
+        }
+    }
+}
+
+/// Owned by each forwarder task's future; its destruction — task completion
+/// or abort processing — is the quiescence boundary (RFC 0012 §3: "the
+/// run-owned stream and execution state are no longer polled and have been
+/// dropped").
+struct QuiesceGuard {
+    token: u64,
+    stops: Arc<StopTracker>,
+}
+
+impl Drop for QuiesceGuard {
+    fn drop(&mut self) {
+        self.stops.record_quiescence(self.token);
+    }
 }
 
 /// Manages the lifecycle of active subscriptions.
@@ -172,17 +238,34 @@ pub(crate) struct SubscriptionManager<Msg> {
     running: HashMap<SubscriptionId, RunningSubscription>,
     msg_sender: channel::Sender<Msg>,
     observer: LoadObserver,
+    next_token: u64,
+    stops: Arc<StopTracker>,
 }
 
 impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// Create a new subscription manager sharing the runtime's load observer.
     #[must_use]
     pub(crate) fn new(msg_sender: channel::Sender<Msg>, observer: LoadObserver) -> Self {
+        let (quiesced, _) = watch::channel(0);
         Self {
             running: HashMap::new(),
             msg_sender,
             observer,
+            next_token: 0,
+            stops: Arc::new(StopTracker {
+                stopping: Mutex::new(HashSet::new()),
+                quiesced,
+                terminating: AtomicBool::new(false),
+            }),
         }
+    }
+
+    /// The message-independent re-evaluation trigger (RFC 0012 INV-SE5): the
+    /// receiver's value changes when a run stopped by a steady-state
+    /// re-evaluation quiesces. The frame scheduler holds this receiver and
+    /// records the dirt.
+    pub(crate) fn quiescence_watch(&self) -> watch::Receiver<u64> {
+        self.stops.quiesced.subscribe()
     }
 
     /// Update the set of active subscriptions.
@@ -228,34 +311,85 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             !finished
         });
 
+        // Stop requests first (RFC 0012 INV-SE3: "a re-evaluation issues its
+        // stop requests first"). The token enters the stopping set before the
+        // abort so a concurrently completing task cannot slip between the
+        // request and its registration; a run that had already finished is
+        // quiesced by definition and is confirmed straight back out.
+        let stops = Arc::clone(&self.stops);
         self.running.retain(|id, running| {
             let keep = new_ids.contains(id);
             if !keep {
+                stops
+                    .stopping
+                    .lock()
+                    .expect("stop tracker lock should not be poisoned")
+                    .insert(running.token);
                 running.handle.abort();
+                if running.handle.is_finished() {
+                    // Already quiesced (finished before the stop request or
+                    // the abort landed synchronously): its guard has already
+                    // dropped, so confirm it out of the stopping set here.
+                    stops.record_quiescence(running.token);
+                }
                 tracing::debug!(target: "tears::subscription", "subscription stopped");
             }
             keep
         });
+
+        // The uniform quiescence barrier (RFC 0012 §4.1, INV-SE3): no
+        // admission while any stop-requested task — this pass's removals or
+        // an earlier pass's still-unquiesced stops — has not quiesced. No
+        // desired set is stored for later: the deferral admits nothing, and
+        // the re-evaluation that the quiescence dirty signal (INV-SE5)
+        // triggers re-reads the then-current state — which makes generation
+        // supersession automatic (INV-SE4) and keeps every admission inside
+        // a reconcile pass (INV-SE5's admission-site rule). A pass with no
+        // outstanding stops — pure additions, restarts of already-finished
+        // tasks — admits immediately, as before.
+        if !self
+            .stops
+            .stopping
+            .lock()
+            .expect("stop tracker lock should not be poisoned")
+            .is_empty()
+        {
+            tracing::debug!(
+                target: "tears::subscription",
+                "admissions deferred behind the quiescence barrier"
+            );
+            return;
+        }
 
         for (id, spawn) in new_subs {
             if !self.running.contains_key(&id) {
                 let restarted = finished_ids.contains(&id);
                 // Only call the spawner when we actually need to start the subscription
                 let stream = spawn();
-                let handle = self.spawn_subscription(stream);
-                self.running.insert(id, RunningSubscription { handle });
+                let running = self.spawn_subscription(stream);
+                self.running.insert(id, running);
                 tracing::debug!(target: "tears::subscription", restarted, "subscription started");
             }
         }
     }
 
-    fn spawn_subscription(&self, mut stream: BoxStream<'static, Msg>) -> JoinHandle<()> {
+    fn spawn_subscription(&mut self, mut stream: BoxStream<'static, Msg>) -> RunningSubscription {
         let sender = self.msg_sender.clone();
         // Raise the `subscriptions` gauge for the forwarding task's lifetime;
         // the guard lowers it on completion or abort (RFC 0006 §4.4).
         let subscription_guard = self.observer.track_subscription();
+        // The run token and its quiescence guard: the guard's drop — task
+        // completion or abort processing — is the run's quiescence boundary
+        // (RFC 0012 §3) and reports to the stop tracker.
+        let token = self.next_token;
+        self.next_token = self.next_token.wrapping_add(1);
+        let quiesce_guard = QuiesceGuard {
+            token,
+            stops: Arc::clone(&self.stops),
+        };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let _quiesce_guard = quiesce_guard;
             let _subscription_guard = subscription_guard;
             // Catch panics in the subscription's stream so a bug in a source is
             // logged instead of vanishing into a detached task.
@@ -279,7 +413,9 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             if result.is_err() {
                 tracing::error!(target: "tears::subscription", "subscription task panicked");
             }
-        })
+        });
+
+        RunningSubscription { handle, token }
     }
 
     /// Shut down all active subscriptions.
@@ -287,6 +423,15 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
     /// This cancels all running subscription tasks. Called automatically
     /// when the runtime shuts down.
     pub(crate) fn shutdown(&mut self) {
+        // Termination-driven stops are outside INV-SE5 (RFC 0012 §4.2):
+        // quiescence during shutdown marks no dirt and triggers no
+        // re-evaluation.
+        self.stops.terminating.store(true, Ordering::SeqCst);
+        self.stops
+            .stopping
+            .lock()
+            .expect("stop tracker lock should not be poisoned")
+            .clear();
         self.abort_running();
         self.running.clear();
     }
@@ -309,7 +454,9 @@ impl<Msg> Drop for SubscriptionManager<Msg> {
     fn drop(&mut self) {
         // `JoinHandle` does not abort on drop (it detaches), so a manager that
         // is dropped without `shutdown()` — for instance while unwinding from a
-        // panic — would otherwise leak its subscription tasks.
+        // panic — would otherwise leak its subscription tasks. Abrupt teardown
+        // is termination too: its quiescences mark no dirt (INV-SE5).
+        self.stops.terminating.store(true, Ordering::SeqCst);
         self.abort_running();
     }
 }
@@ -1180,6 +1327,89 @@ mod tests {
         Ok(())
     }
 
+    // RFC 0012 INV-SE4's mandated sequence, at the manager layer on the
+    // single-threaded test executor (where the quiescence gap is
+    // deterministic: an abort is processed only at an executor turn, so the
+    // interleave below is exact): declare {A}; re-evaluate to {B} (stop
+    // requested for A, B's admission deferred behind the barrier); before A
+    // quiesces, re-evaluate to {C}; then A quiesces, and the next
+    // re-evaluation — reading the then-current state {C} — admits C. B's
+    // spawner is never invoked at any point.
+    #[tokio::test(start_paused = true)]
+    async fn superseded_generation_spawner_is_never_invoked() {
+        struct CountingSource {
+            key: u8,
+            starts: Arc<AtomicUsize>,
+        }
+
+        impl SubscriptionSource for CountingSource {
+            type Output = i32;
+            type Key = u8;
+
+            fn stream(&self) -> BoxStream<'static, i32> {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(stream::pending())
+            }
+
+            fn key(&self) -> Self::Key {
+                self.key
+            }
+        }
+
+        let count = |starts: &Arc<AtomicUsize>| starts.load(Ordering::SeqCst);
+        let generation = |key: u8, starts: &Arc<AtomicUsize>| {
+            Subscription::new(CountingSource {
+                key,
+                starts: Arc::clone(starts),
+            })
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager =
+            SubscriptionManager::new(channel::Sender::from_unbounded(tx), LoadObserver::default());
+        let (a, b, c) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+
+        // {A} admits immediately (no outstanding stops).
+        manager.update(vec![generation(1, &a)]);
+        assert_eq!(count(&a), 1, "A should be admitted");
+
+        // {B}: A's stop is requested; B defers behind the barrier. {C}
+        // arrives before A quiesces (no executor turn has processed the
+        // abort): B's pending admission is superseded — nothing is stored,
+        // so nothing of B survives.
+        manager.update(vec![generation(2, &b)]);
+        manager.update(vec![generation(3, &c)]);
+        assert_eq!(count(&b), 0, "B must not be admitted before quiescence");
+        assert_eq!(count(&c), 0, "C must not be admitted before quiescence");
+
+        // A quiesces (the executor processes the abort).
+        wait_until(
+            || {
+                manager
+                    .stops
+                    .stopping
+                    .lock()
+                    .expect("tracker lock")
+                    .is_empty()
+            },
+            "A should quiesce once the executor runs",
+        )
+        .await;
+
+        // The next re-evaluation reads the then-current state — {C} — and
+        // admits it. B's spawner was never invoked.
+        manager.update(vec![generation(3, &c)]);
+        assert_eq!(count(&c), 1, "the post-quiescence re-evaluation admits C");
+        assert_eq!(count(&b), 0, "the superseded B spawner is never invoked");
+        assert_eq!(count(&a), 1, "A was admitted exactly once");
+
+        manager.shutdown();
+    }
+
     #[tokio::test]
     async fn test_subscription_manager_subscription_changes_based_on_state() -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1197,9 +1427,19 @@ mod tests {
         let msg = timeout(Duration::from_millis(100), rx.recv()).await?;
         assert_eq!(msg, Some(100));
 
-        // Switch to subscription 2
+        // Switch to subscription 2. The stop is requested immediately, but
+        // the replacement's admission waits for mock1's task to quiesce
+        // (RFC 0012 INV-SE3) and executes only at a re-evaluation
+        // (INV-SE5) — here the follow-up `update` stands in for the frame
+        // pass the runtime's quiescence dirty signal would trigger.
         manager.update(vec![Subscription::new(mock2.clone())]);
+        assert_eq!(
+            mock2.receiver_count(),
+            0,
+            "replacement admission must wait behind the quiescence barrier"
+        );
         wait_for_mock_receivers(&mock1, 0).await;
+        manager.update(vec![Subscription::new(mock2.clone())]);
         wait_for_mock_receivers(&mock2, 1).await;
 
         // mock1 should no longer work (no receivers)

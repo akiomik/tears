@@ -8,6 +8,7 @@
 use std::future::pending;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 
 use crate::cadence::next_anchor_phase_deadline;
@@ -28,6 +29,14 @@ pub(super) struct FrameScheduler {
     /// runtime (`Runtime` construction precedes `block_on`).
     schedule: Option<FrameSchedule>,
     pub(super) pending: PendingWork,
+    /// The message-independent re-evaluation trigger (RFC 0012 INV-SE5,
+    /// prototype): the subscription manager bumps this watch when a run
+    /// stopped by a steady-state re-evaluation quiesces. The driver records
+    /// the dirt itself on observing the signal — a conforming mechanism
+    /// choice (INV-SE5 leaves the recording task unpinned). Versioned, so a
+    /// signal that fires while the loop is busy elsewhere is picked up on
+    /// the next frame-branch poll rather than lost.
+    quiescence: watch::Receiver<u64>,
 }
 
 /// The frame cadence: the phase-defining anchor and the next frame deadline.
@@ -38,8 +47,10 @@ struct FrameSchedule {
 }
 
 impl FrameScheduler {
-    /// Creates a frame scheduler with the given target frame rate.
-    pub(super) fn new(frame_rate: FrameRate) -> Self {
+    /// Creates a frame scheduler with the given target frame rate and the
+    /// subscription manager's quiescence watch (the second dirty source,
+    /// RFC 0012 INV-SE5).
+    pub(super) fn new(frame_rate: FrameRate, quiescence: watch::Receiver<u64>) -> Self {
         Self {
             // `frame_duration` divides a one-second `Duration` directly so
             // the period is exact (e.g. 60 FPS -> 16.667ms) instead of
@@ -47,6 +58,7 @@ impl FrameScheduler {
             period: frame_rate.frame_duration(),
             schedule: None,
             pending: PendingWork::new(),
+            quiescence,
         }
     }
 
@@ -81,22 +93,39 @@ impl FrameScheduler {
         self.pending.take_subscriptions_dirty()
     }
 
-    /// Resolves at the next frame boundary, but only when work is pending.
+    /// Resolves at the next frame boundary, but only when work is pending or
+    /// a stopped subscription's quiescence signals for a re-evaluation.
     ///
-    /// If no work is pending, this future parks forever. In the runtime's
-    /// `select!` loop that is intentional: another branch processes a message,
-    /// marks work pending, the loop iterates, and this future is recreated so it
-    /// re-checks the pending flags before awaiting the interval.
+    /// If no work is pending, this future parks on the quiescence watch
+    /// (RFC 0012 INV-SE5's wake-capable event) instead of unconditionally
+    /// forever: the quiescence of a task stopped by a steady-state
+    /// re-evaluation marks subscriptions dirty and wakes the parked loop, so
+    /// the next frame pass can re-evaluate against the then-current state.
+    /// Message-driven work still preempts the park through the event loop's
+    /// other branches: they process a message, mark work pending, the loop
+    /// iterates, and this future is recreated so it re-checks the pending
+    /// flags before awaiting the interval.
     ///
-    /// This relies on the runtime's current single-task ownership invariant:
-    /// only the runtime task mutates [`PendingWork`] while handling another
-    /// `select!` branch. A future parked here does not register a wake for later
-    /// pending-flag changes. If pending work is ever allowed to be marked from a
-    /// different task, this implementation would risk losing that wake and must
-    /// be replaced with an explicitly notified design.
+    /// Pending-flag mutation still relies on the runtime's single-task
+    /// ownership invariant (only the runtime task mutates [`PendingWork`]);
+    /// the cross-task signal is exactly the versioned watch, which loses no
+    /// wake that fires while this future is not being polled.
     pub(super) async fn next_work_frame(&mut self) {
+        // Busy-loop half of INV-SE5: pick up a quiescence signal that arrived
+        // while other branches were running, before deciding whether to park.
+        if self.quiescence.has_changed().unwrap_or(false) {
+            self.quiescence.borrow_and_update();
+            self.pending.mark_subscriptions_dirty();
+        }
         if !self.has_pending_work() {
-            pending::<()>().await;
+            // Parked half: wake on the next quiescence signal. A closed watch
+            // means the manager is gone (teardown in progress) — park forever,
+            // as the pre-0012 scheduler did unconditionally.
+            if self.quiescence.changed().await.is_ok() {
+                self.pending.mark_subscriptions_dirty();
+            } else {
+                pending::<()>().await;
+            }
         }
 
         // Frame deadlines are anchor-phase boundaries (`cadence`), not
@@ -146,9 +175,19 @@ mod tests {
             .expect("frame rate must be valid")
     }
 
+    /// A scheduler with a live (never-bumped) quiescence watch, so the
+    /// pre-0012 parking behavior is what these cadence tests observe.
+    fn test_scheduler(rate: u32) -> (watch::Sender<u64>, FrameScheduler) {
+        let (quiesce_tx, quiesce_rx) = watch::channel(0);
+        (
+            quiesce_tx,
+            FrameScheduler::new(frame_rate(rate), quiesce_rx),
+        )
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn next_work_frame_parks_while_idle() {
-        let mut scheduler = FrameScheduler::new(frame_rate(60));
+        let (_quiesce_tx, mut scheduler) = test_scheduler(60);
         scheduler.take_redraw();
 
         let result = timeout(Duration::from_secs(1), scheduler.next_work_frame()).await;
@@ -161,7 +200,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn next_work_frame_is_ready_immediately_after_idle_work_arrives() {
-        let mut scheduler = FrameScheduler::new(frame_rate(60));
+        let (_quiesce_tx, mut scheduler) = test_scheduler(60);
 
         // Consume the initial redraw frame and drain it so the scheduler reaches
         // the idle state under test.
@@ -192,7 +231,7 @@ mod tests {
     // where Skip works and either implementation passes).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn stalled_frames_do_not_replay_a_catch_up_burst() {
-        let mut scheduler = FrameScheduler::new(frame_rate(500));
+        let (_quiesce_tx, mut scheduler) = test_scheduler(500);
 
         // First frame: due immediately; anchors the cadence.
         scheduler.record_redraw(true);
@@ -229,7 +268,7 @@ mod tests {
     // ("now + period" per call) drifts here and fails.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dropping_a_pending_frame_future_preserves_the_deadline() {
-        let mut scheduler = FrameScheduler::new(frame_rate(250));
+        let (_quiesce_tx, mut scheduler) = test_scheduler(250);
 
         scheduler.record_redraw(true);
         scheduler.next_work_frame().await;
@@ -261,7 +300,7 @@ mod tests {
     // the next boundary can be less than one period away and still fires.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn post_stall_cadence_resumes_on_the_anchor_phase() {
-        let mut scheduler = FrameScheduler::new(frame_rate(250));
+        let (_quiesce_tx, mut scheduler) = test_scheduler(250);
 
         scheduler.record_redraw(true);
         scheduler.next_work_frame().await;

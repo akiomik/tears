@@ -348,8 +348,14 @@ impl<App: Application> Runtime<App> {
             config.keyed_channel_capacity,
         );
         // INV-C5: the scheduler is paced by the frame rate the caller supplied
-        // to `RuntimeConfig::new`, never a hardcoded one.
-        let scheduler = FrameScheduler::new(config.frame_rate);
+        // to `RuntimeConfig::new`, never a hardcoded one. The quiescence watch
+        // is the message-independent re-evaluation trigger (RFC 0012 INV-SE5
+        // prototype): a stopped subscription's quiescence wakes the frame
+        // branch.
+        let scheduler = FrameScheduler::new(
+            config.frame_rate,
+            core.subscription_manager.quiescence_watch(),
+        );
 
         Self {
             core,
