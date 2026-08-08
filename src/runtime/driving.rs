@@ -16,12 +16,13 @@
 //!   tells the script when the resulting phase has completed;
 //! - **producer progress / enqueue arbitration**: real producer tasks (spawned
 //!   through the production spawn paths) are gated inside their
-//!   application-supplied effect and source bodies. Releasing several gates
-//!   within one synchronous section makes the producers simultaneously
-//!   runnable, and the release order is the wake order the deterministic
-//!   current-thread executor serves — the scheduling decision H-2 (i) names,
-//!   scripted at the host level. This controls readiness supply only — no
-//!   manual polling, no direct ingestion, no scheduler instrumentation.
+//!   application-supplied effect and source bodies, and — for enqueue
+//!   ordering — at the crate's send-intent seam (`runtime::send_gate`):
+//!   producers parked at their intents proceed only when the script grants
+//!   them, so the enqueue order among simultaneously ready producers is the
+//!   scripted grant order by construction, independent of any executor
+//!   scheduling order (which Tokio does not guarantee). No manual polling,
+//!   no direct ingestion, no scheduler instrumentation.
 //!
 //! Tests never claim the scripted order as a production ordering guarantee:
 //! production arbitration stays the unbiased select (RFC 0006 INV-L4) and is
@@ -59,6 +60,8 @@ use super::core::RuntimeCore;
 use super::frame_rate::FrameRate;
 use super::frame_scheduler::FrameScheduler;
 use super::load::{Channel, LoadObserver};
+use super::send_gate::SendGate;
+use super::send_gate::scripted::scripted as scripted_send_gate;
 use super::{KernelArbiter, KernelBranch, Runtime};
 
 // ---------------------------------------------------------------------------
@@ -349,10 +352,11 @@ fn parked_command(dropped: Arc<AtomicBool>) -> Command<u32> {
     }))
 }
 
-/// A gated one-message command: the real producer task parks on the gate,
-/// and logs `enqueue:{tag}:{value}` in the same poll that sends the message
-/// (unbounded sends complete synchronously), so the log order is the enqueue
-/// order.
+/// A gated one-message command: the real producer task parks on the oneshot
+/// gate, then logs `enqueue:{tag}:{value}` when its stream yields the
+/// message. Under the production send gate the send completes in the same
+/// poll (unbounded), so the log marks the enqueue; under a scripted send
+/// gate the log marks the send intent, and the enqueue follows the grant.
 fn gated_message(
     gate: oneshot::Receiver<()>,
     value: u32,
@@ -864,16 +868,21 @@ impl Application for ArbApp {
     }
 }
 
-/// One scripted run: two real producer tasks made ready in scripted order
-/// (face i), then the input and frame branches both ready and taken in
-/// scripted order (face ii). Returns the full observation sequence.
+/// One scripted run: two real producer tasks brought to their send intents
+/// simultaneously and granted in scripted order (face i), then the input and
+/// frame branches both ready and taken in scripted order (face ii). Returns
+/// the full observation sequence.
 async fn s3_run(a_first: bool, frame_first: bool) -> Vec<String> {
     let log = ObsLog::default();
     let mock = MockSource::new();
     let (gate_a_tx, gate_a_rx) = oneshot::channel();
     let (gate_b_tx, gate_b_rx) = oneshot::channel();
-    let runtime =
-        Runtime::<ArbApp>::with_config((log.clone(), mock.clone(), gate_a_rx, gate_b_rx), config());
+    let (send_gate, sends) = scripted_send_gate();
+    let runtime = Runtime::<ArbApp>::with_config_gated(
+        (log.clone(), mock.clone(), gate_a_rx, gate_b_rx),
+        &config(),
+        send_gate,
+    );
     let mut terminal = test_terminal();
     let (arbiter, mut script) = scripted();
     let run = runtime.run_driven(&mut terminal, arbiter);
@@ -882,41 +891,66 @@ async fn s3_run(a_first: bool, frame_first: bool) -> Vec<String> {
         script.synchronized().await;
         settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
 
-        // Spawn both real producer tasks; they park on their gates.
-        for trigger in [100u32, 101] {
+        // Spawn both real producer tasks; they park on their oneshot gates
+        // before reaching a send intent. Their send-gate indices are the
+        // registration counts captured at each spawn (spawns are synchronous
+        // in the dispatch phase, so the mapping is deterministic), and both
+        // are held before their gates open, so neither can pass the seam
+        // ungranted.
+        let mut producer_indices = [0usize; 2];
+        for (slot, trigger) in [100u32, 101].into_iter().enumerate() {
             mock.emit(trigger).expect("forwarder should be subscribed");
             settle_until(
                 || log.contains(&format!("enqueue:sub:{trigger}")),
                 "spawn trigger enqueued",
             )
             .await;
+            let before = sends.tasks();
             script.step(Directive::Input).await;
+            assert_eq!(
+                sends.tasks(),
+                before + 1,
+                "the spawn registers one producer"
+            );
+            producer_indices[slot] = before;
+            sends.hold(before);
         }
+        let [producer_a, producer_b] = producer_indices;
 
-        // Face (i): both producers become ready SIMULTANEOUSLY — both gates
-        // are released within one synchronous section (no await between), so
-        // both tasks are runnable and neither has made any progress when the
-        // driver next yields. From that simultaneous-ready state the enqueue
-        // order is decided by executor scheduling (H-2 (i)); the driver
-        // scripts that decision through the wake order it hands the
-        // deterministic current-thread executor, and one settle then lets
-        // both run to completion. No production code is instrumented: the
-        // wake order is host-level input to the same executor the producers
-        // always run on.
-        let (first_gate, second_gate) = if a_first {
-            (gate_a_tx, gate_b_tx)
-        } else {
-            (gate_b_tx, gate_a_tx)
-        };
-        first_gate
+        // Face (i): release both oneshot gates; both producers run to their
+        // send intents and park at the seam — the simultaneous-ready state
+        // (both at intent, neither enqueued). From here the enqueue order is
+        // the scripted grant order BY CONSTRUCTION: only a granted producer
+        // can pass the seam, so no executor scheduling order — guaranteed or
+        // not — can reorder the enqueues (Tokio pins no task scheduling
+        // order; nothing here relies on one).
+        gate_a_tx
             .send(())
-            .expect("first producer should be parked on its gate");
-        second_gate
+            .expect("producer A should be parked on its gate");
+        gate_b_tx
             .send(())
-            .expect("second producer should be parked on its gate");
+            .expect("producer B should be parked on its gate");
         settle_until(
-            || log.contains("enqueue:cmd:1") && log.contains("enqueue:cmd:2"),
-            "both simultaneously ready producers enqueued",
+            || sends.at_intent(producer_a) && sends.at_intent(producer_b),
+            "both producers should be parked at their send intents",
+        )
+        .await;
+
+        let (first, second) = if a_first {
+            (producer_a, producer_b)
+        } else {
+            (producer_b, producer_a)
+        };
+        sends.grant(first);
+        settle_until(
+            || sends.consumed(first) == 1,
+            "first scripted grant consumed",
+        )
+        .await;
+        sends.grant(second);
+        settle_until(
+            || sends.consumed(second) == 1,
+            "second scripted grant consumed",
         )
         .await;
 
@@ -976,23 +1010,16 @@ async fn s3_scripted_readiness_and_arbitration_replay_identically() {
         "the flipped kernel script must also replay identically"
     );
 
-    // Face (i): the enqueue order and the delivered order follow the
-    // producer script.
-    assert!(
-        position(&ab_frame, "enqueue:cmd:1") < position(&ab_frame, "enqueue:cmd:2"),
-        "producer A must enqueue first when scripted first"
-    );
-    assert!(
-        position(&ba_frame, "enqueue:cmd:2") < position(&ba_frame, "enqueue:cmd:1"),
-        "producer B must enqueue first when scripted first"
-    );
+    // Face (i): the delivered order (the shared channel's FIFO) follows the
+    // scripted grant order — enqueue order by construction, since only a
+    // granted producer can pass the send-intent seam.
     assert!(
         position(&ab_frame, "update:1") < position(&ab_frame, "update:2"),
-        "delivery must follow the scripted enqueue order"
+        "delivery must follow the scripted grant order"
     );
     assert!(
         position(&ba_frame, "update:2") < position(&ba_frame, "update:1"),
-        "delivery must follow the flipped scripted enqueue order"
+        "delivery must follow the flipped scripted grant order"
     );
 
     // Face (ii): the frame/input interleaving follows the kernel script.
@@ -1394,18 +1421,17 @@ impl Application for BlockedApp {
     }
 }
 
-// H-5 series "send failure", full-topology half. Owner contract (RFC 0006
-// §4.3 "Shutdown" + RFC 0011 §4.4): send failure is a teardown-time
-// phenomenon — the runtime-owned receivers live for the whole run — and a
-// producer that cannot complete its send terminates at teardown, by
-// cancellation or by observing the closed channel, converging on the same
-// two-stage postcondition. In the full topology every receiver-drop site
-// also cancels its producers within the same synchronous section, and a
-// canceled task is never polled again, so the closure-observation arm is
-// exercised at the manager layer (next test); here the end-to-end route
-// drives blocked senders through teardown: tasks reclaimed (drop flag),
-// bookkeeping reclaimed (all gauges zero, `blocked` included), nothing
-// delivered.
+// H-5 series "send failure (shutdown-scoped closure)", layer (a) of the
+// frozen two-layer verification. Classification (frozen pack row): RFC
+// 0006's normative closure-observation guarantee (§4.3 "Shutdown") is
+// shutdown-scoped; no independent steady-state receiver failure exists —
+// closure always occurs coupled to teardown or to cancellation (keyed
+// cancel/replacement drops the receiver and cancels the producer in one
+// synchronous section; the cancellation side's closure verification is
+// owned by S1). Here the end-to-end route drives blocked senders through
+// teardown: tasks reclaimed (drop flag), bookkeeping reclaimed (all gauges
+// zero, `blocked` included), nothing delivered — the two-stage
+// postcondition. The end-to-end `Err` arm is not required by the row.
 #[tokio::test(start_paused = true)]
 async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
@@ -1467,17 +1493,18 @@ async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
     );
 }
 
-// H-5 series "send failure", closure-observation half. RFC 0006 §4.3
-// ("Shutdown"): "senders blocked in `send` observe the closed channel and
-// terminate their tasks." This arm is a cross-thread fallback in the full
-// topology (closure there always travels with cancellation in one
-// synchronous section, and a canceled task is never polled again), so it is
-// driven at the manager layer: a real `SubscriptionManager`, the real
-// forwarder task body on the real spawn path, a real bounded shared-class
-// channel — with the test owning the receiver in the core's stead. Dropping
-// the receiver WITHOUT any abort makes the blocked send resolve with an
-// error, and the forwarder terminates on its own, releasing its blocked
-// counter and its subscription gauge.
+// H-5 series "send failure (shutdown-scoped closure)", layer (b) of the
+// frozen two-layer verification: the closure-observation arm itself. RFC
+// 0006 §4.3 ("Shutdown"): "senders blocked in `send` observe the closed
+// channel and terminate their tasks." In the full topology closure always
+// arrives coupled to teardown or cancellation (a canceled task is never
+// polled again), so the arm is a cross-thread window there; the frozen row
+// requires it at the component/manager layer: a real `SubscriptionManager`,
+// the real forwarder task body on the real spawn path, a real bounded
+// shared-class channel — with the test owning the receiver in the core's
+// stead. Dropping the receiver WITHOUT any abort makes the blocked send
+// resolve with an error, and the forwarder terminates on its own, releasing
+// its blocked counter and its subscription gauge.
 #[tokio::test(start_paused = true)]
 async fn s6_closed_channel_send_failure_terminates_the_real_forwarder() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
@@ -1485,7 +1512,7 @@ async fn s6_closed_channel_send_failure_terminates_the_real_forwarder() {
     let observer = LoadObserver::default();
     let (msg_tx, msg_rx) =
         channel::channel_observed(NonZeroUsize::new(1), Channel::Shared, observer.clone());
-    let mut manager = SubscriptionManager::new(msg_tx, observer);
+    let mut manager = SubscriptionManager::new(msg_tx, observer, SendGate::production());
     let mock: MockSource<u32> = MockSource::new();
 
     manager.update(vec![Subscription::new(mock.clone())]);

@@ -24,6 +24,7 @@ use crate::subscription::SubscriptionManager;
 use super::app_input::AppInputs;
 use super::channel;
 use super::load::{Channel, LoadObserver};
+use super::send_gate::SendGate;
 
 /// The runtime's owned execution state for a single [`Application`] run.
 ///
@@ -63,6 +64,9 @@ pub(super) struct RuntimeCore<App: Application> {
     /// into every producer (senders, subscriptions, keyed commands) so their
     /// gauge updates aggregate; the batch event is emitted from here.
     pub(super) observer: LoadObserver,
+    /// The send-intent arbitration seam, cloned per spawned producer
+    /// (production: immediate grants).
+    pub(super) send_gate: SendGate,
     /// Running command tasks.
     ///
     /// Kept so command tasks can be aborted on shutdown, and — because a
@@ -89,7 +93,7 @@ impl<App: Application> RuntimeCore<App> {
     #[cfg(test)]
     #[must_use]
     pub(super) fn new(flags: App::Flags) -> Self {
-        Self::with_capacities(flags, None, None)
+        Self::with_capacities(flags, None, None, SendGate::production())
     }
 
     /// Creates the runtime core with the given channel capacities.
@@ -110,13 +114,20 @@ impl<App: Application> RuntimeCore<App> {
         flags: App::Flags,
         app_channel_capacity: Option<NonZeroUsize>,
         keyed_channel_capacity: Option<NonZeroUsize>,
+        send_gate: SendGate,
     ) -> Self {
         let observer = LoadObserver::default();
         let (msg_tx, msg_rx) =
             channel::channel_observed(app_channel_capacity, Channel::Shared, observer.clone());
-        let app_inputs = AppInputs::new(msg_rx, keyed_channel_capacity, observer.clone());
+        let app_inputs = AppInputs::new(
+            msg_rx,
+            keyed_channel_capacity,
+            observer.clone(),
+            send_gate.clone(),
+        );
         let (quit_tx, quit_rx) = mpsc::unbounded_channel();
-        let subscription_manager = SubscriptionManager::new(msg_tx.clone(), observer.clone());
+        let subscription_manager =
+            SubscriptionManager::new(msg_tx.clone(), observer.clone(), send_gate.clone());
 
         // Initialize the application with flags
         let (app, init_cmd) = App::new(flags);
@@ -129,6 +140,7 @@ impl<App: Application> RuntimeCore<App> {
             quit_rx,
             subscription_manager,
             observer,
+            send_gate,
             command_tasks: JoinSet::new(),
         };
 
@@ -170,6 +182,10 @@ impl<App: Application> RuntimeCore<App> {
 
             let msg_tx = self.msg_tx.clone();
             let quit_tx = self.quit_tx.clone();
+            // The send-intent seam handle for this producer task (production:
+            // immediate grants; registration order is the deterministic spawn
+            // order).
+            let task_gate = self.send_gate.register_task();
             // Raise the `unkeyed_commands` gauge for the task's lifetime; the
             // guard lowers it on completion or abort (RFC 0006 §4.4).
             let command_guard = self.observer.track_unkeyed_command();
@@ -192,6 +208,9 @@ impl<App: Application> RuntimeCore<App> {
                     while let Some(action) = stream.next().await {
                         match action {
                             Action::Message(msg) => {
+                                // Send intent reached: pass the arbitration
+                                // seam (immediate in production).
+                                task_gate.granted().await;
                                 // Awaiting applies backpressure in bounded mode (the
                                 // command task waits for shared-channel capacity;
                                 // INV-L2) and completes immediately in unbounded mode

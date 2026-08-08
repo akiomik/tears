@@ -14,6 +14,7 @@ use crate::panic::contained_producer;
 
 use super::channel;
 use super::load::{Channel, LoadObserver};
+use super::send_gate::SendGate;
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) enum CommandOutput<Msg> {
@@ -243,6 +244,9 @@ pub(super) struct KeyedCommands<Msg: Send + 'static> {
     entries: StreamMap<CommandId, KeyedEntry<Msg>>,
     tasks: JoinSet<TaskExit>,
     next_token: u64,
+    /// The send-intent arbitration seam, cloned per spawned keyed producer
+    /// (production: immediate grants).
+    send_gate: SendGate,
     /// Per-command private-channel capacity: `None` keeps each keyed channel
     /// unbounded, `Some(n)` bounds each one to `n` independently — never a
     /// shared pool (INV-L9).
@@ -254,11 +258,16 @@ pub(super) struct KeyedCommands<Msg: Send + 'static> {
 }
 
 impl<Msg: Send + 'static> KeyedCommands<Msg> {
-    pub(super) fn new(keyed_capacity: Option<NonZeroUsize>, observer: LoadObserver) -> Self {
+    pub(super) fn new(
+        keyed_capacity: Option<NonZeroUsize>,
+        observer: LoadObserver,
+        send_gate: SendGate,
+    ) -> Self {
         Self {
             entries: StreamMap::new(),
             tasks: JoinSet::new(),
             next_token: 0,
+            send_gate,
             keyed_capacity,
             observer,
         }
@@ -302,6 +311,9 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
         let (output_tx, output_rx) =
             channel::channel_observed(self.keyed_capacity, Channel::Keyed, self.observer.clone());
         let task_id = id.clone();
+        // The send-intent seam handle for this keyed producer (production:
+        // immediate grants).
+        let task_gate = self.send_gate.register_task();
 
         let abort = self.tasks.spawn(async move {
             // `contained_producer` marks the body so the panic hook leaves the
@@ -312,6 +324,9 @@ impl<Msg: Send + 'static> KeyedCommands<Msg> {
                 while let Some(action) = stream.next().await {
                     match action {
                         Action::Message(message) => {
+                            // Send intent reached: pass the arbitration seam
+                            // (immediate in production).
+                            task_gate.granted().await;
                             // Awaiting the send applies backpressure in bounded
                             // mode (the producer waits for capacity; INV-L2) and
                             // completes immediately in unbounded mode (INV-L6).
@@ -653,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn pending_keyed_poll_wakes_after_output() {
         let id = CommandId::new("output-wake");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         let output_tx = insert_pending_receiver(&mut manager, id.clone());
         let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waker = waker_ref(&wake_counter);
@@ -681,7 +696,7 @@ mod tests {
     #[tokio::test]
     async fn pending_keyed_poll_wakes_after_sender_closure() {
         let id = CommandId::new("closure-wake");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         let output_tx = insert_pending_receiver(&mut manager, id.clone());
         let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waker = waker_ref(&wake_counter);
@@ -708,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_in_flight_drops_finished_buffered_output() {
         let id = CommandId::new("search");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -730,7 +745,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_cancel_is_strict_and_idempotent() {
         let id = CommandId::new("search");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -759,7 +774,7 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = AbortGuard(Arc::clone(&dropped));
         let (started_tx, started_rx) = oneshot::channel();
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -788,7 +803,7 @@ mod tests {
     #[tokio::test]
     async fn keep_in_flight_preserves_finished_buffered_output() {
         let id = CommandId::new("submit");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -810,7 +825,7 @@ mod tests {
     async fn keep_in_flight_rechecks_a_closed_empty_receiver_before_task_exit() {
         let id = CommandId::new("submit");
         let token = RunToken(0);
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         // Model the panic-reporting window: the task still has no published
         // TaskExit, but unwinding has already dropped its output sender.
         let (output_tx, output_rx) = channel::channel(None);
@@ -843,7 +858,7 @@ mod tests {
     #[tokio::test]
     async fn delivering_the_closed_senders_last_item_releases_the_id_for_retry() {
         let id = CommandId::new("submit");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -866,7 +881,7 @@ mod tests {
     #[tokio::test]
     async fn keep_in_flight_does_not_spawn_while_sender_is_open() {
         let id = CommandId::new("submit");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -887,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn keyed_quit_is_delivered_after_the_same_runs_earlier_output() {
         let id = CommandId::new("save-then-quit");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -906,7 +921,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_buffered_quit_suppresses_it() {
         let id = CommandId::new("quit");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -922,7 +937,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancelling_suppresses_a_pending_timeout_message() {
         let id = CommandId::new("timeout");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         let command = Command::future(pending())
             .timeout(Duration::from_secs(5), || 99)
             .cancellable(id.clone());
@@ -953,7 +968,7 @@ mod tests {
             },
             |_| 1,
         );
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -993,7 +1008,7 @@ mod tests {
             },
             |result| result.expect("second retry would succeed"),
         );
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -1013,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn stale_completion_cannot_remove_or_mutate_a_successor() {
         let id = CommandId::new("search");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
@@ -1048,7 +1063,7 @@ mod tests {
             .with_level(Level::ERROR);
         let _guard = recorder.set_default();
         let id = CommandId::new("panic");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         let (event_count, contains_id) = with_silent_panic_hook(async {
             manager.spawn(
                 id.clone(),
@@ -1100,7 +1115,7 @@ mod tests {
         );
 
         let id = CommandId::new("panic-restore");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id,
             CancelPolicy::CancelInFlight,
@@ -1140,7 +1155,7 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = AbortGuard(Arc::clone(&dropped));
         let id = CommandId::new("running");
-        let mut manager = KeyedCommands::new(None, LoadObserver::default());
+        let mut manager = KeyedCommands::new(None, LoadObserver::default(), SendGate::production());
         manager.spawn(
             id,
             CancelPolicy::CancelInFlight,
@@ -1179,6 +1194,7 @@ mod tests {
         let mut manager = KeyedCommands::new(
             Some(NonZeroUsize::new(1).expect("non-zero")),
             LoadObserver::default(),
+            SendGate::production(),
         );
 
         // The guard rides the stream's state so its drop witnesses the parked
@@ -1227,6 +1243,7 @@ mod tests {
         let mut manager = KeyedCommands::new(
             Some(NonZeroUsize::new(1).expect("non-zero")),
             LoadObserver::default(),
+            SendGate::production(),
         );
 
         manager.spawn(
@@ -1270,6 +1287,7 @@ mod tests {
         let mut manager = KeyedCommands::new(
             Some(NonZeroUsize::new(1).expect("non-zero")),
             LoadObserver::default(),
+            SendGate::production(),
         );
         manager.spawn(
             id.clone(),

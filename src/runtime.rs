@@ -122,6 +122,10 @@ mod keyed_commands;
 // `subscription` and the channel/keyed producers share.
 pub mod load;
 mod pending_work;
+// `pub` for the same crate-capping reason as `channel` above: the send-intent
+// arbitration seam is shared by every producer body, including the
+// subscription forwarder.
+pub mod send_gate;
 
 use app_input::AppInput;
 use config::RuntimeConfig;
@@ -342,10 +346,18 @@ impl<App: Application> Runtime<App> {
         // The single channel-construction path (RFC 0006 INV-L6): unset
         // capacities build the unchanged unbounded channels, `Some(n)` bound
         // them.
+        Self::build(flags, &config, send_gate::SendGate::production())
+    }
+
+    /// The single construction body behind [`with_config`](Self::with_config)
+    /// (production send gate) and the test-only gated constructor: identical
+    /// path, parameterized only by the send-intent seam implementation.
+    fn build(flags: App::Flags, config: &RuntimeConfig, gate: send_gate::SendGate) -> Self {
         let core = RuntimeCore::with_capacities(
             flags,
             config.app_channel_capacity,
             config.keyed_channel_capacity,
+            gate,
         );
         // INV-C5: the scheduler is paced by the frame rate the caller supplied
         // to `RuntimeConfig::new`, never a hardcoded one. The quiescence watch
@@ -362,6 +374,18 @@ impl<App: Application> Runtime<App> {
             scheduler,
             batch_max_messages: config.batch_max_messages,
         }
+    }
+
+    /// Test-only construction with a scripted send-intent gate: the same
+    /// [`build`](Self::build) path `with_config` uses, differing only in the
+    /// seam implementation (gate §H-1: the construction path is shared).
+    #[cfg(test)]
+    fn with_config_gated(
+        flags: App::Flags,
+        config: &RuntimeConfig,
+        gate: send_gate::SendGate,
+    ) -> Self {
+        Self::build(flags, config, gate)
     }
 
     #[cfg(test)]
