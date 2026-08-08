@@ -16,9 +16,11 @@
 //!   tells the script when the resulting phase has completed;
 //! - **producer progress / enqueue arbitration**: real producer tasks (spawned
 //!   through the production spawn paths) are gated inside their
-//!   application-supplied effect and source bodies, and the script releases
-//!   the gates in the scripted order on the current-thread test executor,
-//!   settling between releases. This controls readiness supply only — no
+//!   application-supplied effect and source bodies. Releasing several gates
+//!   within one synchronous section makes the producers simultaneously
+//!   runnable, and the release order is the wake order the deterministic
+//!   current-thread executor serves — the scheduling decision H-2 (i) names,
+//!   scripted at the host level. This controls readiness supply only — no
 //!   manual polling, no direct ingestion, no scheduler instrumentation.
 //!
 //! Tests never claim the scripted order as a production ordering guarantee:
@@ -48,13 +50,15 @@ use tokio::time::{Duration, timeout};
 use crate::application::Application;
 use crate::command::{Command, CommandId};
 use crate::subscription::mock::MockSource;
-use crate::subscription::{Subscription, SubscriptionSource};
+use crate::subscription::{Subscription, SubscriptionManager, SubscriptionSource};
 use crate::test_support::{TraceRecorder, with_silent_panic_hook};
 
+use super::channel;
 use super::config::RuntimeConfig;
 use super::core::RuntimeCore;
 use super::frame_rate::FrameRate;
 use super::frame_scheduler::FrameScheduler;
+use super::load::{Channel, LoadObserver};
 use super::{KernelArbiter, KernelBranch, Runtime};
 
 // ---------------------------------------------------------------------------
@@ -62,8 +66,9 @@ use super::{KernelArbiter, KernelBranch, Runtime};
 // ---------------------------------------------------------------------------
 
 /// One scripted arbitration choice: which kernel branch the driver commits
-/// the kernel to next (gate §H-2 face (ii)).
-#[derive(Clone, Copy, Debug)]
+/// the kernel to next (gate §H-2 face (ii)), or a read-only observation the
+/// driver wants confirmed before it commits.
+#[derive(Clone, Debug)]
 enum Directive {
     /// Await the input branch. The pull itself is the production shared-first
     /// pull over the shared and keyed delivery channels.
@@ -73,6 +78,12 @@ enum Directive {
     Frame,
     /// Await the dedicated quit channel.
     Quit,
+    /// Not a branch: settle until the identified keyed run's private channel
+    /// holds buffered output with its sender closed (the real task sent and
+    /// exited), then acknowledge. Read-only introspection of the production
+    /// bookkeeping at the seam — it supplies no readiness, executes no
+    /// phase, and holds no run state on the test side.
+    AwaitKeyedBuffered(CommandId),
 }
 
 /// Test-side arbitration: commits the kernel to the scripted branch.
@@ -98,30 +109,50 @@ impl<App: Application> KernelArbiter<App> for ScriptedArbiter {
         // failure means the script side has finished (terminal directives
         // do not await further seam visits).
         let _ = self.idle.send(());
-        let Some(directive) = self.directives.recv().await else {
-            // The script ended without a terminal directive: this run is
-            // being torn down by dropping the run future (the abrupt
-            // termination series), so park instead of inventing a branch.
-            loop {
-                pending::<()>().await;
-            }
-        };
-        match directive {
-            Directive::Input => {
-                let input = core
-                    .app_inputs
-                    .next()
-                    .await
-                    .expect("scripted Input directive requires an open input source");
-                KernelBranch::Input(input)
-            }
-            Directive::Frame => {
-                scheduler.next_work_frame().await;
-                KernelBranch::Frame
-            }
-            Directive::Quit => {
-                core.quit_rx.recv().await;
-                KernelBranch::Quit
+        loop {
+            let Some(directive) = self.directives.recv().await else {
+                // The script ended without a terminal directive: this run is
+                // being torn down by dropping the run future (the abrupt
+                // termination series), so park instead of inventing a branch.
+                loop {
+                    pending::<()>().await;
+                }
+            };
+            match directive {
+                Directive::Input => {
+                    let input = core
+                        .app_inputs
+                        .next()
+                        .await
+                        .expect("scripted Input directive requires an open input source");
+                    return KernelBranch::Input(input);
+                }
+                Directive::Frame => {
+                    scheduler.next_work_frame().await;
+                    return KernelBranch::Frame;
+                }
+                Directive::Quit => {
+                    core.quit_rx.recv().await;
+                    return KernelBranch::Quit;
+                }
+                Directive::AwaitKeyedBuffered(id) => {
+                    // Observation prelude, not a branch: yield to the
+                    // executor until the real keyed task has sent (buffered
+                    // output present) and exited (sender closed), then ack
+                    // and await the next directive. Condition-observed, with
+                    // a bound that only turns a hang into a failure.
+                    for _ in 0..10_000 {
+                        if core.app_inputs.has_closed_buffered(&id) {
+                            break;
+                        }
+                        yield_now().await;
+                    }
+                    assert!(
+                        core.app_inputs.has_closed_buffered(&id),
+                        "keyed run {id:?} should have buffered output with its sender closed"
+                    );
+                    let _ = self.idle.send(());
+                }
             }
         }
     }
@@ -162,6 +193,39 @@ impl Script {
         self.directives
             .send(directive)
             .expect("kernel should be awaiting directives");
+    }
+
+    /// Queues a directive without awaiting its completion. Queued directives
+    /// are consumed back-to-back by the kernel with no executor turn between
+    /// a phase's end and the next directive's branch await — the tool for
+    /// parking the kernel on a branch *before* a queued task event (an
+    /// abort's processing) can run. Pair with [`ack`](Self::ack).
+    fn queue(&self, directive: Directive) {
+        self.directives
+            .send(directive)
+            .expect("kernel should be awaiting directives");
+    }
+
+    /// Awaits one seam revisit for a previously [`queue`](Self::queue)d
+    /// directive.
+    async fn ack(&mut self) {
+        self.idle
+            .recv()
+            .await
+            .expect("kernel should return to the arbitration seam");
+    }
+
+    /// Waits until the identified keyed run's output is buffered in its
+    /// private channel with the sender closed (the real task sent and
+    /// exited) — the deterministic buffered-before-cancel observation.
+    async fn await_keyed_buffered(&mut self, id: CommandId) {
+        self.directives
+            .send(Directive::AwaitKeyedBuffered(id))
+            .expect("kernel should be awaiting directives");
+        self.idle
+            .recv()
+            .await
+            .expect("kernel should acknowledge the observation");
     }
 
     /// Asserts the directed branch stays parked: no seam revisit within one
@@ -265,17 +329,6 @@ async fn settle_until(mut condition: impl FnMut() -> bool, what: &str) {
     assert!(condition(), "bounded settle exhausted: {what}");
 }
 
-/// A fixed number of executor turns — enough for every already-ready
-/// single-poll task to complete on the deterministic current-thread
-/// scheduler. Used only where no external observation point exists (a keyed
-/// quit's send has no app-visible probe); the assertion it supports does not
-/// depend on the warm-up having been sufficient.
-async fn drain_ready_tasks() {
-    for _ in 0..32 {
-        yield_now().await;
-    }
-}
-
 /// Sets a drop flag when the producer's effect body is destroyed — the
 /// task-reclamation probe for the termination series.
 struct DropFlag(Arc<AtomicBool>);
@@ -318,14 +371,37 @@ fn gated_message(
     )
 }
 
-/// A subscription source whose stream parks forever while tracking, at
-/// stream-construction (admission) time, how many of its streams are alive
-/// concurrently. `peak` records the maximum concurrency ever observed — the
-/// safe-window probe for the stop/restart series.
-struct GuardedPendingSource {
-    key: u32,
+/// Concurrency probes shared by [`GuardedPendingSource`] instances: how many
+/// admitted streams exist (`starts`), how many are alive right now
+/// (`alive`), and the peak concurrency ever observed (`peak` — the
+/// safe-window probe: it exceeds 1 exactly when a successor was admitted
+/// before its predecessor quiesced).
+#[derive(Clone, Default)]
+struct SourceProbe {
+    starts: Arc<AtomicUsize>,
     alive: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
+}
+
+impl SourceProbe {
+    fn starts(&self) -> usize {
+        self.starts.load(Ordering::SeqCst)
+    }
+
+    fn alive(&self) -> usize {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+/// A subscription source whose stream parks forever while tracking, at
+/// stream-construction (admission) time, its probe's counters.
+struct GuardedPendingSource {
+    key: u32,
+    probe: SourceProbe,
 }
 
 struct AliveGuard(Arc<AtomicUsize>);
@@ -341,9 +417,10 @@ impl SubscriptionSource for GuardedPendingSource {
     type Key = u32;
 
     fn stream(&self) -> BoxStream<'static, u32> {
-        let count = self.alive.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(count, Ordering::SeqCst);
-        let guard = AliveGuard(Arc::clone(&self.alive));
+        self.probe.starts.fetch_add(1, Ordering::SeqCst);
+        let count = self.probe.alive.fetch_add(1, Ordering::SeqCst) + 1;
+        self.probe.peak.fetch_max(count, Ordering::SeqCst);
+        let guard = AliveGuard(Arc::clone(&self.probe.alive));
         Box::pin(stream::poll_fn(move |_| {
             let _keep = &guard;
             Poll::<Option<u32>>::Pending
@@ -534,21 +611,16 @@ async fn s1_cancel_beats_buffered_keyed_output_and_keyed_quit() {
         script.synchronized().await;
         settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
 
-        // Spawn the keyed value command and let its real task buffer both
-        // outputs in its private channel (the enqueue probe logs in the same
-        // poll as each unbounded send).
+        // Spawn the keyed value command and confirm — through the runtime's
+        // own receiver facts — that its real task has buffered both outputs
+        // in its private channel and exited.
         mock.emit(200).expect("forwarder should be subscribed");
         settle_until(|| log.contains("enqueue:sub:200"), "spawn trigger enqueued").await;
         script.step(Directive::Input).await;
-        settle_until(
-            || log.contains("enqueue:kv:1") && log.contains("enqueue:kv:2"),
-            "keyed outputs buffered before cancellation",
-        )
-        .await;
+        script.await_keyed_buffered(CommandId::new("search")).await;
 
-        // Arm the keyed quit and give the ready single-poll task its turns so
-        // the quit is buffered too (no app-visible probe exists for it; the
-        // final assertion does not depend on this warm-up sufficing).
+        // Arm the keyed quit and confirm the same way that the quit is
+        // buffered in its private channel before the cancel is issued.
         mock.emit(201).expect("forwarder should be subscribed");
         settle_until(
             || log.contains("enqueue:sub:201"),
@@ -556,7 +628,7 @@ async fn s1_cancel_beats_buffered_keyed_output_and_keyed_quit() {
         )
         .await;
         script.step(Directive::Input).await;
-        drain_ready_tasks().await;
+        script.await_keyed_buffered(CommandId::new("kquit")).await;
 
         // Cancel both while their outputs sit buffered.
         mock.emit(202).expect("forwarder should be subscribed");
@@ -607,22 +679,20 @@ struct SubSwapApp {
     version: u32,
     mock: MockSource<u32>,
     log: ObsLog,
-    alive: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
+    probe: SourceProbe,
 }
 
 impl Application for SubSwapApp {
     type Message = u32;
-    type Flags = (ObsLog, MockSource<u32>, Arc<AtomicUsize>, Arc<AtomicUsize>);
+    type Flags = (ObsLog, MockSource<u32>, SourceProbe);
 
-    fn new((log, mock, alive, peak): Self::Flags) -> (Self, Command<u32>) {
+    fn new((log, mock, probe): Self::Flags) -> (Self, Command<u32>) {
         (
             Self {
                 version: 1,
                 mock,
                 log,
-                alive,
-                peak,
+                probe,
             },
             Command::none(),
         )
@@ -647,29 +717,26 @@ impl Application for SubSwapApp {
             probed_mock(&self.mock, &self.log),
             Subscription::new(GuardedPendingSource {
                 key: self.version,
-                alive: Arc::clone(&self.alive),
-                peak: Arc::clone(&self.peak),
+                probe: self.probe.clone(),
             }),
         ]
     }
 }
 
-/// Drives one stop-and-replace cycle and returns the peak number of
-/// concurrently alive source streams.
-async fn drive_sub_swap() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+// H-5 series "subscription stop / restart": the B-2 safe window, on the
+// RFC 0012 barrier prototype. A key bump stops generation 1 and desires
+// generation 2; the stopping pass admits nothing (INV-SE3 — the barrier),
+// the quiescence alone admits nothing (INV-SE5 — admission only at a
+// re-evaluation), and the next frame pass — dirtied by the quiescence
+// signal — admits generation 2. Peak stream concurrency never exceeds 1:
+// no successor is admitted before the stopped task quiesced.
+#[tokio::test(start_paused = true)]
+async fn s2_replacement_admission_waits_for_stop_quiescence() {
     let log = ObsLog::default();
     let mock = MockSource::new();
-    let alive = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-    let runtime = Runtime::<SubSwapApp>::with_config(
-        (
-            log.clone(),
-            mock.clone(),
-            Arc::clone(&alive),
-            Arc::clone(&peak),
-        ),
-        config(),
-    );
+    let probe = SourceProbe::default();
+    let runtime =
+        Runtime::<SubSwapApp>::with_config((log.clone(), mock.clone(), probe.clone()), config());
     let mut terminal = test_terminal();
     let (arbiter, mut script) = scripted();
     let run = runtime.run_driven(&mut terminal, arbiter);
@@ -677,26 +744,45 @@ async fn drive_sub_swap() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let drive = async {
         script.synchronized().await;
         // Bootstrap admitted generation 1.
-        assert_eq!(
-            alive.load(Ordering::SeqCst),
-            1,
-            "generation 1 should be admitted"
-        );
+        assert_eq!(probe.starts(), 1, "generation 1 should be admitted");
+        assert_eq!(probe.alive(), 1, "generation 1 should be running");
         settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
 
-        // Bump the key: the next re-evaluation stops generation 1 and admits
-        // generation 2 (a replacement) in the same reconcile pass.
+        // Bump the key, then run the stopping re-evaluation: it stops
+        // generation 1 and must defer generation 2's admission behind the
+        // barrier (INV-SE3).
         mock.emit(77).expect("forwarder should be subscribed");
         settle_until(|| log.contains("enqueue:sub:77"), "bump trigger enqueued").await;
         script.step(Directive::Input).await;
         script.step(Directive::Frame).await;
+        assert_eq!(
+            probe.starts(),
+            1,
+            "the stopping pass must not admit the successor (INV-SE3)"
+        );
 
-        // The stopped generation eventually quiesces.
+        // Generation 1 quiesces; quiescence alone still admits nothing —
+        // admission executes only at a re-evaluation (INV-SE5).
         settle_until(
-            || alive.load(Ordering::SeqCst) == 1,
+            || probe.alive() == 0,
             "the stopped generation should quiesce",
         )
         .await;
+        assert_eq!(
+            probe.starts(),
+            1,
+            "quiescence alone must not admit (INV-SE5: admission only at a re-evaluation)"
+        );
+
+        // The quiescence marked subscriptions dirty (the second dirty
+        // source); the next frame pass re-evaluates and admits generation 2.
+        script.step(Directive::Frame).await;
+        assert_eq!(
+            probe.starts(),
+            2,
+            "the quiescence-dirtied frame pass should admit the successor"
+        );
+        assert_eq!(probe.alive(), 1, "generation 2 should now be running");
 
         mock.emit(99).expect("forwarder should be subscribed");
         settle_until(|| log.contains("enqueue:sub:99"), "quit trigger enqueued").await;
@@ -706,44 +792,13 @@ async fn drive_sub_swap() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
 
     let (run_result, ()) = tokio::join!(run, drive);
     run_result.expect("scripted run should exit cleanly");
-    (alive, peak)
-}
-
-// Evidence row (current behavior, passes today): the successor generation is
-// admitted while the stopped generation's task has not yet quiesced — the
-// replacement's stream is constructed synchronously in the same reconcile
-// pass that aborts its predecessor, so both streams are alive at once
-// (peak = 2). This is the deterministic witness that RFC 0012 §4's
-// quiescence barrier (Accepted, unimplemented) does not hold on current
-// code; the driving surface exposes it without forking any phase.
-#[tokio::test(start_paused = true)]
-async fn s2_replacement_admission_overlaps_stop_quiescence_evidence() {
-    let (alive, peak) = drive_sub_swap().await;
 
     assert_eq!(
-        peak.load(Ordering::SeqCst),
-        2,
-        "current code admits the successor before the stopped task quiesces"
+        probe.peak(),
+        1,
+        "B-2 safe window: a successor must never be admitted before the stopped task quiesced"
     );
-    settle_until(
-        || alive.load(Ordering::SeqCst) == 0,
-        "teardown should reclaim all streams",
-    )
-    .await;
-}
-
-// H-5 series "subscription stop / restart" — the contract expectation
-// (B-2 safe window: no successor admission before the stopped task's
-// quiescence). Fails on current code; see the evidence test above.
-#[tokio::test(start_paused = true)]
-#[ignore = "RFC 0012 §4 quiescence barrier is Accepted but unimplemented: replacement admission currently overlaps the stopped task's quiescence (see s2_replacement_admission_overlaps_stop_quiescence_evidence)"]
-async fn s2_safe_window_holds_expected() {
-    let (_alive, peak) = drive_sub_swap().await;
-
-    assert!(
-        peak.load(Ordering::SeqCst) <= 1,
-        "B-2 safe window: a successor must not be admitted before the stopped task quiesced"
-    );
+    settle_until(|| probe.alive() == 0, "teardown should reclaim all streams").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -838,22 +893,32 @@ async fn s3_run(a_first: bool, frame_first: bool) -> Vec<String> {
             script.step(Directive::Input).await;
         }
 
-        // Face (i): both producers are ready to send to the same shared
-        // channel; the script chooses the enqueue order by releasing the
-        // gates one at a time and settling in between.
-        let (first_gate, first_probe, second_gate, second_probe) = if a_first {
-            (gate_a_tx, "enqueue:cmd:1", gate_b_tx, "enqueue:cmd:2")
+        // Face (i): both producers become ready SIMULTANEOUSLY — both gates
+        // are released within one synchronous section (no await between), so
+        // both tasks are runnable and neither has made any progress when the
+        // driver next yields. From that simultaneous-ready state the enqueue
+        // order is decided by executor scheduling (H-2 (i)); the driver
+        // scripts that decision through the wake order it hands the
+        // deterministic current-thread executor, and one settle then lets
+        // both run to completion. No production code is instrumented: the
+        // wake order is host-level input to the same executor the producers
+        // always run on.
+        let (first_gate, second_gate) = if a_first {
+            (gate_a_tx, gate_b_tx)
         } else {
-            (gate_b_tx, "enqueue:cmd:2", gate_a_tx, "enqueue:cmd:1")
+            (gate_b_tx, gate_a_tx)
         };
         first_gate
             .send(())
             .expect("first producer should be parked on its gate");
-        settle_until(|| log.contains(first_probe), "first scripted enqueue").await;
         second_gate
             .send(())
             .expect("second producer should be parked on its gate");
-        settle_until(|| log.contains(second_probe), "second scripted enqueue").await;
+        settle_until(
+            || log.contains("enqueue:cmd:1") && log.contains("enqueue:cmd:2"),
+            "both simultaneously ready producers enqueued",
+        )
+        .await;
 
         mock.emit(55).expect("forwarder should be subscribed");
         settle_until(|| log.contains("enqueue:sub:55"), "plain message enqueued").await;
@@ -1285,7 +1350,9 @@ async fn s5_driving_application_panic_fails_fast_and_reclaims_producers() {
 // ---------------------------------------------------------------------------
 
 /// Init spawns a keyed producer that overfills its bounded private channel;
-/// the mock forwarder overfills the bounded shared channel.
+/// the mock forwarder overfills the bounded shared channel. The keyed
+/// filler's stream carries a drop flag so its reclamation is directly
+/// observable.
 struct BlockedApp {
     log: ObsLog,
     mock: MockSource<u32>,
@@ -1293,14 +1360,24 @@ struct BlockedApp {
 
 impl Application for BlockedApp {
     type Message = u32;
-    type Flags = (ObsLog, MockSource<u32>);
+    type Flags = (ObsLog, MockSource<u32>, Arc<AtomicBool>);
 
-    fn new((log, mock): Self::Flags) -> (Self, Command<u32>) {
+    fn new((log, mock, kfill_dropped): Self::Flags) -> (Self, Command<u32>) {
         let probe = log.clone();
-        let init = Command::stream(stream::iter([1u32, 2]).map(move |v| {
-            probe.push(format!("enqueue:kfill:{v}"));
-            v
-        }))
+        let guard = DropFlag(kfill_dropped);
+        let init = Command::stream(
+            stream::iter([1u32, 2])
+                .map(move |v| {
+                    probe.push(format!("enqueue:kfill:{v}"));
+                    v
+                })
+                // A never-ready tail that owns the drop flag: the stream (and
+                // with it the flag) lives exactly as long as the real task.
+                .chain(stream::poll_fn(move |_| {
+                    let _keep = &guard;
+                    Poll::<Option<u32>>::Pending
+                })),
+        )
         .cancellable(CommandId::new("kfill"));
         (Self { log, mock }, init)
     }
@@ -1317,25 +1394,33 @@ impl Application for BlockedApp {
     }
 }
 
-// H-5 series "send failure": producers whose sends cannot complete (bounded
-// channels at capacity, receivers about to disappear) are reclaimed with
-// their bookkeeping on teardown — tasks end, the blocked counters fall to
-// zero, and nothing leaks. Note (spike report §S6): every receiver-drop site
-// in the current topology also aborts its producer, so the literal
-// `send(..).is_err()` arm is not deterministically reachable; the
-// reclamation property is driven through blocked sends interrupted by
-// teardown, which is the same recovery obligation.
+// H-5 series "send failure", full-topology half. Owner contract (RFC 0006
+// §4.3 "Shutdown" + RFC 0011 §4.4): send failure is a teardown-time
+// phenomenon — the runtime-owned receivers live for the whole run — and a
+// producer that cannot complete its send terminates at teardown, by
+// cancellation or by observing the closed channel, converging on the same
+// two-stage postcondition. In the full topology every receiver-drop site
+// also cancels its producers within the same synchronous section, and a
+// canceled task is never polled again, so the closure-observation arm is
+// exercised at the manager layer (next test); here the end-to-end route
+// drives blocked senders through teardown: tasks reclaimed (drop flag),
+// bookkeeping reclaimed (all gauges zero, `blocked` included), nothing
+// delivered.
 #[tokio::test(start_paused = true)]
 async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
     let log = ObsLog::default();
     let mock = MockSource::new();
+    let kfill_dropped = Arc::new(AtomicBool::new(false));
     let one = NonZeroUsize::new(1).expect("non-zero");
     let runtime_config = RuntimeConfig::new(frame_rate(60))
         .app_channel_capacity(one)
         .keyed_channel_capacity(one);
-    let runtime = Runtime::<BlockedApp>::with_config((log.clone(), mock.clone()), runtime_config);
+    let runtime = Runtime::<BlockedApp>::with_config(
+        (log.clone(), mock.clone(), Arc::clone(&kfill_dropped)),
+        runtime_config,
+    );
     let mut terminal = test_terminal();
     let (arbiter, mut script) = scripted();
     let run = runtime.run_driven(&mut terminal, arbiter);
@@ -1357,6 +1442,10 @@ async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
             "both producers should be parked mid-send at capacity",
         )
         .await;
+        assert!(
+            !kfill_dropped.load(Ordering::SeqCst),
+            "the blocked keyed producer should still be alive before teardown"
+        );
         script
     };
 
@@ -1368,7 +1457,7 @@ async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
     }
 
     settle_until(
-        || producer_gauges_zero(&recorder),
+        || kfill_dropped.load(Ordering::SeqCst) && producer_gauges_zero(&recorder),
         "blocked producers and their bookkeeping should be reclaimed after the drop",
     )
     .await;
@@ -1376,6 +1465,56 @@ async fn s6_blocked_sends_and_bookkeeping_are_reclaimed_without_leaks() {
         log.updates().is_empty(),
         "no blocked output may be delivered after termination"
     );
+}
+
+// H-5 series "send failure", closure-observation half. RFC 0006 §4.3
+// ("Shutdown"): "senders blocked in `send` observe the closed channel and
+// terminate their tasks." This arm is a cross-thread fallback in the full
+// topology (closure there always travels with cancellation in one
+// synchronous section, and a canceled task is never polled again), so it is
+// driven at the manager layer: a real `SubscriptionManager`, the real
+// forwarder task body on the real spawn path, a real bounded shared-class
+// channel — with the test owning the receiver in the core's stead. Dropping
+// the receiver WITHOUT any abort makes the blocked send resolve with an
+// error, and the forwarder terminates on its own, releasing its blocked
+// counter and its subscription gauge.
+#[tokio::test(start_paused = true)]
+async fn s6_closed_channel_send_failure_terminates_the_real_forwarder() {
+    let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+    let _guard = recorder.set_default();
+    let observer = LoadObserver::default();
+    let (msg_tx, msg_rx) =
+        channel::channel_observed(NonZeroUsize::new(1), Channel::Shared, observer.clone());
+    let mut manager = SubscriptionManager::new(msg_tx, observer);
+    let mock: MockSource<u32> = MockSource::new();
+
+    manager.update(vec![Subscription::new(mock.clone())]);
+    settle_until(|| mock.receiver_count() > 0, "the real forwarder admitted").await;
+
+    // Fill the capacity-1 channel, then block the forwarder mid-send.
+    mock.emit(1).expect("forwarder should be subscribed");
+    mock.emit(2).expect("forwarder should be subscribed");
+    settle_until(
+        || last_gauge(&recorder, "blocked") == Some(1),
+        "the forwarder should be parked mid-send at capacity",
+    )
+    .await;
+
+    // Close the channel with NO cancellation anywhere in flight.
+    drop(msg_rx);
+
+    // The blocked send observes the closure and fails; the forwarder breaks
+    // and its task terminates — no abort was ever issued.
+    settle_until(
+        || {
+            last_gauge(&recorder, "blocked") == Some(0)
+                && last_gauge(&recorder, "subscriptions") == Some(0)
+        },
+        "the forwarder should terminate by observing the closed channel",
+    )
+    .await;
+
+    manager.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,43 +1553,13 @@ impl Application for IdleApp {
     }
 }
 
-/// Drives the finished-but-still-desired cycle up to the point where the
-/// second quiescence has happened and no message is pending, then hands the
-/// script back for the wake probe.
-async fn drive_idle_to_second_quiescence(
-    script: &mut Script,
-    log: &ObsLog,
-    mock: &MockSource<u32>,
-    recorder: &TraceRecorder,
-) {
-    script.synchronized().await;
-    settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
-    settle_until(
-        || log.count("enqueue:fin") == 1 && last_gauge(recorder, "subscriptions") == Some(1),
-        "the finite subscription should emit once and quiesce",
-    )
-    .await;
-
-    // Deliver its message: the batch marks subscriptions dirty, and the next
-    // frame pass restarts the finished, still-desired subscription (B-2
-    // restart semantics — driven through the real forwarder lifecycle).
-    script.step(Directive::Input).await;
-    script.step(Directive::Frame).await;
-    settle_until(
-        || log.count("admit:fin") == 2 && last_gauge(recorder, "subscriptions") == Some(1),
-        "the restarted subscription should emit again and quiesce again",
-    )
-    .await;
-}
-
-// Evidence row (current behavior, passes today): after the restarted
-// subscription finishes again, its quiescence does not mark frame work —
-// the frame branch parks indefinitely even though a finished,
-// still-desired subscription is waiting for a restart. The
-// message-independent re-evaluation trigger (RFC 0012 §4.3, Accepted)
-// is not implemented, so H-4's idle-wake path does not exist to drive.
+// Contract negative space (RFC 0011 §2.1's two dirty sources, RFC 0012
+// INV-SE5's scoping): a NATURAL finish — a task that ends without any stop
+// request — is not a dirty source. After the restarted finite subscription
+// finishes again, the frame branch parks indefinitely; only a message or a
+// stopped task's quiescence may wake it.
 #[tokio::test(start_paused = true)]
-async fn s7_no_message_independent_wake_exists_evidence() {
+async fn s7_natural_finish_alone_does_not_wake_the_parked_loop() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
     let log = ObsLog::default();
@@ -1461,16 +1570,34 @@ async fn s7_no_message_independent_wake_exists_evidence() {
     let run = runtime.run_driven(&mut terminal, arbiter);
 
     let drive = async {
-        drive_idle_to_second_quiescence(&mut script, &log, &mock, &recorder).await;
+        script.synchronized().await;
+        settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
+        settle_until(
+            || log.count("enqueue:fin") == 1 && last_gauge(&recorder, "subscriptions") == Some(1),
+            "the finite subscription should emit once and quiesce",
+        )
+        .await;
+
+        // Deliver its message: the batch marks subscriptions dirty, and the
+        // next frame pass restarts the finished, still-desired subscription
+        // (RFC 0005 INV-13 restart semantics, immediate because no stop is
+        // outstanding — INV-SE3's finished-restart case).
+        script.step(Directive::Input).await;
+        script.step(Directive::Frame).await;
+        settle_until(
+            || log.count("admit:fin") == 2 && last_gauge(&recorder, "subscriptions") == Some(1),
+            "the restarted subscription should emit again and quiesce again",
+        )
+        .await;
 
         // The second emission is still queued as a message; the parked-loop
-        // claim is about the *frame* branch: no frame work is pending and no
-        // message-independent source can create any, so the frame branch
-        // stays parked.
+        // claim is about the *frame* branch: no frame work is pending, and a
+        // natural finish is not a dirty source, so the frame branch stays
+        // parked.
         script.direct(Directive::Frame);
         script
             .assert_parked(
-                "no message-independent trigger marks frame work after a subscription quiesces",
+                "a natural finish is not a dirty source and must not wake the frame branch",
             )
             .await;
         script
@@ -1493,44 +1620,157 @@ async fn s7_no_message_independent_wake_exists_evidence() {
     );
 }
 
-// H-5 series "idle wake" — the contract expectation (H-4: a
-// message-independent re-evaluation trigger wakes the parked loop and the
-// next re-evaluation runs). Undrivable on current code; see the evidence
-// test above.
+/// Message codes: 77 bumps the guarded source's key (stop + replace), 99
+/// quits; subscriptions also carry the finite source and the mock.
+struct WakeApp {
+    version: u32,
+    log: ObsLog,
+    mock: MockSource<u32>,
+    probe: SourceProbe,
+}
+
+impl Application for WakeApp {
+    type Message = u32;
+    type Flags = (ObsLog, MockSource<u32>, SourceProbe);
+
+    fn new((log, mock, probe): Self::Flags) -> (Self, Command<u32>) {
+        (
+            Self {
+                version: 1,
+                log,
+                mock,
+                probe,
+            },
+            Command::none(),
+        )
+    }
+
+    fn update(&mut self, msg: u32) -> Command<u32> {
+        self.log.push(format!("update:{msg}"));
+        match msg {
+            77 => {
+                self.version += 1;
+                Command::none()
+            }
+            99 => Command::quit(),
+            _ => Command::none(),
+        }
+    }
+
+    fn view(&self, _frame: &mut Frame<'_>) {}
+
+    fn subscriptions(&self) -> Vec<Subscription<u32>> {
+        vec![
+            probed_mock(&self.mock, &self.log),
+            Subscription::new(GuardedPendingSource {
+                key: self.version,
+                probe: self.probe.clone(),
+            }),
+            Subscription::new(FiniteSource {
+                log: self.log.clone(),
+            }),
+        ]
+    }
+}
+
+// H-5 series "idle wake" (H-4, RFC 0012 INV-SE5): the quiescence of a task
+// stopped by a steady-state re-evaluation reaches the genuinely parked frame
+// branch as a wake-capable event, and the woken frame pass's re-evaluation
+// admits against the then-current state — the deferred replacement AND the
+// finished, still-desired subscription's restart, with no message anywhere
+// in between.
+//
+// The park-before-quiescence ordering is deterministic: the two Frame
+// directives are queued back-to-back, so the kernel moves from the stopping
+// pass into the frame branch's park without an executor turn — the abort's
+// processing (the quiescence) can only run after the kernel is parked on the
+// watch.
 #[tokio::test(start_paused = true)]
-#[ignore = "RFC 0012 §4.3 message-independent re-evaluation trigger is Accepted but unimplemented: no wake source exists for the parked loop without a message (see s7_no_message_independent_wake_exists_evidence)"]
-async fn s7_idle_wake_restarts_quiesced_subscription_expected() {
+async fn s7_stop_quiescence_wakes_parked_loop_and_admissions_follow() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
     let log = ObsLog::default();
     let mock = MockSource::new();
-    let runtime = Runtime::<IdleApp>::with_config((log.clone(), mock.clone()), config());
+    let probe = SourceProbe::default();
+    let runtime =
+        Runtime::<WakeApp>::with_config((log.clone(), mock.clone(), probe.clone()), config());
     let mut terminal = test_terminal();
     let (arbiter, mut script) = scripted();
     let run = runtime.run_driven(&mut terminal, arbiter);
 
     let drive = async {
-        drive_idle_to_second_quiescence(&mut script, &log, &mock, &recorder).await;
-
-        // Expected under RFC 0012 §4.3: the second quiescence itself marks
-        // subscriptions dirty, so the frame branch has work and completes,
-        // and the re-evaluation restarts the finished subscription.
-        script.direct(Directive::Frame);
-        let woke = timeout(Duration::from_secs(1), script.idle.recv()).await;
-        assert!(
-            woke.is_ok(),
-            "H-4 idle wake: a quiesced still-desired subscription must wake the parked loop"
-        );
+        script.synchronized().await;
+        settle_until(|| mock.receiver_count() > 0, "mock forwarder admitted").await;
         settle_until(
-            || log.count("admit:fin") == 3,
-            "the message-independent re-evaluation should restart the subscription",
+            || log.count("enqueue:fin") == 1,
+            "the finite subscription should emit once and finish",
         )
         .await;
+        assert_eq!(probe.starts(), 1, "generation 1 should be admitted");
+
+        // Deliver the finite emission, restart it once through the ordinary
+        // message-driven pass, and deliver the second emission too, so no
+        // input is pending when the wake is probed.
+        script.step(Directive::Input).await;
+        script.step(Directive::Frame).await;
+        settle_until(
+            || log.count("enqueue:fin") == 2,
+            "the restarted finite subscription should emit again and finish",
+        )
+        .await;
+        script.step(Directive::Input).await;
+
+        // Bump the guarded source's key and deliver the bump.
+        mock.emit(77).expect("forwarder should be subscribed");
+        settle_until(|| log.contains("enqueue:sub:77"), "bump trigger enqueued").await;
+        script.step(Directive::Input).await;
+
+        // Queue the stopping pass and the wake probe back-to-back: the
+        // kernel stops generation 1 (deferring every admission, INV-SE3),
+        // then parks on the frame branch before the abort is processed. The
+        // quiescence is then the only possible wake source.
+        script.queue(Directive::Frame);
+        script.queue(Directive::Frame);
+        script.ack().await;
+        script.ack().await;
+
+        // The woken pass re-evaluated against the then-current state and
+        // admitted everything it declares: the deferred generation 2 and the
+        // finished, still-desired finite subscription's restart — with no
+        // message since the stopping pass.
+        assert_eq!(
+            probe.starts(),
+            2,
+            "the quiescence-woken pass should admit the deferred generation 2"
+        );
+        assert_eq!(probe.alive(), 1, "generation 2 should be running");
+        assert_eq!(
+            log.count("admit:fin"),
+            3,
+            "the woken pass should also restart the finished, still-desired subscription"
+        );
+
+        // Drain the third finite emission and quit.
+        script.step(Directive::Input).await;
+        mock.emit(99).expect("forwarder should be subscribed");
+        settle_until(|| log.contains("enqueue:sub:99"), "quit trigger enqueued").await;
+        script.step(Directive::Input).await;
         script.direct(Directive::Quit);
     };
 
     let (run_result, ()) = tokio::join!(run, drive);
     run_result.expect("scripted run should exit cleanly");
+
+    assert_eq!(
+        probe.peak(),
+        1,
+        "the safe window holds across the stop, park, wake, and admission"
+    );
+    assert_eq!(
+        log.updates(),
+        vec!["update:5", "update:5", "update:77", "update:5", "update:99"],
+        "deliveries: two pre-wake finite emissions, the bump, the post-wake emission, the quit"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,8 +1784,7 @@ struct OwnedWorkApp {
     log: ObsLog,
     mock: MockSource<u32>,
     keyed_dropped: Arc<AtomicBool>,
-    sub_alive: Arc<AtomicUsize>,
-    sub_peak: Arc<AtomicUsize>,
+    sub_probe: SourceProbe,
 }
 
 struct OwnedWorkFlags {
@@ -1553,7 +1792,7 @@ struct OwnedWorkFlags {
     mock: MockSource<u32>,
     unkeyed_dropped: Arc<AtomicBool>,
     keyed_dropped: Arc<AtomicBool>,
-    sub_alive: Arc<AtomicUsize>,
+    sub_probe: SourceProbe,
 }
 
 impl Application for OwnedWorkApp {
@@ -1567,8 +1806,7 @@ impl Application for OwnedWorkApp {
                 log: flags.log,
                 mock: flags.mock,
                 keyed_dropped: flags.keyed_dropped,
-                sub_alive: flags.sub_alive,
-                sub_peak: Arc::new(AtomicUsize::new(0)),
+                sub_probe: flags.sub_probe,
             },
             init,
         )
@@ -1591,8 +1829,7 @@ impl Application for OwnedWorkApp {
             probed_mock(&self.mock, &self.log),
             Subscription::new(GuardedPendingSource {
                 key: 0,
-                alive: Arc::clone(&self.sub_alive),
-                peak: Arc::clone(&self.sub_peak),
+                probe: self.sub_probe.clone(),
             }),
         ]
     }
@@ -1604,7 +1841,7 @@ struct OwnedWorkRun {
     mock: MockSource<u32>,
     unkeyed_dropped: Arc<AtomicBool>,
     keyed_dropped: Arc<AtomicBool>,
-    sub_alive: Arc<AtomicUsize>,
+    sub_probe: SourceProbe,
 }
 
 impl OwnedWorkRun {
@@ -1615,7 +1852,7 @@ impl OwnedWorkRun {
             mock: MockSource::new(),
             unkeyed_dropped: Arc::new(AtomicBool::new(false)),
             keyed_dropped: Arc::new(AtomicBool::new(false)),
-            sub_alive: Arc::new(AtomicUsize::new(0)),
+            sub_probe: SourceProbe::default(),
         }
     }
 
@@ -1625,7 +1862,7 @@ impl OwnedWorkRun {
             mock: self.mock.clone(),
             unkeyed_dropped: Arc::clone(&self.unkeyed_dropped),
             keyed_dropped: Arc::clone(&self.keyed_dropped),
-            sub_alive: Arc::clone(&self.sub_alive),
+            sub_probe: self.sub_probe.clone(),
         }
     }
 
@@ -1652,7 +1889,7 @@ impl OwnedWorkRun {
             "the parked unkeyed producer should still be alive"
         );
         assert_eq!(
-            self.sub_alive.load(Ordering::SeqCst),
+            self.sub_probe.alive(),
             1,
             "the parked subscription should be admitted"
         );
@@ -1665,7 +1902,7 @@ impl OwnedWorkRun {
             || {
                 self.unkeyed_dropped.load(Ordering::SeqCst)
                     && self.keyed_dropped.load(Ordering::SeqCst)
-                    && self.sub_alive.load(Ordering::SeqCst) == 0
+                    && self.sub_probe.alive() == 0
                     && producer_gauges_zero(&self.recorder)
             },
             "every owned producer and its bookkeeping should be reclaimed",
