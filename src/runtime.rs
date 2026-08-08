@@ -105,6 +105,11 @@ pub mod channel;
 // crate root; it does not widen effective reachability.
 pub mod config;
 mod core;
+// Test-only stage-3 driving surface (RFC 0012 §6.2's additive frame): a
+// scripted arbiter for `run_driven` plus its acceptance-series tests.
+// Compiled only for tests so the spike adds no public surface.
+#[cfg(test)]
+mod driving;
 // `FrameRate` is a scheduling input, so it lives with the runtime. `pub`
 // (not `pub(crate)`) because `runtime` itself is already `pub(crate)`,
 // which caps this submodule's effective reachability the same way;
