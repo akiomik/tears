@@ -326,9 +326,11 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
         // request and its registration; a run that had already finished is
         // quiesced by definition and is confirmed straight back out.
         let stops = Arc::clone(&self.stops);
+        let mut issued_stop = false;
         self.running.retain(|id, running| {
             let keep = new_ids.contains(id);
             if !keep {
+                issued_stop = true;
                 stops
                     .stopping
                     .lock()
@@ -346,23 +348,22 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
             keep
         });
 
-        // The uniform quiescence barrier (RFC 0012 §4.1, INV-SE3): no
-        // admission while any stop-requested task — this pass's removals or
-        // an earlier pass's still-unquiesced stops — has not quiesced. No
-        // desired set is stored for later: the deferral admits nothing, and
-        // the re-evaluation that the quiescence dirty signal (INV-SE5)
-        // triggers re-reads the then-current state — which makes generation
-        // supersession automatic (INV-SE4) and keeps every admission inside
-        // a reconcile pass (INV-SE5's admission-site rule). A pass with no
-        // outstanding stops — pure additions, restarts of already-finished
-        // tasks — admits immediately, as before.
-        if !self
-            .stops
-            .stopping
-            .lock()
-            .expect("stop tracker lock should not be poisoned")
-            .is_empty()
-        {
+        // The uniform quiescence barrier (RFC 0012 §4.1, INV-SE3) plus
+        // INV-SE5's admission-site rule: no admission while any stop-requested
+        // task — this pass's removals or an earlier pass's still-unquiesced
+        // stops — has not quiesced, AND a pass that issued any stop request
+        // admits nothing even if its stops have already confirmed quiescence
+        // by the time this barrier is consulted (a cross-thread interleave:
+        // another worker can destroy the aborted task between the stop
+        // request and this check; deferred admissions must still execute at
+        // a later re-evaluation, never in the stopping pass). No desired set
+        // is stored for later: the deferral admits nothing, and the
+        // re-evaluation that the quiescence dirty signal (INV-SE5) triggers
+        // re-reads the then-current state — which makes generation
+        // supersession automatic (INV-SE4). A pass with no stops issued and
+        // no outstanding stops — pure additions, restarts of
+        // already-finished tasks — admits immediately, as before.
+        if self.admissions_deferred(issued_stop) {
             tracing::debug!(
                 target: "tears::subscription",
                 "admissions deferred behind the quiescence barrier"
@@ -380,6 +381,22 @@ impl<Msg: Send + 'static> SubscriptionManager<Msg> {
                 tracing::debug!(target: "tears::subscription", restarted, "subscription started");
             }
         }
+    }
+
+    /// The barrier predicate (RFC 0012 INV-SE3 + INV-SE5): admissions are
+    /// deferred when this re-evaluation issued any stop request — even if
+    /// every stop-requested run has already confirmed quiescence — or when
+    /// any earlier stop is still unquiesced. Factored out so the
+    /// issued-stop half, whose distinguishing input state only arises on a
+    /// multi-threaded executor, is pinned deterministically.
+    fn admissions_deferred(&self, issued_stop: bool) -> bool {
+        issued_stop
+            || !self
+                .stops
+                .stopping
+                .lock()
+                .expect("stop tracker lock should not be poisoned")
+                .is_empty()
     }
 
     fn spawn_subscription(&mut self, mut stream: BoxStream<'static, Msg>) -> RunningSubscription {
@@ -1388,6 +1405,63 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         Ok(())
+    }
+
+    // RFC 0012 INV-SE5 regression pin: a re-evaluation that issued a stop
+    // request defers its admissions even when the stopping set is already
+    // empty by the time the barrier is consulted — deferred admissions
+    // execute only at a later re-evaluation, never in the stopping pass.
+    // The distinguishing input state ("stop issued this pass AND every
+    // stop already quiesced") arises only on a multi-threaded executor:
+    // another worker can destroy the aborted task — running its quiescence
+    // guard — between the stop request and the barrier check, while on the
+    // single-threaded test executor an abort is never processed in-pass.
+    // The pin therefore drives the production barrier predicate with each
+    // input state directly, the quiesced-in-pass one emulated through the
+    // tracker exactly as the guard would leave it.
+    #[tokio::test]
+    async fn a_stopping_pass_defers_even_when_its_stops_already_quiesced() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let manager = SubscriptionManager::<i32>::new(
+            channel::Sender::from_unbounded(tx),
+            LoadObserver::default(),
+            SendGate::production(),
+        );
+
+        // The cross-thread interleave's end state: a stop was issued this
+        // pass and its guard already confirmed quiescence (stopping empty).
+        assert!(
+            manager
+                .stops
+                .stopping
+                .lock()
+                .expect("tracker lock")
+                .is_empty(),
+            "precondition: no outstanding stops"
+        );
+        assert!(
+            manager.admissions_deferred(true),
+            "a pass that issued a stop must defer even with an empty stopping set (INV-SE5)"
+        );
+
+        // The conforming immediate-admission input: no stop issued, nothing
+        // outstanding (pure additions, finished restarts).
+        assert!(
+            !manager.admissions_deferred(false),
+            "a pass with no stops issued and none outstanding admits immediately (INV-SE3)"
+        );
+
+        // Outstanding stops from an earlier pass defer regardless.
+        manager
+            .stops
+            .stopping
+            .lock()
+            .expect("tracker lock")
+            .insert(999);
+        assert!(
+            manager.admissions_deferred(false),
+            "still-unquiesced earlier stops defer admissions (INV-SE3)"
+        );
     }
 
     // RFC 0012 INV-SE4's mandated sequence, at the manager layer on the
