@@ -172,6 +172,75 @@ enum InputOutcome {
     Quit,
 }
 
+/// One arbitration outcome: which ready kernel branch runs next.
+///
+/// Part of the arbitration seam (RFC 0010 N46's harness-side
+/// deterministic-interleaving seam): [`Runtime::run_driven`] executes whatever
+/// branch the arbiter returns, so arbitration — and only arbitration — is
+/// substitutable. Phase execution, bookkeeping, and delivery stay in
+/// `run_driven`, the single phase machine.
+enum KernelBranch<Msg> {
+    /// An application input is ready (shared-first pull over the shared and
+    /// keyed delivery channels, exactly as the production `select!` branch).
+    Input(AppInput<Msg>),
+    /// The frame branch fired: render if needed, re-evaluate subscriptions if
+    /// dirty.
+    Frame,
+    /// A signal arrived on the dedicated quit channel.
+    Quit,
+}
+
+/// Arbitration seam: decides which ready kernel branch runs next.
+///
+/// Implementations supply *arbitration only* — the choice among the three
+/// kernel branches — plus, transitively, when each branch future is polled.
+/// They must not execute phases, touch bookkeeping, or deliver outputs; those
+/// remain in [`Runtime::run_driven`]. Production always uses
+/// [`SelectArbiter`]; a test driver may substitute a scripted arbiter without
+/// forking the phase executors or the task/channel topology.
+trait KernelArbiter<App: Application> {
+    /// Resolves when one kernel branch has been chosen and is ready.
+    async fn next_branch(
+        &mut self,
+        core: &mut RuntimeCore<App>,
+        scheduler: &mut FrameScheduler,
+    ) -> KernelBranch<App::Message>;
+}
+
+/// Production arbitration: the unbiased `tokio::select!` over the three
+/// kernel branches, carried over verbatim from the pre-seam `run()` loop
+/// body. This preserves RFC 0006's premises: the tie-break among ready
+/// branches is unbiased (INV-L4's statistical formulation) and the dedicated
+/// quit branch is always armed (R4).
+struct SelectArbiter;
+
+impl<App: Application> KernelArbiter<App> for SelectArbiter {
+    async fn next_branch(
+        &mut self,
+        core: &mut RuntimeCore<App>,
+        scheduler: &mut FrameScheduler,
+    ) -> KernelBranch<App::Message> {
+        tokio::select! {
+            // Message received: the loop batch-processes messages that arrive
+            // in quick succession.
+            Some(input) = core.app_inputs.next() => KernelBranch::Input(input),
+
+            // Frame tick: render if needed and update subscriptions. The
+            // scheduler parks while idle, so the loop does not wake at the
+            // frame rate just to do nothing. When a message re-enables frame
+            // work, the elapsed deadline is ready on the next poll and adds
+            // no render latency; missed frame deadlines are never replayed —
+            // at most one immediate frame fires after a stall, and the
+            // cadence resumes on the anchor's phase (the same non-catch-up
+            // rule as `Timer`, RFC 0009 §4.2).
+            () = scheduler.next_work_frame() => KernelBranch::Frame,
+
+            // Quit signal received
+            _ = core.quit_rx.recv() => KernelBranch::Quit,
+        }
+    }
+}
+
 impl<App: Application> Runtime<App> {
     /// Creates a new runtime with the given initialization flags and frame rate.
     ///
@@ -503,36 +572,46 @@ impl<App: Application> Runtime<App> {
     /// }
     /// ```
     pub async fn run<B: Backend>(
+        self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> Result<(), <B as Backend>::Error> {
+        // Literal delegation: production runs the one phase machine under the
+        // production arbiter, whose `select!` is the pre-seam loop body
+        // verbatim (unbiased tie-break, always-armed quit branch).
+        self.run_driven(terminal, SelectArbiter).await
+    }
+
+    /// Runs the event loop under the given arbitration.
+    ///
+    /// This is the single phase machine: bootstrap (initial subscription
+    /// reconcile), the steady-state loop (input batches / frame passes /
+    /// quit), and controlled termination (`shutdown`) all live here and only
+    /// here. The arbiter contributes exactly one thing — which ready branch
+    /// runs next — so substituting it (the test driving surface) cannot fork
+    /// phase execution, bookkeeping, or delivery.
+    async fn run_driven<B: Backend, Arb: KernelArbiter<App>>(
         mut self,
         terminal: &mut ratatui::Terminal<B>,
+        mut arbiter: Arb,
     ) -> Result<(), <B as Backend>::Error> {
         self.core.initialize_subscriptions();
         tracing::debug!(target: "tears::runtime", "runtime started");
 
         loop {
-            tokio::select! {
-                // Message received: batch process messages that arrive in quick succession
-                Some(input) = self.core.app_inputs.next() => {
+            match arbiter
+                .next_branch(&mut self.core, &mut self.scheduler)
+                .await
+            {
+                KernelBranch::Input(input) => {
                     if self.process_input_batch(input) == BatchOutcome::Quit {
                         tracing::debug!(target: "tears::runtime", "keyed quit signal received");
                         break;
                     }
                 }
-
-                // Frame tick: render if needed and update subscriptions. The
-                // scheduler parks while idle, so the loop does not wake at the
-                // frame rate just to do nothing. When a message re-enables frame
-                // work, the elapsed deadline is ready on the next poll and adds
-                // no render latency; missed frame deadlines are never replayed —
-                // at most one immediate frame fires after a stall, and the
-                // cadence resumes on the anchor's phase (the same non-catch-up
-                // rule as `Timer`, RFC 0009 §4.2).
-                () = self.scheduler.next_work_frame() => {
+                KernelBranch::Frame => {
                     self.process_frame_tick(terminal)?;
                 }
-
-                // Quit signal received
-                _ = self.core.quit_rx.recv() => {
+                KernelBranch::Quit => {
                     tracing::debug!(target: "tears::runtime", "quit signal received");
                     break;
                 }
