@@ -136,5 +136,10 @@ pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 #[doc(hidden)]
 pub use runtime::load::LoadObserver;
 
+// Candidate-B kernel prototype for the architecture-selection acceptance
+// spike (branch `spike/b-kernel`). Test-only: not public API, not part of
+// the shipped runtime; see `src/spike_kernel.rs` for scope.
+#[cfg(test)]
+mod spike_kernel;
 #[cfg(test)]
 mod test_support;
