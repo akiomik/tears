@@ -5,11 +5,16 @@
 //! the uniform subscription barrier with the stopping-pass defer rule,
 //! and the two-stage termination postcondition.
 //!
-//! The branch executors are the single implementation shared by the
-//! production loop (`run`, immediate gate, fixed-priority pick standing in
-//! for the unbiased production arbiter) and by `TestDriver::step`
-//! (scripted arbitration). Only the selection policy and the send-grant
-//! policy differ (C-1's permitted differences).
+//! Pass execution is the fixed pipeline RFC 0014 §3.5 (a) pins: input
+//! batch (always-finite count cap) -> mandatory control-lane drain ->
+//! frame step. Arbitration's negative space is reduced to pass
+//! *initiation* (which wake source ends the park) and producer executor
+//! scheduling. The stage executors are a single implementation shared by
+//! the production loop (`run`, immediate gate, composing them via
+//! `pass_cycle`) and by `TestDriver` (scripted: `step_pass` runs the same
+//! composed pass; `step` decomposes it stage by stage for fine-grained
+//! assertion). Only the initiation/grant policies and the decomposition
+//! granularity differ (C-1's permitted differences).
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
@@ -132,7 +137,9 @@ impl Host for HeadlessHost {
 pub struct KernelConfig {
     /// Data lane capacity; `None` is unbounded.
     pub capacity: Option<usize>,
-    /// Micro-batch cap for the Input branch.
+    /// Count cap of the input-batch stage. Always finite is the contract
+    /// (RFC 0014 §3.5 — a count cap, not a time window); the value is
+    /// mechanism.
     pub batch_cap: usize,
 }
 
@@ -230,6 +237,12 @@ impl<P: Program, H: Host> Kernel<P, H> {
         gate_mode: GateMode,
         host: H,
     ) -> Self {
+        // The input-batch count cap must be finite and positive: the
+        // §3.5 bounds (quit delay <= cap, per-pass render) derive from it.
+        assert!(
+            config.batch_cap > 0,
+            "the input-batch count cap is a positive finite count"
+        );
         let (data_tx, data_rx) = config.capacity.map_or_else(
             || {
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -374,8 +387,10 @@ impl<P: Program, H: Host> Kernel<P, H> {
         self.exit_buf.push_back((token, outcome));
     }
 
-    /// The single branch executor shared by production and scripted
-    /// driving.
+    /// One stage executor. Production composes the stages in the fixed
+    /// pass order (`pass_cycle`); the scripted driver may execute them
+    /// one at a time (`TestDriver::step`) for fine-grained assertion —
+    /// same single implementation either way.
     pub fn run_branch(&mut self, branch: Branch) {
         match branch {
             Branch::Input => self.input_batch(),
@@ -671,19 +686,37 @@ impl<P: Program, H: Host> Kernel<P, H> {
         }
     }
 
-    /// Production loop: same branch executors, immediate gate expected,
-    /// fixed-priority ready pick standing in for the unbiased arbiter
-    /// (prototype simplification; the acceptance series drive scripted).
-    pub async fn run(&mut self) -> ExitReport {
-        let _ = self.boot();
-        while !self.terminating() {
-            let branch = self.park_next().await;
-            self.run_branch(branch);
+    /// One fixed pass (RFC 0014 §3.5 (a)): reflect the exits already
+    /// observable, then run the pinned stage pipeline — input batch
+    /// (always-finite count cap) -> mandatory control-lane drain -> frame
+    /// step (render if redraw pending, then re-evaluation if dirty). The
+    /// stage order is structure, not arbitration: Control and Frame are
+    /// serviced every pass, so a continuously ready data lane can neither
+    /// starve a producer quit past the current batch's remainder (<= cap)
+    /// nor suppress the render a batch raised. Shared verbatim by the
+    /// production loop and `TestDriver::step_pass`.
+    pub fn pass_cycle(&mut self) {
+        self.reflect_available_exits();
+        self.input_batch();
+        if !self.terminating() {
+            self.control_drain();
         }
-        self.settle().await
+        if !self.terminating() {
+            self.frame_step();
+        }
     }
 
-    fn pick_ready(&mut self) -> Option<Branch> {
+    /// Reflects every task exit currently observable (pass-start stage;
+    /// the scripted `step(JoinExit)` reflects them one at a time
+    /// instead).
+    fn reflect_available_exits(&mut self) {
+        while self.poll_exit() {
+            self.join_exit();
+        }
+    }
+
+    /// Whether any wake source has work for a pass.
+    fn pass_work_ready(&mut self) -> bool {
         [
             Branch::Input,
             Branch::Control,
@@ -691,16 +724,24 @@ impl<P: Program, H: Host> Kernel<P, H> {
             Branch::Frame,
         ]
         .into_iter()
-        .find(|&b| self.ready(b))
+        .any(|b| self.ready(b))
     }
 
-    async fn park_next(&mut self) -> Branch {
-        loop {
-            if let Some(branch) = self.pick_ready() {
-                return branch;
+    /// Production loop: fixed passes over the shared stage executors
+    /// (immediate gate expected). Arbitration's remaining negative space
+    /// is pass *initiation* — which wake source ends the park — and the
+    /// producers' executor scheduling; the pass itself is the pinned
+    /// pipeline (`pass_cycle`).
+    pub async fn run(&mut self) -> ExitReport {
+        let _ = self.boot();
+        while !self.terminating() {
+            if self.pass_work_ready() {
+                self.pass_cycle();
+            } else {
+                self.park_once().await;
             }
-            self.park_once().await;
         }
+        self.settle().await
     }
 
     async fn park_once(&mut self) {

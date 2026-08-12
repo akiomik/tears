@@ -1678,6 +1678,110 @@ async fn bounded_full_lane_grant_acks_only_after_real_acceptance() {
     );
 }
 
+// --- P1-3: fixed-pass bounds under flood ------------------------------------
+
+/// P1-3 bound (i) — under continuous input readiness a control-lane quit
+/// is applied before the next input batch starts: with cap 2 and five
+/// committed data envelopes ahead of it, exactly one batch (2 messages)
+/// runs before the mandatory control drain applies the quit. Delay <=
+/// the in-progress batch's remainder <= cap, observed deterministically.
+#[tokio::test]
+async fn control_quit_under_flood_applies_before_the_next_batch() {
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let init = Cmd::Batch(vec![
+        send_then_park("flood", vec![1, 2, 3, 4, 5]),
+        anon(
+            "quitter",
+            body(|ctx| async move {
+                let _ = ctx.handle.quit().await;
+                pending::<()>().await;
+            }),
+        ),
+    ]);
+    let mut driver = TestDriver::new(
+        app,
+        (want(&[]), init),
+        KernelConfig {
+            batch_cap: 2,
+            ..KernelConfig::default()
+        },
+    );
+    driver.boot();
+    driver.await_intents("flood", 1).await;
+    let flood = driver.producer("flood");
+    for _ in 0..5 {
+        driver.grant(flood).await;
+    }
+    driver.await_intents("quitter", 1).await;
+    let quitter = driver.producer("quitter");
+    driver.grant(quitter).await;
+
+    driver.step_pass(Branch::Input).expect("one fixed pass");
+    assert_eq!(
+        driver.state().applied,
+        vec![1, 2],
+        "the quit is applied after at most the batch cap, never a second batch"
+    );
+    let delivery = driver.delivery();
+    assert!(
+        delivery.contains("quit:quitter"),
+        "control drain ran in-pass"
+    );
+    assert!(delivery.contains("terminating:Quit"), "quit applied");
+    assert!(
+        !delivery.contains("update:3"),
+        "no next batch after the quit"
+    );
+    let report = driver.settle().await;
+    assert!(report.gauges_zero, "flood reclaimed");
+}
+
+/// P1-3 bound (ii) — the redraw a batch raises renders before the next
+/// batch starts: with cap 2 and four queued messages, each fixed pass
+/// ends in exactly one render, so the flood cannot suppress rendering.
+#[tokio::test]
+async fn flood_cannot_suppress_render_between_batches() {
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let init = send_then_park("flood", vec![1, 2, 3, 4]);
+    let mut driver = TestDriver::new(
+        app,
+        (want(&[]), init),
+        KernelConfig {
+            batch_cap: 2,
+            ..KernelConfig::default()
+        },
+    );
+    driver.boot();
+    driver.await_intents("flood", 1).await;
+    let flood = driver.producer("flood");
+    for _ in 0..4 {
+        driver.grant(flood).await;
+    }
+
+    driver.step_pass(Branch::Input).expect("first fixed pass");
+    driver.step_pass(Branch::Input).expect("second fixed pass");
+    let entries = driver.delivery().snapshot();
+    assert_eq!(driver.state().applied, vec![1, 2, 3, 4], "both batches ran");
+    assert_eq!(
+        entries.iter().filter(|e| *e == "render").count(),
+        2,
+        "one render per pass: {entries:?}"
+    );
+    let second_batch = position_of(&entries, "update:3");
+    assert!(
+        entries[position_of(&entries, "update:2")..second_batch]
+            .iter()
+            .any(|e| e == "render"),
+        "the first batch's redraw renders before the next batch: {entries:?}"
+    );
+}
+
 // --- production loop smoke --------------------------------------------------
 
 /// The production loop (immediate gate, same branch executors) runs the

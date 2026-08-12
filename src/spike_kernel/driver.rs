@@ -143,8 +143,12 @@ impl<P: Program> TestDriver<P> {
         Ok(Box::pin(async move { gate.commit_reached(sequence).await }))
     }
 
-    /// Scripted arbitration: runs `branch` through the shared executor if
-    /// and only if it is ready.
+    /// Scripted arbitration, stage-granular: runs one stage executor if
+    /// and only if it is ready. This decomposes the fixed pass
+    /// (RFC 0014 §3.5) for fine-grained assertion; the composed pass
+    /// itself is driven by `step_pass` and pinned by the bound tests —
+    /// stage orderings scripted here are driving decompositions, not
+    /// production pass orders (C-2's citation rule applies).
     pub fn step(&mut self, branch: Branch) -> Result<(), StepError> {
         if self.kernel.terminating() {
             return Err(StepError::Terminated);
@@ -153,6 +157,23 @@ impl<P: Program> TestDriver<P> {
             return Err(StepError::NotReady(branch));
         }
         self.kernel.run_branch(branch);
+        Ok(())
+    }
+
+    /// Runs one full fixed pass (exit reflection, then input batch with
+    /// its always-finite count cap, then the mandatory control drain,
+    /// then the frame step) through the same `pass_cycle` the production
+    /// loop runs. `initiation` names the wake source starting the pass
+    /// and must be ready — pass initiation is exactly the arbitration
+    /// slot RFC 0014 §3.5 leaves scriptable.
+    pub fn step_pass(&mut self, initiation: Branch) -> Result<(), StepError> {
+        if self.kernel.terminating() {
+            return Err(StepError::Terminated);
+        }
+        if !self.kernel.ready(initiation) {
+            return Err(StepError::NotReady(initiation));
+        }
+        self.kernel.pass_cycle();
         Ok(())
     }
 
