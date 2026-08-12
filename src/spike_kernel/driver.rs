@@ -20,7 +20,7 @@ use tokio::task::yield_now;
 
 use super::cmd::Program;
 use super::kernel::{Branch, ExitReport, Gauges, HeadlessHost, Kernel, KernelConfig};
-use super::lane::{GateMode, Ledger, OriginGate, PendingCounter, RunToken};
+use super::lane::{GateMode, GrantOutstanding, Ledger, OriginGate, PendingCounter, RunToken};
 use super::registry::Phase;
 
 /// Opaque public form of a run token.
@@ -110,9 +110,9 @@ impl<P: Program> TestDriver<P> {
             .expect("granted origin must have a registry entry")
     }
 
-    /// Sequential grant handshake: banks one allowance, wakes the
-    /// producer, and returns only after observing the send's commit (the
-    /// enqueue acceptance) — C-2's grant -> acceptance -> next-grant.
+    /// Sequential grant handshake: issues the origin's next grant and
+    /// returns only after observing that grant's own commit (the enqueue
+    /// acceptance) — C-2's grant -> acceptance -> next-grant.
     #[expect(
         clippy::needless_pass_by_ref_mut,
         reason = "spec API shape: grant borrows the driver exclusively, so \
@@ -120,19 +120,27 @@ impl<P: Program> TestDriver<P> {
     )]
     pub async fn grant(&mut self, origin: ProducerId) {
         let gate = self.gate(origin);
-        let snapshot = gate.commits();
-        gate.grant_one();
-        gate.commit_past(snapshot).await;
+        let sequence = gate
+            .issue_grant()
+            .expect("the previous grant must be acknowledged before the next");
+        gate.commit_reached(sequence).await;
     }
 
-    /// The grant handshake as a detached future (does not borrow the
-    /// driver), so a test can poll it while stepping the kernel. Used by
-    /// the bounded commit-ack evaluation; not part of the spec's API.
-    pub fn grant_handle(&self, origin: ProducerId) -> BoxFuture<'static, ()> {
+    /// The grant handshake as a detached acknowledgement future (does not
+    /// borrow the driver), so a test can step the kernel while the ack is
+    /// pending — the bounded commit-ack evaluation's shape; not part of
+    /// the spec's API. Grant sequencing is enforced at issue time:
+    /// per-origin outstanding grants are capped at one
+    /// (`GrantOutstanding` otherwise), the returned future waits for this
+    /// grant's exact commit (no snapshot aliasing), and the next grant
+    /// can only be issued once that acceptance exists.
+    pub fn grant_handle(
+        &self,
+        origin: ProducerId,
+    ) -> Result<BoxFuture<'static, ()>, GrantOutstanding> {
         let gate = self.gate(origin);
-        let snapshot = gate.commits();
-        gate.grant_one();
-        Box::pin(async move { gate.commit_past(snapshot).await })
+        let sequence = gate.issue_grant()?;
+        Ok(Box::pin(async move { gate.commit_reached(sequence).await }))
     }
 
     /// Scripted arbitration: runs `branch` through the shared executor if

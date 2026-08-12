@@ -22,7 +22,8 @@ use super::cmd::{
 use super::driver::{StepError, TestDriver, settle_until};
 use super::kernel::{Branch, ExitReason, HeadlessHost, Kernel, KernelConfig, forwarder_body};
 use super::lane::{
-    DataSender, EffectCtx, GateMode, IngressHandle, Ledger, OriginGate, PendingCounter,
+    DataSender, EffectCtx, GateMode, GrantOutstanding, IngressHandle, Ledger, OriginGate,
+    PendingCounter,
 };
 use super::registry::Phase;
 
@@ -739,7 +740,7 @@ async fn s6_blocked_send_is_released_and_reclaimed_by_termination() {
     // Second send: granted but the lane is full — the producer parks
     // inside the real send holding its reservation.
     let flood_counter = driver.counter_of("flood");
-    let mut blocked_ack = driver.grant_handle(flood);
+    let mut blocked_ack = driver.grant_handle(flood).expect("second grant issues");
     settle_until(
         || flood_counter.value() == 2,
         "second send holds a reservation while waiting for capacity",
@@ -1514,6 +1515,51 @@ async fn keyed_slot_policies_replace_or_suppress() {
     assert_eq!(stopping, 0, "replacement is logged as replace, not stop");
 }
 
+/// Grant sequencing (the bounded-API redesign) — per-origin outstanding
+/// grants are capped at one, each acknowledgement waits for its own
+/// grant's exact commit, and the next grant is only issuable after the
+/// previous acceptance exists: two handles can never alias one commit.
+#[tokio::test]
+async fn grant_handles_do_not_alias_acceptances() {
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let init = send_then_park("pa", vec![1, 2]);
+    let mut driver = driver(app, want(&[]), init);
+    driver.boot();
+    driver.await_intents("pa", 1).await;
+    let pa = driver.producer("pa");
+
+    let first = driver.grant_handle(pa).expect("first grant issues");
+    assert!(
+        matches!(driver.grant_handle(pa), Err(GrantOutstanding)),
+        "a second grant is refused while the first is unacknowledged"
+    );
+    first.await;
+    assert_eq!(
+        driver.delivery().count("accept:pa:1"),
+        1,
+        "first acceptance"
+    );
+
+    let mut second = driver
+        .grant_handle(pa)
+        .expect("the next grant issues once the acceptance exists");
+    assert!(
+        (&mut second).now_or_never().is_none(),
+        "the second acknowledgement waits for its own commit, not the first"
+    );
+    second.await;
+    assert_eq!(
+        driver.delivery().count("accept:pa:2"),
+        1,
+        "second acceptance"
+    );
+    driver.step(Branch::Input).expect("both deliveries");
+    assert_eq!(driver.state().applied, vec![1, 2], "grant order held");
+}
+
 // --- bounded commit-ack evaluation -----------------------------------------
 
 #[expect(
@@ -1596,7 +1642,7 @@ async fn bounded_full_lane_run() -> Vec<String> {
     driver.grant(pa).await;
 
     let pb_counter = driver.counter_of("pb");
-    let mut ack = driver.grant_handle(pb);
+    let mut ack = driver.grant_handle(pb).expect("pb grant issues");
     settle_until(
         || pb_counter.value() == 1,
         "pb parks inside the real send holding its reservation",

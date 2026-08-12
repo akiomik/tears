@@ -162,9 +162,15 @@ pub struct OriginGate {
     mode: GateMode,
     allowances: Semaphore,
     intents: AtomicU64,
+    grants_issued: AtomicU64,
     commits: AtomicU64,
     commit_notify: Notify,
 }
+
+/// Refusal: this origin's previous grant has not been acknowledged (its
+/// send has not committed), so a new grant may not be issued yet.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GrantOutstanding;
 
 impl OriginGate {
     /// A gate in the given mode with no banked allowances.
@@ -173,6 +179,7 @@ impl OriginGate {
             mode,
             allowances: Semaphore::new(0),
             intents: AtomicU64::new(0),
+            grants_issued: AtomicU64::new(0),
             commits: AtomicU64::new(0),
             commit_notify: Notify::new(),
         }
@@ -204,12 +211,7 @@ impl OriginGate {
         }
     }
 
-    /// Driver side: bank one allowance and wake the producer.
-    pub fn grant_one(&self) {
-        self.allowances.add_permits(1);
-    }
-
-    /// Commit count snapshot (for the ack handshake).
+    /// Commit count (each committed send of this origin, both lanes).
     pub fn commits(&self) -> u64 {
         self.commits.load(Ordering::SeqCst)
     }
@@ -220,17 +222,38 @@ impl OriginGate {
         self.commit_notify.notify_waiters();
     }
 
-    /// Driver side: parks until the commit count passes `snapshot` — the
+    /// Driver side: issues this origin's next grant — banks one
+    /// allowance, wakes the producer, and returns the grant's sequence
+    /// number. The nth grant corresponds to exactly the nth commit
+    /// (scripted mode admits one send per allowance), so awaiting
+    /// `commit_reached(seq)` is an exact acknowledgement, never a
+    /// snapshot: a concurrently issued handle cannot complete on someone
+    /// else's commit. Refuses (`GrantOutstanding`) while the previous
+    /// grant's send has not committed — per-origin outstanding grants
+    /// are capped at one, and the next grant can only be issued after the
+    /// previous acceptance exists.
+    pub fn issue_grant(&self) -> Result<u64, GrantOutstanding> {
+        let issued = self.grants_issued.load(Ordering::SeqCst);
+        if issued > self.commits() {
+            return Err(GrantOutstanding);
+        }
+        let sequence = issued + 1;
+        self.grants_issued.store(sequence, Ordering::SeqCst);
+        self.allowances.add_permits(1);
+        Ok(sequence)
+    }
+
+    /// Driver side: parks until the commit count reaches `sequence` — the
     /// acceptance confirmation half of the grant handshake.
-    pub async fn commit_past(&self, snapshot: u64) {
+    pub async fn commit_reached(&self, sequence: u64) {
         loop {
-            if self.commits() > snapshot {
+            if self.commits() >= sequence {
                 return;
             }
             let notified = self.commit_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.commits() > snapshot {
+            if self.commits() >= sequence {
                 return;
             }
             notified.await;
