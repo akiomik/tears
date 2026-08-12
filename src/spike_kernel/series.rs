@@ -15,12 +15,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 
 use futures::FutureExt;
 use futures::future::pending;
 use tokio::sync::mpsc;
+use tokio::task::yield_now;
 
 use super::cmd::{
     CancelPolicy, Cmd, EffectBody, MockSource, Program, Reducer, ScopePath, ScopedChild, SpawnCmd,
@@ -168,6 +169,68 @@ fn parked_with_flag(label: &'static str, flag: Arc<AtomicBool>) -> Cmd<u32> {
     )
 }
 
+/// The mid-batch commit handshake: lets a producer's send commit
+/// *during* an in-progress input batch, deterministically.
+///
+/// The reducer (on the driving worker) opens `open_flag` and then blocks
+/// on the std channel until the producer signals that its send
+/// committed; the producer (on the second worker) busy-yields on
+/// `open_flag` — no waker is involved, so tokio's non-stealable LIFO
+/// slot cannot strand it behind the blocked driving worker — then
+/// performs its real send and signals. Requires a 2-worker runtime;
+/// determinism comes from this application-side synchronization, not
+/// from the executor schedule.
+struct MidBatchHandshake {
+    open_flag: Arc<AtomicBool>,
+    committed_rx: Mutex<std_mpsc::Receiver<()>>,
+}
+
+impl MidBatchHandshake {
+    fn new() -> (Self, Arc<AtomicBool>, std_mpsc::Sender<()>) {
+        let open_flag = Arc::new(AtomicBool::new(false));
+        let (committed_tx, committed_rx) = std_mpsc::channel();
+        let handshake = Self {
+            open_flag: Arc::clone(&open_flag),
+            committed_rx: Mutex::new(committed_rx),
+        };
+        (handshake, open_flag, committed_tx)
+    }
+
+    /// Reducer side: open the producer's gate, then wait for its commit.
+    fn open_and_await_commit(&self) {
+        self.open_flag.store(true, Ordering::SeqCst);
+        self.committed_rx
+            .lock()
+            .expect("handshake receiver")
+            .recv()
+            .expect("the producer commits while the batch is in progress");
+    }
+}
+
+/// A producer that busy-yields until its application-side flag opens,
+/// commits one control-lane quit, signals the handshake, then parks.
+fn gated_quitter(
+    label: &'static str,
+    scope: ScopePath,
+    open_flag: Arc<AtomicBool>,
+    committed_tx: std_mpsc::Sender<()>,
+) -> Cmd<u32> {
+    Cmd::Spawn(SpawnCmd {
+        label,
+        scope,
+        key: None,
+        policy: CancelPolicy::CancelInFlight,
+        body: body(move |ctx| async move {
+            while !open_flag.load(Ordering::SeqCst) {
+                yield_now().await;
+            }
+            let _ = ctx.handle.quit().await;
+            let _ = committed_tx.send(());
+            pending::<()>().await;
+        }),
+    })
+}
+
 fn position_of(entries: &[String], prefix: &str) -> usize {
     entries
         .iter()
@@ -195,10 +258,11 @@ fn inert(_state: &mut AppState, _msg: u32) -> Cmd<u32> {
 /// revokes the origin, its already-buffered data envelope is filtered at
 /// dequeue, the Draining tombstone outlives it until that dequeue zeroes
 /// the committed pending, and no stale delivery reaches the reducer.
-/// (The buffered-quit half changed with the normative §3.5 order: a quit
-/// already on the control lane wins over a buffered cancel trigger —
-/// pinned by the INV-RC9 pass-start row; the revoked-origin quit filter
-/// mechanism is pinned by the `whitebox_` probe.)
+/// (The buffered-quit half is witnessed same-topology by
+/// `s1_buffered_quit_is_discarded_when_its_origin_is_torn_down_mid_batch`;
+/// the drain-side filter mechanism is additionally pinned in isolation
+/// by the `whitebox_` probe, and the "already-buffered live quit wins
+/// over a later cancel trigger" rule by the INV-RC9 pass-start row.)
 #[tokio::test]
 async fn s1_cancel_beats_buffered_message_and_reclaims_the_tombstone() {
     let input = MockSource::default();
@@ -289,6 +353,97 @@ async fn s1_cancel_beats_buffered_message_and_reclaims_the_tombstone() {
         driver.state().applied,
         vec![1, 2, 3],
         "only live deliveries"
+    );
+}
+
+/// S1 (buffered-quit half, same-topology witness) — a quit commits
+/// mid-batch and the *same batch's* next input tears its origin down:
+/// commit -> revoke -> drain, witnessed on the ledger. The next pass's
+/// control drain discards the buffered quit (origin revoked) and the
+/// runtime keeps delivering. Runs on two workers with the mid-batch
+/// handshake; determinism is by application-side synchronization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s1_buffered_quit_is_discarded_when_its_origin_is_torn_down_mid_batch() {
+    let (handshake, open_flag, committed_tx) = MidBatchHandshake::new();
+    let app = ScriptApp {
+        on_msg: Box::new(move |_, msg| {
+            if msg == 5 {
+                // The quit commits here, mid-batch; the teardown this
+                // update returns then revokes its origin — with the quit
+                // still buffered on the control lane.
+                handshake.open_and_await_commit();
+                Cmd::Teardown(ScopePath::seg("quit"))
+            } else {
+                Cmd::None
+            }
+        }),
+        sources: no_subs(),
+    };
+    let init = Cmd::Batch(vec![
+        send_then_park("feed", vec![5, 6, 7]),
+        gated_quitter("quitter", ScopePath::seg("quit"), open_flag, committed_tx),
+    ]);
+    let mut driver = TestDriver::new(
+        app,
+        (want(&[]), init),
+        KernelConfig {
+            batch_cap: 2,
+            ..KernelConfig::default()
+        },
+    );
+    driver.boot();
+    driver.await_intents("feed", 1).await;
+    let feed = driver.producer("feed");
+    driver.grant(feed).await;
+    driver.grant(feed).await;
+    let quitter = driver.producer("quitter");
+    let ack = driver
+        .grant_handle(quitter)
+        .expect("bank the quit allowance");
+
+    driver
+        .step_pass(Branch::Input)
+        .expect("commit, then revoke, within one batch");
+    ack.await;
+    let entries = driver.delivery().snapshot();
+    assert!(
+        position_of(&entries, "accept:quitter:quit") < position_of(&entries, "stop:quitter"),
+        "the quit was buffered before its origin was revoked: {entries:?}"
+    );
+    assert_eq!(
+        driver.state().applied,
+        vec![5, 6],
+        "the batch finished its remainder"
+    );
+    assert_eq!(
+        driver.entry_phase("quitter"),
+        Some((Phase::Stopping, true)),
+        "origin revoked with the quit still buffered"
+    );
+
+    driver.await_exit_ready().await;
+    driver
+        .step_pass(Branch::JoinExit)
+        .expect("the next pass drains and filters");
+    assert!(
+        driver.delivery().contains("filtered-quit:quitter"),
+        "the buffered quit is discarded, not applied"
+    );
+    assert!(
+        !driver.delivery().contains("quit:quitter"),
+        "a revoked quit never terminates"
+    );
+    assert!(
+        !driver.delivery().contains("terminating:Quit"),
+        "the runtime keeps running"
+    );
+
+    driver.grant(feed).await;
+    driver.step_pass(Branch::Input).expect("delivery continues");
+    assert_eq!(
+        driver.state().applied,
+        vec![5, 6, 7],
+        "cancel beat the buffered quit and delivery continued"
     );
 }
 
@@ -432,12 +587,13 @@ async fn s2_same_identity_successor_waits_for_stop_quiescence() {
 }
 
 /// White-box probe (stage-granular `step`; outside the evidence
-/// surface) — the control drain's revocation filter: a buffered quit
-/// whose origin was revoked between its commit and the drain (in
-/// production, a commit landing mid-pass after the control stage ran)
-/// is discarded, not applied. Pass driving cannot order a revocation
-/// between a quit's commit and the next drain, so the filter mechanism
-/// is pinned here in isolation.
+/// surface) — the control drain's revocation filter in isolation: a
+/// buffered quit whose origin was revoked between its commit and the
+/// drain is discarded, not applied. The same-topology witness of this
+/// window is `s1_buffered_quit_is_discarded_when_its_origin_is_torn_down_mid_batch`
+/// (two-worker mid-batch handshake); this probe keeps the drain
+/// mechanism pinned on the current-thread domain without the
+/// multi-worker construction.
 #[tokio::test]
 async fn whitebox_revoked_origin_quit_is_filtered_at_the_control_drain() {
     let input = MockSource::default();
@@ -1873,25 +2029,28 @@ async fn quit_ready_at_pass_start_wins_over_ready_input() {
     assert!(report.gauges_zero, "flood reclaimed");
 }
 
-/// INV-RC9 mid-batch row — a quit arriving after a pass's control drain
-/// (mid/after that pass's batch; between passes in scripted driving) is
-/// applied at the next pass's control drain: preceded only by the
-/// in-progress batch's remainder (<= cap), and no further batch starts.
-#[tokio::test]
+/// INV-RC9 mid-batch row — the quit's send commits *during* the
+/// in-progress input batch (a true mid-pass arrival, witnessed on the
+/// ledger between update:1 and update:2): only the in-progress batch's
+/// remainder (<= cap) precedes it, and the quit is applied at the next
+/// pass's control drain — no further batch starts. Runs on two workers
+/// with the mid-batch handshake; determinism is by application-side
+/// synchronization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quit_arriving_mid_batch_applies_at_the_next_pass_start() {
+    let (handshake, open_flag, committed_tx) = MidBatchHandshake::new();
     let app = ScriptApp {
-        on_msg: Box::new(inert),
+        on_msg: Box::new(move |_, msg| {
+            if msg == 1 {
+                handshake.open_and_await_commit();
+            }
+            Cmd::None
+        }),
         sources: no_subs(),
     };
     let init = Cmd::Batch(vec![
         send_then_park("flood", vec![1, 2, 3, 4]),
-        anon(
-            "quitter",
-            body(|ctx| async move {
-                let _ = ctx.handle.quit().await;
-                pending::<()>().await;
-            }),
-        ),
+        gated_quitter("quitter", ScopePath::root(), open_flag, committed_tx),
     ]);
     let mut driver = TestDriver::new(
         app,
@@ -1907,26 +2066,31 @@ async fn quit_arriving_mid_batch_applies_at_the_next_pass_start() {
     for _ in 0..4 {
         driver.grant(flood).await;
     }
+    let quitter = driver.producer("quitter");
+    let ack = driver
+        .grant_handle(quitter)
+        .expect("bank the quit allowance");
 
     driver
         .step_pass(Branch::Input)
         .expect("the in-progress batch");
+    ack.await;
+    let entries = driver.delivery().snapshot();
+    assert!(
+        position_of(&entries, "update:1") < position_of(&entries, "accept:quitter:quit"),
+        "the quit arrived after the batch started: {entries:?}"
+    );
+    assert!(
+        position_of(&entries, "accept:quitter:quit") < position_of(&entries, "update:2"),
+        "the quit arrived mid-batch, before the batch's remainder: {entries:?}"
+    );
     assert_eq!(
         driver.state().applied,
         vec![1, 2],
-        "the in-progress batch's remainder"
+        "only the in-progress batch's remainder precedes the quit"
     );
-    // The quit arrives after that pass's control drain already ran.
-    driver.await_intents("quitter", 1).await;
-    let quitter = driver.producer("quitter");
-    driver.grant(quitter).await;
 
     driver.step_pass(Branch::Control).expect("the next pass");
-    assert_eq!(
-        driver.state().applied,
-        vec![1, 2],
-        "no further input precedes the quit"
-    );
     assert!(
         driver.delivery().contains("quit:quitter"),
         "applied at the first control drain at or after arrival"
