@@ -26,6 +26,7 @@ use super::lane::{
     PendingCounter,
 };
 use super::registry::Phase;
+use crate::test_support::with_silent_panic_hook;
 
 // --- shared scaffolding ---------------------------------------------------
 
@@ -618,48 +619,54 @@ fn panicking_after_send(label: &'static str) -> Cmd<u32> {
 /// unified rule, and other producers keep delivering.
 #[tokio::test]
 async fn s5_producer_panic_is_contained_and_delivery_continues() {
-    let app = ScriptApp {
-        on_msg: Box::new(inert),
-        sources: no_subs(),
-    };
-    let init = Cmd::Batch(vec![
-        panicking_after_send("pan"),
-        send_then_park("healthy", vec![20]),
-    ]);
-    let mut driver = driver(app, want(&[]), init);
-    driver.boot();
-    driver.await_intents("pan", 1).await;
-    let pan = driver.producer("pan");
-    let healthy = driver.producer("healthy");
-    driver.grant(pan).await;
+    // Deliberate-panic test: serialize with the process-global
+    // panic-hook tests and silence the intentional panic output
+    // (docs/testing.md "Process-Global Panic Hook Tests").
+    with_silent_panic_hook(async {
+        let app = ScriptApp {
+            on_msg: Box::new(inert),
+            sources: no_subs(),
+        };
+        let init = Cmd::Batch(vec![
+            panicking_after_send("pan"),
+            send_then_park("healthy", vec![20]),
+        ]);
+        let mut driver = driver(app, want(&[]), init);
+        driver.boot();
+        driver.await_intents("pan", 1).await;
+        let pan = driver.producer("pan");
+        let healthy = driver.producer("healthy");
+        driver.grant(pan).await;
 
-    driver.await_exit_ready().await;
-    driver
-        .step(Branch::JoinExit)
-        .expect("observe the panic exit");
-    assert!(
-        driver.delivery().contains("exit:pan:Panicked"),
-        "panic observed as a join error"
-    );
-    assert_eq!(
-        driver.entry_phase("pan"),
-        Some((Phase::Draining, false)),
-        "panic exit with committed pending is a live tombstone"
-    );
+        driver.await_exit_ready().await;
+        driver
+            .step(Branch::JoinExit)
+            .expect("observe the panic exit");
+        assert!(
+            driver.delivery().contains("exit:pan:Panicked"),
+            "panic observed as a join error"
+        );
+        assert_eq!(
+            driver.entry_phase("pan"),
+            Some((Phase::Draining, false)),
+            "panic exit with committed pending is a live tombstone"
+        );
 
-    driver
-        .step(Branch::Input)
-        .expect("deliver the committed output");
-    assert_eq!(driver.entry_phase("pan"), None, "entry reclaimed");
-    driver.grant(healthy).await;
-    driver
-        .step(Branch::Input)
-        .expect("other producers unaffected");
-    assert_eq!(driver.state().applied, vec![10, 20], "loop continued");
-    assert!(
-        !driver.delivery().contains("terminating:Quit"),
-        "containment: no termination"
-    );
+        driver
+            .step(Branch::Input)
+            .expect("deliver the committed output");
+        assert_eq!(driver.entry_phase("pan"), None, "entry reclaimed");
+        driver.grant(healthy).await;
+        driver
+            .step(Branch::Input)
+            .expect("other producers unaffected");
+        assert_eq!(driver.state().applied, vec![10, 20], "loop continued");
+        assert!(
+            !driver.delivery().contains("terminating:Quit"),
+            "containment: no termination"
+        );
+    })
+    .await;
 }
 
 /// S5 — a panic in application code on the driving task is fail-fast: it
@@ -672,34 +679,40 @@ fn panicking_reducer(_state: &mut AppState, msg: u32) -> Cmd<u32> {
 
 #[tokio::test]
 async fn s5_driving_side_app_panic_fails_fast_and_producers_are_reclaimed() {
-    let input = MockSource::default();
-    let flag = Arc::new(AtomicBool::new(false));
-    let app = ScriptApp {
-        on_msg: Box::new(panicking_reducer),
-        sources: BTreeMap::from([("input", input.clone())]),
-    };
-    let init = parked_with_flag("parked", Arc::clone(&flag));
-    let mut driver = driver(app, want(&["input"]), init);
-    driver.boot();
-    let input_id = driver.producer("input");
-    input.push(13);
-    driver.grant(input_id).await;
+    // Deliberate-panic test: serialize with the process-global
+    // panic-hook tests and silence the intentional panic output
+    // (docs/testing.md "Process-Global Panic Hook Tests").
+    with_silent_panic_hook(async {
+        let input = MockSource::default();
+        let flag = Arc::new(AtomicBool::new(false));
+        let app = ScriptApp {
+            on_msg: Box::new(panicking_reducer),
+            sources: BTreeMap::from([("input", input.clone())]),
+        };
+        let init = parked_with_flag("parked", Arc::clone(&flag));
+        let mut driver = driver(app, want(&["input"]), init);
+        driver.boot();
+        let input_id = driver.producer("input");
+        input.push(13);
+        driver.grant(input_id).await;
 
-    let unwound = catch_unwind(AssertUnwindSafe(|| driver.step(Branch::Input)));
-    assert!(unwound.is_err(), "the panic escapes the driving step");
+        let unwound = catch_unwind(AssertUnwindSafe(|| driver.step(Branch::Input)));
+        assert!(unwound.is_err(), "the panic escapes the driving step");
 
-    let gauges = driver.gauges();
-    let delivery = driver.delivery();
-    drop(driver);
-    settle_until(
-        || gauges.producers() == 0 && flag.load(Ordering::SeqCst),
-        "kernel drop reclaims all producers",
-    )
+        let gauges = driver.gauges();
+        let delivery = driver.delivery();
+        drop(driver);
+        settle_until(
+            || gauges.producers() == 0 && flag.load(Ordering::SeqCst),
+            "kernel drop reclaims all producers",
+        )
+        .await;
+        assert!(
+            delivery.contains("drop:immediate"),
+            "drop postcondition ran"
+        );
+    })
     .await;
-    assert!(
-        delivery.contains("drop:immediate"),
-        "drop postcondition ran"
-    );
 }
 
 // --- S6: send failure (shutdown-scoped) ------------------------------------

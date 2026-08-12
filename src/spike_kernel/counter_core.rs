@@ -106,12 +106,25 @@ impl CounterCore {
 mod tests {
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering as StdOrdering};
+    use std::sync::{MutexGuard, PoisonError};
 
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicU32 as LoomAtomicU32, Ordering as LoomOrdering};
     use loom::thread;
 
     use super::CounterCore;
+    use crate::test_support::PANIC_HOOK_GUARD;
+
+    /// Serializes a loom model against the process-global panic-hook
+    /// tests: loom's generator runtime raises internal panics on every
+    /// explored execution, and those invoke whatever hook is installed —
+    /// a concurrently running hook-recording test would count them
+    /// (docs/testing.md "Process-Global Panic Hook Tests").
+    fn hook_guard() -> MutexGuard<'static, ()> {
+        PANIC_HOOK_GUARD
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// Std-side interleaving counter: `loom::model` requires a `'static`
     /// closure and runs it once per explored execution, so a shared std
@@ -133,6 +146,7 @@ mod tests {
     /// (here zero).
     #[test]
     fn concurrent_release_and_dequeue_balance_without_underflow() {
+        let _hook_guard = hook_guard();
         let interleavings = interleaving_counter();
         let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
@@ -168,6 +182,7 @@ mod tests {
     /// envelope is still undrained: commit-after-removal is unreachable.
     #[test]
     fn removal_condition_never_strands_a_committed_envelope() {
+        let _hook_guard = hook_guard();
         let interleavings = interleaving_counter();
         let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
@@ -217,6 +232,7 @@ mod tests {
     /// saturated the counter is frozen (poison observed by everyone).
     #[test]
     fn saturation_freeze_holds_under_concurrent_writers() {
+        let _hook_guard = hook_guard();
         let interleavings = interleaving_counter();
         let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
@@ -248,6 +264,7 @@ mod tests {
     /// stays at saturation.
     #[test]
     fn decrement_racing_poisoning_cannot_thaw_the_counter() {
+        let _hook_guard = hook_guard();
         let interleavings = interleaving_counter();
         let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
