@@ -21,6 +21,11 @@
 //! and the observability schema are out of scope.
 
 pub mod cmd;
+// Loom mirror of the pending-counter protocol (RFC 0014 §13 item 1's
+// multi-writer accounting verification); same gating as
+// `subscription::http::cell_core`.
+#[cfg(feature = "loom-core")]
+mod counter_core;
 pub mod driver;
 pub mod kernel;
 pub mod lane;

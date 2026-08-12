@@ -5,7 +5,7 @@
 //! `IngressHandle` whose `send`/`quit` enforce the pinned order
 //! intent -> gate -> reservation -> send -> commit (§2.1 rule 0).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, Semaphore, mpsc};
@@ -36,33 +36,63 @@ pub struct Envelope<M> {
 /// Per-origin committed-pending counter (spec §2.1). Saturating: reaching
 /// `u32::MAX` freezes (poisons) the counter, which flips the entry's
 /// removal condition to "termination only" — never toward stale delivery.
+///
+/// Single-atomic encoding: the poisoned state *is* the saturation value
+/// (`count == u32::MAX`), so saturating, freezing, and the frozen check
+/// are each one atomic transition. The prototype's first cut kept a
+/// separate `poisoned` flag beside a `fetch_add`/`fetch_sub`; loom found
+/// two interleaving counterexamples against it (a racing reserve stepping
+/// past `u32::MAX`, and a racing decrement thawing a just-poisoned
+/// counter) — see `counter_core` for the models. This encoding closes
+/// both by construction.
 #[derive(Debug, Default)]
 pub struct PendingCounter {
     count: AtomicU32,
-    poisoned: AtomicBool,
 }
 
+/// The saturation value doubles as the poisoned marker.
+const POISONED: u32 = u32::MAX;
+
 impl PendingCounter {
-    /// Rule 1: reservation increment (saturating; may poison).
+    /// Rule 1: reservation increment (saturating; reaching the ceiling
+    /// poisons — rule 6).
     pub fn reserve(&self) {
-        if self.poisoned.load(Ordering::SeqCst) {
-            return;
-        }
-        let previous = self.count.fetch_add(1, Ordering::SeqCst);
-        assert!(previous != u32::MAX, "reserve past saturation");
-        if previous + 1 == u32::MAX {
-            self.poisoned.store(true, Ordering::SeqCst);
+        let mut current = self.count.load(Ordering::SeqCst);
+        loop {
+            if current == POISONED {
+                return;
+            }
+            match self.count.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
         }
     }
 
     /// Rules 3 and 4: release (uncommitted drop) and dequeue share the
     /// same decrement; a poisoned counter is frozen and skips it.
     pub fn decrement(&self) {
-        if self.poisoned.load(Ordering::SeqCst) {
-            return;
+        let mut current = self.count.load(Ordering::SeqCst);
+        loop {
+            if current == POISONED {
+                return;
+            }
+            assert!(current > 0, "pending counter underflow");
+            match self.count.compare_exchange(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
         }
-        let previous = self.count.fetch_sub(1, Ordering::SeqCst);
-        assert!(previous > 0, "pending counter underflow");
     }
 
     /// Current committed + reserved pending.
@@ -72,7 +102,7 @@ impl PendingCounter {
 
     /// Whether the overflow rule froze this counter.
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned.load(Ordering::SeqCst)
+        self.value() == POISONED
     }
 
     /// Test-side state injection for the overflow rule: pretends `value`
