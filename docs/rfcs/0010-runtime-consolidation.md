@@ -515,6 +515,19 @@ the ledger replay reaffirmed every affected row (§2.4).
 root as readily as an owner/topology break (grade (ii)); none has
 occurred.
 
+**Return #3 (2026-08-13)**: a grade-(ii) owner/topology
+counterexample — the architecture-selection comparison for the
+composition core (decided by RFC 0014) selected a kernel whose
+delivery topology replaces this root's preserved shape — reopened
+`root-A1`: "one execution mechanism with two preserved delivery
+classes" changes to one origin-tagged data lane with revocation
+filtering at the delivery decision point, an `update`-returned quit
+applied synchronously at its dispatch, and producer-originated quits
+on a dedicated control lane; the superseding contract, with its
+per-invariant successor correspondence for RFC 0003 and RFC 0006, is
+RFC 0014 (§3.1, §3.3, §9), whose landing that RFC gates on its
+staged spike.
+
 ### 3.2 `root-SCHED` — verdict: reaffirmation, canonicalization, and two numberings
 
 Shared-first pull is reaffirmed with **RFC 0003 INV-14 as its sole
@@ -547,6 +560,23 @@ against RFC 0012 §4's quiescence barrier — reopened `root-SCHED`
 alone (policy-only; no owner/topology break), resolved by the INV-L8
 rescope with the §4.5 derivations and enforcement text synced, and
 closed. Recorded in the §1.9 journal.
+
+**Return #4 (2026-08-13)**: the same architecture-selection
+counterexample as `root-A1`'s return, grade (ii) with a grade-(i)
+face — the selected kernel's single FIFO with dequeue-time
+revocation filtering replaces shared-first pull's topology, and with
+it INV-14's canonical statement, its keyed-quit application INV-L11,
+and configured frame pacing (the RFC 0006 frame-branch facts,
+RFC 0007 INV-C5, and the frame-rate configuration and constructor
+surface) do not survive — reopened `root-SCHED`: the reaffirmation
+and canonicalization of shared-first pull change to a supersession
+that keeps starvation freedom and flood-proof rendering, records the
+broad cancel-before-delivery opportunity as a deliberate property
+loss, and replaces configured pacing with pass-bounded render
+cadence; fairness stays resolved against any policy and bounded
+delivery stays non-default under the successor; the superseding
+contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), landing gated
+there.
 
 ## 4. Lifecycle and termination
 
@@ -596,6 +626,24 @@ scoped to that set; resolved by unifying deferred re-admission on the
 next frame-pass re-evaluation and adding the quiescence dirty source
 (RFC 0011 §2.1, RFC 0012 §4), and closed. Recorded in the §1.9
 journal.
+
+**Return #5 (2026-08-13)**: a grade-(i) counterexample from the
+architecture-selection outcome (RFC 0014), narrowed by that RFC's
+facade decision — `Runtime<App>`, its `run` signature, and the
+result contract (either quit form returns `Ok(())`, a render error
+returns `Err`) are preserved at the existing entry point, so
+RFC 0011 INV-LC5's classification continues to hold there and the
+reopen does not touch the run/result surface (the constructor change
+rides the pacing supersession, `root-SCHED`'s return in §3.2) —
+reopened `root-K51J46` for the bootstrap contract alone: an init
+command whose `Command::quit()` part is present changes from one
+legal outcome of bootstrap arbitration to deterministic synchronous
+termination during the init dispatch, before the initial reconcile
+and before any source starts — a change to RFC 0011 §3.2's intake
+order; the added advanced entry point (`ProgramRuntime` with its
+`Exit` result) is additive surface beside the preserved one,
+recorded as no supersession; the amending contract is RFC 0014
+(§2.3, §2.4, §6.2, §9), landing gated there.
 
 ## 5. Identity and the composition axiom
 
@@ -653,6 +701,19 @@ the future composition and `cancel_scope` RFCs. **Reopen targets**:
 counterexamples breaking the identity model or requiring its
 re-migration reopen `root-CMP`; none has occurred.
 
+**Return #6 (2026-08-13)**: a grade-(ii) owner/topology
+counterexample — the architecture-selection comparison this axiom
+handed to the composition work was run, and the Application-centric
+shape lost it — reopened `root-CMP`: the concrete shape changes from
+a composition core implementing the existing `Application` boundary
+as a single aggregate `Application` adapter to a reducer-first core
+— a `Program`/`Reducer` protocol over a runtime kernel — with
+`Application` preserved as its single-feature adapter; the axiom's
+substance survives in the successor (the composition layer owns the
+identity boundary; no second runtime, no second identity model), and
+the §5.2 requirements are discharged there item by item; the
+superseding contract is RFC 0014 (§2, §8), landing gated there.
+
 ## 6. Effect and subscription execution boundary
 
 Owns the root judgments: `root-B7` (the directive/effect axis
@@ -687,6 +748,21 @@ blocks composition: no).
 **Contract impact.** Semantics-neutral only: RFC 0002 §9's sync to the
 settled forms. **Reopen targets**: axis-placement counterexamples
 reopen `root-B7`; none has occurred.
+
+**Return #7 (2026-08-13)**: a grade-(i) counterexample — the
+selected kernel (RFC 0014) carries a producer-originated quit on a
+control lane drained before each pass's input batch, which keeps
+backlog independence and cancellability until application (through
+origin revocation) but not RFC 0006 INV-L10's ordering property: a
+keyed run's quit no longer waits behind the same run's earlier
+output — reopened `root-B7`'s preservation conditions on the
+quit-directive question: of the three, unkeyed quit's
+backlog-independent delivery is met in strengthened form
+(synchronous application at the returning dispatch) and the
+cancellation-metadata lowering path holds, while keyed quit's
+in-band ordering half is superseded with the loss recorded as
+breaking; the successor statement is RFC 0014 (§3.3, §9), landing
+gated there.
 
 ### 6.2 `root-D18` — verdict: redesign — a new owner contract for source execution
 
@@ -1815,5 +1891,7 @@ This RFC becomes Implemented when the work §10 enumerates is closed:
 - RFC 0011 — runtime lifecycle: §2, §3, §4, §7, INV-LC1–INV-LC9.
 - RFC 0012 — subscription execution: §2, §4, §5 (INV-SE6), §6, §8,
   §9 (INV-SE8).
+- RFC 0014 — reducer-first core: §2, §3, §6, §8, §9 (the supersede
+  destination the §1.9 return entries in §3–§7 name).
 - `docs/rfcs/pre-review-checklist.md` — the review method §1 builds
   its gate on.
