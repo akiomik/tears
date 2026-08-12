@@ -1,10 +1,17 @@
 //! The pack §H-5 acceptance series (S1-S8) executed on the B-kernel
 //! prototype, plus the claim-specific probes (reservation protocol,
 //! gate-wait abort, counter poisoning, barrier scope, bounded commit-ack
-//! evaluation) and a production-loop smoke test. All tests are
-//! deterministic on the current-thread test executor: no sleeps, no
-//! timers; progress is driven by grant handshakes and bounded yield
-//! settles.
+//! evaluation), the INV-RC9 bound rows, and a production-loop smoke
+//! test. All tests are deterministic on the current-thread test
+//! executor: no sleeps, no timers; progress is driven by grant
+//! handshakes and bounded yield settles.
+//!
+//! Evidence classification: the acceptance evidence drives whole fixed
+//! passes through `TestDriver::step_pass` (the normative §3.5
+//! pipeline). Tests prefixed `whitebox_` drive single stages through
+//! `TestDriver::step`, bypassing the pinned stage order — they probe
+//! stage mechanisms in mid-pass windows unreachable by pass driving and
+//! are outside the C-5 / INV-RC13 evidence surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -184,12 +191,16 @@ fn inert(_state: &mut AppState, _msg: u32) -> Cmd<u32> {
 
 // --- S1: cancel vs buffered output ---------------------------------------
 
-/// S1 — after teardown revokes the origin, its already-buffered data
-/// message and its buffered control-lane quit are both filtered at
-/// dequeue; the tombstone survives as Draining until the last committed
-/// envelope drains, and is reclaimed at that dequeue.
+/// S1 — cancel beats the buffered *message*: after the teardown pass
+/// revokes the origin, its already-buffered data envelope is filtered at
+/// dequeue, the Draining tombstone outlives it until that dequeue zeroes
+/// the committed pending, and no stale delivery reaches the reducer.
+/// (The buffered-quit half changed with the normative §3.5 order: a quit
+/// already on the control lane wins over a buffered cancel trigger —
+/// pinned by the INV-RC9 pass-start row; the revoked-origin quit filter
+/// mechanism is pinned by the `whitebox_` probe.)
 #[tokio::test]
-async fn s1_cancel_beats_buffered_message_and_buffered_quit() {
+async fn s1_cancel_beats_buffered_message_and_reclaims_the_tombstone() {
     let input = MockSource::default();
     let app = ScriptApp {
         on_msg: Box::new(|_, msg| match msg {
@@ -200,7 +211,6 @@ async fn s1_cancel_beats_buffered_message_and_buffered_quit() {
                 policy: CancelPolicy::CancelInFlight,
                 body: body(|ctx| async move {
                     let _ = ctx.handle.send("10", 10).await;
-                    let _ = ctx.handle.quit().await;
                     pending::<()>().await;
                 }),
             }),
@@ -228,19 +238,15 @@ async fn s1_cancel_beats_buffered_message_and_buffered_quit() {
 
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("deliver spawn trigger");
+    driver.step_pass(Branch::Input).expect("spawn pass");
     let fx = driver.producer("fx");
 
-    // The cancel trigger enqueues *before* fx's output: FIFO then carries
-    // [input:2, fx:10] on the data lane and [fx:quit] on the control lane.
+    // The cancel trigger enqueues *before* fx's output: FIFO carries
+    // [input:2, fx:10] into the next passes (cap 1).
     input.push(2);
     driver.grant(input_id).await;
     driver.grant(fx).await;
-    driver.grant(fx).await;
-
-    driver
-        .step(Branch::Input)
-        .expect("deliver teardown trigger");
+    driver.step_pass(Branch::Input).expect("teardown pass");
     assert!(
         driver.delivery().contains("stop:fx"),
         "teardown stops the child run"
@@ -252,39 +258,30 @@ async fn s1_cancel_beats_buffered_message_and_buffered_quit() {
     );
 
     driver.await_exit_ready().await;
-    driver.step(Branch::JoinExit).expect("observe fx exit");
-    assert_eq!(
-        driver.entry_phase("fx"),
-        Some((Phase::Draining, true)),
-        "exited with committed pending stays as a Draining tombstone"
-    );
-
-    driver.step(Branch::Input).expect("drain buffered message");
-    assert_eq!(
-        driver.entry_phase("fx"),
-        Some((Phase::Draining, true)),
-        "tombstone survives while a committed envelope remains"
-    );
-    driver.step(Branch::Control).expect("drain buffered quit");
+    driver.step_pass(Branch::JoinExit).expect("filter pass");
     assert_eq!(
         driver.entry_phase("fx"),
         None,
         "tombstone reclaimed at the dequeue that zeroed committed pending"
     );
-    assert_eq!(driver.registry_len(), 1, "only the input forwarder remains");
-
-    let delivery = driver.delivery();
-    assert!(delivery.contains("filtered:fx"), "buffered message dropped");
+    let entries = driver.delivery().snapshot();
     assert!(
-        delivery.contains("filtered-quit:fx"),
-        "buffered quit dropped"
+        position_of(&entries, "exit:fx") < position_of(&entries, "filtered:fx"),
+        "the Draining tombstone outlived its buffered envelope: {entries:?}"
     );
-    assert!(!delivery.contains("update:10"), "no stale delivery");
-    assert!(!delivery.contains("quit:fx"), "revoked quit does not quit");
+    assert!(
+        driver.delivery().contains("filtered:fx"),
+        "buffered message dropped"
+    );
+    assert!(
+        !driver.delivery().contains("update:10"),
+        "no stale delivery"
+    );
+    assert_eq!(driver.registry_len(), 1, "only the input forwarder remains");
 
     input.push(3);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("deliver quit trigger");
+    driver.step_pass(Branch::Input).expect("quit pass");
     let report = driver.settle().await;
     assert_eq!(report.reason, ExitReason::Quit, "controlled quit");
     assert!(report.gauges_zero, "quiescent postcondition");
@@ -297,11 +294,17 @@ async fn s1_cancel_beats_buffered_message_and_buffered_quit() {
 
 // --- S2: stop/restart safety window ---------------------------------------
 
-/// S2 — the re-evaluation that issues a stop admits nothing, even when
-/// the stopped task has already exited (unobserved); the successor is
-/// admitted only after the exit is reflected through `JoinExit`.
+/// White-box probe (stage-granular `step`; outside the evidence
+/// surface) — the reconcile that issues a stop admits nothing even when
+/// the stopped task has already exited with the exit *unreflected*.
+/// Pass driving cannot reach this window (the §3.5 exit-reflection
+/// stage precedes the frame stage in every pass), but in production an
+/// exit can become observable mid-pass, after the exit stage already
+/// ran — the stopping-pass defer discipline covers exactly that
+/// residue, and this probe pins it against the reconcile mechanism in
+/// isolation.
 #[tokio::test]
-async fn s2_stop_issuing_pass_defers_even_when_the_target_already_exited() {
+async fn whitebox_stop_issuing_reconcile_defers_when_the_exit_is_unreflected() {
     let input = MockSource::default();
     let a_src = MockSource::default();
     let b_src = MockSource::default();
@@ -353,8 +356,11 @@ async fn s2_stop_issuing_pass_defers_even_when_the_target_already_exited() {
     );
 }
 
-/// S2 — removing and re-adding the same identity: the successor waits out
-/// the predecessor's quiescence (the safe window), then restarts fresh.
+/// S2 — removing and re-adding the same identity: the successor waits
+/// out the predecessor's quiescence (the safe window), then restarts
+/// fresh. Driven pass by pass; both triggers are pre-committed so the
+/// stop pass and the barrier pass run back to back with the predecessor
+/// still unquiesced.
 #[tokio::test]
 async fn s2_same_identity_successor_waits_for_stop_quiescence() {
     let input = MockSource::default();
@@ -374,20 +380,32 @@ async fn s2_same_identity_successor_waits_for_stop_quiescence() {
         }),
         sources: BTreeMap::from([("input", input.clone()), ("suba", a_src.clone())]),
     };
-    let mut driver = driver(app, want(&["input", "suba"]), Cmd::None);
+    let mut driver = TestDriver::new(
+        app,
+        (want(&["input", "suba"]), Cmd::None),
+        KernelConfig {
+            batch_cap: 1,
+            ..KernelConfig::default()
+        },
+    );
     driver.boot();
     let input_id = driver.producer("input");
 
+    // Pre-commit both triggers so the two passes run back to back with
+    // no yield in between: the predecessor stays unquiesced across them.
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("deliver removal");
-    driver.step(Branch::Frame).expect("stop pass");
-    assert!(driver.delivery().contains("stop:suba"), "stop issued");
-
     input.push(2);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("deliver re-add");
-    driver.step(Branch::Frame).expect("barrier pass");
+
+    driver.step_pass(Branch::Input).expect("stop pass");
+    assert!(driver.delivery().contains("stop:suba"), "stop issued");
+    assert_eq!(
+        driver.delivery().count("reconcile:deferred"),
+        1,
+        "the stop-issuing pass defers"
+    );
+    driver.step_pass(Branch::Input).expect("barrier pass");
     assert_eq!(
         driver.delivery().count("admit:suba"),
         1,
@@ -400,8 +418,7 @@ async fn s2_same_identity_successor_waits_for_stop_quiescence() {
     );
 
     driver.await_exit_ready().await;
-    driver.step(Branch::JoinExit).expect("reflect quiescence");
-    driver.step(Branch::Frame).expect("admission pass");
+    driver.step_pass(Branch::JoinExit).expect("admission pass");
     assert_eq!(driver.delivery().count("admit:suba"), 2, "fresh restart");
     let entries = driver.delivery().snapshot();
     assert!(
@@ -411,6 +428,65 @@ async fn s2_same_identity_successor_waits_for_stop_quiescence() {
                 .rposition(|e| e == "admit:suba")
                 .expect("second admission present"),
         "restart strictly after quiescence: {entries:?}"
+    );
+}
+
+/// White-box probe (stage-granular `step`; outside the evidence
+/// surface) — the control drain's revocation filter: a buffered quit
+/// whose origin was revoked between its commit and the drain (in
+/// production, a commit landing mid-pass after the control stage ran)
+/// is discarded, not applied. Pass driving cannot order a revocation
+/// between a quit's commit and the next drain, so the filter mechanism
+/// is pinned here in isolation.
+#[tokio::test]
+async fn whitebox_revoked_origin_quit_is_filtered_at_the_control_drain() {
+    let input = MockSource::default();
+    let app = ScriptApp {
+        on_msg: Box::new(|_, msg| match msg {
+            1 => Cmd::Spawn(SpawnCmd {
+                label: "fx",
+                scope: ScopePath::seg("pane"),
+                key: Some("k"),
+                policy: CancelPolicy::CancelInFlight,
+                body: body(|ctx| async move {
+                    let _ = ctx.handle.quit().await;
+                    pending::<()>().await;
+                }),
+            }),
+            2 => Cmd::Teardown(ScopePath::seg("pane")),
+            _ => Cmd::None,
+        }),
+        sources: BTreeMap::from([("input", input.clone())]),
+    };
+    let mut driver = driver(app, want(&["input"]), Cmd::None);
+    driver.boot();
+    let input_id = driver.producer("input");
+
+    input.push(1);
+    driver.grant(input_id).await;
+    driver.step(Branch::Input).expect("spawn fx");
+    let fx = driver.producer("fx");
+    driver.grant(fx).await;
+
+    // Revoke fx via the input stage alone, bypassing the pass's control
+    // drain (the white-box window).
+    input.push(2);
+    driver.grant(input_id).await;
+    driver.step(Branch::Input).expect("revoke fx");
+    driver
+        .step(Branch::Control)
+        .expect("drain the buffered quit");
+    assert!(
+        driver.delivery().contains("filtered-quit:fx"),
+        "the revoked origin's quit is discarded"
+    );
+    assert!(
+        !driver.delivery().contains("quit:fx"),
+        "a revoked quit never terminates"
+    );
+    assert!(
+        !driver.delivery().contains("terminating:Quit"),
+        "the kernel keeps running"
     );
 }
 
@@ -438,7 +514,9 @@ async fn s3_producer_face(first: &str, second: &str) -> Vec<String> {
     let second_id = driver.producer(second);
     driver.grant(first_id).await;
     driver.grant(second_id).await;
-    driver.step(Branch::Input).expect("drain both");
+    driver
+        .step_pass(Branch::Input)
+        .expect("drain both in one pass");
     driver.delivery().snapshot()
 }
 
@@ -473,7 +551,7 @@ async fn s3_grant_handshake_scripts_the_enqueue_order_of_ready_producers() {
     clippy::future_not_send,
     reason = "current-thread test helper; the driver never crosses threads"
 )]
-async fn s3_branch_face(join_first: bool) -> Vec<String> {
+async fn s3_initiation_run(initiate_with_join: bool) -> Vec<String> {
     let app = ScriptApp {
         on_msg: Box::new(inert),
         sources: no_subs(),
@@ -484,42 +562,57 @@ async fn s3_branch_face(join_first: bool) -> Vec<String> {
     ]);
     let mut driver = driver(app, want(&[]), init);
     driver.boot();
+    driver
+        .step_pass(Branch::Frame)
+        .expect("consume the boot redraw");
+    assert!(
+        !driver.ready(Branch::Input),
+        "parked before the wake: no data"
+    );
+    assert!(
+        !driver.ready(Branch::Control),
+        "parked before the wake: no control"
+    );
+    assert!(
+        !driver.ready(Branch::Frame),
+        "parked before the wake: no frame work"
+    );
+
     driver.await_intents("pf", 1).await;
     let pf = driver.producer("pf");
     driver.grant(pf).await;
     driver.await_exit_ready().await;
-
-    assert!(driver.ready(Branch::Input), "data lane ready");
-    assert!(driver.ready(Branch::JoinExit), "join exit ready");
-    if join_first {
-        driver.step(Branch::JoinExit).expect("scripted join first");
-        driver.step(Branch::Input).expect("then input");
+    assert!(driver.ready(Branch::Input), "data wake source ready");
+    let initiation = if initiate_with_join {
+        Branch::JoinExit
     } else {
-        driver.step(Branch::Input).expect("scripted input first");
-        driver.step(Branch::JoinExit).expect("then join");
-    }
+        Branch::Input
+    };
+    driver
+        .step_pass(initiation)
+        .expect("the scripted initiation starts the pass");
     driver.delivery().snapshot()
 }
 
-/// S3 (kernel-branch face) — with Input and `JoinExit` simultaneously
-/// ready, the script picks the order; replays are identical and the two
-/// scripts observably differ.
+/// S3 (pass-initiation seam) — with two wake sources simultaneously
+/// ready on a parked kernel, the script picks which one initiates the
+/// next pass; each script replays identically, and — because the pass
+/// itself is the fixed §3.5 pipeline — the initiation choice does not
+/// fork the observable sequence.
 #[tokio::test]
-async fn s3_scripted_arbitration_orders_ready_branches_and_replays() {
-    let join_one = s3_branch_face(true).await;
-    let join_two = s3_branch_face(true).await;
-    assert_eq!(join_one, join_two, "replay identical (join first)");
-    let input_one = s3_branch_face(false).await;
-    let input_two = s3_branch_face(false).await;
-    assert_eq!(input_one, input_two, "replay identical (input first)");
-
-    assert!(
-        position_of(&join_one, "exit:pf") < position_of(&join_one, "update:1"),
-        "join-first script observes the exit first"
+async fn s3_pass_initiation_is_scriptable_and_replays_identically() {
+    let join_one = s3_initiation_run(true).await;
+    let join_two = s3_initiation_run(true).await;
+    assert_eq!(
+        join_one, join_two,
+        "replay identical (join-exit initiation)"
     );
-    assert!(
-        position_of(&input_one, "update:1") < position_of(&input_one, "exit:pf"),
-        "input-first script delivers first"
+    let input_one = s3_initiation_run(false).await;
+    let input_two = s3_initiation_run(false).await;
+    assert_eq!(input_one, input_two, "replay identical (input initiation)");
+    assert_eq!(
+        join_one, input_one,
+        "the fixed pass pipeline makes the initiation choice observably inconsequential"
     );
 }
 
@@ -543,7 +636,9 @@ async fn s4_reduce_quit_is_synchronous_and_stops_the_batch() {
         driver.grant(input_id).await;
     }
 
-    driver.step(Branch::Input).expect("batch with quit inside");
+    driver
+        .step_pass(Branch::Input)
+        .expect("batch with quit inside");
     assert_eq!(
         driver.state().applied,
         vec![1, 7],
@@ -551,7 +646,7 @@ async fn s4_reduce_quit_is_synchronous_and_stops_the_batch() {
     );
     assert!(driver.delivery().contains("terminating:Quit"), "sync quit");
     assert_eq!(
-        driver.step(Branch::Input),
+        driver.step_pass(Branch::Input),
         Err(StepError::Terminated),
         "no further application calls after termination"
     );
@@ -560,7 +655,9 @@ async fn s4_reduce_quit_is_synchronous_and_stops_the_batch() {
 }
 
 /// S4 — an effect-issued quit travels the control lane and is observed
-/// without draining the data backlog (backlog independence).
+/// without draining the data backlog: the pass's mandatory control drain
+/// precedes its input batch, so a quit ready at pass start wins
+/// (backlog independence, INV-RC9).
 #[tokio::test]
 async fn s4_control_quit_is_observed_independently_of_data_backlog() {
     let app = ScriptApp {
@@ -587,7 +684,9 @@ async fn s4_control_quit_is_observed_independently_of_data_backlog() {
     let quitter = driver.producer("quitter");
     driver.grant(quitter).await;
 
-    driver.step(Branch::Control).expect("control drains first");
+    driver
+        .step_pass(Branch::Control)
+        .expect("control drains first");
     assert!(
         driver.delivery().contains("quit:quitter"),
         "live-origin quit"
@@ -640,25 +739,21 @@ async fn s5_producer_panic_is_contained_and_delivery_continues() {
 
         driver.await_exit_ready().await;
         driver
-            .step(Branch::JoinExit)
-            .expect("observe the panic exit");
+            .step_pass(Branch::JoinExit)
+            .expect("containment pass");
         assert!(
             driver.delivery().contains("exit:pan:Panicked"),
             "panic observed as a join error"
         );
-        assert_eq!(
-            driver.entry_phase("pan"),
-            Some((Phase::Draining, false)),
-            "panic exit with committed pending is a live tombstone"
+        let entries = driver.delivery().snapshot();
+        assert!(
+            position_of(&entries, "exit:pan:Panicked") < position_of(&entries, "update:10"),
+            "the committed output delivers through the live tombstone: {entries:?}"
         );
-
-        driver
-            .step(Branch::Input)
-            .expect("deliver the committed output");
         assert_eq!(driver.entry_phase("pan"), None, "entry reclaimed");
         driver.grant(healthy).await;
         driver
-            .step(Branch::Input)
+            .step_pass(Branch::Input)
             .expect("other producers unaffected");
         assert_eq!(driver.state().applied, vec![10, 20], "loop continued");
         assert!(
@@ -696,8 +791,8 @@ async fn s5_driving_side_app_panic_fails_fast_and_producers_are_reclaimed() {
         input.push(13);
         driver.grant(input_id).await;
 
-        let unwound = catch_unwind(AssertUnwindSafe(|| driver.step(Branch::Input)));
-        assert!(unwound.is_err(), "the panic escapes the driving step");
+        let unwound = catch_unwind(AssertUnwindSafe(|| driver.step_pass(Branch::Input)));
+        assert!(unwound.is_err(), "the panic escapes the driving pass");
 
         let gauges = driver.gauges();
         let delivery = driver.delivery();
@@ -768,7 +863,7 @@ async fn s6_blocked_send_is_released_and_reclaimed_by_termination() {
     let quitter = driver.producer("quitter");
     driver.grant(quitter).await;
     driver
-        .step(Branch::Control)
+        .step_pass(Branch::Control)
         .expect("terminate under blocked send");
 
     let report = driver.settle().await;
@@ -834,7 +929,9 @@ async fn s7_natural_finish_alone_does_not_wake_the_frame_pass() {
     let mut driver = driver(app, want(&["input", "fin"]), Cmd::None);
     driver.boot();
     let input_id = driver.producer("input");
-    driver.step(Branch::Frame).expect("consume the boot redraw");
+    driver
+        .step_pass(Branch::Frame)
+        .expect("consume the boot redraw");
     assert_eq!(
         driver.delivery().count("reconcile"),
         1,
@@ -844,20 +941,23 @@ async fn s7_natural_finish_alone_does_not_wake_the_frame_pass() {
     fin.close();
     driver.await_exit_ready().await;
     driver
-        .step(Branch::JoinExit)
-        .expect("observe natural finish");
+        .step_pass(Branch::JoinExit)
+        .expect("natural-finish pass");
     assert_eq!(
-        driver.step(Branch::Frame),
+        driver.delivery().count("reconcile"),
+        1,
+        "a natural finish triggers no re-evaluation"
+    );
+    assert_eq!(
+        driver.step_pass(Branch::Frame),
         Err(StepError::NotReady(Branch::Frame)),
         "natural finish leaves the loop parked"
     );
-    assert_eq!(driver.delivery().count("reconcile"), 1, "no re-evaluation");
 
     input.push(5);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("a message arrives");
     driver
-        .step(Branch::Frame)
+        .step_pass(Branch::Input)
         .expect("message-driven re-evaluation");
     assert_eq!(
         driver.delivery().count("admit:fin"),
@@ -890,21 +990,23 @@ async fn s7_stop_quiescence_wakes_the_frame_pass_without_a_message() {
     let mut driver = driver(app, want(&["input", "suba"]), Cmd::None);
     driver.boot();
     let input_id = driver.producer("input");
-    driver.step(Branch::Frame).expect("consume the boot redraw");
+    driver
+        .step_pass(Branch::Frame)
+        .expect("consume the boot redraw");
 
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("deliver the swap");
-    driver.step(Branch::Frame).expect("stop pass");
+    driver.step_pass(Branch::Input).expect("stop pass");
     assert_eq!(
-        driver.step(Branch::Frame),
+        driver.step_pass(Branch::Frame),
         Err(StepError::NotReady(Branch::Frame)),
         "nothing left to run: the loop is parked"
     );
 
     driver.await_exit_ready().await;
-    driver.step(Branch::JoinExit).expect("quiescence wake");
-    driver.step(Branch::Frame).expect("idle re-evaluation");
+    driver
+        .step_pass(Branch::JoinExit)
+        .expect("idle wake pass: exit reflection dirties, the same pass re-evaluates");
     let entries = driver.delivery().snapshot();
     let wake = position_of(&entries, "exit:suba");
     let admit = position_of(&entries, "admit:subb");
@@ -960,7 +1062,7 @@ fn owned_work(host: HeadlessHost) -> OwnedWork {
 
 async fn assert_reclaimed(work: &mut OwnedWork, reason: ExitReason) {
     assert_eq!(
-        work.driver.step(Branch::Input),
+        work.driver.step_pass(Branch::Input),
         Err(StepError::Terminated),
         "no application calls after termination"
     );
@@ -991,7 +1093,9 @@ async fn s8_reduce_quit_reclaims_owned_work_and_discards_backlog() {
         work.input.push(value);
         work.driver.grant(input_id).await;
     }
-    work.driver.step(Branch::Input).expect("quit mid-batch");
+    work.driver
+        .step_pass(Branch::Input)
+        .expect("quit mid-batch");
     assert_eq!(work.driver.state().applied, vec![5, 7], "backlog discarded");
     assert_reclaimed(&mut work, ExitReason::Quit).await;
 }
@@ -1007,7 +1111,9 @@ async fn s8_control_quit_reclaims_owned_work() {
     work.driver.await_intents("quitter", 1).await;
     let quitter = work.driver.producer("quitter");
     work.driver.grant(quitter).await;
-    work.driver.step(Branch::Control).expect("control quit");
+    work.driver
+        .step_pass(Branch::Control)
+        .expect("control quit");
     assert!(work.driver.state().applied.is_empty(), "backlog untouched");
     assert_reclaimed(&mut work, ExitReason::Quit).await;
 }
@@ -1020,7 +1126,9 @@ async fn s8_render_error_reclaims_owned_work() {
         ..HeadlessHost::default()
     });
     work.driver.boot();
-    work.driver.step(Branch::Frame).expect("failing render");
+    work.driver
+        .step_pass(Branch::Frame)
+        .expect("failing render");
     assert_reclaimed(&mut work, ExitReason::RenderError).await;
 }
 
@@ -1086,10 +1194,12 @@ async fn gate_wait_abort_leaves_no_reservation_residue() {
     input.push(2);
     driver.grant(input_id).await;
     driver
-        .step(Branch::Input)
+        .step_pass(Branch::Input)
         .expect("teardown the gate waiter");
     driver.await_exit_ready().await;
-    driver.step(Branch::JoinExit).expect("observe the abort");
+    driver
+        .step_pass(Branch::JoinExit)
+        .expect("observe the abort");
     assert_eq!(driver.entry_phase("gw"), None, "removed without Draining");
     assert_eq!(counter.value(), 0, "no counter residue from the gate wait");
     assert!(
@@ -1126,15 +1236,9 @@ async fn saturated_counter_poisons_and_defers_removal_to_termination() {
     driver.grant(px).await;
 
     driver.await_exit_ready().await;
-    driver.step(Branch::JoinExit).expect("observe the exit");
-    assert_eq!(
-        driver.entry_phase("px"),
-        Some((Phase::Draining, false)),
-        "poisoned entry is retained past its exit"
-    );
     driver
-        .step(Branch::Input)
-        .expect("deliveries proceed normally");
+        .step_pass(Branch::JoinExit)
+        .expect("poisoned pass: exit reflected, then deliveries proceed");
     assert_eq!(driver.state().applied, vec![1, 2], "no stale side effects");
     assert_eq!(
         driver.entry_phase("px"),
@@ -1144,7 +1248,7 @@ async fn saturated_counter_poisons_and_defers_removal_to_termination() {
 
     input.push(7);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("terminate");
+    driver.step_pass(Branch::Input).expect("terminate");
     let report = driver.settle().await;
     assert!(
         report.gauges_zero,
@@ -1192,16 +1296,19 @@ async fn barrier_covers_subscription_runs_only_and_is_runtime_wide() {
 
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("spawn the command run");
+    driver
+        .step_pass(Branch::Input)
+        .expect("spawn the command run");
     input.push(2);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("teardown + declare suba");
+    driver
+        .step_pass(Branch::Input)
+        .expect("teardown + declare suba in one pass");
     assert_eq!(
         driver.entry_phase("fetch"),
         Some((Phase::Stopping, true)),
         "command run is stopping, unquiesced"
     );
-    driver.step(Branch::Frame).expect("admission pass");
     assert!(
         driver.delivery().contains("admit:suba"),
         "a stopping command run does not defer subscription admission"
@@ -1209,8 +1316,7 @@ async fn barrier_covers_subscription_runs_only_and_is_runtime_wide() {
 
     input.push(3);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("swap suba for subb");
-    driver.step(Branch::Frame).expect("stop pass defers");
+    driver.step_pass(Branch::Input).expect("stop pass defers");
     assert!(
         !driver.delivery().contains("admit:subb"),
         "a stopping subscription run defers unrelated admission"
@@ -1221,10 +1327,9 @@ async fn barrier_covers_subscription_runs_only_and_is_runtime_wide() {
             break;
         }
         driver.await_exit_ready().await;
-        driver.step(Branch::JoinExit).expect("reflect an exit");
-        if driver.ready(Branch::Frame) {
-            driver.step(Branch::Frame).expect("re-evaluation");
-        }
+        driver
+            .step_pass(Branch::JoinExit)
+            .expect("reflect exits and re-evaluate");
     }
     let entries = driver.delivery().snapshot();
     assert!(
@@ -1345,10 +1450,9 @@ async fn scoped_child_teardown_selects_only_child_runs() {
 
     input.push(5);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("child spawn via routing");
     driver
-        .step(Branch::Frame)
-        .expect("admit the scoped child sub");
+        .step_pass(Branch::Input)
+        .expect("child spawn via routing; the same pass admits the scoped sub");
     assert!(
         driver.delivery().contains("admit:child-sub"),
         "child sub up"
@@ -1357,7 +1461,7 @@ async fn scoped_child_teardown_selects_only_child_runs() {
     input.push(6);
     driver.grant(input_id).await;
     driver
-        .step(Branch::Input)
+        .step_pass(Branch::Input)
         .expect("parent tears the child down");
     let delivery = driver.delivery();
     assert!(
@@ -1372,12 +1476,15 @@ async fn scoped_child_teardown_selects_only_child_runs() {
     );
 
     for _ in 0..2 {
+        if driver.registry_len() == 1 {
+            break;
+        }
         driver.await_exit_ready().await;
-        driver.step(Branch::JoinExit).expect("reflect a child exit");
+        driver
+            .step_pass(Branch::JoinExit)
+            .expect("reflect child exits and re-evaluate");
     }
-    driver
-        .step(Branch::Frame)
-        .expect("post-teardown re-evaluation");
+    assert_eq!(driver.registry_len(), 1, "both child runs reclaimed");
     assert_eq!(
         driver.delivery().count("admit:child-sub"),
         1,
@@ -1427,18 +1534,22 @@ async fn stopped_command_run_exit_does_not_wake_the_frame_pass() {
     let mut driver = driver(app, want(&["input"]), Cmd::None);
     driver.boot();
     let input_id = driver.producer("input");
-    driver.step(Branch::Frame).expect("consume the boot redraw");
+    driver
+        .step_pass(Branch::Frame)
+        .expect("consume the boot redraw");
 
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("spawn the command run");
-    driver.step(Branch::Frame).expect("consume the update dirt");
+    driver
+        .step_pass(Branch::Input)
+        .expect("spawn the command run");
     input.push(2);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("stop the command run");
-    driver.step(Branch::Frame).expect("consume the update dirt");
+    driver
+        .step_pass(Branch::Input)
+        .expect("stop the command run");
     assert_eq!(
-        driver.step(Branch::Frame),
+        driver.step_pass(Branch::Frame),
         Err(StepError::NotReady(Branch::Frame)),
         "nothing pending before the exit"
     );
@@ -1446,14 +1557,14 @@ async fn stopped_command_run_exit_does_not_wake_the_frame_pass() {
 
     driver.await_exit_ready().await;
     driver
-        .step(Branch::JoinExit)
+        .step_pass(Branch::JoinExit)
         .expect("observe the stopped command exit");
     assert!(
         driver.delivery().contains("exit:fetch:Cancelled"),
         "the stopped command run exited"
     );
     assert_eq!(
-        driver.step(Branch::Frame),
+        driver.step_pass(Branch::Frame),
         Err(StepError::NotReady(Branch::Frame)),
         "a stopped command run's quiescence leaves no dirt"
     );
@@ -1496,12 +1607,14 @@ async fn keyed_slot_policies_replace_or_suppress() {
 
     input.push(1);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("first keyed spawn");
+    driver.step_pass(Branch::Input).expect("first keyed spawn");
     assert_eq!(driver.delivery().count("spawn:fetch:t2"), 1, "occupant up");
 
     input.push(2);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("keep-in-flight spawn");
+    driver
+        .step_pass(Branch::Input)
+        .expect("keep-in-flight spawn");
     assert!(
         driver.delivery().contains("suppress:fetch"),
         "KeepInFlight suppresses the new spawn"
@@ -1514,7 +1627,9 @@ async fn keyed_slot_policies_replace_or_suppress() {
 
     input.push(3);
     driver.grant(input_id).await;
-    driver.step(Branch::Input).expect("cancel-in-flight spawn");
+    driver
+        .step_pass(Branch::Input)
+        .expect("cancel-in-flight spawn");
     assert!(
         driver.delivery().contains("replace:fetch"),
         "CancelInFlight revokes the occupant"
@@ -1569,7 +1684,7 @@ async fn grant_handles_do_not_alias_acceptances() {
         1,
         "second acceptance"
     );
-    driver.step(Branch::Input).expect("both deliveries");
+    driver.step_pass(Branch::Input).expect("both deliveries");
     assert_eq!(driver.state().applied, vec![1, 2], "grant order held");
 }
 
@@ -1603,7 +1718,9 @@ async fn bounded_headroom_run(first: &str, second: &str) -> Vec<String> {
     let second_id = driver.producer(second);
     driver.grant(first_id).await;
     driver.grant(second_id).await;
-    driver.step(Branch::Input).expect("drain both");
+    driver
+        .step_pass(Branch::Input)
+        .expect("drain both in one pass");
     driver.delivery().snapshot()
 }
 
@@ -1667,10 +1784,10 @@ async fn bounded_full_lane_run() -> Vec<String> {
     );
 
     driver
-        .step(Branch::Input)
+        .step_pass(Branch::Input)
         .expect("drain one; capacity frees");
     ack.await;
-    driver.step(Branch::Input).expect("drain the second");
+    driver.step_pass(Branch::Input).expect("drain the second");
     driver.delivery().snapshot()
 }
 
@@ -1691,28 +1808,38 @@ async fn bounded_full_lane_grant_acks_only_after_real_acceptance() {
     );
 }
 
-// --- P1-3: fixed-pass bounds under flood ------------------------------------
+// --- INV-RC9 bound rows (fixed-pass bounds under flood) ---------------------
 
-/// P1-3 bound (i) — under continuous input readiness a control-lane quit
-/// is applied before the next input batch starts: with cap 2 and five
-/// committed data envelopes ahead of it, exactly one batch (2 messages)
-/// runs before the mandatory control drain applies the quit. Delay <=
-/// the in-progress batch's remainder <= cap, observed deterministically.
+/// INV-RC9 pass-start row — a quit already arrived at pass start wins
+/// over a full ready input batch: the mandatory control drain precedes
+/// the input stage, so the quit applies with **zero** inputs processed —
+/// even though the first queued input would have torn the quitter's
+/// scope down ("an input that could have cancelled the quit's origin
+/// never precedes it").
 #[tokio::test]
-async fn control_quit_under_flood_applies_before_the_next_batch() {
+async fn quit_ready_at_pass_start_wins_over_ready_input() {
     let app = ScriptApp {
-        on_msg: Box::new(inert),
+        on_msg: Box::new(|_, msg| {
+            if msg == 9 {
+                Cmd::Teardown(ScopePath::seg("quit"))
+            } else {
+                Cmd::None
+            }
+        }),
         sources: no_subs(),
     };
     let init = Cmd::Batch(vec![
-        send_then_park("flood", vec![1, 2, 3, 4, 5]),
-        anon(
-            "quitter",
-            body(|ctx| async move {
+        send_then_park("flood", vec![9, 1, 2, 3, 4]),
+        Cmd::Spawn(SpawnCmd {
+            label: "quitter",
+            scope: ScopePath::seg("quit"),
+            key: None,
+            policy: CancelPolicy::CancelInFlight,
+            body: body(|ctx| async move {
                 let _ = ctx.handle.quit().await;
                 pending::<()>().await;
             }),
-        ),
+        }),
     ]);
     let mut driver = TestDriver::new(
         app,
@@ -1733,28 +1860,89 @@ async fn control_quit_under_flood_applies_before_the_next_batch() {
     driver.grant(quitter).await;
 
     driver.step_pass(Branch::Input).expect("one fixed pass");
+    assert!(
+        driver.state().applied.is_empty(),
+        "the quit wins at pass start: zero inputs processed"
+    );
+    assert!(
+        driver.delivery().contains("quit:quitter"),
+        "applied at the first control drain at or after arrival"
+    );
+    assert!(driver.delivery().contains("terminating:Quit"), "terminated");
+    let report = driver.settle().await;
+    assert!(report.gauges_zero, "flood reclaimed");
+}
+
+/// INV-RC9 mid-batch row — a quit arriving after a pass's control drain
+/// (mid/after that pass's batch; between passes in scripted driving) is
+/// applied at the next pass's control drain: preceded only by the
+/// in-progress batch's remainder (<= cap), and no further batch starts.
+#[tokio::test]
+async fn quit_arriving_mid_batch_applies_at_the_next_pass_start() {
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let init = Cmd::Batch(vec![
+        send_then_park("flood", vec![1, 2, 3, 4]),
+        anon(
+            "quitter",
+            body(|ctx| async move {
+                let _ = ctx.handle.quit().await;
+                pending::<()>().await;
+            }),
+        ),
+    ]);
+    let mut driver = TestDriver::new(
+        app,
+        (want(&[]), init),
+        KernelConfig {
+            batch_cap: 2,
+            ..KernelConfig::default()
+        },
+    );
+    driver.boot();
+    driver.await_intents("flood", 1).await;
+    let flood = driver.producer("flood");
+    for _ in 0..4 {
+        driver.grant(flood).await;
+    }
+
+    driver
+        .step_pass(Branch::Input)
+        .expect("the in-progress batch");
     assert_eq!(
         driver.state().applied,
         vec![1, 2],
-        "the quit is applied after at most the batch cap, never a second batch"
+        "the in-progress batch's remainder"
     );
-    let delivery = driver.delivery();
-    assert!(
-        delivery.contains("quit:quitter"),
-        "control drain ran in-pass"
+    // The quit arrives after that pass's control drain already ran.
+    driver.await_intents("quitter", 1).await;
+    let quitter = driver.producer("quitter");
+    driver.grant(quitter).await;
+
+    driver.step_pass(Branch::Control).expect("the next pass");
+    assert_eq!(
+        driver.state().applied,
+        vec![1, 2],
+        "no further input precedes the quit"
     );
-    assert!(delivery.contains("terminating:Quit"), "quit applied");
     assert!(
-        !delivery.contains("update:3"),
-        "no next batch after the quit"
+        driver.delivery().contains("quit:quitter"),
+        "applied at the first control drain at or after arrival"
+    );
+    assert!(
+        !driver.delivery().contains("update:3"),
+        "the next batch never starts"
     );
     let report = driver.settle().await;
     assert!(report.gauges_zero, "flood reclaimed");
 }
 
-/// P1-3 bound (ii) — the redraw a batch raises renders before the next
-/// batch starts: with cap 2 and four queued messages, each fixed pass
-/// ends in exactly one render, so the flood cannot suppress rendering.
+/// INV-RC9 render row — the redraw a batch raises renders before the
+/// next batch starts: with cap 2 and four queued messages, each fixed
+/// pass ends in exactly one render, so the flood cannot suppress
+/// rendering.
 #[tokio::test]
 async fn flood_cannot_suppress_render_between_batches() {
     let app = ScriptApp {

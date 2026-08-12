@@ -5,16 +5,17 @@
 //! the uniform subscription barrier with the stopping-pass defer rule,
 //! and the two-stage termination postcondition.
 //!
-//! Pass execution is the fixed pipeline RFC 0014 §3.5 (a) pins: input
-//! batch (always-finite count cap) -> mandatory control-lane drain ->
-//! frame step. Arbitration's negative space is reduced to pass
-//! *initiation* (which wake source ends the park) and producer executor
-//! scheduling. The stage executors are a single implementation shared by
-//! the production loop (`run`, immediate gate, composing them via
-//! `pass_cycle`) and by `TestDriver` (scripted: `step_pass` runs the same
-//! composed pass; `step` decomposes it stage by stage for fine-grained
-//! assertion). Only the initiation/grant policies and the decomposition
-//! granularity differ (C-1's permitted differences).
+//! Pass execution is the fixed pipeline RFC 0014 §3.5 pins (normative
+//! order): exit reflection -> mandatory control-lane drain -> input
+//! batch (always-finite count cap) -> frame step. A quit ready at pass
+//! start deterministically wins over ready input (INV-RC9). Arbitration's
+//! negative space is reduced to pass *initiation* (which wake source
+//! ends the park) and producer executor scheduling. The stage executors
+//! are a single implementation shared by the production loop (`run`,
+//! immediate gate, composing them via `pass_cycle`) and by
+//! `TestDriver::step_pass` (the scripted evidence surface). The
+//! stage-granular `TestDriver::step` bypasses the pinned stage order and
+//! is a component/white-box probe only.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
@@ -686,20 +687,36 @@ impl<P: Program, H: Host> Kernel<P, H> {
         }
     }
 
-    /// One fixed pass (RFC 0014 §3.5 (a)): reflect the exits already
-    /// observable, then run the pinned stage pipeline — input batch
-    /// (always-finite count cap) -> mandatory control-lane drain -> frame
-    /// step (render if redraw pending, then re-evaluation if dirty). The
-    /// stage order is structure, not arbitration: Control and Frame are
-    /// serviced every pass, so a continuously ready data lane can neither
-    /// starve a producer quit past the current batch's remainder (<= cap)
-    /// nor suppress the render a batch raised. Shared verbatim by the
-    /// production loop and `TestDriver::step_pass`.
+    /// One fixed pass in the normative RFC 0014 §3.5 stage order:
+    ///
+    /// 1. exit reflection (bookkeeping and §5.2 dirt only — no input is
+    ///    processed and no quit is applied here; on an idle wake this
+    ///    stage runs at the head of the woken pass and the same pass's
+    ///    frame stage consumes the dirt);
+    /// 2. mandatory control-lane drain (every already-arrived quit —
+    ///    applied if the origin is live, discarded if revoked — *before*
+    ///    this pass's input batch, so a quit that is ready at pass start
+    ///    deterministically wins over ready input, and INV-RC9 holds: a
+    ///    quit is applied at the first control drain at or after its
+    ///    arrival, preceded only by the in-progress batch's remainder;
+    ///    an input that could have cancelled the quit's origin never
+    ///    precedes it);
+    /// 3. input batch (at most once per pass, always-finite count cap);
+    /// 4. frame step (render if redraw pending, then re-evaluation if
+    ///    dirty).
+    ///
+    /// The stage order is structure, not arbitration: a continuously
+    /// ready data lane can neither starve a quit past the current
+    /// batch's remainder (<= cap) nor suppress the render a batch
+    /// raised. Shared verbatim by the production loop and
+    /// `TestDriver::step_pass`.
     pub fn pass_cycle(&mut self) {
         self.reflect_available_exits();
-        self.input_batch();
         if !self.terminating() {
             self.control_drain();
+        }
+        if !self.terminating() {
+            self.input_batch();
         }
         if !self.terminating() {
             self.frame_step();

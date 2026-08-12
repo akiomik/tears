@@ -143,12 +143,14 @@ impl<P: Program> TestDriver<P> {
         Ok(Box::pin(async move { gate.commit_reached(sequence).await }))
     }
 
-    /// Scripted arbitration, stage-granular: runs one stage executor if
-    /// and only if it is ready. This decomposes the fixed pass
-    /// (RFC 0014 §3.5) for fine-grained assertion; the composed pass
-    /// itself is driven by `step_pass` and pinned by the bound tests —
-    /// stage orderings scripted here are driving decompositions, not
-    /// production pass orders (C-2's citation rule applies).
+    /// Component/white-box probe: runs one stage executor in isolation if
+    /// and only if it is ready. This **bypasses the fixed §3.5 stage
+    /// order**, so it is outside the same-topology evidence surface —
+    /// tests driving through it are white-box probes of a single stage's
+    /// mechanism (e.g. mid-pass phase windows unreachable by scripted
+    /// pass driving) and are excluded from the C-5 / INV-RC13 acceptance
+    /// evidence. The evidence surface drives whole passes via
+    /// `step_pass`.
     pub fn step(&mut self, branch: Branch) -> Result<(), StepError> {
         if self.kernel.terminating() {
             return Err(StepError::Terminated);
@@ -160,12 +162,14 @@ impl<P: Program> TestDriver<P> {
         Ok(())
     }
 
-    /// Runs one full fixed pass (exit reflection, then input batch with
-    /// its always-finite count cap, then the mandatory control drain,
-    /// then the frame step) through the same `pass_cycle` the production
-    /// loop runs. `initiation` names the wake source starting the pass
-    /// and must be ready — pass initiation is exactly the arbitration
-    /// slot RFC 0014 §3.5 leaves scriptable.
+    /// Runs one full fixed pass in the normative §3.5 order (exit
+    /// reflection, then the mandatory control drain, then the input
+    /// batch with its always-finite count cap, then the frame step)
+    /// through the same `pass_cycle` the production loop runs.
+    /// `initiation` names the wake source starting the pass and must be
+    /// ready — pass initiation is exactly the arbitration slot RFC 0014
+    /// §3.5 leaves scriptable, and it is the driving surface of the
+    /// same-topology acceptance evidence.
     pub fn step_pass(&mut self, initiation: Branch) -> Result<(), StepError> {
         if self.kernel.terminating() {
             return Err(StepError::Terminated);
