@@ -449,9 +449,21 @@ impl<P: Program, H: Host> Kernel<P, H> {
             return;
         };
         match self.registry.on_exit(token) {
-            Some((label, revoked)) => {
-                self.delivery.push(format!("exit:{label}:{outcome:?}"));
-                if revoked && !self.terminating() {
+            Some(observation) => {
+                self.delivery
+                    .push(format!("exit:{}:{outcome:?}", observation.label));
+                // Dirt boundary (RFC 0014 §5.1): only the quiescence of a
+                // *subscription* run that a steady-state stop (reconcile,
+                // teardown, or keyed replace) revoked marks subscriptions
+                // dirty. Command/cleanup runs never trigger a
+                // re-evaluation, natural finishes leave no dirt, and
+                // termination-time quiescence is excluded by the phase
+                // check (a termination-stopped run is only observable
+                // while terminating).
+                if observation.stopped
+                    && matches!(observation.kind, RunKind::Sub(_))
+                    && !self.terminating()
+                {
                     self.dirty = true;
                 }
             }

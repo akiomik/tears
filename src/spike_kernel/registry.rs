@@ -36,6 +36,22 @@ pub enum Phase {
     Draining,
 }
 
+/// What a `JoinExit` observation reports to the kernel: the run's kind
+/// and whether a stop had been requested before the exit — the inputs of
+/// the dirt boundary (RFC 0014 §5.1). The stop *cause* (steady-state vs
+/// termination) is not stored on the entry: a termination-stopped run can
+/// only ever be observed while the kernel is terminating, so the kernel's
+/// phase at observation time distinguishes the causes exactly.
+pub struct ExitObservation {
+    /// Ledger vocabulary for the run.
+    pub label: &'static str,
+    /// Whether a stop (revocation) had been requested before the exit;
+    /// `false` is a natural finish.
+    pub stopped: bool,
+    /// Producer species; only subscription runs may mark dirt.
+    pub kind: RunKind,
+}
+
 /// One run's authoritative record.
 pub struct RunEntry {
     /// Run identity token.
@@ -167,13 +183,17 @@ impl ScopeRegistry {
     }
 
     /// `JoinExit` observation: marks the exit, then applies the unified
-    /// removal condition. Returns `(label, revoked)` of the observed run;
+    /// removal condition. Returns what the kernel's dirt decision needs;
     /// `None` if the token is unknown (already removed — an invariant
     /// violation surfaced to the caller).
-    pub fn on_exit(&mut self, token: RunToken) -> Option<(&'static str, bool)> {
+    pub fn on_exit(&mut self, token: RunToken) -> Option<ExitObservation> {
         let entry = self.entries.get_mut(&token)?;
         entry.exited = true;
-        let observed = (entry.label, entry.revoked);
+        let observed = ExitObservation {
+            label: entry.label,
+            stopped: entry.revoked,
+            kind: entry.kind.clone(),
+        };
         if entry.removable() {
             self.entries.remove(&token);
         } else if let Some(entry) = self.entries.get_mut(&token) {

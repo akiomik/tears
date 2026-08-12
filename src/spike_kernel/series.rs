@@ -1389,6 +1389,67 @@ async fn construction_is_inert_and_never_run_drop_is_clean() {
     assert_eq!(gauges.producers(), 0, "never-run drop spawns nothing");
 }
 
+/// Dirt boundary (RFC 0014 §5.1) — the exit of a *stopped command* run
+/// never wakes the frame pass: only the quiescence of a stopped
+/// subscription run marks dirt (the positive case is pinned by S7 and the
+/// barrier test; the natural-finish case by the S7 contrast test).
+#[tokio::test]
+async fn stopped_command_run_exit_does_not_wake_the_frame_pass() {
+    let input = MockSource::default();
+    let app = ScriptApp {
+        on_msg: Box::new(|_, msg| match msg {
+            1 => Cmd::Spawn(SpawnCmd {
+                label: "fetch",
+                scope: ScopePath::seg("work"),
+                key: Some("k"),
+                policy: CancelPolicy::CancelInFlight,
+                body: body(|_ctx| pending::<()>()),
+            }),
+            2 => Cmd::Teardown(ScopePath::seg("work")),
+            _ => Cmd::None,
+        }),
+        sources: BTreeMap::from([("input", input.clone())]),
+    };
+    let mut driver = driver(app, want(&["input"]), Cmd::None);
+    driver.boot();
+    let input_id = driver.producer("input");
+    driver.step(Branch::Frame).expect("consume the boot redraw");
+
+    input.push(1);
+    driver.grant(input_id).await;
+    driver.step(Branch::Input).expect("spawn the command run");
+    driver.step(Branch::Frame).expect("consume the update dirt");
+    input.push(2);
+    driver.grant(input_id).await;
+    driver.step(Branch::Input).expect("stop the command run");
+    driver.step(Branch::Frame).expect("consume the update dirt");
+    assert_eq!(
+        driver.step(Branch::Frame),
+        Err(StepError::NotReady(Branch::Frame)),
+        "nothing pending before the exit"
+    );
+    let reconciles = driver.delivery().count("reconcile");
+
+    driver.await_exit_ready().await;
+    driver
+        .step(Branch::JoinExit)
+        .expect("observe the stopped command exit");
+    assert!(
+        driver.delivery().contains("exit:fetch:Cancelled"),
+        "the stopped command run exited"
+    );
+    assert_eq!(
+        driver.step(Branch::Frame),
+        Err(StepError::NotReady(Branch::Frame)),
+        "a stopped command run's quiescence leaves no dirt"
+    );
+    assert_eq!(
+        driver.delivery().count("reconcile"),
+        reconciles,
+        "no re-evaluation was triggered by the command exit"
+    );
+}
+
 /// Keyed replacement policies — `CancelInFlight` revokes the occupant and
 /// starts fresh; `KeepInFlight` suppresses the new spawn; a Stopping
 /// occupant does not hold the slot (fresh-slot rule).
