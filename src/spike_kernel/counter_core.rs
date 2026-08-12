@@ -104,9 +104,11 @@ impl CounterCore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering as StdOrdering};
 
     use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicU32 as LoomAtomicU32, Ordering as LoomOrdering};
     use loom::thread;
 
     use super::CounterCore;
@@ -114,8 +116,8 @@ mod tests {
     /// Std-side interleaving counter: `loom::model` requires a `'static`
     /// closure and runs it once per explored execution, so a shared std
     /// atomic (untracked by loom) counts the explored interleavings.
-    fn interleaving_counter() -> std::sync::Arc<AtomicUsize> {
-        std::sync::Arc::new(AtomicUsize::new(0))
+    fn interleaving_counter() -> StdArc<AtomicUsize> {
+        StdArc::new(AtomicUsize::new(0))
     }
 
     fn explored(counter: &AtomicUsize, what: &str) {
@@ -132,7 +134,7 @@ mod tests {
     #[test]
     fn concurrent_release_and_dequeue_balance_without_underflow() {
         let interleavings = interleaving_counter();
-        let in_model = std::sync::Arc::clone(&interleavings);
+        let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
             in_model.fetch_add(1, StdOrdering::SeqCst);
             let counter = Arc::new(CounterCore::default());
@@ -160,18 +162,18 @@ mod tests {
         explored(&interleavings, "release/dequeue balance");
     }
 
-    /// Exit observation is ordered after RAII resolution (JoinSet join
+    /// Exit observation is ordered after RAII resolution (`JoinSet` join
     /// happens-after the task future's drop). Under that ordering, the
     /// removal condition can never remove an entry whose committed
     /// envelope is still undrained: commit-after-removal is unreachable.
     #[test]
     fn removal_condition_never_strands_a_committed_envelope() {
         let interleavings = interleaving_counter();
-        let in_model = std::sync::Arc::clone(&interleavings);
+        let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
             in_model.fetch_add(1, StdOrdering::SeqCst);
             let counter = Arc::new(CounterCore::default());
-            let queued = Arc::new(loom::sync::atomic::AtomicU32::new(0));
+            let queued = Arc::new(LoomAtomicU32::new(0));
 
             let producer = {
                 let counter = Arc::clone(&counter);
@@ -179,7 +181,7 @@ mod tests {
                 thread::spawn(move || {
                     // Send #1 commits (envelope enters the lane).
                     counter.reserve();
-                    queued.fetch_add(1, loom::sync::atomic::Ordering::SeqCst);
+                    queued.fetch_add(1, LoomOrdering::SeqCst);
                     // Send #2 fails: RAII release before the task ends.
                     counter.reserve();
                     counter.decrement();
@@ -190,9 +192,9 @@ mod tests {
                 let queued = Arc::clone(&queued);
                 thread::spawn(move || {
                     // A dequeue only happens for a committed envelope.
-                    if queued.load(loom::sync::atomic::Ordering::SeqCst) > 0 {
+                    if queued.load(LoomOrdering::SeqCst) > 0 {
                         counter.decrement();
-                        queued.fetch_sub(1, loom::sync::atomic::Ordering::SeqCst);
+                        queued.fetch_sub(1, LoomOrdering::SeqCst);
                     }
                 })
             };
@@ -201,7 +203,7 @@ mod tests {
             // was committed or released (thread join = JoinSet order).
             producer.join().expect("producer thread");
             let removable = counter.value() == 0 && !counter.is_poisoned();
-            let stranded = queued.load(loom::sync::atomic::Ordering::SeqCst);
+            let stranded = queued.load(LoomOrdering::SeqCst);
             assert!(
                 !removable || stranded == 0,
                 "an entry must never be removable while a committed envelope is undrained"
@@ -216,7 +218,7 @@ mod tests {
     #[test]
     fn saturation_freeze_holds_under_concurrent_writers() {
         let interleavings = interleaving_counter();
-        let in_model = std::sync::Arc::clone(&interleavings);
+        let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
             in_model.fetch_add(1, StdOrdering::SeqCst);
             let counter = Arc::new(CounterCore::default());
@@ -247,7 +249,7 @@ mod tests {
     #[test]
     fn decrement_racing_poisoning_cannot_thaw_the_counter() {
         let interleavings = interleaving_counter();
-        let in_model = std::sync::Arc::clone(&interleavings);
+        let in_model = StdArc::clone(&interleavings);
         loom::model(move || {
             in_model.fetch_add(1, StdOrdering::SeqCst);
             let counter = Arc::new(CounterCore::default());
