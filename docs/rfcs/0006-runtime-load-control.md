@@ -329,6 +329,11 @@ load-control implementation (sections 4–6) landed after 0.10.0 behind
 
 ## 4. Contract design (post-0.10.0, direction fixed)
 
+This section states the contract on the delivery topology this RFC is
+written over. Section 5.2 records what each of its clauses becomes under
+the successor kernel RFC 0014 defines, and which of them that kernel
+supersedes.
+
 ### 4.1 Configuration surface
 
 `RuntimeConfig` — public shape fixed by the separate `RuntimeConfig` RFC
@@ -1003,6 +1008,8 @@ Consequences:
 The invariants below are the load-control implementation contract. Each
 states its enforcement class (structural, behavioral, or statistical) and
 the check that realizes it; the implementation realizes those checks.
+Section 5.2 carries each invariant's successor correspondence under the
+kernel RFC 0014 defines, invariant by invariant.
 
 - **INV-L1**: With `app_channel_capacity = n`, the shared channel buffers at
   most `n` messages, and each configured keyed channel buffers at most its
@@ -1488,6 +1495,199 @@ is therefore `app_channel_capacity + concurrent shared-channel producers`
 (`capacity + 1` in these single-flood-producer scenarios); depth exceeding
 `capacity + producers` is the regression signal.
 
+### 5.2 Successor correspondence under the reducer-first kernel
+
+RFC 0014 replaces the delivery topology this contract is stated over.
+Producer message output — subscription, unkeyed command, keyed command —
+travels one origin-tagged FIFO data lane; deliverability is decided at
+the delivery decision point by the producing run's liveness; a
+producer-originated quit travels a dedicated control lane drained as a
+mandatory stage of every pass, before that pass's input batch; and an
+`update`-returned quit applies synchronously at its dispatch (RFC 0014
+§3.1, §3.3, §3.5). Bounded and unbounded lane modes stay configuration,
+and bounded-mode capacity, blocking sends, and the capacity-wait
+observability stay this contract's, amended only as the clauses below
+state. The register that decides the correspondence is RFC 0014 §9 rows
+2, 4, 9, and 10, whose landing that RFC gates on its staged spike (its
+§13.1). Until then every clause of this document states the contract in
+force; each becomes the following. Two parts are absent below because
+nothing reaches them: section 3's release-gate verdict records a decision
+already taken, and R6 — no default-behavior change *in 0.10.0* — is that
+gate's own requirement, discharged there, while the successor's behavior
+changes ride RFC 0014's CHANGELOG at 0.11.0. R1, R2, and R3 are carried
+by the invariants that state them (INV-L1, INV-L2, INV-L3 below). The
+successor's own enforcement classes are RFC 0014 §12's — this
+correspondence records what each clause becomes and adds no check of its
+own.
+
+- **The delivery-class split is superseded** — section 1.1's channel
+  inventory, section 4.2's per-source-class send contract, and section
+  4.3's per-source FIFO scopes. Two app-facing classes become one data
+  lane beside the control lane, so the send contract is per lane rather
+  than per source class: in bounded mode a producer awaits data-lane
+  capacity whatever it produces, and quit signals still never
+  participate in backpressure — R4's unbounded exception carries to the
+  control lane, which is never bounded (RFC 0014 §3.1, §3.3; §9 row 2).
+- **R4 is preserved on the control lane, and sharpened.** A quit already
+  in the control lane is applied independently of data-lane backlog and
+  capacity, and the mandatory per-pass drain turns the guarantee
+  constructive: a quit that has arrived when a pass begins is applied
+  with zero further inputs processed, and one arriving mid-pass is
+  preceded only by the in-progress batch's remainder (RFC 0014 §3.5,
+  INV-RC9). The `update`-returned route is stronger still — a quit
+  returned from `update`, the init command's included, applies at that
+  dispatch and travels no lane at all — and it is a route the successor
+  splits by origin, not by keying: every producer-originated quit,
+  keyed run or anonymous run alike, takes the control lane.
+- **R5's disjunction is discharged on the amendment side.** The RFC 0003
+  invariants it required to be preserved or explicitly amended are
+  classified one by one in RFC 0003 §6.1, and the keyed-quit ordering R5
+  preserved under the same rule — pinned here as INV-L10 — is amended
+  rather than preserved (below).
+- **INV-L5 reads over RFC 0003's successor forms.** Its claim is about
+  bounded mode, not about the topology: on the successor kernel "all
+  RFC 0003 invariants hold unchanged in bounded mode" quantifies over
+  the forms RFC 0003 §6.1 records, which the bounded lane mode leaves
+  intact.
+- **INV-L1 and INV-L3 hold over the data lane** (RFC 0014 §3.1's lane
+  modes). A configured data-lane capacity bounds that lane's buffer, an
+  accepted item is preceded by at most `capacity - 1` earlier items, and
+  the drain-side and admission bounds keep their producer-count premise
+  (section 4.5), which stays application-owned and observable.
+- **INV-L9, INV-L1's per-command term, and the `keyed_channel_capacity`
+  control are superseded, with a recorded property loss.** All three
+  quantify over the private per-`CommandId` channels the kernel removes:
+  with one data lane there is no per-command channel for a capacity to
+  bound, for isolation to hold between, or for the `m ×
+  keyed_channel_capacity` term to sum over. The control leaves the
+  public surface (RFC 0007 §7.1), the term leaves INV-L1's total, and
+  **INV-L9's isolation is not preserved**: a producer blocked on the
+  data lane's capacity delays every other producer awaiting that same
+  capacity, whatever key each belongs to, where today one key's full
+  channel delays neither another key's admission nor the shared
+  channel's. This is a user-visible property loss of the same class as
+  the shared-first one above, carried by RFC 0014's CHANGELOG
+  (RFC 0014 §3.1; §9 row 2). What replaces the per-command bound is the
+  one lane's own: INV-L1's data-lane capacity above, on the same
+  application-owned producer-count premise.
+- **INV-L2 is preserved.** Lossless delivery under backpressure is
+  untouched — the successor changes the deliverability decision, not the
+  drop policy — and the carve-out INV-L2 already makes for the
+  cancellation contract reads over that decision's revocation set:
+  explicit cancel, supersession, scope teardown, and termination
+  (RFC 0014 §3.1).
+- **INV-L4's property is preserved; its acceptance conditions are a
+  named prerequisite.** Backlog independence survives on the control
+  lane (R4 above). The conditions — the four `quit_*` scenarios, the
+  trial counts, the p99 threshold, and the reference-machine scoping —
+  are stated over this topology and over RFC 0011 §7's unbiased-select
+  premise, and neither the scenario set nor the premise survives
+  unchanged. Re-deriving the formulation and the bounded-mode scenario
+  set on the successor topology, under this section's reference-machine
+  and reproducibility discipline, is owned by this RFC and tracked as
+  RFC 0014 §13.5; the successor's acceptance run waits on it, and no
+  numeric threshold is claimed for the successor before it lands. What
+  holds meanwhile is RFC 0014 §3.3's latency statement with INV-RC9's
+  constructive bounds. The formulation-(a) fallback INV-L4 records is
+  moot there: the control drain is a fixed pass stage, not a select
+  branch that could be biased.
+- **INV-L6 splits.** Its `None`-path claim survives as the unbounded
+  lane mode's selection — an unset capacity selects unbounded delivery,
+  not a large bound. Its batching half does not: with `batch_max_messages`
+  unset the successor applies the kernel's own finite count cap in place
+  of the time-capped-only loop (RFC 0014 §3.5; §9 row 4).
+- **INV-L7's object is unchanged; its check re-points.** It forbids the
+  driving task performing an awaiting send on a channel it drains, and
+  the successor keeps producer output on producer runs while the
+  `update`-returned quit route performs no send at all — so the
+  no-self-deadlock precondition is the same claim, reviewed at the lane
+  send sites instead of the per-class ones.
+- **INV-L8 is preserved.** Load control still paces sends without
+  intervening in producer admission, and the successor adds no
+  load-coupled admission rule of its own: its subscription barrier is
+  RFC 0012's lifecycle ordering, the carve-out section 4.5 already
+  makes.
+- **INV-L10 and INV-L11 are superseded, breaking.** The successor
+  statement: a producer-originated quit is backlog-independent and
+  cancellable until applied — through origin revocation rather than
+  private-channel drop — and its ordering against its own run's earlier
+  data-lane output is not guaranteed, so a run emitting `[Message(saved),
+  Quit]` no longer guarantees `saved` reaches `update` before
+  termination. An application needing deliver-then-quit returns the quit
+  from the `update` that observes the final message, which the
+  synchronous route pins exactly. INV-L11's shared-first precedence
+  falls with shared-first pull itself (RFC 0014 §3.3, §3.2; §9 row 10).
+- **INV-L12 is preserved except its `None` clause.** The counted unit
+  stays this invariant's — every pulled input counts, the opening input
+  first — and a configured cap still bounds one batch's pulls. With
+  `None` the pull count is no longer unbounded: the kernel applies a
+  finite default. The composing exits change with the topology: input
+  exhaustion remains and an `update`-returned quit still ends processing
+  at its dispatch, while the 100µs time cap goes with the kernel's
+  wall-clock reads (RFC 0014 §3.5, §6.3; §9 row 4).
+- **INV-L13 keeps its firing conditions and takes a new vocabulary.**
+  `shared_pending` reads as the data lane's residual occupancy at batch
+  end; `channel` becomes single-valued, carrying `"data"` for the one
+  bounded lane in place of today's `"shared"`/`"keyed"` pair; and the
+  gauge kind counts map onto the
+  kernel's run kinds — `unkeyed_commands` counts anonymous runs,
+  `keyed_commands` counts keyed runs, `subscriptions` counts subscription
+  runs. Levels, targets, required fields, `runtime_id`, `seq`, the
+  per-instance current-value rule, and every firing condition are
+  unchanged (RFC 0014 §9 row 9). The kernel's cleanup runs (RFC 0014
+  §4.4) are a producer kind no gauge field counts; row 9 adds none, and
+  this schema stays as stated.
+- **INV-L14's object goes with INV-14.** What it narrows is the
+  incidental strength INV-14 lends in unbounded mode; with shared-first
+  pull superseded (row 2) the recorded loss is the general one
+  (RFC 0014 §3.2), and the executions INV-L14 legalizes stay legal.
+- **INV-L15's negative space is preserved; its fact list follows rows 2
+  and 10.** The delivery-channel classes become the data lane and the
+  control lane, the shared-before-keyed fact and the keyed-quit
+  precedence leave the list, and capacity is configured for the data
+  lane. What the invariant exists to pin is unchanged: no reservation,
+  priority, weight, fairness policy, shedding, or coalescing — a single
+  FIFO introduces none (RFC 0014 §3.1).
+- **Section 4.6's decision object is superseded; its property survives.**
+  Keyed-quit routing through the private channel is replaced by the
+  control lane (row 10), and *cancel beats a buffered quit* — the
+  property that resolution defended — is preserved through origin
+  revocation instead of through routing (RFC 0014 §3.3).
+- **Section 4.7's resolution stands.** No fairness policy, in either lane
+  mode: a single FIFO has no priority to relax, and what it gives
+  instead is starvation freedom **among already-enqueued items** — every
+  enqueued item is delivered after exactly the prefix ahead of it, in a
+  backlog-proportional number of passes (RFC 0014 §3.2, INV-RC10). It is
+  no claim at all about a producer still awaiting admission in bounded
+  mode, which stays as unbounded here as INV-L14 leaves it. The
+  resolution's derivation from shared-first pull is superseded with
+  INV-14; its conclusion, and the rule that reopening is a new RFC, are
+  not.
+- **The frame-branch pacing facts are superseded.** Section 1.1's
+  scheduling inventory records a frame branch paced by the configured
+  frame interval and gated on pending work; the successor kernel reads no
+  wall clock and owns no frame-rate configuration, so render cadence is
+  pass-bounded — at most one render per pass, promptly after the pass
+  that marked redraw pending — and time-driven redraw is an application
+  `Timer` subscription (RFC 0014 §6.3; §9 row 4). Two properties are
+  preserved: idle costs nothing, because a workless kernel parks, and a
+  flooding producer cannot suppress rendering — the property F5's
+  frame-health finding and section 4.7's loop-level-fairness appeal rest
+  on, carried there by the frame stage's fixed position in every pass
+  (RFC 0014 INV-RC10).
+- **Section 4.3's shutdown bullet is clarified, not superseded.** That
+  senders blocked in `send` observe the closed channel and terminate
+  their tasks is a component-level obligation of the producer body; in
+  the full topology a producer whose send is blocked at termination is
+  reclaimed by the cancellation request itself — its future dropped at
+  the await point — reaching both of RFC 0011 §4.4's postcondition stages
+  without first observing closure (RFC 0014 §6.1; §9 row 10).
+- **Section 2's measurements and section 5.1's matrix stay
+  topology-scoped.** They are the record of the private-channel topology,
+  and remain the regression baseline for it; the successor's numbers come
+  from INV-L4's named prerequisite above, never by carrying these cells
+  over.
+
 ## 6. Open questions (all resolved)
 
 Every question below is resolved — in this RFC, or by the `RuntimeConfig`
@@ -1655,3 +1855,7 @@ question remains as a prerequisite of the implementation PR
   load path feeds; the admissibility owner INV-L8 defers to).
 - RFC 0012 — subscription execution (§4's quiescence barrier, the
   subscription admission-timing owner INV-L8 defers to).
+- RFC 0014 — reducer-first core (§3.1's single data lane, §3.3's quit
+  routes, §3.5's pass stages, §6.3's pass-bounded render cadence, §13.5's
+  acceptance re-derivation, and the supersession register §9 whose rows 2,
+  4, 9, and 10 name this RFC; section 5.2 carries the correspondence).
