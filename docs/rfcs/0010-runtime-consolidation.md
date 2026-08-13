@@ -578,6 +578,19 @@ delivery stays non-default under the successor; the superseding
 contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), landing gated
 there.
 
+The same counterexample carries one more grade-(i) face on this root:
+the private keyed channels go with shared-first pull, and per-command
+backpressure isolation goes with them — RFC 0006 INV-L9, the term
+RFC 0006 INV-L1 sums per command, and RFC 0007's
+`keyed_channel_capacity` surface. This root's ledger row for that
+isolation, LG-0006-058, reads as reaffirmed; under the successor it is
+superseded instead, since every producer awaiting capacity awaits the
+one data lane's, and a slow reader of any lane member delays all of
+them. The ledger stays the snapshot §8.1 adopts, unamended; this entry
+is where the correction lives, and the superseding contract is
+RFC 0014 (§3.1, §9, whose row for the delivery-class supersession
+carries it), landing gated there.
+
 ## 4. Lifecycle and termination
 
 Owns the root judgment: `root-K51J46` (the lifecycle root).
