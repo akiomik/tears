@@ -70,4 +70,4 @@ Three corollaries:
 | [0011](0011-runtime-lifecycle.md) | Runtime lifecycle: phase order, bootstrap, termination model |
 | [0012](0012-subscription-execution.md) | Subscription execution: source template, quiescence barrier, effect-DI negative space |
 | [0013](0013-scope-teardown.md) | Scope teardown: prefix selection over every run kind, revocation strictness, subscription stop, cleanup participation |
-| [0014](0014-reducer-first-core.md) | Reducer-first core: `Program`/`Reducer` protocol, unified delivery with revocation, scope teardown successor, two-layer testing |
+| [0014](0014-reducer-first-core.md) | Reducer-first core: `Program`/`Reducer` protocol, unified delivery with revocation, kernel-side scope teardown, two-layer testing |

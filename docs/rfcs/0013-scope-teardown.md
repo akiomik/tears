@@ -196,7 +196,8 @@ The teardown contract is reviewed against this list:
   composition machinery invoke the same `Command::teardown`
   constructor — no internal twin — so correctness of child teardown
   does not rest on hand-written anchors, and the machinery adds no
-  reach the primitive lacks.
+  reach the primitive lacks. The one-surface property is checked
+  structurally (§7.2's construction-route review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
@@ -471,7 +472,11 @@ quiescence follows per run on the executor's schedule; a
 teardown-stopped subscription run's quiescence marks subscriptions
 dirty, and successor admissions are ordered behind quiescence at the
 next re-evaluation (§4.3). The composition layer observes none of it:
-combinators return commands and never await quiescence (R3).
+combinators return commands and never await quiescence (R3). The
+orphan measures for a torn-down scope's output — zero deliveries
+after the application point, and the lane-split occupancy bounds over
+the request→quiescence tail — are the kernel's, pinned at RFC 0014
+§4.3.
 
 Termination takes precedence: a teardown in flight when the runtime
 terminates adds nothing to RFC 0011 §4.4's two postconditions,
@@ -604,7 +609,18 @@ steps, RFC 0014 §7.2), on both lane modes where delivery is asserted:
 - a teardown-selected command run defers no subscription admission
   (barrier scope, RFC 0014 §5.1, INV-RC12);
 - a message from a selected run already delivered to `update` before
-  the teardown stays delivered — no retroactive effect (INV-ST8);
+  the teardown stays delivered, and the state transition it caused
+  stays applied — no retroactive effect (INV-ST8);
+- an external side effect a selected run performed before the
+  teardown — observed through a test-provided instrument — is not
+  undone or compensated (INV-ST8);
+- input a teardown-stopped source consumed from an external resource
+  before quiescing is neither replayed nor delivered to the successor
+  admitted after the barrier: the successor observes only input
+  arriving after its own admission (INV-ST8);
+- key-addressed external input arriving after a same-key
+  remove-and-reinsert reaches the new instance (INV-ST8; RFC 0014
+  §2.5's routing boundary);
 - cleanup: a registration under the prefix starts at the application
   point; a teardown-and-reregister command consumes the old hooks and
   leaves the new registration armed (§5);
@@ -621,6 +637,17 @@ reinserted child's leaf stays deliverable; root-path anonymous pending
 output unaffected. A store that ignores teardown entries in the parts
 fails these.
 
+One structural check accompanies these tests, for R8's one-surface
+property, which no behavioral test can prove — an internal twin
+constructor produces lowered entries identical to the public
+surface's. The review walks the teardown-entry construction routes:
+the public `Command::teardown` constructor, the combinators'
+journal-drain sites, and the lowered parts' teardown-entry type,
+confirming that the journal drain builds its teardowns through the
+public constructor and that no route below the public surface
+constructs a teardown entry. The combinator rows above are its
+regression neighbors, not its proof.
+
 ### 7.3 Adversarial models considered
 
 - *Superset canceller* — tearing down more than the selection passes
@@ -630,6 +657,10 @@ fails these.
   INV-ST1's reordered/deeper/subset tests.
 - *Spawn-before-cancel implementation* — kills the same command's
   reinserted child; excluded by INV-ST3's same-command spawn test.
+- *Private-twin constructor* — composition machinery that builds its
+  teardown entries through an internal constructor produces the same
+  lowered entries and passes every behavioral test while violating
+  R8; excluded by §7.2's structural construction-route review.
 - *Filter-at-update and tombstone-expiry implementations* — deliver a
   revoked run's output into the batch and drop it there, or forget a
   revoked run after its task exits and deliver late-queued output;
@@ -672,9 +703,9 @@ fails these.
   INV-RC4 own the multi-keyed lowering; INV-ST3 pins only the cancel
   phase's precedence over it.
 - The retraction quantifiers — "every queued item, regardless of
-  task-exit timing", on both lane modes — are not restated as
-  INV-ST invariants; RFC 0014 INV-RC5/INV-RC6 own them and INV-ST4
-  cites them as its carrier.
+  task-exit timing", on both lane modes — are not independently owned
+  here: INV-ST4 states them with RFC 0014 INV-RC5/INV-RC6 as its
+  carrier, and their behavioral checks live there.
 - The cleanup finalizer contract (at most once, no messages,
   termination discards) is not pinned here — RFC 0014 INV-RC8 owns
   it; INV-ST1/INV-ST5 pin only its participation in selection and

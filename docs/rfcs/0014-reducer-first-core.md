@@ -21,8 +21,8 @@
   removal journals (§2.5); the kernel delivery contract — one
   origin-tagged data lane, revocation filtering, the control-lane and
   synchronous quit routes (§3); multi-keyed `batch` lowering and the
-  modifier interaction rules (§3.4); scope teardown as the successor of
-  RFC 0013's command half, with cleanup hooks (§4); subscription
+  modifier interaction rules (§3.4); the kernel side of RFC 0013's
+  scope teardown, with cleanup hooks (§4); subscription
   execution under the new core — barrier scope, the teardown stop
   cause, the stopping-pass defer rule (§5); the lifecycle mapping with
   the bootstrap-quit change and the removal of configured frame pacing
@@ -373,7 +373,7 @@ Contract:
   new one starts fresh — a same-update remove-and-reinsert (or
   replace) yields the old instance's teardown *and* the new instance's
   fresh spawns in one returned command, which §3.4's lowering makes
-  work at batch granularity (RFC 0013 R4 beyond single-command scope).
+  work at batch granularity (RFC 0013 R4).
   The journal records removals rather than diffing states, so
   same-key reinsertion is not mistaken for continuity.
 - **Message routing is typed.** `extract` either claims a message for
@@ -405,8 +405,8 @@ producing run's liveness:
   delivered. This extends RFC 0003's strict-cancel family (INV-3,
   INV-4, INV-6) from the keyed delivery class to every producer,
   subscription output included: retraction of a torn-down scope's
-  undelivered output is now contract (INV-RC6), answering RFC 0013
-  open question 4 with *yes*.
+  undelivered output is now contract (INV-RC6) — RFC 0013 §9's
+  fourth resolution.
 - **Natural finish is not revocation.** A run that finishes on its own
   while output is still queued remains deliverable until its output is
   delivered; finishing does not discard (the RFC 0003 INV-6 property,
@@ -588,33 +588,34 @@ measured after the fact.
 
 ## 4. Scope teardown
 
-This section is the successor of RFC 0013's command-half contract,
-extended to the three domains RFC 0013 R1 requires; RFC 0013's own
-Draft is revised separately against this text (§9 row 7). Its open
-questions resolve here:
+This section states the kernel side of scope teardown, closing the
+three-domain reach RFC 0013 R1 requires; the teardown contract
+itself — selection, ordering, strictness, INV-ST1–ST8, R1–R9 — is
+RFC 0013's (§9 row 7), whose §9 records the same four resolutions
+from the contract side:
 
-1. **Public surface and owner** (open question 1):
+1. **Public surface and owner** (question 1):
    `Command::teardown(seg)` is the manual primitive; the composition
    machinery invokes the *same* constructor internally (no internal
    twin — RFC 0013 R8's two layers over one surface). Anchoring
    composes through `scoped` exactly as explicit cancel IDs do
    (INV-ST2, preserved). Lowering, selection, and application are the
    kernel's.
-2. **Subscription participation** (open question 2): immediate stop —
+2. **Subscription participation** (question 2): immediate stop —
    teardown's application point issues stop requests to the selected
    subscription runs and revokes them; the composition layer removes
    the declarations in the same update, so the stop is never
    self-defeating. The required RFC 0012 amendments are §5's. The
    admission coupling stays the uniform barrier, accepted as
    documented negative space (§5.1).
-3. **Scope tree and unkeyed tracking** (open question 3): the runtime
+3. **Scope tree and unkeyed tracking** (question 3): the runtime
    tracks task-by-scope first-class. Anonymous (unkeyed) effects
    spawned through a composition boundary carry scope membership —
    no logical key, no second identity model — and prefix teardown
    selects them (INV-RC7). Auto-keying (a synthetic second identity)
    and prohibiting unkeyed child effects (breaking the
    child-as-standalone-app symmetry) are both rejected; nothing leaks.
-4. **Shared-output retraction** (open question 4): yes — §3.1's
+4. **Shared-output retraction** (question 4): yes — §3.1's
    revocation filtering is the contract; the orphan window for
    *delivery* ends at the teardown's application point, not at
    quiescence. What filtering cannot do — return input already
@@ -623,10 +624,11 @@ questions resolve here:
 
 ### 4.1 Selection, ordering, strictness, totality, reuse
 
-RFC 0013 §3.1–§3.6 carry over with one domain change: selection
-matches, by complete prefix path over structural segment equality,
-**every run under the prefix** — keyed commands, anonymous effects,
-subscription runs — plus the prefix's unfired cleanup registrations
+RFC 0013 §3.1–§3.6 own the operation's contract; on this kernel it
+reads: selection matches, by complete prefix path over structural
+segment equality, **every run under the prefix** — keyed commands,
+anonymous effects, subscription runs — plus the prefix's unfired
+cleanup registrations
 (consumed, §4.4). Local keys never participate in selection; shorter,
 reordered, subset, and deeper-position paths are not selected;
 teardown applies in the cancel phase before same-command spawns,
@@ -638,25 +640,27 @@ buffered producer quit under the prefix included.
 
 ### 4.2 The RFC 0013 successor mapping
 
-Each of INV-ST1–ST8 is classified as *preserved* (holds as stated),
-*re-derived* (its pinned requirement re-stated as a successor
-invariant on the new topology), or *failed* (the behavioral
+Each of RFC 0013's INV-ST1–ST8 is classified against its pre-kernel
+form as *preserved* (holds as stated on both topologies),
+*re-derived* (the pinned requirement re-stated on this kernel — the
+form RFC 0013's current text carries), or *failed* (the behavioral
 requirement itself unmet — the only classification that counts as
 failure): **preserved** — INV-ST2, INV-ST3, INV-ST5, INV-ST6,
 INV-ST7. **Re-derived** — INV-ST1, INV-ST4, INV-ST8, with the
 requirement mapping. **Failed** — none:
 
-| Requirement the old clause pinned | Successor invariant (new topology) |
+| Requirement the pre-kernel clause pinned | Successor statement (RFC 0013's current form) |
 | --- | --- |
 | ST1: selection completeness and minimality (R1/R5) | a teardown for a prefix selects every run of every kind whose scope path begins with that prefix, and only those (INV-RC7's scope tracking is what makes "every kind" satisfiable) |
 | ST4: no delivery after the application point; a buffered keyed quit does not quit (R1, cancel-beats-quit) | a selected run is revoked; its queued output — control-lane quit included — is never delivered, and the guarantee holds for every queued item regardless of how long the queue is or when the run's task exits (INV-RC5/INV-RC6) |
-| ST8: the negative space, as a regression surface | teardown's unreachable set shrinks to: messages already delivered to `update`, state mutations already applied, external side effects already performed. Anonymous-run reachability and undelivered-output retraction are regression-tested, not negative space |
+| ST8: the negative space, as a regression surface | teardown's unreachable set shrinks to what has crossed delivery or left the runtime's custody: messages already delivered to `update`, state mutations already applied, external side effects already performed, input already consumed by a stop-requested source, key-addressed input routing (RFC 0013 §3.8). Anonymous-run reachability and undelivered-output retraction are regression-tested, not negative space |
 
 ### 4.3 Orphan measures
 
-Stated on RFC 0013 §4.1's three measures: deliveries after the
-application point — zero (retraction); instantaneous occupancy in
-bounded mode — split by lane: the **data-lane** portion is capped by
+Three orphan measures are pinned for a torn-down scope's output:
+deliveries after the application point — zero (retraction);
+instantaneous occupancy in bounded mode — split by lane: the
+**data-lane** portion is capped by
 the lane capacity (revoked items still occupy until dequeued, and
 their dequeue does no `update` work), while a torn-down run's quit
 occupies the **control lane, which is never bounded** (§3.3), so
@@ -803,8 +807,8 @@ non-execution boundary — the store never starts, polls, or restarts a
 subscription source, and never spawns a task. Its command intake
 consumes the same lowered parts the kernel consumes, now including
 teardown entries and multi-keyed batch children (the RFC 0008
-cancellation-parity extension RFC 0013 §7 already names). The store
-makes no same-topology claim; that claim belongs to the driver alone.
+parity extension RFC 0013 §8 names). The store makes no
+same-topology claim; that claim belongs to the driver alone.
 
 ### 7.2 The stage-3 driver
 
@@ -909,7 +913,7 @@ names the owner document that edits in place.
 | 4 | RFC 0006 / RFC 0007 / RFC 0011 §7 | supersede (breaking) | the kernel's wall-clock reads: configured frame pacing — frame-branch pacing facts, INV-C5, the frame-rate config field and constructor parameter, the non-catch-up premise → §6.3's pass-bounded cadence — and the time-capped batching window (INV-L6's default) → an always-finite count cap (§3.5; `batch_max_messages = None` comes to mean the kernel's default count cap, an RFC 0007 doc change in the same cluster) |
 | 5 | RFC 0012 | additive amendment | fourth stop cause (teardown) + its dirt classification; stopping-pass defer recorded as clarification (§5) |
 | 6 | RFC 0005 | amendment (one clause each) | INV-18 coverage extends to teardown prefixes and cleanup registrations; INV-17/INV-12 unchanged |
-| 7 | RFC 0013 | successor revision | §3's command-half operation and §8's open questions resolve per §4; INV-ST classification and mapping per §4.2 |
+| 7 | RFC 0013 | successor revision | the teardown contract re-derived on §4's operation: selection over every run kind (its §3), immediate subscription stop (its §4), cleanup participation (its §5), resolved questions (its §9); INV-ST classification and mapping per §4.2 |
 | 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2); INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
 | 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes single-valued; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
 | 10 | RFC 0006 | supersede | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; INV-L4's acceptance re-derivation is §13.5 |
@@ -1231,8 +1235,8 @@ segment-value contract restated as a bound.
 - RFC 0011 — runtime lifecycle: §2–§6, INV-LC1–INV-LC9, §7's
   premises.
 - RFC 0012 — subscription execution: §2–§9, INV-SE1–INV-SE8.
-- RFC 0013 — scope teardown: §3–§6, INV-ST1–ST8, R1–R9, open
-  questions 1–4.
+- RFC 0013 — scope teardown: §3–§6, §9 (resolved questions),
+  INV-ST1–ST8, R1–R9.
 - `src/runtime.rs`, `src/runtime/core.rs`,
   `src/runtime/keyed_commands.rs`, `src/subscription.rs`,
   `src/command/core.rs` — the surfaces §9's supersessions replace.
