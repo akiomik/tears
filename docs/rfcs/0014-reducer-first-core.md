@@ -36,6 +36,10 @@
   adapter over the same kernel that runs composed reducers.
   `Runtime::new` and `RuntimeConfig` lose their frame-rate parameter
   and field (configured wall-clock frame pacing is removed, §6.3);
+  `RuntimeConfig` also loses `keyed_channel_capacity`: with one data
+  lane there are no per-command channels, so per-command backpressure
+  isolation is not preserved — every producer awaiting capacity awaits
+  the same lane's (§3.1, §9 row 2);
   `Command::batch` no longer ignores child spawn keys (they lower to
   independent keyed entries, §3.4); `Command::quit` returned from
   `update` applies synchronously at dispatch (observation order
@@ -418,7 +422,11 @@ producing run's liveness:
 - Bounded and unbounded lane modes remain configuration
   (`RuntimeConfig`); bounded-mode capacity, blocking sends, and the
   capacity-wait observability follow RFC 0006's bounded-mode contract
-  unchanged except as §9 amends its vocabulary.
+  unchanged except as §9 amends its vocabulary. The configured capacity
+  is the data lane's, and it is the only one: there are no per-command
+  channels left to size or to isolate from one another, so the
+  per-command capacity control and its isolation property do not
+  survive (§9 row 2).
 
 ### 3.2 What the superseded delivery contracts protected
 
@@ -724,12 +732,12 @@ RFC 0012's contract is consumed, not redesigned. Three clauses:
   (RFC 0005 INV-13, untouched) and is documented as self-defeating.
   Dirt sources stay exactly two (RFC 0011 §2.1): a batch that ran
   `update`, and the quiescence of a subscription run stopped by a
-  steady-state re-evaluation — teardown-stopped runs included, per
-  this clause. **A natural finish marks no dirt** — a finished,
-  still-declared subscription restarts at the next re-evaluation,
-  whenever one occurs (RFC 0005 INV-13 through RFC 0012 §4.3) — **and
-  the quiescence of command and cleanup runs marks no dirt**: they
-  are not re-evaluation subjects.
+  steady-state cause — a re-evaluation's removal or replacement, or a
+  scope teardown, per this clause. **A natural finish marks no
+  dirt** — a finished, still-declared subscription restarts at the
+  next re-evaluation, whenever one occurs (RFC 0005 INV-13 through
+  RFC 0012 §4.3) — **and the quiescence of command and cleanup runs
+  marks no dirt**: they are not re-evaluation subjects.
 - **Stopping-pass defer (5.3).** A re-evaluation that issues stop
   requests admits nothing in that same pass, even if a stop quiesces
   while the pass is still running. This is a clarification derived
@@ -908,20 +916,21 @@ names the owner document that edits in place.
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
 | 1 | RFC 0003 | supersede | delivery topology: private keyed channels and receiver-based statements (INV-1's shared path, INV-2, the receiver clauses of INV-3/INV-4/INV-6/INV-7) → origin revocation on one lane (§3.1); INV-8's token rule, INV-10, INV-12 preserved; INV-9 → origin-liveness successor (§3.3); INV-16 → kernel park contract |
-| 2 | RFC 0003 / RFC 0006 | supersede + property loss | INV-14 shared-first pull and RFC 0006's two delivery classes → single FIFO (§3.1); the broad cancel-opportunity property is not preserved (§3.2) — recorded as a user-visible property loss |
+| 2 | RFC 0003 / RFC 0006 / RFC 0007 | supersede + property loss | INV-14 shared-first pull and RFC 0006's two delivery classes → single FIFO (§3.1); the broad cancel-opportunity property is not preserved (§3.2) — recorded as a user-visible property loss. The private keyed channels go with them, and so does everything stated per channel: RFC 0007's `keyed_channel_capacity` leaves the public surface, RFC 0006 INV-L1's `m × keyed_channel_capacity` term has nothing to sum over, and INV-L9's per-command isolation — one key's full channel never delaying admission into another key's or into the shared channel — is **not preserved**: every producer awaiting capacity awaits the one data lane's. A second user-visible property loss, carried by this RFC's CHANGELOG |
 | 3 | RFC 0003 / RFC 0005 | supersede (breaking) | INV-11 batch folding → multi-keyed lowering (§3.4); RFC 0005 INV-20's "scoping does not bypass batch" restated over distribution |
 | 4 | RFC 0006 / RFC 0007 / RFC 0011 §7 | supersede (breaking) | the kernel's wall-clock reads: configured frame pacing — frame-branch pacing facts, INV-C5, the frame-rate config field and constructor parameter, the non-catch-up premise → §6.3's pass-bounded cadence — and the time-capped batching window (INV-L6's default) → an always-finite count cap (§3.5; `batch_max_messages = None` comes to mean the kernel's default count cap, an RFC 0007 doc change in the same cluster) |
 | 5 | RFC 0012 | additive amendment | fourth stop cause (teardown) + its dirt classification; stopping-pass defer recorded as clarification (§5) |
 | 6 | RFC 0005 | amendment (one clause each) | INV-18 coverage extends to teardown prefixes and cleanup registrations; INV-17/INV-12 unchanged |
 | 7 | RFC 0013 | successor revision | the teardown contract re-derived on §4's operation: selection over every run kind (its §3), immediate subscription stop (its §4), cleanup participation (its §5), resolved questions (its §9); INV-ST classification and mapping per §4.2 |
-| 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2); INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
-| 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes single-valued; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
-| 10 | RFC 0006 | supersede | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; INV-L4's acceptance re-derivation is §13.5 |
+| 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2); INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); INV-LC8's producer-kind inventory extended to cleanup runs (§4.4, §6.1); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
+| 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes the single value `"data"`; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
+| 10 | RFC 0006 | supersede | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 
 Count: five supersessions (rows 1, 2, 3, 4 — the public constructor
-change belongs to row 4's cluster — and 10), five amendments (rows 5,
-6, 8, 9, 11), one successor revision (row 7). Preserved and worth
+change belongs to row 4's cluster and the keyed-capacity removal to
+row 2's — and 10), five amendments (rows 5, 6, 8, 9, 11), one
+successor revision (row 7). Preserved and worth
 naming: the effect-DI negative space (RFC 0012 INV-SE8 — the driving
 seams are not an effect-executor abstraction: they gate branch choice
 and send release, never effect execution or dependency resolution),
@@ -1020,8 +1029,9 @@ is pinned; the invariants of §12 are.
 Excluded claims (minimal-contract pass): a per-run
 quiescence-follows-request invariant is not restated — RFC 0011 §4.4's
 two-stage model owns it; delivery losslessness and backpressure are
-not restated — RFC 0006 owns them, §3.1 changes only the
-deliverability decision; subscription admission rules are not
+not restated — RFC 0006 owns them, and what §3.1 changes there is the
+deliverability decision and the lane count backpressure is stated over
+(§9 row 2); subscription admission rules are not
 restated — RFC 0012 INV-SE2–SE5 own them, §5 adds the fourth cause
 and the defer clarification; the configured batch cap's counting
 semantics stay RFC 0006 INV-L12's (what changes is only that a cap
@@ -1159,7 +1169,10 @@ teardown and `on_teardown` (INV-RC7/INV-RC8, §4.2's successor table),
 quit (INV-RC9), the two entry points and `Exit` (INV-RC1, INV-RC11 —
 the facade's result contract is RFC 0011 INV-LC5's, preserved),
 constructor changes (§9 row 4 — covered by INV-RC11's conformance
-rows), barrier clauses (INV-RC12), driver (INV-RC13/INV-RC14).
+rows), barrier clauses (INV-RC12), driver (INV-RC13/INV-RC14). The
+per-command capacity control's removal (§9 row 2) carries no invariant
+of its own: INV-RC5's one-lane delivery is what leaves nothing per
+command to size or isolate.
 `ScopeValue` carries no separate invariant: it is the RFC 0005
 segment-value contract restated as a bound.
 
