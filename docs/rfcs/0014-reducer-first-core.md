@@ -653,7 +653,7 @@ requirement mapping. **Failed** — none:
 | --- | --- |
 | ST1: selection completeness and minimality (R1/R5) | a teardown for a prefix selects every run of every kind whose scope path begins with that prefix, and only those (INV-RC7's scope tracking is what makes "every kind" satisfiable) |
 | ST4: no delivery after the application point; a buffered keyed quit does not quit (R1, cancel-beats-quit) | a selected run is revoked; its queued output — control-lane quit included — is never delivered, and the guarantee holds for every queued item regardless of how long the queue is or when the run's task exits (INV-RC5/INV-RC6) |
-| ST8: the negative space, as a regression surface | teardown's unreachable set shrinks to what has crossed delivery or left the runtime's custody: messages already delivered to `update`, state mutations already applied, external side effects already performed, input already consumed by a stop-requested source, key-addressed input routing (RFC 0013 §3.8). Anonymous-run reachability and undelivered-output retraction are regression-tested, not negative space |
+| ST8: the negative space, as a regression surface | teardown's unreachable set shrinks to two classes: what has crossed delivery or left the runtime's custody — messages already delivered to `update`, state mutations already applied, external side effects already performed, input already consumed by a stop-requested source — and input carrying no run origin (key-addressed routing) (RFC 0013 §3.8). Anonymous-run reachability and undelivered-output retraction are regression-tested, not negative space |
 
 ### 4.3 Orphan measures
 

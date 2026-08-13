@@ -197,7 +197,7 @@ The teardown contract is reviewed against this list:
   constructor — no internal twin — so correctness of child teardown
   does not rest on hand-written anchors, and the machinery adds no
   reach the primitive lacks. The one-surface property is checked
-  structurally (§7.2's construction-route review).
+  structurally (§7.2's origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
@@ -359,8 +359,9 @@ implementation's.
 
 ### 3.8 What teardown cannot reach
 
-A teardown operation affects nothing that has already crossed the
-delivery decision point or left the runtime's custody:
+A teardown operation cannot reach two classes. The first is what has
+already crossed the delivery decision point or left the runtime's
+custody:
 
 - **messages already delivered to `update`**, and state mutations
   already applied;
@@ -369,12 +370,13 @@ delivery decision point or left the runtime's custody:
   stop-requested, not-yet-quiesced source — revocation filters
   delivery, it cannot return what a source already took; ordering a
   successor behind that source's quiescence is the barrier's job
-  (§4.3);
-- **key-addressed external input**, which carries no run identity:
-  input addressed to a removed child that has been re-inserted under
-  the same key reaches the new instance (RFC 0014 §2.5's routing
-  boundary) — documented negative space of the composition surface,
-  unchanged by teardown.
+  (§4.3).
+
+The second is input that carries no run origin: **key-addressed
+external input** addressed to a removed child that has been
+re-inserted under the same key reaches the new instance (RFC 0014
+§2.5's routing boundary) — documented negative space of the
+composition surface, unchanged by teardown.
 
 The classes RFC 0003's topology left unreachable are not exceptions
 here: anonymous runs are selected (§3.1), a revoked run's undelivered
@@ -614,10 +616,15 @@ steps, RFC 0014 §7.2), on both lane modes where delivery is asserted:
 - an external side effect a selected run performed before the
   teardown — observed through a test-provided instrument — is not
   undone or compensated (INV-ST8);
-- input a teardown-stopped source consumed from an external resource
-  before quiescing is neither replayed nor delivered to the successor
-  admitted after the barrier: the successor observes only input
-  arriving after its own admission (INV-ST8);
+- consumed input is not returned — against a destructive,
+  non-replaying test resource: a token a teardown-stopped source
+  consumed before quiescing is not returned to the resource by the
+  runtime, and the runtime does not itself redeliver it to the
+  successor — the successor's own reads find the resource without it.
+  A source's own replay semantics on reconnection are outside this
+  test's subject: RFC 0012 §2's template deliberately pins neither
+  the resource-acquisition point nor the items a source's stream
+  yields, and a source that replays history conforms (INV-ST8);
 - key-addressed external input arriving after a same-key
   remove-and-reinsert reaches the new instance (INV-ST8; RFC 0014
   §2.5's routing boundary);
@@ -639,14 +646,18 @@ fails these.
 
 One structural check accompanies these tests, for R8's one-surface
 property, which no behavioral test can prove — an internal twin
-constructor produces lowered entries identical to the public
-surface's. The review walks the teardown-entry construction routes:
-the public `Command::teardown` constructor, the combinators'
-journal-drain sites, and the lowered parts' teardown-entry type,
-confirming that the journal drain builds its teardowns through the
-public constructor and that no route below the public surface
-constructs a teardown entry. The combinator rows above are its
-regression neighbors, not its proof.
+produces lowered entries identical to the public surface's. The
+review walks the teardown *origination* routes: the public
+`Command::teardown` constructor and the combinators' journal-drain
+sites, confirming that every teardown operation originates in a call
+to the public constructor — the journal drain included — and that no
+route below the public surface originates one from a raw prefix.
+Transformations of an already-originated operation are not
+origination and stay free: `scoped`'s prefix qualification, the
+aggregation of batch children's entries, and the lowering from
+command metadata to the runtime parts all transform existing entries.
+The combinator rows above are its regression neighbors, not its
+proof.
 
 ### 7.3 Adversarial models considered
 
@@ -657,10 +668,11 @@ regression neighbors, not its proof.
   INV-ST1's reordered/deeper/subset tests.
 - *Spawn-before-cancel implementation* — kills the same command's
   reinserted child; excluded by INV-ST3's same-command spawn test.
-- *Private-twin constructor* — composition machinery that builds its
-  teardown entries through an internal constructor produces the same
-  lowered entries and passes every behavioral test while violating
-  R8; excluded by §7.2's structural construction-route review.
+- *Private-twin constructor* — composition machinery that originates
+  its teardown operations from raw prefixes through an internal
+  constructor produces the same lowered entries and passes every
+  behavioral test while violating R8; excluded by §7.2's structural
+  origination review.
 - *Filter-at-update and tombstone-expiry implementations* — deliver a
   revoked run's output into the batch and drop it there, or forget a
   revoked run after its task exits and deliver late-queued output;
