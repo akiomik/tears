@@ -149,10 +149,14 @@ distinct, and naming them separately is what the rest of this RFC
 builds on:
 
 - **Stop requested** — the runtime has requested the task's
-  cancellation: its ID left the desired set, the runtime is shutting
-  down, or the run is being torn down abruptly. This is a request in
-  exactly RFC 0011 §4.4's sense: cancellation is asked for, not yet
-  observed complete, and a poll already in flight may still finish.
+  cancellation. Four causes issue that request: its ID left the desired
+  set, a scope teardown selected the run (RFC 0013 §4, the operation
+  landing with the RFC 0014 kernel), the runtime is shutting down, or
+  the run is being torn down abruptly. This is a request in exactly
+  RFC 0011 §4.4's sense: cancellation is asked for, not yet observed
+  complete, and a poll already in flight may still finish. The cause
+  decides only what the quiescence marks (§4.2): the first two are
+  steady-state stops, the last two are termination.
 - **Quiesced** — the forwarder task has terminated, as a confirmed
   fact rather than a pending request. After quiescence the run-owned
   stream and execution state are no longer polled and have been
@@ -178,8 +182,16 @@ socket) while its successor is already reading the same resource.
 ### 4.1 The rule
 
 Restart admission is after quiescence, uniformly: **no subscription is
-admitted while any task whose stop has been requested has not yet
-quiesced** — for every subscription, with no source-class distinctions.
+admitted while any subscription task whose stop has been requested has
+not yet quiesced** — for every subscription, with no source-class
+distinctions.
+
+The barrier's subjects are subscription runs, and only they trigger it:
+a stop-requested command run defers no admission, and neither does a
+cleanup run under RFC 0014's kernel (its §5.1). Such runs poll no input
+source, so the §3 stolen-input hazard cannot arise from them, and
+extending the barrier to them would couple admissions to unrelated
+effects with no hazard to close.
 
 Uniformity is load-bearing, not a simplification. A barrier scoped to
 "handoff-prone" sources (terminals, sockets) would require the runtime
@@ -209,11 +221,16 @@ interference on top.
 - **INV-SE3 — no admission before outstanding stops quiesce.** A
   re-evaluation issues its stop requests first; no admission from its
   desired set executes until every stop-requested task — its own
-  removals and any still-unquiesced stops from earlier
-  re-evaluations — has quiesced. A re-evaluation with no outstanding
-  stopped task (pure additions; restarts of already-finished tasks,
-  which are quiesced by definition) admits immediately — the current
-  synchronous behavior remains conforming there.
+  removals, and any still-unquiesced stop from an earlier
+  re-evaluation or from a scope teardown — has quiesced. A
+  re-evaluation that has issued stop requests therefore admits nothing
+  in its own pass, even when one of those tasks quiesces while that
+  pass is still running: admission executes at a re-evaluation
+  (INV-SE5), and a deferred admission is the next frame pass's. A
+  re-evaluation with no outstanding stopped task (pure additions;
+  restarts of already-finished tasks, which are quiesced by definition)
+  admits immediately — the current synchronous behavior remains
+  conforming there.
 - **INV-SE4 — a newer re-evaluation supersedes pending admissions.**
   When a new re-evaluation arrives while admissions are pending on the
   barrier, the older generation's pending desired set and its
@@ -228,9 +245,10 @@ interference on top.
 - **INV-SE5 — admission executes only at a subscription
   re-evaluation** — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation; deferred admissions are always the
-  latter. The quiescence of a task stopped by a steady-state
-  re-evaluation — removed or replaced out of the desired set — marks
-  subscriptions dirty (the second dirty source RFC 0011 §2.1 records
+  latter. The quiescence of a task stopped by a steady-state cause —
+  removed or replaced out of the desired set by a re-evaluation, or
+  selected by a scope teardown — marks subscriptions dirty (the second
+  dirty source RFC 0011 §2.1 records
   for this RFC), and the completion reaches an idle runtime as a
   wake-capable event: a parked loop with no pending input is woken so
   the next frame pass can run — the wake's occurrence is contract; the
@@ -270,7 +288,7 @@ conformance change is this RFC's `Changed` entry, and its scope is
 two-fold, stated honestly: (1) *admission timing* — new and restarted
 subscriptions wait for outstanding stopped tasks' quiescence; and
 (2) *a new re-evaluation trigger* — that quiescence (of tasks a
-steady-state re-evaluation stopped) marks subscriptions dirty, so
+steady-state cause stopped, §4.2) marks subscriptions dirty, so
 `subscriptions()` can be re-evaluated on a frame pass that no message
 preceded. An observable consequence of
 (2): if subscription A's stream finishes naturally while stopped B is
@@ -459,15 +477,27 @@ Enforcement classes follow the pre-review checklist's definitions.
   that removes one subscription and keeps another asserts the kept
   task's handle is untouched and its source uninterrupted while the
   removed task quiesces.
-- **INV-SE3**: no admission executes while any stop-requested task has
-  not quiesced; a re-evaluation with no outstanding stopped task
-  admits immediately. Behavioral at the manager layer on a
+- **INV-SE3**: no admission executes while any stop-requested
+  subscription task has not quiesced — whatever requested the stop,
+  command and cleanup runs not being subjects (§4.1) — and a
+  re-evaluation that issued stop requests admits nothing in its own
+  pass even if one of them quiesces during it; a re-evaluation with no
+  outstanding stopped task admits immediately. Behavioral at the manager layer on a
   single-threaded test executor, where the quiescence gap is
   deterministic: after a re-evaluation that stops A and adds B, assert
   B's spawner has not run before the executor processes A's
   cancellation, then drive the executor through A's quiescence and the
   next frame-pass re-evaluation and assert B is admitted there; the
   pure-addition and finished-restart cases assert immediate admission.
+  The same-pass clause is structural at the same call sites INV-SE5
+  reviews — the reconcile path makes no second admission attempt after
+  issuing its stops, so a quiescence observed while the pass runs has
+  no site to admit into — because a mid-pass quiescence is not
+  constructible on the executor the behavioral rows use (INV-SE5
+  forbids an await between a reconcile's stop requests and its return).
+  The non-subject half — a stop-requested command or cleanup run defers
+  no admission — is behavioral at the reconcile seam under RFC 0014
+  INV-RC12, where those run kinds exist.
 - **INV-SE4**: only the newest desired set is admitted; a superseded
   generation's pending spawners are discarded un-invoked. Behavioral
   at the manager layer — the mandated sequence: `{A}` → `{B}` (stop
@@ -480,7 +510,8 @@ Enforcement classes follow the pre-review checklist's definitions.
   re-evaluation — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation — against the then-current state, and
   deferred admissions only at the latter; the quiescence of a task
-  stopped by a steady-state re-evaluation marks subscriptions dirty
+  stopped by a steady-state cause — a re-evaluation's removal or
+  replacement, or a scope teardown — marks subscriptions dirty
   and reaches an idle runtime as a wake-capable event, and nothing
   more — termination-driven quiescence marks nothing (§4.2). No
   admission is
@@ -598,6 +629,12 @@ INV-SE3's checks.
 - RFC 0011 — runtime lifecycle: §2/INV-LC1 (re-evaluation as a
   frame-pass activity — the constraint behind INV-SE5), §4.4 (the
   request/quiescent two-stage model §3 applies per subscription).
+- RFC 0013 — scope teardown: §4 (the subscription participation whose
+  stop is §3's fourth cause).
+- RFC 0014 — reducer-first core: §5.1 (the barrier's subjects), §5.2
+  (the teardown stop cause and its dirt classification), §5.3 (the
+  stopping-pass defer), and the amendment register §9 whose row 5 names
+  this RFC.
 - `src/subscription.rs` (`SubscriptionManager::update`,
   `spawn_subscription` — the admission seam and the current
   nonconformance), `src/subscription/core.rs` (the spawner that
