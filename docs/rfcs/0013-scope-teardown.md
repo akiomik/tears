@@ -1,10 +1,10 @@
 # RFC 0013: Scope Teardown
 
-- Status: Draft — the contract is complete and reviewable; it is
-  co-designed with RFC 0014 (the reducer-first core), whose §4 states
-  the kernel side of the same operation, and its implementation and
-  the owner-document edits it requires are gated on RFC 0014 §13.1's
-  spike tier.
+- Status: Accepted — co-designed with RFC 0014 (the reducer-first
+  core), whose §4 states the kernel side of the same operation. The
+  owner-document edits this contract requires land with that RFC's
+  acceptance (§8); the implementation waits, with the rest of that
+  kernel, on RFC 0014 §13.1's implementation-acceptance tier.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
   RFC 0014's breaking changes, recorded there.
@@ -749,8 +749,8 @@ that RFC's acceptance:
 - RFC 0008 (row 11): the store parity extension to teardown entries
   and batch children, and the stage-3 driver amendment.
 
-One edit is this RFC's own, landing with its acceptance: RFC 0005
-§4.5's deferral text points here as its resolution. RFC 0008 INV-T3
+One edit is this RFC's own: RFC 0005 §4.5 records this contract as the
+resolution of the six questions it deferred. RFC 0008 INV-T3
 needs no text change — the store already consumes the shared parts
 type — but its structural review re-runs at the store's intake once
 the parts carry teardown entries (RFC 0014 §7.1).

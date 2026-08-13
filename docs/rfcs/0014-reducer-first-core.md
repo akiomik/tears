@@ -1,18 +1,17 @@
 # RFC 0014: Reducer-First Core
 
-- Status: Draft — acceptance is gated on the **spike tier** §13.1
-  defines: four kernel claims (the grant handshake, the
+- Status: Accepted (2026-08-13) — accepted at the **spike tier** §13.1
+  defines: the four kernel claims (the grant handshake, the
   delivery-accounting soundness with its concurrency check, revocation
-  filtering, driver topology) demonstrated on a prototype kernel,
-  together with the eight-series conformance suite. The remaining
-  behavioral checks of §12 — cleanup hooks, the full combinator
-  surface, the observability vocabulary, the production arbitration
-  default — are **implementation acceptance criteria**: they gate
-  implementation mainlining, not this RFC's acceptance. The §9
-  supersessions and amendments to owner RFCs land only after
-  acceptance, in §13.1's stated order, so a spike-tier failure rolls
-  back by reopening the architecture selection (RFC 0010 §1.9) with no
-  owner contract yet touched.
+  filtering, driver topology) are demonstrated on a prototype kernel,
+  and the eight-series conformance suite is green and repeat-stable
+  under pass-unit driving. The remaining behavioral checks of §12 —
+  cleanup hooks, the full combinator surface, the observability
+  vocabulary, the production arbitration default — are
+  **implementation acceptance criteria**: they gate implementation
+  mainlining, which this acceptance does not grant. The §9
+  supersessions and amendments to owner RFCs land with this
+  acceptance, in §13.1's order, ahead of that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8)
 - Scope: the reducer-first core protocol (`Reducer`/`Program`) and the
@@ -111,9 +110,10 @@ Eight decisions:
    arbitration, send-intent grants) plus application-side inputs.
 
 Mechanism — the kernel's registries, counters, and seam types — is
-informative (§10). Acceptance is gated on the §13.1 spike because the
-kernel exists today as design only; this RFC states the contract the
-spike must demonstrate, and §13.1 pins the rollback order if it fails.
+informative (§10). The kernel exists today as the prototype §13.1's
+spike tier was demonstrated on, not as crate code; this RFC states the
+contract that tier verified, and §13.1 pins what still gates
+mainlining.
 
 ## 1. Scope
 
@@ -910,8 +910,10 @@ the driver drives the kernel itself.
 
 ## 9. Supersessions and amendments
 
-Gated on §13.1 (nothing below lands before the spike passes). Each row
-names the owner document that edits in place.
+The spike tier of §13.1 having passed, these rows land on their owner
+documents with this RFC's acceptance, ahead of the mainlining that
+tier's open half still gates. Each row names the owner document that
+edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
@@ -1046,8 +1048,8 @@ facade).
 
 Enforcement classes per the pre-review checklist. The behavioral
 checks divide into two tiers (§13.1): the **spike tier** — the four
-kernel claims and the eight-series conformance suite, which gate this
-RFC's acceptance and run on a prototype kernel — and the
+kernel claims and the eight-series conformance suite, which gated this
+RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
 below, which gates implementation mainlining, not acceptance. Both
 tiers remain the regression suite afterward.
@@ -1178,9 +1180,10 @@ segment-value contract restated as a bound.
 
 ## 13. Open questions
 
-1. **The acceptance gate: spike tier and implementation-acceptance
-   tier.** *Spike tier* — gates this RFC's acceptance, demonstrated
-   on a prototype kernel, four claims plus the suite: the
+1. **The acceptance gate: the spike tier is met, the
+   implementation-acceptance tier is open.** *Spike tier* — the gate
+   this RFC's acceptance passed, demonstrated on a prototype kernel,
+   four claims plus the suite: the
    send-acknowledgement grant handshake (§7.2); the
    delivery-accounting soundness behind retraction (§3.1), including
    a concurrency check of the multi-writer accounting (loom or
@@ -1195,17 +1198,19 @@ segment-value contract restated as a bound.
    termination under owned work through every cause) green and
    repeat-stable, **driven pass-unit** — each driver step executing
    §3.5's full stage order (§7.2; stage-granular probes are outside
-   the evidence surface). *Implementation-acceptance tier* — gates
-   mainlining, not acceptance: cleanup hooks (INV-RC8), the full
-   combinator surface (INV-RC2–INV-RC4), the observability
-   vocabulary mapping (§9 row 9), the production arbitration default
-   (§3.5's unbiased pass initiation), and the remaining §12
-   behavioral rows. **Rollback order**: the spike tier precedes
-   acceptance; acceptance precedes every §9 edit; §9 precedes
-   implementation mainlining. A spike-tier failure therefore stops
-   before any owner contract changes: this RFC records the failure,
-   stays Draft, and the selection reopens under RFC 0010 §1.9 — no
-   partial supersession state exists to unwind.
+   the evidence surface). *Implementation-acceptance tier* — open,
+   and what it gates is mainlining, not acceptance: cleanup hooks
+   (INV-RC8), the full combinator surface (INV-RC2–INV-RC4), the
+   observability vocabulary mapping (§9 row 9), the production
+   arbitration default (§3.5's unbiased pass initiation), and the
+   remaining §12 behavioral rows. **Order**: the spike tier precedes
+   acceptance, acceptance precedes every §9 edit, and the open tier
+   precedes mainlining — so the §9 supersessions stand on the owner
+   documents while the kernel itself stays outside the crate until
+   that tier closes. A failure in the open tier stops mainlining and
+   reopens the design of whatever it failed; whether it also reaches
+   the architecture selection is RFC 0010 §1.9's counterexample-grade
+   question, as it is for any later finding.
 2. **Driver API body.** The concrete `TestDriver` surface lands in the
    RFC 0008 stage-3 amendment (§7.2 pins its contract; §9 row 11).
    Resolves there.

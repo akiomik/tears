@@ -679,28 +679,29 @@ deferred per-effect cancellation work and is not silently added here.
 ### 4.5 Scoping is not teardown
 
 `scoped(PaneId(7))` qualifies IDs; it does not create an ownership handle or a
-prefix-cancellation command.
+prefix-cancellation command. That operation is a contract of its own —
+RFC 0013 — and it decides the six questions this section deferred:
 
-A future operation such as `Command::cancel_scope(PaneId(7))` would need to
-decide at least:
+- selection matches a complete prefix path, never one segment at an arbitrary
+  position (RFC 0013 §3.1);
+- whether lookup scans or indexes stays mechanism, deliberately unpinned
+  (RFC 0013 §3.7);
+- a teardown applies in the cancel phase, with the same command's explicit
+  cancels and before every spawn of that command (RFC 0013 §3.3);
+- running and finished-but-buffered output is revoked — nothing under the
+  prefix is delivered after the application point (RFC 0013 §3.4);
+- subscriptions participate by immediate stop at that point, paired with
+  declaration removal by the composition layer (RFC 0013 §4); and
+- a later child reusing the same scope observes nothing stale (RFC 0013 §3.6).
 
-- whether selection matches one segment or a complete prefix path;
-- whether lookup scans current entries or maintains a secondary index;
-- ordering relative to same-update spawns and explicit ID cancels;
-- treatment of running and finished-but-buffered command output;
-- whether subscriptions participate and how declarative re-evaluation interacts
-  with teardown; and
-- whether a later child reusing the same scope can observe stale teardown state.
+The structural path defined here is what that operation anchors on: a teardown
+prefix is qualified by `scoped` exactly as an explicit cancel ID is (§4.3,
+INV-18).
 
-Those decisions belong to a separate RFC. The structural path defined here is
-forward-compatible with such work but does not pre-accept its API or behavior.
-
-One concrete client of that future RFC is already known: TCA-parity collection
-composition (a `forEach`-style reducer) must automatically cancel a removed
-child instance's in-flight effects when the child leaves the collection. Full
-effect parity in the reducer composition RFC therefore depends on prefix
-teardown, and scheduling should treat teardown as a prerequisite of that work
-rather than an optional extension.
+The concrete client is served there as well: TCA-parity collection composition
+— `for_each` in RFC 0014 §2.5 — tears a removed child instance's in-flight
+effects down automatically, through a removal journal that issues the teardown,
+rather than through anything this RFC's manual scoping provides.
 
 ### 4.6 Residual composition risk
 
@@ -1189,17 +1190,18 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-The follow-up order was, with items 1–2 since completed and the rest
-remaining design work:
+The follow-up order was, with items 1–2 shipped and items 3–5 designed and
+awaiting implementation:
 
 1. implement Phase A for 0.10.0 (done);
 2. evaluate and, when scheduled, implement Phase B additively (done);
-3. design per-effect command cancellation/batch composition;
+3. design per-effect command cancellation/batch composition (RFC 0014 §3.4);
 4. use scoped identity and deterministic effect testing as inputs to the
-   reducer composition RFC; and
+   reducer composition RFC (RFC 0014); and
 5. design prefix teardown before or together with collection
-   (`forEach`-style) reducer composition; automatic cancellation of a removed
-   child's in-flight effects is its known concrete use case (section 4.5).
+   (`forEach`-style) reducer composition (RFC 0013, with RFC 0014 §2.5's
+   `for_each`); automatic cancellation of a removed child's in-flight effects
+   is its known concrete use case (section 4.5).
 
 ## 11. References
 
