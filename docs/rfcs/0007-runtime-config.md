@@ -926,27 +926,42 @@ RFC 0014 §12's.
   load-control-unset configuration, and that unset configuration selects
   the unbounded lane mode (RFC 0006 §5.2). What the delegation no longer
   carries is a frame rate.
-- **§2.1's field set shrinks to two controls.** The frame rate goes
-  with the pacing removal above, and `keyed_channel_capacity` goes with
-  the private keyed channels it sizes — superseded by RFC 0014 §9 row 2,
-  with the per-command isolation loss that follows recorded by its owner
-  (RFC 0006 §5.2). What remains is `app_channel_capacity` and
-  `batch_max_messages`, one setter each. The no-`Default` decision's
+- **§2.1's field set shrinks to two controls, one of them renamed.**
+  The frame rate goes with the pacing removal above, and
+  `keyed_channel_capacity` goes with the private keyed channels it
+  sizes — superseded by RFC 0014 §9 row 2, with the per-command
+  isolation loss that follows recorded by its owner (RFC 0006 §5.2).
+  What remains is `data_lane_capacity` and `batch_max_messages`, one
+  setter each. The first is `app_channel_capacity` renamed, **with no
+  compatibility alias**: it stops sizing the shared
+  application-message channel and starts sizing the single data lane
+  every producer shares, so keeping the old name would assert a
+  compatibility that does not hold, and the breaking landing makes
+  callers move rather than inherit a control whose meaning widened
+  under them (RFC 0014 §9 row 2). Its semantics are the lane's:
+  `data_lane_capacity: None` leaves the data lane unbounded — the
+  default, and what `Runtime::new` still selects — while `Some(n)`
+  bounds that one lane at `n`, for every producer sharing it. The
+  no-`Default` decision's
   stated basis — the crate has no default frame rate — goes with the
   frame rate; adding `Default` remains additive, and this RFC decides
   nothing further about it here.
-- **INV-C2, INV-C3, INV-C4, and INV-C6 are re-derived over that set.**
-  INV-C2: the constructor leaves both surviving controls unset, and each
-  setter sets exactly its own field and no other. INV-C3: no
-  construction or setter can produce an invalid configuration and none
-  returns a `Result` or panics — both surviving capacities are
-  `Option<NonZeroUsize>`, so zero stays unrepresentable, and each body
-  stays a plain field write; the check is the same two-part review over
-  a smaller surface. INV-C4: the public surface is exactly those two
-  controls — no frame rate, no per-command capacity, no restart-rate
-  field — with §2.3's re-export placement unchanged. INV-C6: `#[must_use]`
-  on the constructor, on each surviving setter with its own message, and
-  on `Runtime::with_config`. INV-C5 alone has no successor object.
+- **INV-C2, INV-C3, INV-C4, and INV-C6 are re-derived over that set**,
+  under the surviving names. INV-C2: the constructor leaves
+  `data_lane_capacity` and `batch_max_messages` unset, and each setter
+  sets exactly its own field and no other. INV-C3: no construction or
+  setter can produce an invalid configuration and none returns a
+  `Result` or panics — both surviving fields are `Option<NonZeroUsize>`,
+  so zero stays unrepresentable, and each body stays a plain field
+  write; the check is the same two-part review over a smaller surface.
+  INV-C4: the public surface is exactly those two controls — no frame
+  rate, no `app_channel_capacity` under its old name, no per-command
+  capacity, no restart-rate field — with §2.3's re-export placement
+  unchanged; the absence of the old name is part of what that review
+  checks, since an alias is what this rename declines. INV-C6:
+  `#[must_use]` on the constructor, on each surviving setter with its
+  own message, and on `Runtime::with_config`. INV-C5 alone has no
+  successor object.
 - **§3.1's `batch_max_messages: unset` recommendation stands on new
   ground.** The recommendation not to set a value is unchanged, but
   unset stops meaning "time cap only": the kernel applies its own finite
@@ -954,9 +969,11 @@ RFC 0014 §12's.
   recommendation cites, is superseded with the pacing facts (RFC 0006
   §5.2), so the successor's basis comes from that RFC's re-derivation,
   not from this cell.
-- **§3.1's capacity rules follow RFC 0006 §5.2.** The
-  `app_channel_capacity` sizing rule reads over the successor's data
-  lane, the latency/burst trade unchanged in shape. The
+- **§3.1's capacity rules follow RFC 0006 §5.2.** The sizing rule
+  §3.1 states for `app_channel_capacity` reads over the successor's
+  data lane under the new name, the latency/burst trade unchanged in
+  shape — what widens is the traffic it sizes, since keyed and
+  anonymous command output now share the lane the rule bounds. The
   `keyed_channel_capacity` rule goes with the control it sizes: with no
   per-command channel there is no per-command burst to absorb and no
   `m × capacity` share to bound, so no successor rule replaces it.

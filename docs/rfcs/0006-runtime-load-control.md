@@ -1562,10 +1562,17 @@ own.
   the forms RFC 0003 §6.1 records, which the bounded lane mode leaves
   intact.
 - **INV-L1 and INV-L3 hold over the data lane** (RFC 0014 §3.1's lane
-  modes). A configured data-lane capacity bounds that lane's buffer, an
-  accepted item is preceded by at most `capacity - 1` earlier items, and
-  the drain-side and admission bounds keep their producer-count premise
-  (section 4.5), which stays application-owned and observable.
+  modes), under the successor's name for the control: what these
+  invariants call `app_channel_capacity` is `data_lane_capacity` there,
+  renamed with no compatibility alias because it stops sizing the
+  shared application-message channel and starts sizing the one lane
+  every producer shares (RFC 0014 §9 row 2; RFC 0007 §7.1). A
+  configured `data_lane_capacity` bounds that lane's buffer, an
+  accepted item is preceded by at most `capacity - 1` earlier items,
+  and the drain-side and admission bounds keep their producer-count
+  premise (section 4.5), which stays application-owned and observable —
+  over a wider producer set than the shared channel carried, since
+  keyed and anonymous command output join it.
 - **INV-L9, INV-L1's per-command term, and the `keyed_channel_capacity`
   control are superseded, with a recorded property loss.** All three
   quantify over the private per-`CommandId` channels the kernel removes:
@@ -1604,8 +1611,9 @@ own.
   moot there: the control drain is a fixed pass stage, not a select
   branch that could be biased.
 - **INV-L6 splits.** Its `None`-path claim survives as the unbounded
-  lane mode's selection — an unset capacity selects unbounded delivery,
-  not a large bound. Its batching half does not: with `batch_max_messages`
+  lane mode's selection — an unset `data_lane_capacity` selects
+  unbounded delivery, not a large bound. Its batching half does not:
+  with `batch_max_messages`
   unset the successor applies the kernel's own finite count cap in place
   of the time-capped-only loop (RFC 0014 §3.5; §9 row 4).
 - **INV-L7's object is unchanged; its check re-points.** It forbids the
@@ -1657,8 +1665,9 @@ own.
   input reaches `update` as subscription output through the shared
   channel, whose capacity no keyed output consumed, and INV-14 pulled
   it ahead of every ready keyed result. On the successor it shares the
-  one data lane and the one configured capacity with every producer,
-  so in bounded mode an input's admission can queue behind keyed
+  one data lane and the one configured capacity — `data_lane_capacity`,
+  the renamed control — with every producer, so in bounded mode an
+  input's admission can queue behind keyed
   command output that a full lane is holding — the interactivity a
   bounded configuration buys is not what section 3.1's verdict and
   section 4.1's sizing rule were written against. This follows from
@@ -1671,7 +1680,8 @@ own.
   and 10.** The delivery-channel classes become the data lane and the
   control lane, the shared-before-keyed fact and the keyed-quit
   precedence leave the list, and capacity is configured for the data
-  lane. What the invariant exists to pin is unchanged: no reservation,
+  lane through `data_lane_capacity`. What the invariant exists to pin
+  is unchanged: no reservation,
   priority, weight, fairness policy, shedding, or coalescing — a single
   FIFO introduces none (RFC 0014 §3.1).
 - **The documentation guidance of sections 4.6 and 4.7 is superseded,
