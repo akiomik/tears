@@ -525,8 +525,9 @@ filtering at the delivery decision point, an `update`-returned quit
 applied synchronously at its dispatch, and producer-originated quits
 on a dedicated control lane; the superseding contract, with its
 per-invariant successor correspondence for RFC 0003 and RFC 0006, is
-RFC 0014 (§3.1, §3.3, §9), whose landing that RFC gates on its
-staged spike.
+RFC 0014 (§3.1, §3.3, §9), accepted at its staged spike's tier: the
+owner-document edits that correspondence names are landed, and
+implementation mainlining stays gated there (§13.1).
 
 ### 3.2 `root-SCHED` — verdict: reaffirmation, canonicalization, and two numberings
 
@@ -575,8 +576,9 @@ broad cancel-before-delivery opportunity as a deliberate property
 loss, and replaces configured pacing with pass-bounded render
 cadence; fairness stays resolved against any policy and bounded
 delivery stays non-default under the successor; the superseding
-contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), landing gated
-there.
+contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), accepted at its
+staged spike's tier, with its owner-document edits landed and
+implementation mainlining still gated there (§13.1).
 
 The same counterexample carries one more grade-(i) face on this root:
 the private keyed channels go with shared-first pull, and per-command
@@ -585,11 +587,13 @@ RFC 0006 INV-L1 sums per command, and RFC 0007's
 `keyed_channel_capacity` surface. This root's ledger row for that
 isolation, LG-0006-058, reads as reaffirmed; under the successor it is
 superseded instead, since every producer awaiting capacity awaits the
-one data lane's, and a slow reader of any lane member delays all of
-them. The ledger stays the snapshot §8.1 adopts, unamended; this entry
-is where the correction lives, and the superseding contract is
-RFC 0014 (§3.1, §9, whose row for the delivery-class supersession
-carries it), landing gated there.
+one data lane's — one producer's occupancy couples capacity admission
+for all producers, where the per-command channels coupled none. The
+ledger stays the snapshot §8.1 adopts, unamended; this entry is where
+the correction lives, and the superseding contract is RFC 0014 (§3.1,
+§9, whose row for the delivery-class supersession carries it), landed
+in the owner documents on that RFC's acceptance and gated there for
+mainlining (§13.1).
 
 ## 4. Lifecycle and termination
 
@@ -656,7 +660,9 @@ and before any source starts — a change to RFC 0011 §3.2's intake
 order; the added advanced entry point (`ProgramRuntime` with its
 `Exit` result) is additive surface beside the preserved one,
 recorded as no supersession; the amending contract is RFC 0014
-(§2.3, §2.4, §6.2, §9), landing gated there.
+(§2.3, §2.4, §6.2, §9), accepted at its staged spike's tier, with its
+owner-document edits landed and implementation mainlining still gated
+there (§13.1).
 
 ## 5. Identity and the composition axiom
 
@@ -725,7 +731,9 @@ as a single aggregate `Application` adapter to a reducer-first core
 substance survives in the successor (the composition layer owns the
 identity boundary; no second runtime, no second identity model), and
 the §5.2 requirements are discharged there item by item; the
-superseding contract is RFC 0014 (§2, §8), landing gated there.
+superseding contract is RFC 0014 (§2, §8), accepted at its staged
+spike's tier, with its owner-document edits landed and implementation
+mainlining still gated there (§13.1).
 
 ## 6. Effect and subscription execution boundary
 
@@ -774,8 +782,9 @@ backlog-independent delivery is met in strengthened form
 (synchronous application at the returning dispatch) and the
 cancellation-metadata lowering path holds, while keyed quit's
 in-band ordering half is superseded with the loss recorded as
-breaking; the successor statement is RFC 0014 (§3.3, §9), landing
-gated there.
+breaking; the successor statement is RFC 0014 (§3.3, §9), accepted at
+its staged spike's tier, with its owner-document edits landed and
+implementation mainlining still gated there (§13.1).
 
 ### 6.2 `root-D18` — verdict: redesign — a new owner contract for source execution
 

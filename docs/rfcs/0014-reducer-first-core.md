@@ -926,13 +926,18 @@ edits in place.
 | 7 | RFC 0013 | successor revision | the teardown contract re-derived on §4's operation: selection over every run kind (its §3), immediate subscription stop (its §4), cleanup participation (its §5), resolved questions (its §9); INV-ST classification and mapping per §4.2 |
 | 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2); INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); INV-LC8's producer-kind inventory extended to cleanup runs (§4.4, §6.1); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
 | 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes the single value `"data"`; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
-| 10 | RFC 0006 | supersede | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
+| 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 
 Count: five supersessions (rows 1, 2, 3, 4 — the public constructor
 change belongs to row 4's cluster and the keyed-capacity removal to
 row 2's — and 10), five amendments (rows 5, 6, 8, 9, 11), one
-successor revision (row 7). Preserved and worth
+successor revision (row 7). Row 10 carries a clarification beside its
+supersession — the shutdown closure-observation guarantee read as its
+two layers, which supersedes nothing and is what RFC 0006 records as a
+clarification — so the counts are unchanged by it: it is one row, one
+supersession, with the clarification recorded on the same row rather
+than as an entry of its own. Preserved and worth
 naming: the effect-DI negative space (RFC 0012 INV-SE8 — the driving
 seams are not an effect-executor abstraction: they gate branch choice
 and send release, never effect execution or dependency resolution),
