@@ -1508,9 +1508,10 @@ mandatory stage of every pass, before that pass's input batch; and an
 and bounded-mode capacity, blocking sends, and the capacity-wait
 observability stay this contract's, amended only as the clauses below
 state. The register that decides the correspondence is RFC 0014 §9 rows
-2, 4, 9, and 10, whose landing that RFC gates on its staged spike (its
-§13.1). Until then every clause of this document states the contract in
-force; each becomes the following. Two parts are absent below because
+2, 4, 9, and 10, landed with that RFC's acceptance; every clause of this
+document states the contract in force until mainlining closes RFC 0014
+§13.1's open tier, and each becomes the following there. Two parts
+are absent below because
 nothing reaches them: section 3's release-gate verdict records a decision
 already taken, and R6 — no default-behavior change *in 0.10.0* — is that
 gate's own requirement, discharged there, while the successor's behavior
@@ -1528,17 +1529,28 @@ own.
   capacity whatever it produces, and quit signals still never
   participate in backpressure — R4's unbounded exception carries to the
   control lane, which is never bounded (RFC 0014 §3.1, §3.3; §9 row 2).
-- **R4 is preserved on the control lane, and sharpened.** A quit already
-  in the control lane is applied independently of data-lane backlog and
-  capacity, and the mandatory per-pass drain turns the guarantee
-  constructive: a quit that has arrived when a pass begins is applied
-  with zero further inputs processed, and one arriving mid-pass is
-  preceded only by the in-progress batch's remainder (RFC 0014 §3.5,
-  INV-RC9). The `update`-returned route is stronger still — a quit
-  returned from `update`, the init command's included, applies at that
-  dispatch and travels no lane at all — and it is a route the successor
-  splits by origin, not by keying: every producer-originated quit,
-  keyed run or anonymous run alike, takes the control lane.
+- **R4 splits by dimension: preserved in delivery, superseded in
+  arming.** *Preserved* — a quit already in the control lane is applied
+  independently of data-lane backlog and capacity, and the mandatory
+  per-pass drain turns that guarantee constructive: a quit that has
+  arrived when a pass begins is applied with zero further inputs
+  processed, and one arriving mid-pass is preceded only by the
+  in-progress batch's remainder (RFC 0014 §3.5, INV-RC9). The
+  `update`-returned route is stronger still — a quit returned from
+  `update`, the init command's included, applies at that dispatch and
+  travels no lane at all — and the successor splits its routes by
+  origin, not by keying: every producer-originated quit, keyed run or
+  anonymous run alike, takes the control lane. *Superseded* — the form
+  this requirement names, "the dedicated channel **and its always-armed
+  select branch**", does not survive: there is no select branch to arm,
+  because the control drain is a fixed stage of every pass rather than
+  an arbitrated branch. What that arming provided is a separate
+  property, and it is re-derived rather than dropped: a parked kernel
+  registers a waker on control-lane arrival, and an arrival begins a
+  pass (RFC 0014 INV-RC16, §3.5's wake arming). Without that successor
+  the drain guarantee above would hold vacuously — no pass, no drain —
+  so the two halves are recorded separately here rather than as one
+  "preserved and sharpened" claim.
 - **R5's disjunction is discharged on the amendment side.** The RFC 0003
   invariants it required to be preserved or explicitly amended are
   classified one by one in RFC 0003 §6.1, and the keyed-quit ordering R5
@@ -1648,6 +1660,25 @@ own.
   lane. What the invariant exists to pin is unchanged: no reservation,
   priority, weight, fairness policy, shedding, or coalescing — a single
   FIFO introduces none (RFC 0014 §3.1).
+- **The documentation guidance of sections 4.6 and 4.7 is superseded,
+  and has no successor advice.** Two landed rustdoc deliverables rest on
+  the superseded topology (RFC 0007 §3.3): "use unkeyed
+  `Command::quit()` for a prompt unconditional quit; `.cancellable(id)`
+  on a quit buys suppression at the cost of waiting behind pending
+  inputs under load" (section 4.6), and "keying a command buys
+  cancellation and suppression at the cost of delivery deferral behind
+  ready shared inputs under load; put liveness-critical output in
+  unkeyed commands" (section 4.7). Neither holds on the successor: a
+  keyed quit waits behind no pending input, because it travels the
+  control lane drained before every input batch, and unkeyed output buys
+  no priority, because one FIFO has none to buy — the deferral both
+  notes trade against is exactly what row 2's supersession removes. The
+  cancellability half of the quit note survives in RFC 0014 §3.3's form
+  (a producer quit is cancellable until applied, through origin
+  revocation), and the choice the notes existed to price no longer
+  exists, so no replacement guidance is stated here. The rustdoc these
+  notes landed in is an implementation deliverable of the kernel's own
+  landing, not of this correspondence.
 - **Section 4.6's decision object is superseded; its property survives.**
   Keyed-quit routing through the private channel is replaced by the
   control lane (row 10), and *cancel beats a buffered quit* — the
