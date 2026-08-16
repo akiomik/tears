@@ -900,10 +900,13 @@ RFC 0014's kernel reads no wall clock and owns no frame-rate
 configuration: render cadence becomes pass-bounded, and time-driven
 redraw becomes an application `Timer` subscription (RFC 0014 §6.3). The
 frame rate therefore leaves this type and the constructors that carry it.
-The register that decides this is RFC 0014 §9 row 4, whose landing that
-RFC gates on its staged spike (its §13.1); until then every clause above
-states the surface in force. Each becomes the following, with the
-successor's own enforcement classes staying RFC 0014 §12's.
+Two register rows decide this section: RFC 0014 §9 row 4, the pacing
+cluster, and row 2, under which the per-command capacity leaves with
+the private keyed channels it sized. Both landed with that RFC's
+acceptance; every clause above states the surface in force until
+mainlining closes RFC 0014 §13.1's open tier, and each becomes the
+following there, with the successor's own enforcement classes staying
+RFC 0014 §12's.
 
 - **INV-C5 is superseded.** With no frame-rate configuration there is no
   scheduler for a config to disagree with, so the mismatch this invariant
