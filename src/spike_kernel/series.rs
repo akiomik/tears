@@ -1,26 +1,33 @@
 //! The pack §H-5 acceptance series (S1-S8) executed on the B-kernel
-//! prototype, plus the claim-specific probes (reservation protocol,
-//! gate-wait abort, counter poisoning, barrier scope, bounded commit-ack
-//! evaluation), the INV-RC9 bound rows, and a production-loop smoke
-//! test. All tests are deterministic on the current-thread test
-//! executor: no sleeps, no timers; progress is driven by grant
-//! handshakes and bounded yield settles.
+//! prototype, plus the park/wake witnesses ("parked control-quit wake",
+//! "parked subscription-quiescence wake"), the claim-specific probes
+//! (reservation protocol, gate-wait abort, counter poisoning, barrier
+//! scope, bounded commit-ack evaluation, "bounded-lane revocation"), the
+//! INV-RC9 bound rows, and a production-loop smoke test. All tests are
+//! deterministic on the current-thread test executor: no sleeps, no
+//! timers; progress is driven by grant handshakes and bounded condition
+//! settles.
 //!
 //! Evidence classification: the acceptance evidence drives whole fixed
 //! passes through `TestDriver::step_pass` (the normative §3.5
 //! pipeline). Tests prefixed `whitebox_` drive single stages through
 //! `TestDriver::step`, bypassing the pinned stage order — they probe
 //! stage mechanisms in mid-pass windows unreachable by pass driving and
-//! are outside the C-5 / INV-RC13 evidence surface.
+//! are outside the C-5 / INV-RC13 evidence surface. The park/wake
+//! witnesses drive the production loop (`Kernel::run`) by hand through
+//! `ParkProbe`, which is the only surface on which the park boundary —
+//! and therefore the wake-source set — is observable at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::task::{Context, Poll, Wake, Waker};
 
 use futures::FutureExt;
 use futures::future::pending;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::yield_now;
 
 use super::cmd::{
@@ -1309,6 +1316,381 @@ async fn s8_run_future_drop_reclaims_owned_work() {
     );
 }
 
+// --- park/wake witnesses ----------------------------------------------------
+
+/// A permit-storing release signal for producer bodies: `open` banks the
+/// permit whether or not the body has reached its wait, so no scheduling
+/// order is load-bearing.
+#[derive(Clone, Default)]
+struct Latch(Arc<Notify>);
+
+impl Latch {
+    /// Releases the producer holding at this latch.
+    fn open(&self) {
+        self.0.notify_one();
+    }
+
+    /// Producer side: holds until the test opens the latch.
+    async fn wait(&self) {
+        self.0.notified().await;
+    }
+}
+
+/// A producer that holds at its latch, commits exactly one control-lane
+/// quit when released, and then parks forever — the wake
+/// counterexample's own producer ("emits `Quit`, then blocks, never
+/// exits"), so no task exit can stand in for the wake under test.
+fn latched_quitter(label: &'static str, latch: Latch) -> Cmd<u32> {
+    anon(
+        label,
+        body(move |ctx| async move {
+            latch.wait().await;
+            let _ = ctx.handle.quit().await;
+            pending::<()>().await;
+        }),
+    )
+}
+
+/// A producer that holds at its latch, then sends each value once and
+/// parks — a test-timed data-lane arrival for the production loop whose
+/// origin never exits.
+fn latched_sender(label: &'static str, latch: Latch, values: Vec<u32>) -> Cmd<u32> {
+    anon(
+        label,
+        body(move |ctx| async move {
+            latch.wait().await;
+            for value in values {
+                if ctx.handle.send(&value.to_string(), value).await.is_err() {
+                    return;
+                }
+            }
+            pending::<()>().await;
+        }),
+    )
+}
+
+/// Counts the signals the kernel's own wake arming produces.
+#[derive(Default, Debug)]
+struct WakeCount(AtomicUsize);
+
+impl Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Hand-driving probe for the production loop's park boundary. It owns
+/// the *only* waker `Kernel::run` is ever polled with and it is the only
+/// thing that ever polls that future, so the counter reads exactly the
+/// wake sources the kernel armed and "still parked" becomes observable
+/// instead of inferred. A kernel that arms wakers on the data lane and
+/// the join set only leaves the counter at its parked value when a quit
+/// arrives on the control lane.
+struct ParkProbe {
+    count: Arc<WakeCount>,
+    waker: Waker,
+}
+
+impl ParkProbe {
+    /// A fresh probe with no signals recorded.
+    fn new() -> Self {
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        Self { count, waker }
+    }
+
+    /// Signals this waker has received so far.
+    fn wakes(&self) -> usize {
+        self.count.0.load(Ordering::SeqCst)
+    }
+
+    /// One poll with the probe's waker.
+    fn poll<F: Future>(&self, fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(&self.waker))
+    }
+
+    /// Establishes that the loop is **parked** and not merely between
+    /// passes: a further poll suspends again having run no pass (the
+    /// delivery ledger is unchanged), and no wake source is signalled —
+    /// so by the `Future` contract the loop cannot resume until some
+    /// source signals this waker. Returns the wake count the park starts
+    /// from.
+    fn assert_parked<F: Future>(&self, fut: Pin<&mut F>, delivery: &Ledger, what: &str) -> usize {
+        let before = self.wakes();
+        let ledger = delivery.snapshot();
+        assert!(self.poll(fut).is_pending(), "the loop is suspended: {what}");
+        assert_eq!(
+            delivery.snapshot(),
+            ledger,
+            "re-polling ran no pass, so the suspension is a park and not a \
+             gap between passes: {what}"
+        );
+        assert_eq!(
+            self.wakes(),
+            before,
+            "no wake source is signalled while parked: {what}"
+        );
+        before
+    }
+
+    /// The park assertion hardened with executor turns: the runtime is
+    /// handed turns so that every other runnable task, and any wake a
+    /// self-re-arming loop deferred, gets to run — and the loop's waker
+    /// must *still* be unsignalled afterwards. This is what separates a
+    /// park from a loop that yields and re-arms itself every turn: the
+    /// yielding impostor accumulates signals here, a parked loop
+    /// accumulates none. Usable only where the awaited event is not
+    /// itself produced by those turns.
+    async fn assert_parked_across_turns<F: Future>(
+        &self,
+        mut fut: Pin<&mut F>,
+        delivery: &Ledger,
+        what: &str,
+    ) -> usize {
+        let before = self.assert_parked(fut.as_mut(), delivery, what);
+        // The turn count is not a correctness condition: any number of
+        // executor turns has to leave the waker unsignalled.
+        for _ in 0..8 {
+            yield_now().await;
+        }
+        assert_eq!(
+            self.wakes(),
+            before,
+            "executor turns signalled no wake source, so the loop is parked \
+             on a waker rather than re-arming itself: {what}"
+        );
+        self.assert_parked(fut.as_mut(), delivery, what)
+    }
+
+    /// Polls to completion, handing the executor a turn between polls so
+    /// the runtime-owned tasks the kernel waits on can run. The
+    /// iteration bound converts a would-be hang into a failed assertion.
+    async fn drive_to_ready<F: Future>(&self, mut fut: Pin<&mut F>, what: &str) -> F::Output {
+        for _ in 0..10_000 {
+            if let Poll::Ready(output) = self.poll(fut.as_mut()) {
+                return output;
+            }
+            yield_now().await;
+        }
+        unreachable!("bounded drive exhausted: {what}")
+    }
+}
+
+/// "parked control-quit wake" — the control-lane arm of the park/wake
+/// contract, on the production loop. The loop is polled by hand with a
+/// counting waker on the current-thread executor, so runtime turns
+/// happen only where this test yields. After the boot pass it suspends
+/// with **zero** signals recorded and re-polling runs no pass: it is
+/// genuinely waiting on a waker, not sitting in the gap between two
+/// passes. A producer-originated quit then commits on the control lane
+/// while nothing else changes — no input, no task exit (the quitter
+/// parks forever), no pending frame work — and that arrival **alone**
+/// signals the waker; one further poll runs the woken pass, whose
+/// mandatory control drain applies the quit.
+///
+/// The wake counterexample this excludes: a kernel registering wakers on
+/// the data lane and the join set only satisfies "a quit is applied at
+/// the first control drain at or after its arrival" vacuously, because
+/// no pass ever begins. Its counter never leaves the parked value and
+/// this witness fails at the wake assertion.
+#[tokio::test(flavor = "current_thread")]
+async fn parked_control_quit_wake() {
+    let latch = Latch::default();
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let mut kernel = Kernel::new(
+        app,
+        (want(&[]), latched_quitter("quitter", latch.clone())),
+        KernelConfig::default(),
+        GateMode::Immediate,
+        HeadlessHost::default(),
+    );
+    let delivery = kernel.delivery();
+    let probe = ParkProbe::new();
+    let mut run = Box::pin(kernel.run());
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the production loop suspends after the boot pass"
+    );
+    assert!(delivery.contains("render"), "the boot pass rendered");
+    let parked_at = probe
+        .assert_parked_across_turns(run.as_mut(), &delivery, "after the boot pass")
+        .await;
+    assert_eq!(parked_at, 0, "nothing has woken the loop yet");
+
+    // The one event: a producer-originated quit reaches the control
+    // lane. `accept:quitter:quit` is that send's enqueue acceptance —
+    // the handshake this witness synchronizes on.
+    latch.open();
+    settle_until(
+        || delivery.contains("accept:quitter:quit"),
+        "the quit is accepted by the control lane",
+    )
+    .await;
+    let arrival = delivery.snapshot();
+    assert!(
+        !arrival.iter().any(|e| e.starts_with("update:")),
+        "no input accompanied the quit: {arrival:?}"
+    );
+    assert_eq!(
+        probe.wakes(),
+        parked_at + 1,
+        "the control-lane arrival alone woke the parked loop, with exactly \
+         one signal"
+    );
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the woken pass terminates and the loop moves to settle"
+    );
+    assert!(
+        delivery.contains("quit:quitter"),
+        "the woken pass applied the arrived quit at its control drain"
+    );
+    assert!(
+        delivery.contains("terminating:Quit"),
+        "controlled termination"
+    );
+    let report = probe
+        .drive_to_ready(run.as_mut(), "the terminated loop settles")
+        .await;
+    assert_eq!(report.reason, ExitReason::Quit, "controlled quit");
+    assert!(report.gauges_zero, "the quitter was reclaimed at settle");
+}
+
+/// "parked subscription-quiescence wake" — the
+/// subscription-quiescence arm of the park/wake contract, on the
+/// production loop and under the same hand-driven park witness. One
+/// message flips the declaration, so the pass stops `suba` and, being a
+/// stopping pass, admits nothing; the loop then parks with the stop
+/// outstanding. The stopped run's quiescence — observed independently
+/// through the producer gauge, which the run's task drops on
+/// reclamation — is then the one event, and it alone signals the waker.
+/// One further poll runs the woken pass: its exit reflection marks
+/// subscriptions dirty and the same pass's frame stage re-evaluates and
+/// admits the successor, with no message in between.
+#[tokio::test(flavor = "current_thread")]
+async fn parked_subscription_quiescence_wake() {
+    let latch = Latch::default();
+    let a_src = MockSource::default();
+    let b_src = MockSource::default();
+    let app = ScriptApp {
+        on_msg: Box::new(|state, msg| {
+            if msg == 1 {
+                state.want.remove("suba");
+                state.want.insert("subb");
+            }
+            Cmd::None
+        }),
+        sources: BTreeMap::from([("suba", a_src.clone()), ("subb", b_src.clone())]),
+    };
+    let mut kernel = Kernel::new(
+        app,
+        (
+            want(&["suba"]),
+            latched_sender("trigger", latch.clone(), vec![1]),
+        ),
+        KernelConfig::default(),
+        GateMode::Immediate,
+        HeadlessHost::default(),
+    );
+    let delivery = kernel.delivery();
+    let gauges = kernel.gauges();
+    let probe = ParkProbe::new();
+    let mut run = Box::pin(kernel.run());
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the production loop suspends after the boot pass"
+    );
+    assert!(
+        delivery.contains("admit:suba"),
+        "boot admitted the declared subscription"
+    );
+    probe
+        .assert_parked_across_turns(run.as_mut(), &delivery, "after the boot pass")
+        .await;
+    assert_eq!(
+        gauges.producers(),
+        2,
+        "the trigger and suba are the live producers"
+    );
+
+    latch.open();
+    settle_until(
+        || delivery.contains("accept:trigger:1"),
+        "the trigger's message is accepted by the data lane",
+    )
+    .await;
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the message-woken pass runs the re-evaluation"
+    );
+    assert!(
+        delivery.contains("stop:suba"),
+        "the re-evaluation stopped suba"
+    );
+    assert!(
+        delivery.contains("reconcile:deferred"),
+        "the stopping pass admits nothing"
+    );
+    assert!(
+        !delivery.contains("admit:subb"),
+        "the successor waits behind the barrier"
+    );
+    // This park carries the synchronous assertion only: the executor
+    // turns that would falsify a yielding impostor are the very turns
+    // that reclaim the stopped run, so they cannot be spent before the
+    // awaited event. The exact-signal assertion below covers that gap
+    // instead — an impostor re-arming itself on every turn accumulates
+    // more than the one signal the quiescence produces.
+    let parked_at = probe.assert_parked(run.as_mut(), &delivery, "with the stop outstanding");
+
+    // The one event: the stop-requested subscription run quiesces. No
+    // input, no control traffic, no pending frame work.
+    settle_until(
+        || gauges.producers() == 1,
+        "the stopped subscription run quiesces",
+    )
+    .await;
+    assert_eq!(
+        probe.wakes(),
+        parked_at + 1,
+        "the quiescence notification alone woke the parked loop, with \
+         exactly one signal"
+    );
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the woken pass reflects the exit and re-evaluates"
+    );
+    let entries = delivery.snapshot();
+    let wake = position_of(&entries, "exit:suba");
+    let admit = position_of(&entries, "admit:subb");
+    assert!(wake < admit, "the admission follows the wake: {entries:?}");
+    assert!(
+        !entries[wake..admit]
+            .iter()
+            .any(|e| e.starts_with("update:")),
+        "no message between the quiescence and the re-evaluation: {entries:?}"
+    );
+    probe.assert_parked(run.as_mut(), &delivery, "after the woken pass");
+
+    drop(run);
+    assert_eq!(
+        kernel.state().applied,
+        vec![1],
+        "one message drove the whole witness"
+    );
+}
+
 // --- claim probes ----------------------------------------------------------
 
 /// §2.1 rule 0 — the grant await precedes the reservation: a producer
@@ -1961,6 +2343,135 @@ async fn bounded_full_lane_grant_acks_only_after_real_acceptance() {
     assert!(
         position_of(&one, "update:1") < position_of(&one, "accept:pb:2"),
         "the second acceptance happens only after the first dequeue: {one:?}"
+    );
+}
+
+/// "bounded-lane revocation" — strict revocation witnessed on the
+/// **bounded** lane mode, driven pass-unit. The buffered acceptance is
+/// established by the commit-ack handshake: `grant` returns only once
+/// the real bounded `send().await` has been accepted into the lane's
+/// buffer, and the two-slot lane is exactly full at that point, which a
+/// third producer's send confirms by parking on the missing capacity
+/// (no acceptance, reservation held). The teardown pass then revokes the
+/// buffered item's origin; the revoked envelope keeps holding its lane
+/// slot — capacity is reclaimed by the delivery-side dequeue, not by the
+/// revocation — and when the drain reaches it the item is filtered:
+/// **no `update` invocation**, while the live origin's item queued
+/// behind it still delivers. Every step is a handshake or a condition
+/// settle; no yield count or sleep is a correctness condition.
+#[tokio::test]
+async fn bounded_lane_revocation() {
+    let input = MockSource::default();
+    let app = ScriptApp {
+        on_msg: Box::new(|_, msg| match msg {
+            1 => Cmd::Spawn(SpawnCmd {
+                label: "fx",
+                scope: ScopePath::seg("pane"),
+                key: Some("k"),
+                policy: CancelPolicy::CancelInFlight,
+                body: body(|ctx| async move {
+                    let _ = ctx.handle.send("10", 10).await;
+                    pending::<()>().await;
+                }),
+            }),
+            2 => Cmd::Teardown(ScopePath::seg("pane")),
+            3 => Cmd::Quit,
+            _ => Cmd::None,
+        }),
+        sources: BTreeMap::from([("input", input.clone())]),
+    };
+    let mut driver = TestDriver::new(
+        app,
+        (want(&["input"]), send_then_park("pb", vec![20])),
+        KernelConfig {
+            capacity: Some(2),
+            batch_cap: 1,
+        },
+    );
+    driver.boot();
+    let input_id = driver.producer("input");
+    let pb = driver.producer("pb");
+
+    input.push(1);
+    driver.grant(input_id).await;
+    driver.step_pass(Branch::Input).expect("spawn pass");
+    let fx = driver.producer("fx");
+
+    // The cancel trigger enqueues *before* fx's output: FIFO carries
+    // [input:2, fx:10] into the next passes (cap 1). Both grants return
+    // only after their bounded send was accepted into the lane, so the
+    // two-slot lane is exactly full here.
+    input.push(2);
+    driver.grant(input_id).await;
+    driver.grant(fx).await;
+    assert_eq!(
+        driver.counter_of("fx").value(),
+        1,
+        "fx's item is committed into the bounded lane"
+    );
+
+    // Capacity is genuinely exhausted: a third producer's send parks
+    // inside the real bounded send holding its reservation, and its
+    // grant does not acknowledge.
+    let pb_counter = driver.counter_of("pb");
+    let mut pb_ack = driver.grant_handle(pb).expect("pb's grant issues");
+    settle_until(
+        || pb_counter.value() == 1,
+        "pb parks inside the real send holding its reservation",
+    )
+    .await;
+    assert!(
+        (&mut pb_ack).now_or_never().is_none(),
+        "the bounded lane is full: no acceptance for pb"
+    );
+
+    driver.step_pass(Branch::Input).expect("teardown pass");
+    assert!(
+        driver.delivery().contains("stop:fx"),
+        "the teardown revoked the buffered item's origin"
+    );
+    assert_eq!(
+        driver.entry_phase("fx"),
+        Some((Phase::Stopping, true)),
+        "fx is revoked with its item still buffered"
+    );
+    pb_ack.await;
+    assert_eq!(
+        driver.counter_of("fx").value(),
+        1,
+        "the revoked item still holds its lane slot: revocation frees no capacity"
+    );
+
+    driver.await_exit_ready().await;
+    driver.step_pass(Branch::JoinExit).expect("filter pass");
+    let entries = driver.delivery().snapshot();
+    assert!(
+        entries.iter().any(|e| e == "filtered:fx"),
+        "the buffered item is filtered at dequeue: {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| e == "update:10"),
+        "no update invocation for the revoked origin: {entries:?}"
+    );
+    assert_eq!(
+        driver.entry_phase("fx"),
+        None,
+        "the tombstone is reclaimed by the filtering dequeue"
+    );
+
+    driver
+        .step_pass(Branch::Input)
+        .expect("the live origin's item queued behind still delivers");
+    input.push(3);
+    driver.grant(input_id).await;
+    driver.step_pass(Branch::Input).expect("quit pass");
+    let report = driver.settle().await;
+    assert_eq!(report.reason, ExitReason::Quit, "controlled quit");
+    assert!(report.gauges_zero, "quiescent postcondition");
+    assert_eq!(
+        driver.state().applied,
+        vec![1, 2, 20, 3],
+        "only live deliveries, on a bounded lane"
     );
 }
 
