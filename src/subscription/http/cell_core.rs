@@ -119,12 +119,13 @@ mod tests {
     use crate::test_support::PANIC_HOOK_GUARD;
 
     /// Serializes a loom model against the process-global panic-hook
-    /// tests. On the locked loom/generator versions a succeeding model
-    /// reaches no hook — only a failing assertion inside one does. The
-    /// recording tests filter by thread name, which is the primary
-    /// defence; this guard is a second one, cheap at four models
-    /// (docs/testing.md "Process-Global Panic Hook Tests", which records
-    /// the measurement and the flake it originated in).
+    /// tests, because a model *is* a hook swapper: loom drives each model
+    /// thread as a `generator` coroutine, and generator takes the global
+    /// hook, installs a no-op around its own unwind, and reinstalls the
+    /// previous one. That is the swap this guard exists to serialize —
+    /// the recording tests' thread-name filter guards their counts, but
+    /// not against a hook being swapped under them (docs/testing.md
+    /// "Process-Global Panic Hook Tests").
     fn hook_guard() -> MutexGuard<'static, ()> {
         PANIC_HOOK_GUARD
             .lock()
