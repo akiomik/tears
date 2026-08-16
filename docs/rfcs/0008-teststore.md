@@ -137,7 +137,10 @@ gates inside application-supplied effects); scripted determinism over
 the whole script — inputs, readiness, arbitration choices, and
 grants — for a deterministic application, with the
 grant-then-acceptance handshake as the narrower condition under which
-*enqueue order* is guaranteed at all; and **pass-unit driving as the
+*enqueue order* is guaranteed at all, and the whole determinism claim
+scoped to its verified range: a current-thread executor and unbounded
+lanes, with the bounded-lane extension and its two protocol conditions
+open at RFC 0014 §13.3; and **pass-unit driving as the
 evidence surface**, one driver step executing one whole production
 pass, with stage-granular probes admissible as component-level
 instruments but outside that surface. §4.2's citation rule generalizes
@@ -148,8 +151,9 @@ RFC 0014 §7.3's.
 
 The API body — the concrete `TestDriver` surface — lands as an
 additive amendment to this RFC: the amendment RFC 0014 §9 row 11
-records and RFC 0012 §6.2 reserves, whose landing RFC 0014 gates on its
-staged spike (its §13.1).
+records and RFC 0012 §6.2 reserves, landed with RFC 0014's acceptance;
+the surface itself arrives when mainlining closes RFC 0014 §13.1's open
+tier.
 
 The same landing extends this store's command intake: the lowered parts
 it consumes gain teardown entries and independently keyed batch children
