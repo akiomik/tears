@@ -747,8 +747,8 @@ proof.
   carrier, and their behavioral checks live there.
 - The cleanup finalizer contract (at most once, no runtime-visible
   output of any kind, termination discards) is not pinned here —
-  RFC 0014 INV-RC8 owns it, including the structural half at the
-  cleanup task's construction site; INV-ST1/INV-ST5 pin only its
+  RFC 0014 INV-RC8 owns it, the no-output clause structural-primary at
+  the cleanup task's construction site; INV-ST1/INV-ST5 pin only its
   participation in selection and idempotence.
 - Barrier scope and the stopping-pass defer are not pinned here —
   RFC 0012 §4 and RFC 0014 §5.1/§5.3 own them; §4.3 consumes them.

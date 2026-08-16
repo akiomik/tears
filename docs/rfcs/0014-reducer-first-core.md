@@ -1016,7 +1016,7 @@ edits in place.
 | 7 | RFC 0013 | successor revision | the teardown contract re-derived on §4's operation: selection over every run kind (its §3), immediate subscription stop (its §4), cleanup participation (its §5), resolved questions (its §9); INV-ST classification and mapping per §4.2 |
 | 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2), narrowing INV-LC4's arbitration clause by that one case; INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); INV-LC8's producer-kind inventory extended to cleanup runs (§4.4, §6.1); §7 premises re-derived on the seam vocabulary — the always-armed quit branch splitting into a strengthened drain and a superseded arming half whose successor is INV-RC16, which also takes §7's parking premise as contract; pass initiation's production policy stays unbiased and becomes normative (§3.5) |
 | 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes the single value `"data"`; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
-| 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
+| 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
 
@@ -1220,12 +1220,19 @@ tiers remain the regression suite afterward.
   application point, no runtime-visible output of any kind (no
   message, no quit, no directive), consumed-not-rerun, termination
   discards unfired hooks and cancels running ones. Behavioral per
-  clause — the output clause asserting, for a cleanup run that
-  attempts each, no delivery to `update`, no termination, and no
-  redraw or subscription dirt attributable to it — with a structural
-  half at the cleanup task's construction site, where the run is
-  handed no lane sender to attempt any of them with; the termination
-  row reuses the settle-loop discipline.
+  clause with one exception: the **no-output clause is
+  structural-primary**, reviewed at the cleanup task's construction
+  site, because the sanctioned API hands the run no lane sender and no
+  directive capability — so no cleanup run that *attempts* an output
+  exists for a test to observe failing, and a passing test would
+  witness the absence of the attempt rather than of the output. Its
+  behavioral neighbour is a regression check over an ordinary cleanup
+  run — no delivery to `update`, no termination, no redraw or
+  subscription dirt attributable to it — which no more proves the
+  absence of the capability than a finite scenario proves a pool's
+  absence, the shape RFC 0006 INV-L9 and RFC 0013 INV-ST7 both take.
+  The remaining clauses keep their behavioral rows, and the
+  termination row reuses the settle-loop discipline.
 - **INV-RC9 — quit routes.** An `update`-returned quit terminates at
   its dispatch's completion with no intervening input processed. A
   producer quit is applied at the first control drain at or after its
