@@ -1510,14 +1510,20 @@ observability stay this contract's, amended only as the clauses below
 state. The register that decides the correspondence is RFC 0014 §9 rows
 2, 4, 9, and 10, landed with that RFC's acceptance; every clause of this
 document states the contract in force until mainlining closes RFC 0014
-§13.1's open tier, and each becomes the following there. Two parts
-are absent below because
-nothing reaches them: section 3's release-gate verdict records a decision
-already taken, and R6 — no default-behavior change *in 0.10.0* — is that
-gate's own requirement, discharged there, while the successor's behavior
-changes ride RFC 0014's CHANGELOG at 0.11.0. R1, R2, and R3 are carried
-by the invariants that state them (INV-L1, INV-L2, INV-L3 below). The
-successor's own enforcement classes are RFC 0014 §12's — this
+§13.1's open tier, and each becomes the following there. Three parts
+are absent below because nothing reaches them independently. Section 3's
+release-gate verdict records a decision already taken, and R6 — no
+default-behavior change *in 0.10.0* — is that gate's own requirement,
+discharged there, while the successor's behavior changes ride RFC 0014's
+CHANGELOG at 0.11.0. R1, R2, and R3 are carried by the invariants that
+state them (INV-L1, INV-L2, INV-L3 below). Section 6's resolved
+questions are likewise records of decisions already taken, and where one
+restates the clauses its decision produced — question 3's buffer-total
+formula for R1 and INV-L1, and the per-command isolation it pins as
+INV-L9 — it follows those clauses' correspondence below and carries none
+of its own.
+
+The successor's own enforcement classes are RFC 0014 §12's — this
 correspondence records what each clause becomes and adds no check of its
 own.
 
