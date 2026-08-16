@@ -228,9 +228,11 @@ Prompts that have already paid off:
   behavioral rows needed a probe at the park boundary, which the
   evidence rule — acceptance evidence comes from whole-pass driving
   only — could not admit, since a driver step begins a pass and a
-  parked kernel is one with no pass running; the suite meanwhile
-  declared all eleven of its series driven that way, and the
-  prototype's own notes said two of them were not).
+  parked kernel is one with no pass running, while the suite declared
+  every one of its series driven that way; the resolution now stands in
+  RFC 0014 §7.2, which names the park-boundary probe and scopes what it
+  may be cited for, and §13.1, which splits the suite into the series
+  each instrument can carry).
 - A normative contract stated as *observable properties*, not as the
   implementation mechanism that happens to produce them. A clause phrased
   over a specific call (`.skip(1)`, an `interval` handle) is satisfiable
@@ -324,16 +326,13 @@ check (from PR #253: a review suggestion listed `tokio::time::pause`
 among the clock calls an effect could issue; the fix promoted the list
 to a normative "succeeds", but pausing an already-paused clock panics —
 the reviewer then caught their own suggestion's promotion). A
-measurement someone else ran elsewhere is the same class of hypothesis,
-and it does not outrank this repository's own primary record — but that
-record does not outrank a fresh measurement either. The order is:
-measure here, now; then the repository's own record of what was
-observed; then anyone's report. *From PR #282:* an outside measurement
-showing a dependency never reached the panic hook was written into
-documentation over this repository's own recorded diagnosis, which had
-attributed a real flake to exactly that path — the reviewer's number
-was right, the record was right about what it saw, and the text that
-believed only one of them was wrong.
+measurement someone else ran elsewhere is the same class of hypothesis.
+That is a rule about how to verify, not about who is right: measure it
+here first; where that is impossible, consult this repository's own
+record of what was observed; treat any outside report as standing until
+one of those two bears on it. When two verified observations disagree,
+neither is discarded — see the measurement-citation bullets below for
+what to write instead.
 
 *From PR #211:* "quit occupancy is bounded by producer count" — false,
 because a task terminates after `send` while its signal stays queued.
@@ -457,15 +456,18 @@ delegated remainder even when it is currently empty (item 1).
 A behavioral claim about a dependency is a code claim, verified against
 that dependency's documented semantics — thresholds, margins, and
 "best-effort" hedges included — not its assumed behavior. Reading one
-source site is not reading the mechanism: a neighbouring routine in the
-same dependency can invert what that site does observably, so a claim
-about the dependency's *effect* is checked against the paths around the
-call as well as the call. *From PR #282:* a coroutine crate raises a
-panic on its normal completion path, which a panic hook would see —
-true at that line, and false as an effect claim, because the same crate
-installs a no-op hook around coroutine teardown and restores the
-previous one afterwards; two accounts that had each read one of the two
-sites appeared to contradict each other. *From PR #246:*
+source site is not reading the mechanism: what a call does observably
+can depend on which path reaches it and on what the surrounding
+routines are doing at that moment, so a claim about the dependency's
+*effect* is checked across the paths that reach the site, and settled
+by measurement when reading cannot settle it. *From PR #282:* a
+coroutine crate raises a panic on its normal completion path, which a
+panic hook would see, and separately installs a no-op hook around the
+resume it uses to cancel a coroutine, restoring the previous hook
+afterwards — two sites, two paths, hook handling that differs between
+them. Neither reading establishes what an installed hook observes
+during a successful run; the in-repo measurement did, and the two
+sites are described rather than argued into agreement. *From PR #246:*
 a `Timer` contract asserted no catch-up burst "because
 `MissedTickBehavior::Skip` skips missed ticks", but Tokio's Skip engages
 only once a tick is late past a fixed 5 ms margin, so sub-margin
@@ -614,13 +616,12 @@ places across seven owner documents, which returned as the next pass's
 blocker; later in the same review, a clause rewritten in three places
 regenerated the finding from a fourth in one of the same documents.
 
-The list is the
-enforcement; without it the pass silently shrinks to the sentences the
-finding pointed at, and a small patch is precisely the patch whose
-re-check gets skipped. *From PR #221:* two of the three findings sat
-in claims PR #220's review-fix commit had added or reshaped
-— the reference-machine-exclusivity sentence, and the rewritten
-pass/fail derivation that carried "cannot fail on speed" into new
+The list is the enforcement; without it the pass silently shrinks to
+the sentences the finding pointed at, and a small patch is precisely
+the patch whose re-check gets skipped. *From PR #221:* two of the three
+findings sat in claims PR #220's review-fix commit had added or
+reshaped — the reference-machine-exclusivity sentence, and the
+rewritten pass/fail derivation that carried "cannot fail on speed" into new
 surroundings — and both would have appeared on that commit's
 changed-claims list.
 
