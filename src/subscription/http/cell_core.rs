@@ -110,11 +110,6 @@ impl CellCore {
 
 #[cfg(test)]
 mod tests {
-    use loom::sync::Arc;
-    use loom::thread;
-
-    use super::CellCore;
-    use crate::test_support::hook_guard;
     // Each model holds the guard for its duration, because a loom model
     // *is* a hook swapper: loom drives each model thread as a `generator`
     // coroutine, and generator takes the global hook, installs a no-op
@@ -123,6 +118,12 @@ mod tests {
     // thread-name filter guards their counts, but not against a hook being
     // swapped under them (docs/testing.md "Process-Global Panic Hook
     // Tests").
+
+    use loom::sync::Arc;
+    use loom::thread;
+
+    use super::CellCore;
+    use crate::test_support::hook_guard;
 
     #[test]
     fn single_flight_selects_at_most_one_fetcher_per_generation() {

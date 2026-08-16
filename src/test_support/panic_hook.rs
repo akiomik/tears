@@ -18,7 +18,7 @@ use crate::panic::compose_hook;
 /// The panic hook is process-global and shared across threads, so a test that
 /// records hook activity and a test that panics must not run concurrently, or
 /// the panicking test's hook invocation would pollute the recording one.
-pub static PANIC_HOOK_GUARD: Mutex<()> = Mutex::new(());
+static PANIC_HOOK_GUARD: Mutex<()> = Mutex::new(());
 
 /// Locks [`PANIC_HOOK_GUARD`], recovering from poisoning.
 ///
@@ -74,10 +74,10 @@ impl Drop for SilentPanicHook {
 /// starts with the installing test's prefix.
 ///
 /// Unlike [`with_silent_panic_hook`] (current-thread, async), this probe also
-/// serves multi-thread runtimes and non-async tests; callers hold
-/// [`PANIC_HOOK_GUARD`] for their whole critical section themselves. That
-/// serializes the hook swaps but not the rest of the test binary: a test that
-/// panics without taking the guard would still reach this hook. The
+/// serves multi-thread runtimes and non-async tests; callers call
+/// [`hook_guard`] and hold it for their whole critical section themselves.
+/// That serializes the hook swaps but not the rest of the test binary: a
+/// test that panics without taking the guard would still reach this hook. The
 /// thread-name filter keeps such a panic out of the counts — libtest names
 /// each test's thread after the test's full path, and multi-thread tests
 /// stamp their runtime workers with their own prefix.
