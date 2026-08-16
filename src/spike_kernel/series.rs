@@ -1,22 +1,31 @@
-//! The pack §H-5 acceptance series (S1-S8) executed on the B-kernel
-//! prototype, plus the park/wake witnesses ("parked control-quit wake",
-//! "parked subscription-quiescence wake"), the claim-specific probes
-//! (reservation protocol, gate-wait abort, counter poisoning, barrier
-//! scope, bounded commit-ack evaluation, "bounded-lane revocation"), the
-//! INV-RC9 bound rows, and a production-loop smoke test. All tests are
+//! The B-kernel prototype's twelve acceptance series, plus the
+//! claim-specific probes (reservation protocol, gate-wait abort, counter
+//! poisoning, barrier scope, bounded commit-ack evaluation), the INV-RC9
+//! bound rows, and a production-loop smoke test. All tests are
 //! deterministic on the current-thread test executor: no sleeps, no
 //! timers; progress is driven by grant handshakes and bounded condition
 //! settles.
 //!
-//! Evidence classification: the acceptance evidence drives whole fixed
-//! passes through `TestDriver::step_pass` (the normative §3.5
-//! pipeline). Tests prefixed `whitebox_` drive single stages through
+//! Evidence classification — the twelve series split by instrument, and
+//! each series belongs to exactly one:
+//!
+//! 1. **Pass-unit driving (9 series)**: the pack §H-5 set (S1-S8) plus
+//!    "bounded-lane revocation". One driver step executes one whole pass
+//!    in the normative §3.5 stage order through
+//!    `TestDriver::step_pass`. This is the steady-state evidence
+//!    surface.
+//! 2. **Park-boundary probing (3 series)**: "parked control-quit wake",
+//!    "parked subscription-quiescence wake" and "parked data-lane wake"
+//!    drive the production loop (`Kernel::run`) by hand through
+//!    `ParkProbe`. A pass-unit driver cannot produce this evidence at
+//!    all: its step *is* a pass and it scripts pass initiation, which is
+//!    exactly the mechanism under test. This surface is scoped to the
+//!    park/wake arming rows and carries no other claim.
+//!
+//! Outside both: tests prefixed `whitebox_` drive single stages through
 //! `TestDriver::step`, bypassing the pinned stage order — they probe
 //! stage mechanisms in mid-pass windows unreachable by pass driving and
-//! are outside the C-5 / INV-RC13 evidence surface. The park/wake
-//! witnesses drive the production loop (`Kernel::run`) by hand through
-//! `ParkProbe`, which is the only surface on which the park boundary —
-//! and therefore the wake-source set — is observable at all.
+//! are outside the C-5 / INV-RC13 evidence surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1316,7 +1325,7 @@ async fn s8_run_future_drop_reclaims_owned_work() {
     );
 }
 
-// --- park/wake witnesses ----------------------------------------------------
+// --- park/wake witnesses (the `ParkProbe` surface) --------------------------
 
 /// A permit-storing release signal for producer bodies: `open` banks the
 /// permit whether or not the body has reached its wait, so no scheduling
@@ -1383,13 +1392,21 @@ impl Wake for WakeCount {
     }
 }
 
-/// Hand-driving probe for the production loop's park boundary. It owns
-/// the *only* waker `Kernel::run` is ever polled with and it is the only
-/// thing that ever polls that future, so the counter reads exactly the
-/// wake sources the kernel armed and "still parked" becomes observable
-/// instead of inferred. A kernel that arms wakers on the data lane and
-/// the join set only leaves the counter at its parked value when a quit
-/// arrives on the control lane.
+/// Hand-driving probe for the production loop's park boundary — the
+/// second named evidence surface, scoped to the park/wake arming rows
+/// and carrying no other claim. It owns the *only* waker `Kernel::run`
+/// is ever polled with and it is the only thing that ever polls that
+/// future, so the counter reads exactly the wake sources the kernel
+/// armed and "still parked" becomes observable instead of inferred. A
+/// kernel that arms wakers on the data lane and the join set only
+/// leaves the counter at its parked value when a quit arrives on the
+/// control lane.
+///
+/// Why the pass-unit surface cannot carry these three series: one step
+/// of that driver *is* one pass, and it scripts which source initiates
+/// the pass — the very mechanism the park/wake rows constrain. A
+/// scripted driver never parks, so a parked kernel is unreachable from
+/// it and the wake-source set is unobservable through it.
 struct ParkProbe {
     count: Arc<WakeCount>,
     waker: Waker,
@@ -1688,6 +1705,107 @@ async fn parked_subscription_quiescence_wake() {
         kernel.state().applied,
         vec![1],
         "one message drove the whole witness"
+    );
+}
+
+/// "parked data-lane wake" — the data-lane arm of the park/wake
+/// contract, the third and last wake source, on the production loop
+/// under the same hand-driven park witness. The other two series reach a
+/// data-lane arrival only in passing; this one is the behavioral row for
+/// it.
+///
+/// The producer is a latched sender that **parks forever after its
+/// send**, so its task never exits: no producer-exit notification can
+/// stand in for the wake being measured. After the boot pass the loop is
+/// parked under both proofs (re-poll runs no pass; executor turns
+/// signal nothing). Releasing the latch makes the data-lane acceptance
+/// the *only* event — asserted literally, as the one entry the delivery
+/// ledger gains — and the waker takes **exactly one** signal from it,
+/// before any poll. The next poll then runs the woken pass and the
+/// message reaches the reducer: `update:5` on the ledger and the value
+/// in the application's own applied list.
+#[tokio::test(flavor = "current_thread")]
+async fn parked_data_lane_wake() {
+    let latch = Latch::default();
+    let app = ScriptApp {
+        on_msg: Box::new(inert),
+        sources: no_subs(),
+    };
+    let mut kernel = Kernel::new(
+        app,
+        (want(&[]), latched_sender("feed", latch.clone(), vec![5])),
+        KernelConfig::default(),
+        GateMode::Immediate,
+        HeadlessHost::default(),
+    );
+    let delivery = kernel.delivery();
+    let gauges = kernel.gauges();
+    let probe = ParkProbe::new();
+    let mut run = Box::pin(kernel.run());
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the production loop suspends after the boot pass"
+    );
+    assert!(delivery.contains("render"), "the boot pass rendered");
+    let parked_at = probe
+        .assert_parked_across_turns(run.as_mut(), &delivery, "after the boot pass")
+        .await;
+    assert_eq!(parked_at, 0, "nothing has woken the loop yet");
+    assert_eq!(gauges.producers(), 1, "the feed producer is the only run");
+    let parked_ledger = delivery.snapshot();
+
+    // The one event: a message reaches the data lane. `accept:feed:5` is
+    // that send's enqueue acceptance — the handshake this witness
+    // synchronizes on, and the only entry the ledger gains.
+    latch.open();
+    settle_until(
+        || delivery.contains("accept:feed:5"),
+        "the message is accepted by the data lane",
+    )
+    .await;
+    let arrival = delivery.snapshot();
+    let since_park: Vec<&str> = arrival[parked_ledger.len()..]
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        since_park,
+        vec!["accept:feed:5"],
+        "the data-lane acceptance is the only thing that happened: {arrival:?}"
+    );
+    assert_eq!(
+        gauges.producers(),
+        1,
+        "the sender is still live: no task exit stands in for this wake"
+    );
+    assert_eq!(
+        probe.wakes(),
+        parked_at + 1,
+        "the data-lane arrival alone woke the parked loop, with exactly \
+         one signal"
+    );
+
+    assert!(
+        probe.poll(run.as_mut()).is_pending(),
+        "the woken pass runs the input batch"
+    );
+    assert!(
+        delivery.contains("update:5"),
+        "the woken pass delivered the message to the reducer"
+    );
+    assert_eq!(
+        gauges.producers(),
+        1,
+        "the sender outlives its own delivery"
+    );
+    probe.assert_parked(run.as_mut(), &delivery, "after the woken pass");
+
+    drop(run);
+    assert_eq!(
+        kernel.state().applied,
+        vec![5],
+        "the reducer applied the woken pass's message"
     );
 }
 
