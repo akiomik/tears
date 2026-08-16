@@ -1,11 +1,12 @@
 # RFC 0014: Reducer-First Core
 
-- Status: Accepted (2026-08-13) — accepted at the **spike tier** §13.1
+- Status: Accepted (2026-08-16) — accepted at the **spike tier** §13.1
   defines: the four kernel claims (the grant handshake, the
   delivery-accounting soundness with its concurrency check, revocation
   filtering, driver topology) are demonstrated on a prototype kernel,
-  and the eleven-series conformance suite is green and repeat-stable
-  under pass-unit driving. The remaining behavioral checks of §12 —
+  and the twelve-series conformance suite is green and repeat-stable —
+  nine series pass-unit driven, three on the park-boundary probe §7.2
+  names. The remaining behavioral checks of §12 —
   cleanup hooks, the full combinator surface, the observability
   vocabulary, the production arbitration default — are
   **implementation acceptance criteria**: they gate implementation
@@ -893,17 +894,40 @@ contract; its API body lands in that amendment. Contract:
   in the API. The guaranteed observation sequence begins at the send
   gate: pre-gate send-intent records are a separate, non-guaranteed
   ledger, and neither ledger is a public transcript surface.
-- **Pass-unit driving is the evidence surface.** Acceptance and
-  conformance evidence is produced by pass-unit driving only: one
+- **Pass-unit driving is the evidence surface for everything the
+  driver can reach.** Acceptance and conformance evidence for a
+  steady-state property is produced by pass-unit driving only: one
   driver step executes one whole pass through the production stage
   order (§3.5). Stage-granular probes — running a single stage in
   isolation — may exist as component-level white-box instruments, but
   they bypass the fixed stage order and sit outside the same-topology
   evidence surface: nothing observed through them is evidence for
-  INV-RC13 or for the §13.1 suite.
+  INV-RC13 or for §13.1's pass-unit series.
+- **The park boundary is what the driver cannot reach, and
+  `ParkProbe` is its named surface.** A driver step *begins* a pass,
+  and a parked kernel is precisely one with no pass running and none
+  beginning until a source arrives; the driver's first differential
+  above — scripted pass initiation — replaces the very mechanism
+  INV-RC16 constrains, so no pass-unit step can witness a park or its
+  arming. `ParkProbe` polls the production driving future directly,
+  with a waker of its own, and observes whether the loop parks, which
+  sources it armed, and which arrival wakes it. It is not a third
+  runtime seam and not a second driver: it scripts nothing inside the
+  kernel, adds no branch, and drives the same production loop — what
+  it supplies is the waker and the poll, and nothing else. **Its
+  evidence scope is INV-RC16's arming and wake claims, and nothing
+  else**: a `ParkProbe` observation is never evidence for INV-RC13's
+  same-topology claim, for INV-RC14's scripted determinism, for the
+  pass stage order of §3.5, or for production pass initiation. §13.1
+  names the three series it carries; every other series is pass-unit
+  driven.
 - **The citation rule.** A driver-established order is never evidence
-  of a production order — the RFC 0008 §4.2 rule, generalized;
-  production arbitration stays RFC 0011 §2.3's negative space.
+  of a production order — the RFC 0008 §4.2 rule, generalized — and
+  the scope above is part of the same rule: a `ParkProbe`-established
+  fact is evidence for the park contract alone, never for a pass
+  order, a topology claim, or a production arbitration. Which source
+  production picks among several ready at once stays unobserved here
+  (§3.5 pins the policy, not the occasion).
 - **Scope of the determinism claim.** The handshake's acceptance
   confirmation is the post-send acknowledgement, which is the form an
   executor-independent or bounded-lane extension requires; the
@@ -1101,7 +1125,7 @@ facade).
 
 Enforcement classes per the pre-review checklist. The behavioral
 checks divide into two tiers (§13.1): the **spike tier** — the four
-kernel claims and the eleven-series conformance suite, which gated this
+kernel claims and the twelve-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
 below, which gates implementation mainlining, not acceptance. Both
@@ -1254,10 +1278,13 @@ tiers remain the regression suite afterward.
   park site — review that the parked future registers the current
   waker with each member of the set, since no finite test proves a
   registration present for the source it did not exercise — with one
-  behavioral row per source: §13.1's `idle wake` (data-lane readiness
-  and producer exit), `parked control-quit wake`, and
-  `parked subscription-quiescence wake`, each scripted from a genuinely
-  parked kernel with no other work pending.
+  behavioral row per source, all three on the `ParkProbe` surface
+  §7.2 names and each scripted from a genuinely parked kernel with no
+  other work pending: `parked data-lane wake`,
+  `parked control-quit wake`, and
+  `parked subscription-quiescence wake` (§13.1). §13.1's pass-unit
+  `idle wake` series exercises the woken pass's exit reflection rather
+  than the park boundary, and is not a row of this invariant.
 
 Surface–invariant coverage: `Reducer`/`Program`/adapter (INV-RC1;
 purity via RFC 0012 INV-SE6's transfer, §2.1), combinators and
@@ -1285,22 +1312,28 @@ send-acknowledgement grant handshake (§7.2); the delivery-accounting
 soundness behind retraction (§3.1), including a concurrency check of
 the multi-writer accounting (loom or equivalent); revocation filtering
 end to end; the driver's same-topology stage sharing; and the
-conformance suite (the eleven-series acceptance set: cancel vs
-buffered output; stop/restart safe window; simultaneous readiness
-under both script faces; both quit semantics; both panic classes;
-shutdown-scoped send failure — full topology: a blocked sender
-reclaimed by cancellation with the two-stage postconditions; component
-level: closure observation → error → autonomous stop (§6.1); idle
-wake; termination under owned work through every cause;
-`parked control-quit wake`; `parked subscription-quiescence wake`;
-`bounded-lane revocation`) green and repeat-stable, **driven
-pass-unit** — each driver step executing §3.5's full stage order
-(§7.2; stage-granular probes are outside the evidence surface). The
-last three series are INV-RC15's and INV-RC16's evidence: the two
-parked-wake series drive a genuinely parked kernel to the arrival of a
-control-lane quit and of a subscription-quiescence notification, and
-the revocation series runs INV-RC5's bounded-lane half over the single
-data lane. *Implementation-acceptance tier* — open, and what it gates
+conformance suite — **twelve series in two groups**, all green and
+repeat-stable.
+
+**Pass-unit driven** (nine), each driver step executing §3.5's full
+stage order (§7.2): cancel vs buffered output; stop/restart safe
+window; simultaneous readiness under both script faces; both quit
+semantics; both panic classes; shutdown-scoped send failure — full
+topology: a blocked sender reclaimed by cancellation with the
+two-stage postconditions; component level: closure observation →
+error → autonomous stop (§6.1); idle wake; termination under owned
+work through every cause; `bounded-lane revocation`, which runs
+INV-RC5's bounded-lane half over the single data lane.
+
+**`ParkProbe` driven** (three), each scripted from a genuinely parked
+kernel with no other work pending and each evidence for INV-RC16
+alone, at the scope §7.2 states: `parked data-lane wake`;
+`parked control-quit wake`;
+`parked subscription-quiescence wake` — one series per wake source
+that invariant arms. The park boundary is unreachable by pass-unit
+driving, which is why these three carry their own instrument rather
+than a weaker form of the same one; stage-granular probes are outside
+both groups. *Implementation-acceptance tier* — open, and what it gates
 is mainlining, not acceptance: cleanup hooks (INV-RC8), the full
 combinator surface (INV-RC2–INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration default (§3.5's

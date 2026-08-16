@@ -143,9 +143,13 @@ lanes, with the bounded-lane extension and its two protocol conditions
 open at RFC 0014 §13.3; and **pass-unit driving as the
 evidence surface**, one driver step executing one whole production
 pass, with stage-granular probes admissible as component-level
-instruments but outside that surface. §4.2's citation rule generalizes
-to it: an order the driver establishes is never evidence of a
-production order. §1.2's negative
+instruments but outside that surface. The one boundary no pass-unit
+step reaches is the park boundary, where RFC 0014 §7.2 names a
+separate instrument, `ParkProbe`, whose observations are evidence for
+that RFC's park-and-wake invariant alone — never for the driver's
+topology or determinism claims, and not for anything this store's
+layers claim. §4.2's citation rule generalizes to both: an order the
+driver establishes is never evidence of a production order. §1.2's negative
 space is about the store and is unchanged — what each layer claims is
 RFC 0014 §7.3's.
 
