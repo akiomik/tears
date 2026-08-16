@@ -323,21 +323,24 @@ pub struct Slot<S> { /* Option<S> + dismissal journal */ }
 
 pub trait ReducerExt: Reducer + Sized {
     fn scope<Seg, C>(self, child: C, seg: Seg,
-        state: fn(&mut Self::State) -> &mut C::State,
+        state: fn(&Self::State) -> &C::State,
+        state_mut: fn(&mut Self::State) -> &mut C::State,
         extract: fn(Self::Message) -> Result<C::Message, Self::Message>,
         embed: fn(C::Message) -> Self::Message,
     ) -> Scoped<Self, C, Seg>
     where C: Reducer, Seg: ScopeValue;
 
     fn for_each<C, K>(self, child: C,
-        rows: fn(&mut Self::State) -> &mut Keyed<K, C::State>,
+        rows: fn(&Self::State) -> &Keyed<K, C::State>,
+        rows_mut: fn(&mut Self::State) -> &mut Keyed<K, C::State>,
         extract: fn(Self::Message) -> Result<(K, C::Message), Self::Message>,
         embed: fn(K, C::Message) -> Self::Message,
     ) -> ForEach<Self, C, K>
     where C: Reducer, K: ScopeValue;
 
     fn presented<C, Seg>(self, child: C, seg: Seg,
-        slot: fn(&mut Self::State) -> &mut Slot<C::State>,
+        slot: fn(&Self::State) -> &Slot<C::State>,
+        slot_mut: fn(&mut Self::State) -> &mut Slot<C::State>,
         extract: fn(Self::Message) -> Result<C::Message, Self::Message>,
         embed: fn(C::Message) -> Self::Message,
     ) -> Presented<Self, C, Seg>
@@ -359,8 +362,29 @@ associated types, written directly into the signatures — no free type
 parameter whose equality with `Self::State`/`Self::Message` is left
 implicit — and each returned combinator implements
 `Reducer<State = Self::State, Message = Self::Message>`, so stacks
-nest. `into_program` is the closing surface: a combinator stack plus a
-root `init` and a root `view` is a `Program` the runtime (§2.3) or the
+nest.
+
+**Each projection is supplied as a read/write pair**, because the two
+`Reducer` methods borrow the parent differently: `reduce` takes
+`&mut Self::State` and needs the mutable projection, while
+`subscriptions` takes `&Self::State` and needs the shared one. A
+combinator holding only the mutable accessor could not aggregate its
+child's declarations from the borrow `subscriptions` gives it — it
+would have to fabricate an aliasing mutable borrow, or drop the child's
+subscriptions — and the aggregation INV-RC2 requires would be
+unimplementable as written. The pair closes that: `subscriptions`
+projects with `state`/`rows`/`slot` and walks a collection shared,
+`reduce` projects with `state_mut`/`rows_mut`/`slot_mut`. Both are
+projections of state the caller already holds, so the purity RFC 0012
+INV-SE6 transfers to `Reducer::subscriptions` (§2.1) is untouched:
+aggregating reads the declared set out of state and reaches nothing
+outside it. Two function items per boundary is the whole cost; no lens
+trait is introduced, and none is needed to state this — a projection
+here is a pair of ordinary `fn` items, not an abstraction the core has
+to own.
+
+`into_program` is the closing surface: a combinator stack plus a root
+`init` and a root `view` is a `Program` the runtime (§2.3) or the
 facade-equivalent test layers (§7) can drive. A same-domain sequential
 combinator (`combine`) is deliberately absent — §11 records why.
 
@@ -372,7 +396,9 @@ Contract:
   prefixes, cleanup registrations — with its segment (`seg`, or the
   collection key), exactly as `Command::scoped` does (RFC 0005 §4.3);
   child subscription declarations are aggregated with the same
-  qualification. User code writes no `.scoped(...)` and cannot omit or
+  qualification, read through the boundary's shared projection so the
+  aggregation needs nothing beyond the `&Self::State` its caller holds.
+  User code writes no `.scoped(...)` and cannot omit or
   double-apply one. RFC 0005's scope laws (INV-14–INV-21) hold through
   the combinators — the laws' bodies are unchanged; the two clauses
   that must be amended to *cover* the new carriers (teardown prefixes
@@ -758,9 +784,18 @@ filtered, not prevented). The composition layer observes none of it
 
 ```rust
 impl<M: Send + 'static> Command<M> {
-    pub fn on_teardown(effect: CleanupEffect) -> Command<M>;
+    pub fn on_teardown(
+        finalizer: impl Future<Output = ()> + Send + 'static,
+    ) -> Command<M>;
 }
 ```
+
+The finalizer is an ordinary future under `Command`'s existing effect
+bounds — `Send + 'static`, exactly what `Command::future` takes — with
+`Output = ()` rather than a message, because a cleanup run produces
+none. No new public type is introduced for it: the output clause below
+is what a cleanup effect differs by, and the signature already carries
+that difference, so there is nothing left for a wrapper type to say.
 
 `on_teardown` registers a finalizer against the scope at the call
 boundary (qualified by `scoped`/combinators like every other carrier).
@@ -772,9 +807,10 @@ Contract (INV-RC8):
   in; it runs concurrently with the torn-down runs' quiescence).
 - A cleanup run produces **no runtime-visible output of any kind**:
   no message on the data lane, no producer-originated quit on the
-  control lane, and no runtime directive. It is given no sender for
-  either lane, so it cannot orphan output, cannot terminate the
-  application, and cannot mark redraw or dirt. Its external side
+  control lane, and no runtime directive. Its `Output = ()` closes the
+  message-return path in the signature itself, and it is given no
+  sender for either lane, so it cannot orphan output, cannot terminate
+  the application, and cannot mark redraw or dirt. Its external side
   effects are its whole purpose and are not restricted — what is closed
   is the path back into the runtime, not the finalizer's own work.
 - Re-applying a teardown does not re-run consumed hooks (idempotence,
