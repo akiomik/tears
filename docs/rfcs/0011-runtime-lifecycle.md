@@ -724,17 +724,29 @@ RFC 0014 §12's.
   a teardown-issued stop as a steady-state stop, so its quiescence marks
   dirt like any other (RFC 0014 §5.2). Termination-driven quiescence
   stays excluded.
-- **§7's premises are re-derived on the successor's seam vocabulary**
-  (informative there as here). The unbiased top-level select becomes
-  pass-initiation arbitration among ready wake sources, whose production
-  policy is unbiased selection; frame-branch pacing and gating go
-  entirely, replaced by the frame step's fixed position in every pass
-  (RFC 0014 §6.3); the always-armed quit branch becomes the mandatory
-  control drain preceding every pass's input batch, which is the
-  stronger form; synchronous producer creation on the driving task is
-  unchanged; and parking keeps its wake-capability requirement, with a
-  producer exit named as a wake source the woken pass's exit-reflection
-  stage consumes (RFC 0014 §3.5).
+- **§7's premises are re-derived on the successor's seam vocabulary.**
+  The unbiased top-level select becomes pass-initiation arbitration
+  among ready wake sources; its production policy stays unbiased
+  selection and is normative there rather than a premise, with per
+  occasion choice and fairness still unclaimed (RFC 0014 §3.5).
+  Frame-branch pacing and gating go entirely, replaced by the frame
+  step's fixed position in every pass (RFC 0014 §6.3), and synchronous
+  producer creation on the driving task is unchanged — both stay
+  informative, here and there.
+- **The always-armed quit branch splits by dimension**, as RFC 0006
+  §5.2 records for the requirement that names it. In the **delivery**
+  dimension it is strengthened: the mandatory control drain precedes
+  every pass's input batch, so a quit that has arrived when a pass
+  begins is applied with zero inputs processed (RFC 0014 §3.5,
+  INV-RC9). In the **arming** dimension it is **superseded** — there is
+  no select branch left to arm — and its successor is **RFC 0014
+  INV-RC16**, which is also where §7's parking premise lands: a parked
+  kernel registers a waker on every source that can create a pass's
+  work — data-lane readiness, control-lane arrival, and producer-exit
+  or subscription-quiescence notification — and the arrival of any one
+  of them begins a pass. What §7 records as the condition parking is
+  sound under becomes contract there, over the whole source set rather
+  than any one member of it.
 
 ## 9. Open questions
 
