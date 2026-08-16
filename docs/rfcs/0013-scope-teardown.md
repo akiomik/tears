@@ -493,13 +493,15 @@ update.
 
 ### 7.1 Invariants
 
-All invariants in this section are behavioral: unit and property tests
-on the selection predicate, plus contract tests through the production
-dispatch path on the RFC 0014 kernel — the store layer for the command
-half, the stage-3 driver (pass-unit, RFC 0014 §7.2) for execution.
-Async tests use deterministic synchronization, never sleeps. Where an
-invariant's carrier is a kernel invariant, the citation names it; the
-statement here is the teardown-side contract in full.
+Every invariant in this section is behavioral except where its own
+statement declares otherwise (INV-ST7's absence half): unit and
+property tests on the selection predicate, plus contract tests through
+the production dispatch path on the RFC 0014 kernel — the store layer
+for the command half, the stage-3 driver (pass-unit, RFC 0014 §7.2)
+for execution. Async tests use deterministic synchronization, never
+sleeps. Where an invariant's carrier is a kernel invariant, the
+citation names it; the statement here is the teardown-side contract in
+full.
 
 - **INV-ST1: prefix selection.** A teardown selects exactly the runs
   whose scope path begins with its prefix — segment-by-segment
@@ -550,7 +552,18 @@ statement here is the teardown-side contract in full.
   spawn under the torn-down prefix observes a fresh slot; late task
   exits and late sends from torn-down runs are inert (§3.6); a later
   occupant observes no teardown residue beyond the ordinary lifecycle
-  rules.
+  rules. Its two halves take different classes, for the reason
+  RFC 0006 INV-L9 splits the same way. The **observable** half —
+  fresh-slot spawn, inert late exit, inert late send — is
+  **behavioral**: the fresh-start rows below, scripted per case. The
+  **absence** half — no scope-generation state exists and none is
+  introduced, so no residue can be observed at all — is
+  **structural**, an inventory review of the runtime's per-scope
+  state at the teardown application and spawn sites, because no finite
+  set of fresh-start scripts proves it: an implementation that taints
+  only the scopes a test never reuses passes every such script. The
+  §7.3 *generation-tracking* adversary is excluded by that review,
+  with the fresh-start rows as its regression neighbours.
 - **INV-ST8: the unreached.** Teardown affects nothing already
   delivered to `update`, no state mutation already applied, and no
   external side effect already performed; it cannot un-consume input a
@@ -572,7 +585,11 @@ Phase B constant-hash scope tests — applied to selection); selection
 uniform across the three run kinds.
 
 Kernel tests, through the production dispatch path (pass-unit driver
-steps, RFC 0014 §7.2), on both lane modes where delivery is asserted:
+steps, RFC 0014 §7.2), on both lane modes where delivery is asserted —
+the bounded-mode witness being RFC 0014 §13.1's `bounded-lane
+revocation` series, which scripts a bounded lane under the two
+protocol conditions RFC 0014 §13.3 names and carries no bounded-lane
+determinism claim beyond the enqueue order the grant handshake fixes:
 
 - teardown of a prefix with one running and one finished-but-queued
   run revokes both and delivers neither — asserted as no `update`
@@ -687,7 +704,9 @@ proof.
   excluded by INV-ST4's subscription row, whose two assertions run
   before any re-evaluation.
 - *Generation-tracking implementation* — suppresses or taints later
-  same-scope spawns; excluded by INV-ST7's fresh-start tests.
+  same-scope spawns; excluded by INV-ST7's structural half — the
+  per-scope state inventory — with its fresh-start rows as the
+  behavioral neighbours.
 - *No-op implementation* — trivially idempotent; excluded because
   INV-ST5's idempotence is asserted only after INV-ST4's effects are.
 - *Joint-satisfiability walk* — one implementation satisfying all
