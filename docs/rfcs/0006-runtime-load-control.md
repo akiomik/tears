@@ -1520,8 +1520,8 @@ state them (INV-L1, INV-L2, INV-L3 below). Section 6's resolved
 questions are likewise records of decisions already taken, and where one
 restates the clauses its decision produced — question 3's buffer-total
 formula for R1 and INV-L1, and the per-command isolation it pins as
-INV-L9 — it follows those clauses' correspondence below and carries none
-of its own.
+INV-L9, among them — it follows those clauses' correspondence below and
+carries none of its own.
 
 The successor's own enforcement classes are RFC 0014 §12's — this
 correspondence records what each clause becomes and adds no check of its
