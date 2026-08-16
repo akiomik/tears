@@ -1059,8 +1059,12 @@ subscription-quiescence notification. The frame step is not among
 them, being consumed inside the pass that marks its work, and the
 exit-observation source is contract there (INV-RC16) rather than the
 driver-side extension it was before that arming was stated. Load gauges
-follow RFC 0006 §4.4 with §9 row 9's vocabulary. None of these shapes
-is pinned; the invariants of §12 are.
+follow RFC 0006 §4.4 with §9 row 9's vocabulary. Two of the shapes
+named above are pinned elsewhere and are not free here: the
+pass-initiation policy is §3.5's normative unbiased selection, and the
+control lane's arming is INV-RC16's, alongside the exit-observation
+source noted above. None of the remaining shapes is pinned; the
+invariants of §12 are.
 
 ## 11. Adversarial models considered
 
@@ -1164,7 +1168,8 @@ tiers remain the regression suite afterward.
   state ownership, lane topology, input delivery, quit delivery,
   park and wake, effect-task ownership and bookkeeping, cancellation
   state, subscription-task ownership, task body policy, frame and
-  render, observability, time, identity — and every phase step of §6, an `Application`-adapted
+  render, observability, time, identity — and every phase step of §6,
+  an `Application`-adapted
   program and a composed program execute the same code; the facade
   contributes mapping calls only. Structural (review of the adapter
   and kernel entry: no `Application`-typed branch below the adapter)

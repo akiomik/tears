@@ -432,7 +432,8 @@ command run neither joins the barrier nor triggers it, and neither
 does a cleanup run — which a teardown never selects at all (§3.1),
 and which is therefore outside the barrier for two reasons rather than
 one. Neither kind polls an input source, so there is no stolen-input
-hazard to close through them (RFC 0014 §5.1). The availability coupling the uniform barrier carries — one
+hazard to close through them (RFC 0014 §5.1). The availability
+coupling the uniform barrier carries — one
 slow-quiescing teardown-stopped source defers unrelated children's
 admissions runtime-wide — is accepted as documented negative space
 (R5; RFC 0014 §5.1), and narrowing the barrier by declared conflict
@@ -443,9 +444,10 @@ domains stays rejected there.
 `Command::on_teardown(effect)` registers a finalizer against the scope
 at the call boundary, qualified by `scoped` and the combinators like
 every other identity-bearing carrier (§3.2). The surface and the
-finalizer contract — at most once, no messages, consumed-not-rerun,
-termination discards unfired registrations and cancels running
-cleanup runs — are RFC 0014 §4.4's (INV-RC8). What this RFC pins is
+finalizer contract — at most once, no runtime-visible output of any
+kind, consumed-not-rerun, termination discards unfired registrations
+and cancels running cleanup runs — are RFC 0014 §4.4's
+(INV-RC8). What this RFC pins is
 the teardown-side participation:
 
 - a teardown **consumes** the prefix's unfired registrations at its
