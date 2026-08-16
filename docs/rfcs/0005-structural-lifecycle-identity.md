@@ -593,6 +593,13 @@ ID present at the call boundary:
 - the optional keyed spawn ID and its existing `CancelPolicy`; and
 - every explicit ID in the command's cancel list.
 
+The rule is stated over the lifecycle IDs present at that boundary, not over
+a fixed pair of them: RFC 0013's teardown prefixes and RFC 0014 §4.4's cleanup
+registrations are qualified the same way where a command carries them — the
+coverage extension RFC 0014 §9 row 6 records, landed with that RFC's
+acceptance; the rule above states the contract in force until mainlining
+closes RFC 0014 §13.1's open tier.
+
 It does not change the effect stream, message mapping, redraw directive, timeout
 or retry wrappers, cancellation policy, or application output.
 
@@ -653,6 +660,11 @@ child.update(message)
 
 ### 4.4 `Command::batch` boundary
 
+Scoping composes with the batch boundary rather than crossing it: a scope
+applied at a boundary qualifies every lifecycle ID that boundary carries, and
+no ID escapes qualification by being batched. Which IDs a batch carries is
+RFC 0003's decision, not this RFC's.
+
 This RFC preserves RFC 0003 INV-11:
 
 - child explicit cancel lists are folded into the batch;
@@ -673,34 +685,42 @@ key. Applying `scoped` to the resulting batch scopes its folded explicit
 cancels and any top-level key already present at that call boundary.
 
 Preserving independently keyed child effects requires the runtime lowering to
-spawn multiple keyed tasks from one returned command. That is RFC 0003's
-deferred per-effect cancellation work and is not silently added here.
+spawn multiple keyed tasks from one returned command — RFC 0003's deferred
+per-effect cancellation work, which this RFC does not silently add. RFC 0014
+§3.4 decides it: each child's spawn key lowers to its own keyed entry, and
+`scoped` distributes over the children so that each child's spawn key,
+explicit cancel IDs, teardown prefixes, and cleanup registrations are
+qualified — the boundary carries more IDs, and the opening rule above reaches
+every one of them. That supersession is RFC 0014 §9 row 3, landed with that
+RFC's acceptance; the boundary above states the contract in force until
+mainlining closes RFC 0014 §13.1's open tier.
 
 ### 4.5 Scoping is not teardown
 
 `scoped(PaneId(7))` qualifies IDs; it does not create an ownership handle or a
-prefix-cancellation command.
+prefix-cancellation command. That operation is a contract of its own —
+RFC 0013 — and it decides the six questions this section deferred:
 
-A future operation such as `Command::cancel_scope(PaneId(7))` would need to
-decide at least:
+- selection matches a complete prefix path, never one segment at an arbitrary
+  position (RFC 0013 §3.1);
+- whether lookup scans or indexes stays mechanism, deliberately unpinned
+  (RFC 0013 §3.7);
+- a teardown applies in the cancel phase, with the same command's explicit
+  cancels and before every spawn of that command (RFC 0013 §3.3);
+- running and finished-but-buffered output is revoked — nothing under the
+  prefix is delivered after the application point (RFC 0013 §3.4);
+- subscriptions participate by immediate stop at that point, paired with
+  declaration removal by the composition layer (RFC 0013 §4); and
+- a later child reusing the same scope observes nothing stale (RFC 0013 §3.6).
 
-- whether selection matches one segment or a complete prefix path;
-- whether lookup scans current entries or maintains a secondary index;
-- ordering relative to same-update spawns and explicit ID cancels;
-- treatment of running and finished-but-buffered command output;
-- whether subscriptions participate and how declarative re-evaluation interacts
-  with teardown; and
-- whether a later child reusing the same scope can observe stale teardown state.
+The structural path defined here is what that operation anchors on: a teardown
+prefix is qualified by `scoped` exactly as an explicit cancel ID is (§4.3,
+INV-18).
 
-Those decisions belong to a separate RFC. The structural path defined here is
-forward-compatible with such work but does not pre-accept its API or behavior.
-
-One concrete client of that future RFC is already known: TCA-parity collection
-composition (a `forEach`-style reducer) must automatically cancel a removed
-child instance's in-flight effects when the child leaves the collection. Full
-effect parity in the reducer composition RFC therefore depends on prefix
-teardown, and scheduling should treat teardown as a prerequisite of that work
-rather than an optional extension.
+The concrete client is served there as well: TCA-parity collection composition
+— `for_each` in RFC 0014 §2.5 — tears a removed child instance's in-flight
+effects down automatically, through a removal journal that issues the teardown,
+rather than through anything this RFC's manual scoping provides.
 
 ### 4.6 Residual composition risk
 
@@ -824,12 +844,24 @@ as `Partially Implemented (Phase A)` until both public phases ship.
 - **INV-17: map propagation.** `Subscription::map` and `Command::map` preserve
   full identity; applying `map` immediately before or after the same scope is
   behaviorally equivalent.
-- **INV-18: command metadata coverage.** `Command::scoped` qualifies both the
-  keyed spawn ID and every explicit cancel ID present at the call boundary.
+- **INV-18: command metadata coverage.** `Command::scoped` qualifies every
+  carrier of lifecycle identity present at the call boundary. On the command
+  surface this RFC is stated over, those carriers are the keyed spawn ID and
+  every explicit cancel ID; the teardown prefixes RFC 0013 adds and the cleanup
+  registrations RFC 0014 §4.4 adds are qualified by the same rule, the
+  extension RFC 0014 §9 row 6 records — landed with that RFC's acceptance,
+  with the carriers arriving when mainlining closes RFC 0014 §13.1's open
+  tier.
 - **INV-19: command cancellation isolation.** Cancelling or replacing a full ID
   under one scope cannot affect an equal local ID under a different scope.
 - **INV-20: batch compatibility.** Scoping does not bypass RFC 0003's batch
-  boundary: child keys are still ignored, while scoped explicit cancels fold.
+  boundary: a scope qualifies every lifecycle ID that boundary carries, and
+  none escapes qualification by being batched. Under the boundary RFC 0003
+  INV-11 states, that means child keys are still ignored while scoped explicit
+  cancels fold; under RFC 0014 §3.4's multi-keyed lowering the boundary carries
+  each child's own IDs and `scoped` distributes over them (RFC 0014 §9 row 3,
+  landed with that RFC's acceptance; the boundary it replaces holds until
+  mainlining closes RFC 0014 §13.1's open tier).
 - **INV-21: no implicit teardown.** Dropping a value returned by `scoped` or
   omitting one scoped command does not issue prefix cancellation beyond the
   lifecycle's existing ID-specific rules.
@@ -1189,17 +1221,18 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-The follow-up order was, with items 1–2 since completed and the rest
-remaining design work:
+The follow-up order was, with items 1–2 shipped and items 3–5 designed and
+awaiting implementation:
 
 1. implement Phase A for 0.10.0 (done);
 2. evaluate and, when scheduled, implement Phase B additively (done);
-3. design per-effect command cancellation/batch composition;
+3. design per-effect command cancellation/batch composition (RFC 0014 §3.4);
 4. use scoped identity and deterministic effect testing as inputs to the
-   reducer composition RFC; and
+   reducer composition RFC (RFC 0014); and
 5. design prefix teardown before or together with collection
-   (`forEach`-style) reducer composition; automatic cancellation of a removed
-   child's in-flight effects is its known concrete use case (section 4.5).
+   (`forEach`-style) reducer composition (RFC 0013, with RFC 0014 §2.5's
+   `for_each`); automatic cancellation of a removed child's in-flight effects
+   is its known concrete use case (section 4.5).
 
 ## 11. References
 
@@ -1211,6 +1244,10 @@ remaining design work:
 - `benches/subscription.rs`
 - `docs/rfcs/0001-http-module-redesign.md`
 - `docs/rfcs/0003-command-cancellation.md`
+- `docs/rfcs/0013-scope-teardown.md` (the teardown prefixes INV-18 covers)
+- `docs/rfcs/0014-reducer-first-core.md` (§3.4's multi-keyed lowering, §4.4's
+  cleanup registrations, and the supersession register §9 whose rows 3 and 6
+  name this RFC)
 - `docs/api-guidelines.md`
 - TCA reducer `Scope`, identified collection composition, and effect
   cancellation IDs

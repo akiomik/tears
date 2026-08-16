@@ -181,6 +181,57 @@ tests. It is lib-only: it needs the crate-private `compose_hook`, so the
 integration copy under `tests/common/panic_hook.rs` deliberately has no
 equivalent.
 
+**A recording hook filters by thread name. That is the primary defence, and it
+is the recording test's own obligation.** The guard serializes hook swaps, not
+the rest of the binary: any test in the process may panic while a recording hook
+is installed, and there is no way to enumerate — let alone guard — every test
+that panics on purpose, since `#[should_panic]` tests panic by construction. So
+a test that counts hook activity counts only panics raised on its own threads,
+the way `HookProbe` does, and the hook-restoration test in
+`src/test_support/panic_hook.rs` applies the same filter for the same reason.
+A recording hook without that filter is the defect: it asserts a count over the
+whole process while claiming to measure one test.
+
+**A loom model takes the guard because it is a hook swapper**, which is the
+first rule of this section rather than a category of its own. Loom drives each
+model thread as a `generator` coroutine, and generator manages the
+process-global hook around its own unwinds: tearing a coroutine down, it calls
+`take_hook`, installs a no-op so the internal unwind prints nothing, and
+reinstalls the previous hook afterwards (`generator`'s `gen_impl.rs`). A test
+running concurrently with that sequence is running concurrently with a hook
+swap it did not make — exactly what `PANIC_HOOK_GUARD` serializes. That the
+swap is performed by a dependency rather than by the test's own code changes
+nothing about the hazard. Robustness against future loom or generator versions
+is a secondary reason, and the cost is four models serializing against the
+hook-holding tests, which is nothing.
+
+The guard is not, on the locked versions, holding back a stream of hook calls.
+Measured on loom 0.7.2 and generator 0.8.9, built both with and without
+`--cfg loom`: a succeeding model explored 27 interleavings and reached an
+installed hook **zero** times, with the counting hook unfiltered (it would have
+counted a panic on any thread) and its liveness proven in the same run by a
+deliberate panic that it did count. Only a failing assertion inside a model
+reaches the hook, once, when the build is already red.
+
+The rule has an observed origin worth recording as it happened. During the kernel
+spike the hook-restoration test began failing intermittently under the parallel
+full-suite run — three hook calls counted where one was expected — and
+instrumenting the recording hook with thread names attributed the extra calls to
+panics raised on other tests' threads: deliberate panics in tests that were not
+holding the guard, and the loom models running in the same binary. That
+diagnosis named generator's completion path as the primary cause, and it is a
+real path — `done()` raises `panic_any` in generator's `yield_.rs`, and loom's
+scheduler ends a coroutine body with it. Serializing both against
+`PANIC_HOOK_GUARD` closed the flake, with twelve consecutive green runs of the
+full lib suite where the same conditions had failed frequently before. The
+re-measurement above does not reproduce that path reaching an installed hook,
+and the two observations are left as they are rather than reconciled by
+argument: whether a generator unwind reaches the hook you installed depends on
+how generator is managing the hook at that moment, which is the same take/set/
+restore sequence the paragraph above makes the guard's reason. The fix at the
+time treated the hazard from the swapper side; the filter treats it from the
+recorder side, which is the side that scales.
+
 Integration tests cannot use crate-private test support, so they use the focused
 local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses
 `tokio::sync::Mutex` so it can be held across `.await` without blocking a runtime

@@ -947,6 +947,104 @@ existing command-task shutdown guarantee.
   remaining keyed receiver. If shared input is closed and keyed reconciliation
   reports `Quiescent`, the same poll returns `Poll::Ready(None)`.
 
+### 6.1 Successor correspondence under the reducer-first kernel
+
+RFC 0014 replaces the delivery topology the invariants above are stated over.
+Every producer's message output — keyed command, unkeyed command, subscription
+— travels one origin-tagged FIFO data lane whose deliverability is decided at
+the delivery decision point by the producing run's liveness, and a
+producer-originated quit travels a dedicated control lane while an
+`update`-returned quit applies synchronously at its dispatch (RFC 0014 §3.1,
+§3.3). The register that decides this correspondence is RFC 0014 §9 rows 1–3,
+landed with that RFC's acceptance; the clauses above state the contract in
+force until mainlining closes RFC 0014 §13.1's open tier, and each becomes the
+following there. The successor's own enforcement classes are RFC 0014 §12's — this
+correspondence records what each clause becomes and adds no check of its own.
+
+- **INV-1 — superseded.** No separate shared path remains: an unkeyed
+  command's messages travel the same origin-tagged lane as every other
+  producer's, and its quit takes whichever route its origin selects (INV-9
+  below). What survives is the property the clause protected — a command
+  carrying no cancellation metadata joins no keyed lifecycle.
+- **INV-2 — superseded as a receiver statement.** Its property is carried by
+  revocation and the fresh-slot rule: at most one run per `CommandId` is
+  deliverable, and a supersede or a cancel revokes the previous run before a
+  successor can deliver (RFC 0014 INV-RC5, §3.1).
+- **INV-3 and INV-4 — property preserved, receiver clause superseded.**
+  Supersession and explicit cancel revoke the run, and from the revocation's
+  application point none of its output is delivered — buffered before or sent
+  after, for every queued item regardless of when the run's task exits
+  (RFC 0014 INV-RC5). Explicit cancel stays total and idempotent.
+- **INV-5 — preserved.** `CancelPolicy` and its arrival handling are
+  unchanged; RFC 0014 §3.4 applies the policy per lowered entry, and occupancy
+  is read from the run's deliverability rather than from a receiver.
+- **INV-6 — property preserved (both faces), receiver formulation
+  superseded.** Finishing is not revocation, so a run that finishes on its own
+  while its output is still queued stays deliverable until that output is
+  delivered; and it stays *revocable* for exactly that window, so a later
+  explicit cancel, supersession, teardown, or termination still drops the
+  queued output undelivered — which is what makes a finished-but-buffered
+  run's output cancellable, and what keeps its identity occupied until one of
+  the two happens (RFC 0014 §3.1, INV-RC5). The clause's object changes with
+  the topology like INV-3's, INV-4's and INV-7's: "the receiver still contains
+  output" becomes the run's queued output on the one data lane, and occupancy
+  is the delivery accounting's, not a receiver's.
+- **INV-7 — property preserved, receiver facts superseded.** An identity whose
+  run has finished and whose output has drained is free, so same-id work
+  returned by the current `update` is not dropped as in-flight; what decides it
+  is the delivery accounting and the pass's exit-reflection stage rather than a
+  sampled `sender_closed`/`buffered` pair (RFC 0014 §3.1, §3.5).
+- **INV-8 — preserved.** The per-run token discipline holds: a revoked or
+  exited run's late exit and late sends are inert with respect to its successor
+  (RFC 0014 §3.1).
+- **INV-9 — successor statement.** The successor's two quit routes are split
+  by where the quit originates, not by whether its command is keyed: a quit
+  returned from `update` (the init command's included) applies synchronously
+  at that dispatch, while *every* producer-originated quit — from a keyed run
+  or an anonymous one alike — travels the control lane and is applied only if
+  its origin is still live, so a revoked run's quit never quits the
+  application (RFC 0014 §3.3, INV-RC9). This clause's cancellable-quit
+  property therefore survives for both kinds of producer rather than for keyed
+  runs alone, and the suppression mechanism becomes origin revocation instead
+  of private-channel drop.
+- **INV-10 — preserved.** Commands returned by one input are still dispatched
+  before the next input is pulled.
+- **INV-11 — superseded, breaking.** Each child's spawn key lowers to its own
+  independent keyed entry, cancel and teardown entries from every child apply
+  in one cancel phase preceding every spawn of the same command, and keying a
+  batch itself is not constructible (RFC 0014 §3.4; §9 row 3).
+- **INV-12 — preserved.** `map` still preserves cancellation key, policy,
+  cancel list, and directives.
+- **INV-13 — preserved in property.** Bookkeeping stays bounded, restated over
+  the kernel's run registry: producer exits are reflected and entries retired
+  once the delivery accounting permits, and no per-identity state survives an
+  entry's retirement (RFC 0014 §3.1, §3.5). RFC 0014 §9 records no supersession
+  for it.
+- **INV-14 — superseded, with a recorded property loss.** One FIFO admits no
+  priority. A cancel that has been applied still wins against everything
+  undelivered, but the broad opportunity shared-first pull provided — a
+  simultaneously ready shared input cancelling an already-buffered keyed result
+  before its delivery — is not preserved (RFC 0014 §3.2; §9 row 2).
+- **INV-15 — not reached by the register.** The clause pins the closedness of
+  this document's keyed lifecycle decision type, part of the bookkeeping the
+  kernel replaces; RFC 0014 §9 states no successor for it and none is claimed
+  here.
+- **INV-16 — successor statement.** The property becomes the kernel's park
+  contract, RFC 0014 INV-RC16: a workless kernel parks, and a parked kernel
+  holds a registered waker on every source that can create a pass's work —
+  data-lane readiness, control-lane arrival, and producer-exit or
+  subscription-quiescence notification — with the arrival of any one of them
+  beginning a pass (RFC 0014 §3.5, §6.3). This clause's "future-wakeable"
+  property therefore survives with a wider source set than the shared and
+  keyed receivers it names, and with the same force: a kernel that parks while
+  one of those has arrived unconsumed is non-conforming. The clause's second
+  half — shared input closed and keyed reconciliation `Quiescent` yielding
+  `Poll::Ready(None)` — is **superseded** with the receiver set it reports on:
+  the successor has no receiver collection to exhaust, and a live kernel with
+  no work parks rather than reporting exhaustion (RFC 0014 §6.3, INV-RC16).
+  What ends a run there is termination, whose routes and postconditions are
+  RFC 0011's (its §4), not an input-source exhaustion signal.
+
 ## 7. Testing Strategy
 
 ### 7.1 Command Unit Tests
@@ -1145,6 +1243,9 @@ starts from those seams.
 - `docs/rfcs/0004-command-timeout-retry.md`
 - `docs/rfcs/0011-runtime-lifecycle.md` (lifecycle phases and termination
   model, its §2–§4; cited in section 4.4)
+- `docs/rfcs/0014-reducer-first-core.md` (the successor delivery topology, its
+  §3.1–§3.5, and the supersession register §9 whose rows 1–3 name this RFC;
+  cited in section 6.1)
 - TCA `Effect.cancellable(id:cancelInFlight:)`
 - TCA `Effect.cancel(id:)`
 - RxJS `switchMap` and `exhaustMap`

@@ -113,10 +113,58 @@ context the store itself owns (§4.3).
   them, and passing TestStore proves nothing about them — stated here as
   negative space so no later document cites TestStore as evidence for a
   runtime scheduling property.
-- **Reducer composition**: there is no reducer trait yet. TestStore
-  targets `Application` directly; when a composition API lands, its
-  `Application` adapter is expected to reuse this store rather than grow
-  a second harness, but that is that RFC's obligation, not this one's.
+- **Reducer composition**: TestStore targets `Application` directly, and
+  the composition core is RFC 0014's — a reducer-first kernel over which
+  `Application` is a single-feature adapter. That RFC discharges the
+  no-second-harness obligation on this store's terms: the adapter and
+  composed programs are tested through this store's own intake,
+  unchanged (its §7.1, §7.3). Designing that core is that RFC's work,
+  not this one's; what it adds here is §1.3's delegated layer.
+
+### 1.3 Delegated: the stage-3 driving layer
+
+Stages 1 and 2 never start, poll, or restart a subscription source and
+never spawn a task (§1.2); that boundary is unchanged. A third layer
+sits beside them rather than inside them: a `TestDriver` that drives the
+production kernel itself. Its contract is pinned by RFC 0014 §7.2 —
+construction through the production path, with the production task
+bookkeeping, lanes, phase machine, and termination shared rather than
+re-implemented; a driving differential confined, exhaustively, to two
+seams — pass-initiation arbitration and producer send grants — plus
+what the application side supplies, which is **inputs and readiness**
+(mock sources satisfying RFC 0012 §6.1's template, and test-controlled
+gates inside application-supplied effects); scripted determinism over
+the whole script — inputs, readiness, arbitration choices, and
+grants — for a deterministic application, with the
+grant-then-acceptance handshake as the narrower condition under which
+*enqueue order* is guaranteed at all, and the whole determinism claim
+scoped to its verified range: a current-thread executor and unbounded
+lanes, with the bounded-lane extension and its two protocol conditions
+open at RFC 0014 §13.3; and **pass-unit driving as the
+evidence surface**, one driver step executing one whole production
+pass, with stage-granular probes admissible as component-level
+instruments but outside that surface. The one boundary no pass-unit
+step reaches is the park boundary, where RFC 0014 §7.2 names a
+separate instrument, `ParkProbe`, whose observations are evidence for
+that RFC's park-and-wake invariant alone — never for the driver's
+topology or determinism claims, and not for anything this store's
+layers claim. §4.2's citation rule generalizes to both: an order the
+driver establishes is never evidence of a production order. §1.2's negative
+space is about the store and is unchanged — what each layer claims is
+RFC 0014 §7.3's.
+
+The API body — the concrete `TestDriver` surface — lands as an
+additive amendment to this RFC: the amendment RFC 0014 §9 row 11
+records and RFC 0012 §6.2 reserves, landed with RFC 0014's acceptance;
+the surface itself arrives when mainlining closes RFC 0014 §13.1's open
+tier.
+
+The same landing extends this store's command intake: the lowered parts
+it consumes gain teardown entries and independently keyed batch children
+(RFC 0014 §3.4, §7.1). INV-T3 needs no restatement for that — it is
+stated over the shared decomposition boundary rather than over that
+boundary's current member list — but its structural review re-runs at
+the store's intake site once the parts carry the new entries.
 
 ## 2. The `Message` boundary
 
@@ -1103,6 +1151,12 @@ rule, the no-side-effect claim, and the no-warning claim together
   INV-C3, consumed by §4.3 and INV-T12; its §3.4 equal-deadline
   negative space, which §4.2's linearization supplies; its §5.1 design
   inputs and `test-util` decision, resolved and carried out by §7.
+- RFC 0012 — subscription execution: §6.2, which reserves the stage-3
+  driving surface §1.3 delegates, and whose non-execution boundary it
+  preserves.
+- RFC 0014 — reducer-first core: §7.1's store parity extension, §7.2's
+  driving contract, §7.3's per-layer claims, and the amendment register
+  §9 whose row 11 names this RFC.
 - `src/application.rs` — the trait whose bounds §2 pins.
 - `src/command/core.rs`, `src/command/runtime_parts.rs` — the
   decomposition boundary INV-T3 names.

@@ -667,6 +667,91 @@ the frame pass) because INV-LC1 alone does not order the two activities
 within the pass, and the never-while-pending clause is what excludes the
 split-pass adversary.
 
+### 8.1 Successor correspondence under the reducer-first kernel
+
+RFC 0014's kernel drives both its entry types through this contract's
+phase machine, and its §6.1 re-checks rather than restates what this
+document pins: construction inertness for both entry types, the
+steady-state phase order, the two-stage termination postconditions with
+the bounded settle discipline, the panic split, and driver exclusivity.
+What changes is named by RFC 0014 §9 row 8, landed with that RFC's
+acceptance; this document states the contract in force until mainlining
+closes RFC 0014 §13.1's open tier, and each clause below becomes what
+it says there, with the successor's own enforcement classes staying
+RFC 0014 §12's.
+
+- **§2.3's negative space narrows.** A steady-state pass on that kernel
+  has four fixed stages in fixed order — exit reflection, control-lane
+  drain, at most one count-bounded input batch, then the frame step — and
+  no sequence of ready inputs can defer any of them, so the frame step
+  and quit application are no longer branches freely arbitrated against
+  batches (RFC 0014 §3.5). What stays unspecified narrows with it: pass
+  *initiation* keeps no per-occasion claim — which ready wake source
+  begins the next pass is unobservable — but its production policy is
+  pinned there as unbiased selection over the armed source set, checked
+  structurally, so the negative space this section states covers the
+  occasion and the executor's scheduling among producers, not the
+  policy. INV-LC1 and INV-LC2
+  are unchanged — rendering still happens outside batches, at most once
+  per pass, before re-evaluation, on the pass's current state.
+- **§3.2's intake order gains a bootstrap short-circuit, pinning
+  INV-LC4's arbitration clause one case narrower.** The order itself
+  stands — init dispatch, then the initial reconcile, then the first
+  render pending unconditionally — but an init command whose
+  `Command::quit()` part is present terminates deterministically
+  *during* the init dispatch, before the initial reconcile runs and
+  before any subscription source starts (RFC 0014 §6.2). Under this
+  document's contract that outcome is one legal result of bootstrap
+  arbitration; on the successor it is pinned, and the arbitration clause
+  covers the init effect's output, initial subscription output, and the
+  first render.
+- **INV-LC5's classification is stated per entry point.** At the
+  `Runtime<App>` entry point this document is written over, it holds
+  verbatim: RFC 0014 §2.4 preserves that entry point, its `run`
+  signature, and its result contract — `Ok(())` for either quit form,
+  `Err` carrying the render error. The advanced entry that RFC adds
+  beside it classifies the same causes over its own result type — a quit
+  of either route returns `Ok(Exit::Quit)`, a render error returns `Err`
+  (RFC 0014 §2.3). The controlled causes themselves are re-spelled by the
+  successor's two quit routes — an `update`-returned quit applied at its
+  dispatch, a producer-originated quit applied at a control drain
+  (RFC 0014 §3.3) — and the render-error cause, the postcondition
+  boundary, and §4.2's mechanism freedom are unchanged for both entries.
+- **INV-LC8's task-kind inventory gains one member.** Producer panics
+  stay contained for every producer kind, and the successor's cleanup
+  runs (RFC 0014 §4.4) join that quantifier; application panics on the
+  driving task stay fail-fast (RFC 0014 §6.1). The containment property
+  and §5.1's diagnostic negative space are otherwise unchanged.
+- **§2.1's second dirty source keeps its shape and its owner.** Dirt
+  sources stay exactly two, re-evaluation stays a frame-pass activity,
+  and the recording rule stays RFC 0012's — whose successor form counts
+  a teardown-issued stop as a steady-state stop, so its quiescence marks
+  dirt like any other (RFC 0014 §5.2). Termination-driven quiescence
+  stays excluded.
+- **§7's premises are re-derived on the successor's seam vocabulary.**
+  The unbiased top-level select becomes pass-initiation arbitration
+  among ready wake sources; its production policy stays unbiased
+  selection and is normative there rather than a premise, with per
+  occasion choice and fairness still unclaimed (RFC 0014 §3.5).
+  Frame-branch pacing and gating go entirely, replaced by the frame
+  step's fixed position in every pass (RFC 0014 §6.3), and synchronous
+  producer creation on the driving task is unchanged — both stay
+  informative, here and there.
+- **The always-armed quit branch splits by dimension**, as RFC 0006
+  §5.2 records for the requirement that names it. In the **delivery**
+  dimension it is strengthened: the mandatory control drain precedes
+  every pass's input batch, so a quit that has arrived when a pass
+  begins is applied with zero inputs processed (RFC 0014 §3.5,
+  INV-RC9). In the **arming** dimension it is **superseded** — there is
+  no select branch left to arm — and its successor is **RFC 0014
+  INV-RC16**, which is also where §7's parking premise lands: a parked
+  kernel registers a waker on every source that can create a pass's
+  work — data-lane readiness, control-lane arrival, and producer-exit
+  or subscription-quiescence notification — and the arrival of any one
+  of them begins a pass. What §7 records as the condition parking is
+  sound under becomes contract there, over the whole source set rather
+  than any one member of it.
+
 ## 9. Open questions
 
 1. **Panic-reason preservation.** For the transition-panic route
@@ -713,6 +798,11 @@ split-pass adversary.
 - RFC 0012 — subscription execution: §4 (the subscription
   lifecycle-completion dirty source §2.1 records, and the admission
   rules that consume this RFC's frame-phase contract).
+- RFC 0014 — reducer-first core: §2.3/§2.4 (the two entry points
+  INV-LC5's classification is stated over), §3.5 (the fixed pass stages
+  that narrow §2.3), §6.1–§6.3 (what this contract preserves, the
+  bootstrap quit, the pacing removal), and the amendment register §9
+  whose row 8 names this RFC; §8.1 carries the correspondence.
 - `src/runtime.rs` (`run`, `process_input_batch`, `process_frame_tick`),
   `src/runtime/core.rs` (construction, dispatch, shutdown),
   `src/runtime/keyed_commands.rs`, `src/subscription.rs` (the three

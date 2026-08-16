@@ -894,6 +894,99 @@ semantics are `FrameRate`'s, unchanged by relocation; the load controls'
 runtime *semantics* are covered by RFC 0006's invariants (INV-L1, INV-L3,
 INV-L6, INV-L12), not duplicated here.
 
+### 7.1 Successor correspondence under the reducer-first kernel
+
+RFC 0014's kernel reads no wall clock and owns no frame-rate
+configuration: render cadence becomes pass-bounded, and time-driven
+redraw becomes an application `Timer` subscription (RFC 0014 §6.3). The
+frame rate therefore leaves this type and the constructors that carry it.
+Two register rows decide this section: RFC 0014 §9 row 4, the pacing
+cluster, and row 2, under which the per-command capacity leaves with
+the private keyed channels it sized. Both landed with that RFC's
+acceptance; every clause above states the surface in force until
+mainlining closes RFC 0014 §13.1's open tier, and each becomes the
+following there, with the successor's own enforcement classes staying
+RFC 0014 §12's.
+
+- **INV-C5 is superseded.** With no frame-rate configuration there is no
+  scheduler for a config to disagree with, so the mismatch this invariant
+  prohibits is closed by removal rather than by a check. The reason it
+  gives is also why the parameter cannot simply be ignored: a frame rate
+  accepted and paced at nothing is the degenerate worst case of that same
+  mismatch (RFC 0014 §2.4).
+- **§2.1's `frame_rate` field and §2.2's `Runtime::new(flags,
+  frame_rate)` are superseded.** The constructors become
+  `Runtime::new(flags)` and `Runtime::with_config(flags, config)`
+  (RFC 0014 §2.4), and `RuntimeConfig::new` loses the parameter with the
+  field for INV-C5's reason above. Every other §2.1 decision is
+  untouched: private fields, infallible consuming setters, no `Default`,
+  the derive set with `Copy` deliberately absent, and §2.3's placement.
+- **INV-C1 is preserved.** One construction path still exists:
+  `Runtime::new(flags)` delegates to `with_config` with a
+  load-control-unset configuration, and that unset configuration selects
+  the unbounded lane mode (RFC 0006 §5.2). What the delegation no longer
+  carries is a frame rate.
+- **§2.1's field set shrinks to two controls, one of them renamed.**
+  The frame rate goes with the pacing removal above, and
+  `keyed_channel_capacity` goes with the private keyed channels it
+  sizes — superseded by RFC 0014 §9 row 2, with the per-command
+  isolation loss that follows recorded by its owner (RFC 0006 §5.2).
+  What remains is `data_lane_capacity` and `batch_max_messages`, one
+  setter each. The first is `app_channel_capacity` renamed, **with no
+  compatibility alias**: it stops sizing the shared
+  application-message channel and starts sizing the single data lane
+  every producer shares, so keeping the old name would assert a
+  compatibility that does not hold, and the breaking landing makes
+  callers move rather than inherit a control whose meaning widened
+  under them (RFC 0014 §9 row 2). Its semantics are the lane's:
+  `data_lane_capacity: None` leaves the data lane unbounded — the
+  default, and what `Runtime::new` still selects — while `Some(n)`
+  bounds that one lane at `n`, for every producer sharing it. The
+  no-`Default` decision's
+  stated basis — the crate has no default frame rate — goes with the
+  frame rate; adding `Default` remains additive, and this RFC decides
+  nothing further about it here.
+- **INV-C2, INV-C3, INV-C4, and INV-C6 are re-derived over that set**,
+  under the surviving names. INV-C2: the constructor leaves
+  `data_lane_capacity` and `batch_max_messages` unset, and each setter
+  sets exactly its own field and no other. INV-C3: no construction or
+  setter can produce an invalid configuration and none returns a
+  `Result` or panics — both surviving fields are `Option<NonZeroUsize>`,
+  so zero stays unrepresentable, and each body stays a plain field
+  write; the check is the same two-part review over a smaller surface.
+  INV-C4: the public surface is exactly those two controls — no frame
+  rate, no `app_channel_capacity` under its old name, no per-command
+  capacity, no restart-rate field — with §2.3's re-export placement
+  unchanged; the absence of the old name is part of what that review
+  checks, since an alias is what this rename declines. INV-C6:
+  `#[must_use]` on the constructor, on each surviving setter with its
+  own message, and on `Runtime::with_config`. INV-C5 alone has no
+  successor object.
+- **§3.1's `batch_max_messages: unset` recommendation stands on new
+  ground.** The recommendation not to set a value is unchanged, but
+  unset stops meaning "time cap only": the kernel applies its own finite
+  count cap (RFC 0014 §3.5). F5, the frame-branch evidence the
+  recommendation cites, is superseded with the pacing facts (RFC 0006
+  §5.2), so the successor's basis comes from that RFC's re-derivation,
+  not from this cell.
+- **§3.1's capacity rules follow RFC 0006 §5.2.** The sizing rule
+  §3.1 states for `app_channel_capacity` reads over the successor's
+  data lane under the new name, the latency/burst trade unchanged in
+  shape — what widens is the traffic it sizes, since keyed and
+  anonymous command output now share the lane the rule bounds. The
+  `keyed_channel_capacity` rule goes with the control it sizes: with no
+  per-command channel there is no per-command burst to absorb and no
+  `m × capacity` share to bound, so no successor rule replaces it.
+  §3.3's guidance notes are carried from RFC 0006 §4.6/§4.7 and follow
+  that RFC's own record.
+- **§5's bounded-run parameters and §6's smoke profile follow RFC 0006's
+  named prerequisite.** They configure a harness measured on the
+  superseded topology; re-deriving the acceptance formulation and its
+  scenario set is owned by RFC 0006 (its §5.2, tracked as RFC 0014
+  §13.5), and the parameters this RFC fixes are re-fixed against
+  whatever that re-derivation defines. §4's restart-rate position is
+  unaffected: rate policy stays subscription-level (RFC 0012 §8).
+
 ## 8. Open questions
 
 None. This RFC exists to close RFC 0006's delegated questions; leaving one
@@ -906,7 +999,11 @@ them.
 ## 9. References
 
 - RFC 0006 — runtime load control: the delegating document; §§3.2, 4.1, 5,
-  5.1, 6 name the obligations discharged here.
+  5.1, 6 name the obligations discharged here, and §5.2 carries the
+  successor correspondence §7.1 defers to.
+- RFC 0014 — reducer-first core: §2.4's constructor decision, §6.3's
+  removal of configured frame pacing, §3.5's count cap, and the
+  supersession register §9 whose row 4 names this RFC.
 - `benches/runtime_load.rs` — the harness every §5 parameter configures.
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions used
   in §7.
