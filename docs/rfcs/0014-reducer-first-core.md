@@ -4,7 +4,7 @@
   defines: the four kernel claims (the grant handshake, the
   delivery-accounting soundness with its concurrency check, revocation
   filtering, driver topology) are demonstrated on a prototype kernel,
-  and the eight-series conformance suite is green and repeat-stable
+  and the eleven-series conformance suite is green and repeat-stable
   under pass-unit driving. The remaining behavioral checks of §12 —
   cleanup hooks, the full combinator surface, the observability
   vocabulary, the production arbitration default — are
@@ -47,10 +47,12 @@
   ordering is not preserved (§3.2). `run`'s signature and result
   contract for `Application` users are unchanged (§2.4). `Added` —
   `Reducer`, `Program`, composition combinators (`scope`, `for_each`,
-  `presented`, `into_program`) with `Keyed`/`Slot`, `Command::teardown`,
+  `presented`, `into_program`) with `Keyed`/`Slot`,
   `Command::on_teardown`, `ProgramRuntime`, `Exit`, and the stage-3
-  `TestDriver` (the RFC 0008 amendment §7.2 delegates). Lands with the
-  implementation, after §13.1's gate.
+  `TestDriver` (the RFC 0008 amendment §7.2 delegates); the
+  `Command::teardown` these combinators invoke is RFC 0013's surface and
+  is entered there, not here. Lands with the implementation, after
+  §13.1's gate.
 
 ## Summary
 
@@ -442,9 +444,17 @@ re-checked one by one:
   result before delivery; under one FIFO, whichever enqueued first
   delivers first. This is a deliberate property loss, recorded in §9
   (row 2), not an oversight.
-- *Liveness-critical output does not starve* — **preserved**: a FIFO
-  admits no starvation; every enqueued item is delivered within a
-  backlog-proportional bound (no priority, bounded delay).
+- *Liveness-critical output does not starve* — **preserved for
+  enqueued items, and only for them**: a FIFO admits no starvation
+  among the items already in the lane, each delivered after exactly
+  the prefix ahead of it, within a backlog-proportional bound (no
+  priority, bounded delay). Two halves are not preserved and are not
+  claimed anywhere else either: a producer still awaiting admission in
+  bounded mode is outside the property (the same carve-out RFC 0006
+  §5.2 makes), and the per-command routing advice this property carried
+  — put liveness-critical output in an unkeyed command — has no
+  successor, because one lane offers no faster class to move it to
+  (§9 rows 2 and 10).
 - *Redraw cadence survives flood* — **preserved, deterministically**:
   the batch cap — always finite under this RFC (§3.5, superseding the
   time-capped default window; §9 row 4) — forces pass boundaries, a
@@ -557,29 +567,50 @@ fixed order**:
    is superseded — the driving loop reads no wall clock (§6.3), and a
    time-windowed batch would make the bounds below
    wall-clock-relative (§9 row 4). The default cap's value is
-   mechanism; its finiteness is the contract.
+   mechanism. What is contract is **finite-prefix eventual progress**:
+   every batch ends after a finite prefix of the ready input, so the
+   pass reaches its frame stage and the next pass its control drain,
+   however much input stays ready. No wall-clock bound and no practical
+   bound on the cap's value is claimed here — a conforming default may
+   be far larger than the superseded time window admitted, and RFC 0006
+   §5.2's INV-L4 prerequisite is where latency figures are re-derived.
 4. **Frame step** — render if a redraw is pending, then re-evaluation
    if subscriptions are dirty.
 
 The stages are not independently arbitrated branches: no sequence of
-ready inputs can defer any of them. What stays unspecified is pass
-*initiation* — which ready wake source begins the next pass when the
-kernel is parked — and executor scheduling among producers; the
-citation rule (§7.2) and RFC 0011 §2.3's negative space continue to
-apply there. One consequence of control-before-input is stated
-plainly: when a quit and an input are both ready at pass start, the
-quit wins — an input whose `update` would have cancelled the quit's
-origin does not run first. That sits inside the shared-first
+ready inputs can defer any of them.
+
+**Wake arming.** A kernel with no pass in progress and nothing to make
+progress on parks, and a parked kernel holds a registered waker on
+**every** source that can create a pass's work. The set is exhaustive:
+data-lane readiness (an item enqueued for delivery), control-lane
+arrival (a producer-originated quit), and producer-exit or
+subscription-quiescence notification (the facts stage 1 reflects). The
+arrival of any one of them begins a pass, whose stages then run in the
+order above; a kernel that parks while one of them has arrived and
+remains unconsumed is non-conforming. This is INV-RC16, and it is what
+keeps the bounds below from holding vacuously. What stays unspecified
+is *which* of several simultaneously ready sources begins the pass —
+pass initiation is the arbitration seam (§7.2), not the source set —
+and executor scheduling among producers; the citation rule (§7.2) and
+RFC 0011 §2.3's negative space continue to apply there.
+
+One consequence of control-before-input is stated plainly: when a quit
+and an input are both ready at pass start, the quit wins — an input
+whose `update` would have cancelled the quit's origin does not run
+first. That sits inside the shared-first
 non-preservation already recorded (§3.2, §9 row 10), made
 deterministic rather than arbitrated.
 
-Two deterministic bounds follow and are pinned as contract: a
+Two deterministic bounds follow and are pinned as contract, each on
+the arming above — a pass exists to run because arrival wakes one: a
 producer quit is applied before any input batch that begins after its
 arrival — a quit that has arrived when a pass begins is applied with
 **zero** further inputs processed, and a quit arriving mid-pass is
 preceded only by the in-progress batch's remainder (INV-RC9); a
 redraw marked by a batch is rendered before the next input batch
-begins (INV-RC10). This narrows RFC 0011
+begins, the batch that marked it having ended after a finite prefix
+(INV-RC10). This narrows RFC 0011
 §2.3's stated negative space — the frame pass is no longer freely
 interleaved against batches — and is part of §9 row 8's RFC 0011
 amendment; RFC 0011 INV-LC1/INV-LC2 themselves are unchanged
@@ -648,16 +679,19 @@ buffered producer quit under the prefix included.
 
 ### 4.2 The RFC 0013 successor mapping
 
-Each of RFC 0013's INV-ST1–ST8 is classified against its pre-kernel
-form as *preserved* (holds as stated on both topologies),
-*re-derived* (the pinned requirement re-stated on this kernel — the
-form RFC 0013's current text carries), or *failed* (the behavioral
-requirement itself unmet — the only classification that counts as
-failure): **preserved** — INV-ST2, INV-ST3, INV-ST5, INV-ST6,
-INV-ST7. **Re-derived** — INV-ST1, INV-ST4, INV-ST8, with the
-requirement mapping. **Failed** — none:
+Each of RFC 0013's INV-ST1–ST8 is classified by what this kernel has
+to supply for the requirement that clause pins — RFC 0013's R1–R9 and
+the questions RFC 0005 §4.5 deferred — not against any earlier text:
+*preserved* (the clause holds as stated, with no kernel-specific
+reading needed), *re-derived* (the requirement is met, and the clause
+is stated in this kernel's terms — scope tracking, revocation, the
+delivery accounting — to say how), or *failed* (the behavioral
+requirement itself unmet, the only classification that counts as
+failure). **Preserved** — INV-ST2, INV-ST3, INV-ST5, INV-ST6,
+INV-ST7. **Re-derived** — INV-ST1, INV-ST4, INV-ST8, whose requirement
+mapping is below. **Failed** — none:
 
-| Requirement the pre-kernel clause pinned | Successor statement (RFC 0013's current form) |
+| Requirement | What this kernel supplies for it (RFC 0013's clause) |
 | --- | --- |
 | ST1: selection completeness and minimality (R1/R5) | a teardown for a prefix selects every run of every kind whose scope path begins with that prefix, and only those (INV-RC7's scope tracking is what makes "every kind" satisfiable) |
 | ST4: no delivery after the application point; a buffered keyed quit does not quit (R1, cancel-beats-quit) | a selected run is revoked; its queued output — control-lane quit included — is never delivered, and the guarantee holds for every queued item regardless of how long the queue is or when the run's task exits (INV-RC5/INV-RC6) |
@@ -707,43 +741,49 @@ Contract (INV-RC8):
 
 ## 5. Subscription execution under the new core
 
-RFC 0012's contract is consumed, not redesigned. Three clauses:
+RFC 0012's contract is consumed, not redesigned. Three clauses.
 
-- **Barrier scope (5.1).** The uniform quiescence barrier holds
-  exactly as RFC 0012 §4 states it, and its subjects are subscription
-  runs only: a stop-requested, not-yet-quiesced *subscription* task
-  defers every new subscription admission runtime-wide. Command and
-  cleanup runs neither join the barrier nor trigger it — they poll no
-  input source, so they cannot steal input, and extending the barrier
-  to them would create a new coupling with no hazard to close. The
-  availability trade-off — one slow-quiescing source defers unrelated
-  children's admissions — remains the explicitly accepted negative
-  space (RFC 0013 R5's coupling, RFC 0010's G-6 demand), and
-  narrowing by declared conflict domains stays rejected: the kernel
-  cannot verify such declarations, and stolen input cannot be
-  recovered by delivery-side filtering.
-- **The fourth stop cause (5.2).** A teardown-issued stop joins
-  RFC 0012 §3's stop causes (an amendment there, §9 row 5). Its dirt
-  classification: the quiescence of a teardown-stopped task marks
-  subscriptions dirty like any steady-state stop — termination-driven
-  quiescence stays excluded. The declaration-removal pairing is
-  structural through combinators; the manual primitive applied to a
-  still-declared subscription restarts it at the next re-evaluation
-  (RFC 0005 INV-13, untouched) and is documented as self-defeating.
-  Dirt sources stay exactly two (RFC 0011 §2.1): a batch that ran
-  `update`, and the quiescence of a subscription run stopped by a
-  steady-state cause — a re-evaluation's removal or replacement, or a
-  scope teardown, per this clause. **A natural finish marks no
-  dirt** — a finished, still-declared subscription restarts at the
-  next re-evaluation, whenever one occurs (RFC 0005 INV-13 through
-  RFC 0012 §4.3) — **and the quiescence of command and cleanup runs
-  marks no dirt**: they are not re-evaluation subjects.
-- **Stopping-pass defer (5.3).** A re-evaluation that issues stop
-  requests admits nothing in that same pass, even if a stop quiesces
-  while the pass is still running. This is a clarification derived
-  from INV-SE4/INV-SE5 (the pass's admissions would otherwise race its
-  own supersession window), not a semantic amendment; it binds this
-  kernel's re-evaluation and the §7.2 driver alike.
+### 5.1 Barrier scope
+
+The uniform quiescence barrier holds exactly as RFC 0012 §4 states it,
+and its subjects are subscription runs only: a stop-requested,
+not-yet-quiesced *subscription* task defers every new subscription
+admission runtime-wide. Command and cleanup runs neither join the
+barrier nor trigger it — they poll no input source, so they cannot
+steal input, and extending the barrier to them would create a new
+coupling with no hazard to close. The availability trade-off — one
+slow-quiescing source defers unrelated children's admissions — remains
+the explicitly accepted negative space (RFC 0013 R5's coupling,
+RFC 0010's G-6 demand), and narrowing by declared conflict domains
+stays rejected: the kernel cannot verify such declarations, and stolen
+input cannot be recovered by delivery-side filtering.
+
+### 5.2 The fourth stop cause
+
+A teardown-issued stop joins RFC 0012 §3's stop causes (an amendment
+there, §9 row 5). Its dirt classification: the quiescence of a
+teardown-stopped task marks subscriptions dirty like any steady-state
+stop — termination-driven quiescence stays excluded. The
+declaration-removal pairing is structural through combinators; the
+manual primitive applied to a still-declared subscription restarts it
+at the next re-evaluation (RFC 0005 INV-13, untouched) and is
+documented as self-defeating. Dirt sources stay exactly two (RFC 0011
+§2.1): a batch that ran `update`, and the quiescence of a subscription
+run stopped by a steady-state cause — a re-evaluation's removal or
+replacement, or a scope teardown, per this clause. **A natural finish
+marks no dirt** — a finished, still-declared subscription restarts at
+the next re-evaluation, whenever one occurs (RFC 0005 INV-13 through
+RFC 0012 §4.3) — **and the quiescence of command and cleanup runs
+marks no dirt**: they are not re-evaluation subjects.
+
+### 5.3 Stopping-pass defer
+
+A re-evaluation that issues stop requests admits nothing in that same
+pass, even if a stop quiesces while the pass is still running. This is
+a clarification derived from INV-SE4/INV-SE5 (the pass's admissions
+would otherwise race its own supersession window), not a semantic
+amendment; it binds this kernel's re-evaluation and the §7.2 driver
+alike.
 
 ## 6. Lifecycle
 
@@ -921,25 +961,28 @@ edits in place.
 | 2 | RFC 0003 / RFC 0006 / RFC 0007 | supersede + property loss | INV-14 shared-first pull and RFC 0006's two delivery classes → single FIFO (§3.1); the broad cancel-opportunity property is not preserved (§3.2) — recorded as a user-visible property loss. The private keyed channels go with them, and so does everything stated per channel: RFC 0007's `keyed_channel_capacity` leaves the public surface, RFC 0006 INV-L1's `m × keyed_channel_capacity` term has nothing to sum over, and INV-L9's per-command isolation — one key's full channel never delaying admission into another key's or into the shared channel — is **not preserved**: every producer awaiting capacity awaits the one data lane's. A second user-visible property loss, carried by this RFC's CHANGELOG |
 | 3 | RFC 0003 / RFC 0005 | supersede (breaking) | INV-11 batch folding → multi-keyed lowering (§3.4); RFC 0005 INV-20's "scoping does not bypass batch" restated over distribution |
 | 4 | RFC 0006 / RFC 0007 / RFC 0011 §7 | supersede (breaking) | the kernel's wall-clock reads: configured frame pacing — frame-branch pacing facts, INV-C5, the frame-rate config field and constructor parameter, the non-catch-up premise → §6.3's pass-bounded cadence — and the time-capped batching window (INV-L6's default) → an always-finite count cap (§3.5; `batch_max_messages = None` comes to mean the kernel's default count cap, an RFC 0007 doc change in the same cluster) |
-| 5 | RFC 0012 | additive amendment | fourth stop cause (teardown) + its dirt classification; stopping-pass defer recorded as clarification (§5) |
-| 6 | RFC 0005 | amendment (one clause each) | INV-18 coverage extends to teardown prefixes and cleanup registrations; INV-17/INV-12 unchanged |
+| 5 | RFC 0012 | additive amendment + clarification | fourth stop cause (teardown) with its dirt classification (§5.2); stopping-pass defer recorded as clarification (§5.3); the barrier's subjects clarified — subscription runs only, command and cleanup runs neither joining nor triggering it (§5.1), the non-participation half enforced as INV-RC12's behavioral row |
+| 6 | RFC 0005 | amendment (one clause each) | INV-18 coverage extends to teardown prefixes and cleanup registrations; RFC 0005 INV-17 (map/scope commutation) and RFC 0003 INV-12 (`map` metadata propagation) unchanged |
 | 7 | RFC 0013 | successor revision | the teardown contract re-derived on §4's operation: selection over every run kind (its §3), immediate subscription stop (its §4), cleanup participation (its §5), resolved questions (its §9); INV-ST classification and mapping per §4.2 |
-| 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2); INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); INV-LC8's producer-kind inventory extended to cleanup runs (§4.4, §6.1); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
+| 8 | RFC 0011 | amendment | bootstrap-quit short-circuit (§6.2), narrowing INV-LC4's arbitration clause by that one case; INV-LC5's classification statement scoped to the facade entry with the advanced entry's `Exit` classification added; §2.3's negative space narrowed by §3.5's fixed pass stages (exit reflection, control drain, and the frame step are no longer freely interleaved branches); INV-LC8's producer-kind inventory extended to cleanup runs (§4.4, §6.1); §7 premises re-derived on the seam vocabulary (pass initiation stays unbiased) |
 | 9 | RFC 0006 | vocabulary amendment | INV-L13 schema: `shared_pending` reads as the data lane's residual occupancy; `channel`'s value domain becomes the single value `"data"`; gauge kind counts map (`unkeyed_commands` = anonymous runs, `keyed_commands` = keyed runs); firing conditions unchanged |
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4's backlog independence preserved for the control lane; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
+| 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
 
-Count: five supersessions (rows 1, 2, 3, 4 — the public constructor
-change belongs to row 4's cluster and the keyed-capacity removal to
-row 2's — and 10), five amendments (rows 5, 6, 8, 9, 11), one
-successor revision (row 7). Row 10 carries a clarification beside its
-supersession — the shutdown closure-observation guarantee read as its
-two layers, which supersedes nothing and is what RFC 0006 records as a
-clarification — so the counts are unchanged by it: it is one row, one
-supersession, with the clarification recorded on the same row rather
-than as an entry of its own. Preserved and worth
-naming: the effect-DI negative space (RFC 0012 INV-SE8 — the driving
-seams are not an effect-executor abstraction: they gate branch choice
+Count: twelve rows — five supersessions (rows 1, 2, 3, 4 — the public
+constructor change belongs to row 4's cluster and the keyed-capacity
+removal to row 2's — and 10), six amendments (rows 5, 6, 8, 9, 11,
+12), and one successor revision (row 7); five plus six plus one is
+the twelve. Two rows carry a clarification beside their primary kind
+— row 10's shutdown closure-observation guarantee read as its two
+layers, and row 5's barrier subjects — and neither adds an entry: a
+clarification rides the row whose object it belongs to, so the count
+above is by primary kind and the row total is what the table shows.
+
+Preserved and worth naming: the effect-DI negative space (RFC 0012
+INV-SE8 — the driving seams are not an effect-executor abstraction:
+they gate branch choice
 and send release, never effect execution or dependency resolution),
 `RuntimeConfig` move-only (RFC 0007), the `Message` boundary
 (RFC 0010 §7.1), and the uniform barrier (§5.1).
@@ -1023,7 +1066,12 @@ is pinned; the invariants of §12 are.
   constructive, and INV-RC9/INV-RC10's flood rows exercise them under
   scripted continuous readiness. A capless batch stage is the same
   adversary in another guise — one batch that never ends defers the
-  later stages forever — excluded by §3.5's always-finite count cap.
+  later stages forever — excluded by §3.5's count cap, which every
+  configuration has: a batch ends after a finite prefix of the ready
+  input, so the same pass reaches its frame stage and the next its
+  control drain. What that cap's value is stays mechanism, and no
+  wall-clock or practical bound on it is claimed — what this entry
+  excludes is the stage that never ends, not a latency figure.
 - *Batch-first pass* — an implementation that orders the input batch
   before the control drain satisfies an "applied in the first pass
   after arrival" reading while a quit that was already waiting when
@@ -1053,7 +1101,7 @@ facade).
 
 Enforcement classes per the pre-review checklist. The behavioral
 checks divide into two tiers (§13.1): the **spike tier** — the four
-kernel claims and the eight-series conformance suite, which gated this
+kernel claims and the eleven-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
 below, which gates implementation mainlining, not acceptance. Both
@@ -1096,7 +1144,11 @@ tiers remain the regression suite afterward.
   depth or the run's task-exit timing; a naturally finished, live
   run's buffered output is still delivered. Behavioral, on both lane
   modes: revoke-then-deliver-later sequences, the buffered-quit case,
-  the late-task-exit adversary, the natural-finish control.
+  the late-task-exit adversary, the natural-finish control. The
+  bounded-mode half runs as §13.1's `bounded-lane revocation` series,
+  which scripts the bounded lane through the grant handshake for
+  enqueue order only and claims no further bounded-lane determinism
+  (§13.3).
 - **INV-RC6 — retraction.** INV-RC5 applied to a torn-down scope's
   subscription output: after the teardown's application point, zero
   deliveries from selected runs. Behavioral (kept separate from
@@ -1142,13 +1194,20 @@ tiers remain the regression suite afterward.
   and §6.3's premise substitution. Behavioral: RFC 0011's own test
   rows re-run against the kernel, plus the init-quit row.
 - **INV-RC12 — barrier scope, defer, and dirt sources.** RFC 0012's
-  admission suite passes; additionally a stop-requested command or
-  cleanup run defers no subscription admission; a stop-issuing
-  re-evaluation admits zero in its own pass even when the stop
-  quiesces mid-pass; and dirt is marked only by §5.2's two sources —
-  the quiescence of a naturally finished subscription run, of a
-  command run, or of a cleanup run marks no dirt. Behavioral at the
-  reconcile seam, with one row per non-dirt source.
+  admission suite passes; additionally (a) a stop-requested command or
+  cleanup run defers no subscription admission, (b) dirt is marked
+  only by §5.2's two sources — the quiescence of a naturally finished
+  subscription run, of a command run, or of a cleanup run marks
+  none — and (c) a stop-issuing re-evaluation admits zero in its own
+  pass, even when the stop quiesces while that pass is still running.
+  Enforcement splits by what a check can construct: (a) and (b) are
+  **behavioral** at the reconcile seam, one row per non-participating
+  run kind and one per non-dirt source; (c) is **structural** at the
+  same seam — the reconcile path takes no second admission attempt
+  after issuing its stops, so a quiescence observed while the pass
+  runs has no site to admit into — because a mid-pass quiescence is
+  not constructible on the single-threaded executor those behavioral
+  rows use. RFC 0012 §4.2 states the same split from the owner side.
 - **INV-RC13 — driver topology.** The driver constructs through the
   production path and shares bookkeeping, producer execution, lanes,
   and termination with production; the five prohibited shapes are not
@@ -1167,80 +1226,129 @@ tiers remain the regression suite afterward.
   the guaranteed sequence. Behavioral: repeat-stability over the
   conformance suite; the raw-grant shape is unrepresentable
   (structural half).
+- **INV-RC15 — lane topology.** The runtime owns exactly two delivery
+  lanes: one FIFO data lane carrying every producer's message
+  output — keyed command, anonymous command, and subscription
+  alike — and one control lane carrying producer-originated quits and
+  nothing else (§3.1, §3.3). No per-run, per-key, or per-class message
+  lane exists, so nothing per producer can be sized, isolated, or
+  prioritized — the two property losses §9 row 2 records follow from
+  this row. Structural at the construction and send sites (one
+  data-lane sender reaching every producer kind; no second message
+  channel constructible) with a behavioral neighbor at the
+  observability seam: under a bounded lane, blocked sends from a
+  subscription, an anonymous command, and a keyed command all report
+  the capacity-wait event's `channel` as `"data"` (RFC 0006 §4.4's
+  schema as §9 row 9 amends it).
+- **INV-RC16 — park and wake.** A parked kernel holds a registered
+  waker on every source that can create a pass's work — data-lane
+  readiness, control-lane arrival, and producer-exit or
+  subscription-quiescence notification — and the arrival of any one of
+  them begins a pass (§3.5's wake arming). A kernel that stays parked
+  while one of them has arrived and remains unconsumed is
+  non-conforming; the workless park §6.3 preserves is the case where
+  none has. This is what keeps INV-RC9's quit bound and INV-RC12's
+  admission rows from holding vacuously, and it is the successor of
+  RFC 0003 INV-16's arming half (§9 row 1) and of the always-armed
+  select branch RFC 0006 R4 relied on (§9 row 10). Structural at the
+  park site — review that the parked future registers the current
+  waker with each member of the set, since no finite test proves a
+  registration present for the source it did not exercise — with one
+  behavioral row per source: §13.1's `idle wake` (data-lane readiness
+  and producer exit), `parked control-quit wake`, and `parked
+  subscription-quiescence wake`, each scripted from a genuinely parked
+  kernel with no other work pending.
 
 Surface–invariant coverage: `Reducer`/`Program`/adapter (INV-RC1;
 purity via RFC 0012 INV-SE6's transfer, §2.1), combinators and
 journals (INV-RC2/INV-RC3), `Keyed`/`Slot` (INV-RC3), batch lowering
-(INV-RC4), delivery and revocation (INV-RC5/INV-RC6/INV-RC10),
+(INV-RC4), lane topology (INV-RC15), delivery and revocation
+(INV-RC5/INV-RC6/INV-RC10), park and wake (INV-RC16),
 teardown and `on_teardown` (INV-RC7/INV-RC8, §4.2's successor table),
 quit (INV-RC9), the two entry points and `Exit` (INV-RC1, INV-RC11 —
 the facade's result contract is RFC 0011 INV-LC5's, preserved),
 constructor changes (§9 row 4 — covered by INV-RC11's conformance
 rows), barrier clauses (INV-RC12), driver (INV-RC13/INV-RC14). The
-per-command capacity control's removal (§9 row 2) carries no invariant
-of its own: INV-RC5's one-lane delivery is what leaves nothing per
-command to size or isolate.
+per-command capacity control's removal (§9 row 2) needs no invariant
+of its own beyond INV-RC15: that row's two-lane topology is what
+leaves nothing per command to size or isolate.
 `ScopeValue` carries no separate invariant: it is the RFC 0005
 segment-value contract restated as a bound.
 
 ## 13. Open questions
 
-1. **The acceptance gate: the spike tier is met, the
-   implementation-acceptance tier is open.** *Spike tier* — the gate
-   this RFC's acceptance passed, demonstrated on a prototype kernel,
-   four claims plus the suite: the
-   send-acknowledgement grant handshake (§7.2); the
-   delivery-accounting soundness behind retraction (§3.1), including
-   a concurrency check of the multi-writer accounting (loom or
-   equivalent); revocation filtering end to end; the driver's
-   same-topology stage sharing; and the conformance suite (the
-   eight-series acceptance set: cancel vs buffered output;
-   stop/restart safe window; simultaneous readiness under both script
-   faces; both quit semantics; both panic classes; shutdown-scoped
-   send failure — full topology: a blocked sender reclaimed by
-   cancellation with the two-stage postconditions; component level:
-   closure observation → error → autonomous stop (§6.1); idle wake;
-   termination under owned work through every cause) green and
-   repeat-stable, **driven pass-unit** — each driver step executing
-   §3.5's full stage order (§7.2; stage-granular probes are outside
-   the evidence surface). *Implementation-acceptance tier* — open,
-   and what it gates is mainlining, not acceptance: cleanup hooks
-   (INV-RC8), the full combinator surface (INV-RC2–INV-RC4), the
-   observability vocabulary mapping (§9 row 9), the production
-   arbitration default (§3.5's unbiased pass initiation), and the
-   remaining §12 behavioral rows. **Order**: the spike tier precedes
-   acceptance, acceptance precedes every §9 edit, and the open tier
-   precedes mainlining — so the §9 supersessions stand on the owner
-   documents while the kernel itself stays outside the crate until
-   that tier closes. A failure in the open tier stops mainlining and
-   reopens the design of whatever it failed; whether it also reaches
-   the architecture selection is RFC 0010 §1.9's counterexample-grade
-   question, as it is for any later finding.
-2. **Driver API body.** The concrete `TestDriver` surface lands in the
-   RFC 0008 stage-3 amendment (§7.2 pins its contract; §9 row 11).
-   Resolves there.
-3. **Bounded-lane scripted determinism.** Extending §7.2's determinism
-   claim to bounded lanes and executor-independent scheduling — the
-   acknowledgement form is already compatible — needs its own
-   verification pass and the two protocol conditions §7.2 names:
-   **driver progress** (the driver stays steppable while a grant's
-   acceptance is outstanding, so a capacity-blocked send cannot
-   deadlock the handshake — the kernel must be able to drain the lane
-   the pending send waits on) and **ack correlation** (at most one
-   outstanding grant per origin, or an explicit correlation of each
-   grant to its exact commit; the next grant to an origin only after
-   the previous acceptance). Until then the claim keeps its verified
-   scope. Resolves as an amendment to the driving contract in the
-   RFC 0008 amendment.
-4. **External driving surface.** A public host-driven step API
-   (RFC 0011 §6's additive room) — shape, pacing responsibilities,
-   park/wake integration. Future RFC.
-5. **Load-acceptance re-derivation.** RFC 0006's statistical
-   acceptance (INV-L4 formulation and the bounded-mode scenario set)
-   re-measured on the new topology, with the same
-   reference-environment discipline. Implementation-stage work under
-   RFC 0006's ownership; until it lands, §3.3's latency statements are
-   the contract and no numeric threshold is claimed here.
+### 13.1 The acceptance gate: spike tier met, implementation tier open
+
+*Spike tier* — the gate this RFC's acceptance passed, demonstrated on
+a prototype kernel, four claims plus the suite: the
+send-acknowledgement grant handshake (§7.2); the delivery-accounting
+soundness behind retraction (§3.1), including a concurrency check of
+the multi-writer accounting (loom or equivalent); revocation filtering
+end to end; the driver's same-topology stage sharing; and the
+conformance suite (the eleven-series acceptance set: cancel vs
+buffered output; stop/restart safe window; simultaneous readiness
+under both script faces; both quit semantics; both panic classes;
+shutdown-scoped send failure — full topology: a blocked sender
+reclaimed by cancellation with the two-stage postconditions; component
+level: closure observation → error → autonomous stop (§6.1); idle
+wake; termination under owned work through every cause; `parked
+control-quit wake`; `parked subscription-quiescence wake`;
+`bounded-lane revocation`) green and repeat-stable, **driven
+pass-unit** — each driver step executing §3.5's full stage order
+(§7.2; stage-granular probes are outside the evidence surface). The
+last three series are INV-RC15's and INV-RC16's evidence: the two
+parked-wake series drive a genuinely parked kernel to the arrival of a
+control-lane quit and of a subscription-quiescence notification, and
+the revocation series runs INV-RC5's bounded-lane half over the single
+data lane. *Implementation-acceptance tier* — open, and what it gates
+is mainlining, not acceptance: cleanup hooks (INV-RC8), the full
+combinator surface (INV-RC2–INV-RC4), the observability vocabulary
+mapping (§9 row 9), the production arbitration default (§3.5's
+unbiased pass initiation), and the remaining §12 behavioral rows.
+**Order**: the spike tier precedes acceptance, acceptance precedes
+every §9 edit, and the open tier precedes mainlining — so the §9
+supersessions stand on the owner documents while the kernel itself
+stays outside the crate until that tier closes. A failure in the open
+tier stops mainlining and reopens the design of whatever it failed;
+whether it also reaches the architecture selection is RFC 0010 §1.9's
+counterexample-grade question, as it is for any later finding.
+
+### 13.2 Driver API body
+
+The concrete `TestDriver` surface lands in the RFC 0008 stage-3
+amendment (§7.2 pins its contract; §9 row 11). Resolves there.
+
+### 13.3 Bounded-lane scripted determinism
+
+Extending §7.2's determinism claim to bounded lanes and
+executor-independent scheduling — the acknowledgement form is already
+compatible — needs its own verification pass and the two protocol
+conditions §7.2 names: **driver progress** (the driver stays steppable
+while a grant's acceptance is outstanding, so a capacity-blocked send
+cannot deadlock the handshake — the kernel must be able to drain the
+lane the pending send waits on) and **ack correlation** (at most one
+outstanding grant per origin, or an explicit correlation of each grant
+to its exact commit; the next grant to an origin only after the
+previous acceptance). Until then the claim keeps its verified scope:
+§13.1's `bounded-lane revocation` series scripts a bounded lane under
+exactly the two conditions above and witnesses INV-RC5 there, which is
+what that invariant's both-lane-modes check consumes — it is evidence
+for revocation under a bounded lane, never for a general bounded-lane
+determinism claim. Resolves as an amendment to the driving contract in
+the RFC 0008 amendment.
+
+### 13.4 External driving surface
+
+A public host-driven step API (RFC 0011 §6's additive room) — shape,
+pacing responsibilities, park/wake integration. Future RFC.
+
+### 13.5 Load-acceptance re-derivation
+
+RFC 0006's statistical acceptance (INV-L4 formulation and the
+bounded-mode scenario set) re-measured on the new topology, with the
+same reference-environment discipline. Implementation-stage work under
+RFC 0006's ownership; until it lands, §3.3's latency statements are
+the contract and no numeric threshold is claimed here.
 
 ## 14. References
 
