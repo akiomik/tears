@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use futures::FutureExt;
@@ -18,7 +18,22 @@ use crate::panic::compose_hook;
 /// The panic hook is process-global and shared across threads, so a test that
 /// records hook activity and a test that panics must not run concurrently, or
 /// the panicking test's hook invocation would pollute the recording one.
-pub static PANIC_HOOK_GUARD: Mutex<()> = Mutex::new(());
+static PANIC_HOOK_GUARD: Mutex<()> = Mutex::new(());
+
+/// Locks [`PANIC_HOOK_GUARD`], recovering from poisoning.
+///
+/// Poisoning is the ordinary case here, not a corruption signal: the guard
+/// serializes access to a process-global hook rather than to data, and the
+/// tests it serializes panic on purpose, so any of them may unwind while
+/// holding it. Recovering means one such panic fails its own test instead
+/// of every later hook test, which would otherwise report a poison error in
+/// place of their own assertions. This is the only place the recovery is
+/// spelled out; hook tests call this rather than locking the static.
+pub fn hook_guard() -> MutexGuard<'static, ()> {
+    PANIC_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
@@ -59,10 +74,10 @@ impl Drop for SilentPanicHook {
 /// starts with the installing test's prefix.
 ///
 /// Unlike [`with_silent_panic_hook`] (current-thread, async), this probe also
-/// serves multi-thread runtimes and non-async tests; callers hold
-/// [`PANIC_HOOK_GUARD`] for their whole critical section themselves. That
-/// serializes the hook swaps but not the rest of the test binary: a test that
-/// panics without taking the guard would still reach this hook. The
+/// serves multi-thread runtimes and non-async tests; callers call
+/// [`hook_guard`] and hold it for their whole critical section themselves.
+/// That serializes the hook swaps but not the rest of the test binary: a
+/// test that panics without taking the guard would still reach this hook. The
 /// thread-name filter keeps such a panic out of the counts — libtest names
 /// each test's thread after the test's full path, and multi-thread tests
 /// stamp their runtime workers with their own prefix.
@@ -155,9 +170,7 @@ pub async fn with_silent_panic_hook<F, T>(future: F) -> T
 where
     F: Future<Output = T>,
 {
-    let _hook_guard = PANIC_HOOK_GUARD
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let _hook_guard = hook_guard();
     run_with_silent_panic_hook(future).await
 }
 
@@ -196,9 +209,7 @@ mod tests {
         const PROBE: &str =
             "test_support::panic_hook::tests::silent_scope_restores_the_previous_hook";
 
-        let hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let guard = hook_guard();
         let original = panic::take_hook();
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let recorded_calls = Arc::clone(&hook_calls);
@@ -218,7 +229,7 @@ mod tests {
         let restored_hook = panic::take_hook();
         panic::set_hook(original);
         drop(restored_hook);
-        drop(hook_guard);
+        drop(guard);
 
         assert!(outcome.is_err());
         assert!(probe.is_err());

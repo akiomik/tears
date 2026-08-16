@@ -566,8 +566,8 @@ mod tests {
 
     use std::future::pending;
     use std::num::NonZeroUsize;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, PoisonError};
     use std::time::Duration;
 
     use futures::stream;
@@ -580,7 +580,7 @@ mod tests {
     use crate::Command;
     use crate::command::{RetryPolicy, fold_leaves};
     use crate::test_support::{
-        HookProbe, PANIC_HOOK_GUARD, TraceRecorder, wait_until, with_silent_panic_hook,
+        HookProbe, TraceRecorder, hook_guard, wait_until, with_silent_panic_hook,
     };
 
     fn actions<I>(items: I) -> BoxStream<'static, Action<i32>>
@@ -1092,9 +1092,7 @@ mod tests {
         reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
     )]
     async fn a_panicking_keyed_command_task_skips_the_terminal_restore() {
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         let probe = HookProbe::install(
             "runtime::keyed_commands::tests::a_panicking_keyed_command_task_skips_the_terminal_restore",
         );
