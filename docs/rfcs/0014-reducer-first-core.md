@@ -8,7 +8,7 @@
   nine series pass-unit driven, three on the park-boundary probe §7.2
   names. The remaining behavioral checks of §12 —
   cleanup hooks, the full combinator surface, the observability
-  vocabulary, the production arbitration default — are
+  vocabulary, the production arbitration policy — are
   **implementation acceptance criteria**: they gate implementation
   mainlining, which this acceptance does not grant. The §9
   supersessions and amendments to owner RFCs land with this
@@ -590,11 +590,24 @@ subscription-quiescence notification (the facts stage 1 reflects). The
 arrival of any one of them begins a pass, whose stages then run in the
 order above; a kernel that parks while one of them has arrived and
 remains unconsumed is non-conforming. This is INV-RC16, and it is what
-keeps the bounds below from holding vacuously. What stays unspecified
-is *which* of several simultaneously ready sources begins the pass —
-pass initiation is the arbitration seam (§7.2), not the source set —
-and executor scheduling among producers; the citation rule (§7.2) and
-RFC 0011 §2.3's negative space continue to apply there.
+keeps the bounds below from holding vacuously.
+
+**Pass initiation.** Which of the armed sources begins the pass when
+several are ready at once is arbitrated, and the production policy is
+**unbiased selection** over them: no source is preferred, and none is
+starved by another's continuous readiness. That is the whole claim.
+What is *not* claimed is which source is picked on any given occasion,
+any fairness bound or ratio, and any initiation order a consumer could
+rely on — the policy pins the absence of preference, not a schedule —
+and executor scheduling among producers stays unspecified as well
+(RFC 0011 §2.3's negative space, at that reduced scope). Enforcement
+is **structural**, at the single pass-initiation selection site the
+driving loop performs — the seam §7.2's first driving differential
+replaces with a script: review that the selection is an unbiased choice
+over the armed set, with no per-source priority, quota, or ordering
+state beside it. A behavioral test cannot prove the absence of bias
+from finitely many draws, and §7.2's citation rule keeps a
+driver-scripted initiation order out of evidence for this policy.
 
 One consequence of control-before-input is stated plainly: when a quit
 and an input are both ready at pass start, the quit wins — an input
@@ -1027,9 +1040,12 @@ two driving seams are a pass-initiation arbitration policy
 (production: unbiased selection among ready wake sources, the control
 lane always armed as one) and a send gate (production: immediate);
 the pass stages themselves are fixed (§3.5) and not arbitrated. The
-scripted arbitration covers an exit-observation wake source beyond
-the input/frame/quit set — a driver-side extension, not part of any
-prior contract. Load gauges
+scripted arbitration covers exactly the wake sources §3.5 arms —
+data-lane readiness, control-lane arrival, and producer-exit or
+subscription-quiescence notification. The frame step is not among
+them, being consumed inside the pass that marks its work, and the
+exit-observation source is contract there (INV-RC16) rather than the
+driver-side extension it was before that arming was stated. Load gauges
 follow RFC 0006 §4.4 with §9 row 9's vocabulary. None of these shapes
 is pinned; the invariants of §12 are.
 
@@ -1336,8 +1352,9 @@ than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — open, and what it gates
 is mainlining, not acceptance: cleanup hooks (INV-RC8), the full
 combinator surface (INV-RC2–INV-RC4), the observability vocabulary
-mapping (§9 row 9), the production arbitration default (§3.5's
-unbiased pass initiation), and the remaining §12 behavioral rows.
+mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
+pass initiation, whose check is the structural review named there),
+and the remaining §12 behavioral rows.
 **Order**: the spike tier precedes acceptance, acceptance precedes
 every §9 edit, and the open tier precedes mainlining — so the §9
 supersessions stand on the owner documents while the kernel itself

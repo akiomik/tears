@@ -685,9 +685,13 @@ RFC 0014 §12's.
   drain, at most one count-bounded input batch, then the frame step — and
   no sequence of ready inputs can defer any of them, so the frame step
   and quit application are no longer branches freely arbitrated against
-  batches (RFC 0014 §3.5). What stays unspecified is pass *initiation*:
-  which ready wake source begins the next pass when the kernel is
-  parked, and executor scheduling among producers. INV-LC1 and INV-LC2
+  batches (RFC 0014 §3.5). What stays unspecified narrows with it: pass
+  *initiation* keeps no per-occasion claim — which ready wake source
+  begins the next pass is unobservable — but its production policy is
+  pinned there as unbiased selection over the armed source set, checked
+  structurally, so the negative space this section states covers the
+  occasion and the executor's scheduling among producers, not the
+  policy. INV-LC1 and INV-LC2
   are unchanged — rendering still happens outside batches, at most once
   per pass, before re-evaluation, on the pass's current state.
 - **§3.2's intake order gains a bootstrap short-circuit, pinning
