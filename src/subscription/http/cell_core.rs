@@ -121,8 +121,9 @@ mod tests {
     /// Serializes a loom model against the process-global panic-hook
     /// tests: loom's generator runtime raises internal panics on every
     /// explored execution, and those invoke whatever hook is installed —
-    /// a concurrently running hook-recording test would count them
-    /// (docs/testing.md "Process-Global Panic Hook Tests").
+    /// a concurrently running test that installs an unfiltered counting
+    /// hook would count them (docs/testing.md "Process-Global Panic Hook
+    /// Tests").
     fn hook_guard() -> MutexGuard<'static, ()> {
         PANIC_HOOK_GUARD
             .lock()

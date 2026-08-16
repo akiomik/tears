@@ -181,6 +181,18 @@ tests. It is lib-only: it needs the crate-private `compose_hook`, so the
 integration copy under `tests/common/panic_hook.rs` deliberately has no
 equivalent.
 
+A third category takes the guard without touching the hook at all: tests that
+deliberately raise panics while leaving the installed hook alone. A loom model is
+the case in hand — loom's generator raises internal panics on every explored
+execution, and whatever hook is installed at that moment observes them. Against
+`HookProbe` that is harmless, because it filters by worker thread name; against a
+plain counting hook it is not, and the hook-restoration tests in
+`src/test_support/panic_hook.rs` install exactly that — an unfiltered counter
+whose assertion a concurrent loom model inflates. So a test that panics on
+purpose holds `PANIC_HOOK_GUARD` for the whole panicking section even though it
+neither installs nor takes a hook, as the `cell_core.rs` models do. The rule is
+about who *raises* panics, not only about who swaps hooks.
+
 Integration tests cannot use crate-private test support, so they use the focused
 local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses
 `tokio::sync::Mutex` so it can be held across `.await` without blocking a runtime
