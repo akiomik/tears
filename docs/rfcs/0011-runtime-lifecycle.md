@@ -674,10 +674,11 @@ phase machine, and its §6.1 re-checks rather than restates what this
 document pins: construction inertness for both entry types, the
 steady-state phase order, the two-stage termination postconditions with
 the bounded settle discipline, the panic split, and driver exclusivity.
-What changes is named by RFC 0014 §9 row 8, whose landing that RFC gates
-on its staged spike (its §13.1). Until then this document states the
-contract in force; each clause below becomes what it says, with the
-successor's own enforcement classes staying RFC 0014 §12's.
+What changes is named by RFC 0014 §9 row 8, landed with that RFC's
+acceptance; this document states the contract in force until mainlining
+closes RFC 0014 §13.1's open tier, and each clause below becomes what
+it says there, with the successor's own enforcement classes staying
+RFC 0014 §12's.
 
 - **§2.3's negative space narrows.** A steady-state pass on that kernel
   has four fixed stages in fixed order — exit reflection, control-lane
