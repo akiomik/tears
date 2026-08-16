@@ -595,6 +595,22 @@ the correction lives, and the superseding contract is RFC 0014 (§3.1,
 in the owner documents on that RFC's acceptance and gated there for
 mainlining (§13.1).
 
+**Return #8 (2026-08-16)**: one counterexample, recorded on each root
+it reaches — this root, `root-CMP` (§5.3), and `root-D18` (§6.2) —
+and correcting audit rows rather than root judgments: no verdict of
+§3–§7 changes on any of the three, and each entry says what it does
+change. Here it is LG-0006-047, the documentation guidance this root
+owns and the ledger records as reaffirmed: keying buys cancellability
+at the cost of delivery deferral under load, so liveness-critical
+output routes to unkeyed commands. Neither half survives the successor
+this root's own return already records — one data lane defers no keyed
+output behind a class of its own, and an unkeyed command buys no
+priority to route toward — so that guidance is superseded together
+with the delivery classes that carried it, and its cancellability
+half survives only in the form RFC 0014 §3.3 states. RFC 0006 §5.2
+carries the owner-side correspondence. The ledger stays the snapshot
+§8.1 adopts, unamended; this entry is where the correction lives.
+
 ## 4. Lifecycle and termination
 
 Owns the root judgment: `root-K51J46` (the lifecycle root).
@@ -735,6 +751,24 @@ superseding contract is RFC 0014 (§2, §8), accepted at its staged
 spike's tier, with its owner-document edits landed and implementation
 mainlining still gated there (§13.1).
 
+**Return #8 (2026-08-16)**: the entry §3.2 opens, on the root that
+owns the cleanup-hook seam. What changes here is the condition text
+N27 carries for that seam, not this root's verdict: N27 describes a
+cleanup window that defers admission through the subscription barrier
+and is observable through the producer gauges, and the successor
+denies both — a cleanup run neither joins the barrier nor triggers it
+(RFC 0014 §5.1), and no gauge field counts one (RFC 0006 §5.2). The
+axiom's successor keeps cleanup registration inside the composition
+boundary, qualified like every other identity-bearing carrier
+(RFC 0014 §4.4), so what the correction leaves open is an overlap
+rather than a leak: a cleanup run for a torn-down instance may still
+be running while that scope's successor instance starts. That overlap
+is accepted negative space here, not a pinned exclusion; a design that
+needs non-overlap states it as a condition on the graceful-drain and
+cleanup-ordering work, where §10.1 already seats the drain slot. The
+ledger stays the snapshot §8.1 adopts, unamended; this entry is where
+the correction lives.
+
 ## 6. Effect and subscription execution boundary
 
 Owns the root judgments: `root-B7` (the directive/effect axis
@@ -830,6 +864,24 @@ admission rules but its counterexample affected the lifecycle root's
 decision (the dirty-source set), so per §1.9 it reopened `root-K51J46`
 and not `root-D18` — recorded here because this chapter's rules were
 the trigger.
+
+**Return #8 (2026-08-16)**: the entry §3.2 opens, on the root whose
+audit rows carry it. N27's sharpening and INT-6's joint walk both rest
+on cleanup delay being visible through this root's own machinery —
+cleanup delay defers admission through the barrier and is observable
+through the gauges, the same shape as a blocking source. The successor
+denies both halves: a command or cleanup run neither joins the
+subscription barrier nor triggers it (RFC 0014 §5.1), and no gauge
+field counts a cleanup run (RFC 0006 §5.2). INT-6's terminal verdict
+cannot stand as a pass — the joint walk it verified is unavailable on
+the successor — so it re-terminates as `C`, on the condition N27
+already names: the graceful-drain slot with its cleanup-hook seam
+(§10.1). **This root's judgment is not reopened.** Source execution
+stays the redesign RFC 0012 owns, and every rule of §4 there — the
+barrier, its admission rules, the boundaries — is unamended by this
+correction, which reaches a feature row and an interaction row and
+nothing §6.2 decides. The ledger and the audit snapshot stay as
+§8.1 adopts them, unamended; this entry is where the correction lives.
 
 ## 7. Public API boundary and contour
 
@@ -1774,11 +1826,11 @@ material under §1.8, not register entries.
 
 | Delegated document | Audit rows | Gates | Scope handed over |
 |---|---|---|---|
-| composition RFC | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
-| `cancel_scope` RFC (`C-16`, §5.3) | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5) | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
+| composition RFC — RFC 0014, Accepted; delegation discharged | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
+| `cancel_scope` RFC (`C-16`, §5.3) — RFC 0013, Accepted; delegation discharged | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5); met by co-design, both accepted together | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
 | driving surface RFC (with its subordinate conformance kit) | N7, N15, N24, N45, N48, N49, P12 | no | external driving of the runtime: pacing/latency step mapping, parking premise, bootstrap/termination intake, backend/terminal separation, the contour declaration's inventory of signals the driving surface exclusively holds (POSIX signal handling), source/backend conformance kit |
 | RFC 0008 stage-3 driving-store amendment | TS-1, TS-3, TS-6 | no | driving-store test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
-| graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, cleanup hook seam (window inside RFC 0012 §3's stop-requested→quiesced interval) |
+| graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, and what remains of the cleanup-hook seam now that RFC 0014 §4.4 takes the hook itself (registration, at-most-once firing at the teardown application point, termination discarding unfired hooks) — the drain window around it, the ordering of a cleanup against its scope's successor (§6.2's return), and any bound on cleanup completion |
 | supervision/rate RFC (the S8a slot) | N25, N36, S8a; the restart-storm half of N54 | no | opt-in restart-rate policy in RFC 0012 §8's delegation slot (one of the two recorded forms, with the immediacy-amendment precondition), startup-failure cause observation |
 | suspend-time contract RFC | N54 (production half) | no | production suspend-time behavior: fill or pin as negative space what RFC 0009 leaves open beyond monotonic passthrough |
 | batching/load-control RFC | P10 | no | batching strategies beyond the current batch semantics, via RFC 0006 INV-L12 amendment; reopens `root-SCHED` per §1.9 |
