@@ -697,12 +697,18 @@ buffered producer quit under the prefix included.
 Each of RFC 0013's INV-ST1–ST8 is classified by what this kernel has
 to supply for the requirement that clause pins — RFC 0013's R1–R9 and
 the questions RFC 0005 §4.5 deferred — not against any earlier text:
-*preserved* (the clause holds as stated, with no kernel-specific
-reading needed), *re-derived* (the requirement is met, and the clause
-is stated in this kernel's terms — scope tracking, revocation, the
-delivery accounting — to say how), or *failed* (the behavioral
-requirement itself unmet, the only classification that counts as
-failure). **Preserved** — INV-ST2, INV-ST3, INV-ST5, INV-ST6,
+the test being what remains of the clause's own claim when its
+kernel citations are struck out. *Preserved* — a complete claim
+remains: the clause quantifies over teardown's own objects (prefixes,
+selected runs, registrations, spawns) and any conforming
+implementation satisfies it as written; the citations orient the
+reader to the carrier without carrying the claim. *Re-derived* — an
+incomplete claim remains: the clause cannot be stated at all without
+a mechanism only this kernel supplies (scope tracking across every
+run kind, the delivery decision point and its accounting), so
+RFC 0013 states it in those terms. *Failed* — the behavioral
+requirement itself is unmet, the only classification that counts as
+failure. **Preserved** — INV-ST2, INV-ST3, INV-ST5, INV-ST6,
 INV-ST7. **Re-derived** — INV-ST1, INV-ST4, INV-ST8, whose requirement
 mapping is below. **Failed** — none:
 
@@ -1155,10 +1161,10 @@ below, which gates implementation mainlining, not acceptance. Both
 tiers remain the regression suite afterward.
 
 - **INV-RC1 — single execution path.** For every kernel concern —
-  state ownership, input delivery, quit delivery, effect-task
-  ownership and bookkeeping, cancellation state, subscription-task
-  ownership, task body policy, frame and render, observability, time,
-  identity — and every phase step of §6, an `Application`-adapted
+  state ownership, lane topology, input delivery, quit delivery,
+  park and wake, effect-task ownership and bookkeeping, cancellation
+  state, subscription-task ownership, task body policy, frame and
+  render, observability, time, identity — and every phase step of §6, an `Application`-adapted
   program and a composed program execute the same code; the facade
   contributes mapping calls only. Structural (review of the adapter
   and kernel entry: no `Application`-typed branch below the adapter)
@@ -1421,14 +1427,17 @@ the contract and no numeric threshold is claimed here.
 - RFC 0006 — runtime load control: delivery classes, R4/INV-L4,
   INV-L10/INV-L11, INV-L12, INV-L13, §4.2/§4.4.
 - RFC 0007 — RuntimeConfig: INV-C5, the move-only property.
-- RFC 0008 — TestStore: stages 1–2, INV-T3/INV-T7/INV-T11, §4.2's
-  citation rule.
+- RFC 0008 — TestStore: stages 1–2 and their intake, §4.2's citation
+  rule (which §7.2 generalizes), §1.3's delegation of the stage-3
+  surface.
 - RFC 0009 — Clock DI: the time axis §6.3 leaves source-side.
 - RFC 0010 — runtime consolidation: §1.8/§1.9, §5.1/§5.2 (C-15),
   §7.1.
 - RFC 0011 — runtime lifecycle: §2–§6, INV-LC1–INV-LC9, §7's
   premises.
-- RFC 0012 — subscription execution: §2–§9, INV-SE1–INV-SE8.
+- RFC 0012 — subscription execution: §2–§9, INV-SE2–INV-SE8 (§5's
+  clauses consume §3's boundaries and §4's admission rules; INV-SE6's
+  purity is §2.1's transfer and §9 row 12's object).
 - RFC 0013 — scope teardown: §3–§6, §9 (resolved questions),
   INV-ST1–ST8, R1–R9.
 - `src/runtime.rs`, `src/runtime/core.rs`,

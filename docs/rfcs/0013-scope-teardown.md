@@ -556,7 +556,9 @@ full.
   exits and late sends from torn-down runs are inert (§3.6); a later
   occupant observes no teardown residue beyond the ordinary lifecycle
   rules. Its two halves take different classes, for the reason
-  RFC 0006 INV-L9 splits the same way. The **observable** half —
+  RFC 0006 INV-L9 splits the same way — cited for its method, not as
+  a live neighbour: that invariant is itself not preserved on this
+  kernel (RFC 0006 §5.2). The **observable** half —
   fresh-slot spawn, inert late exit, inert late send — is
   **behavioral**: the fresh-start rows below, scripted per case. The
   **absence** half — no scope-generation state exists and none is
@@ -880,7 +882,9 @@ construction (§3.1).
   rule, INV-10; its delivery topology is superseded per RFC 0014 §9
 - RFC 0005: Structural Lifecycle Identity — §2.3, §4.3–§4.5, INV-13,
   INV-14–INV-21
-- RFC 0006: Runtime Load Control — §4.4 gauges
+- RFC 0006: Runtime Load Control — §4.4 gauges; INV-L9, cited by
+  INV-ST7 for its enforcement-class method (the invariant itself is
+  superseded, its §5.2)
 - RFC 0008: TestStore — INV-T3 (the parts intake), the stage-3
   amendment slot
 - RFC 0010: Runtime Consolidation — §1.8, §5.3, §10.1 (N27, N30,
