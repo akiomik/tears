@@ -596,8 +596,9 @@ ID present at the call boundary:
 The rule is stated over the lifecycle IDs present at that boundary, not over
 a fixed pair of them: RFC 0013's teardown prefixes and RFC 0014 §4.4's cleanup
 registrations are qualified the same way where a command carries them — the
-coverage extension RFC 0014 §9 row 6 records, whose landing that RFC gates on
-its staged spike (its §13.1).
+coverage extension RFC 0014 §9 row 6 records, landed with that RFC's
+acceptance; the rule above states the contract in force until mainlining
+closes RFC 0014 §13.1's open tier.
 
 It does not change the effect stream, message mapping, redraw directive, timeout
 or retry wrappers, cancellation policy, or application output.
@@ -690,8 +691,9 @@ per-effect cancellation work, which this RFC does not silently add. RFC 0014
 `scoped` distributes over the children so that each child's spawn key,
 explicit cancel IDs, teardown prefixes, and cleanup registrations are
 qualified — the boundary carries more IDs, and the opening rule above reaches
-every one of them. That supersession is RFC 0014 §9 row 3, whose landing that
-RFC gates on its staged spike (its §13.1).
+every one of them. That supersession is RFC 0014 §9 row 3, landed with that
+RFC's acceptance; the boundary above states the contract in force until
+mainlining closes RFC 0014 §13.1's open tier.
 
 ### 4.5 Scoping is not teardown
 
@@ -847,8 +849,9 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   surface this RFC is stated over, those carriers are the keyed spawn ID and
   every explicit cancel ID; the teardown prefixes RFC 0013 adds and the cleanup
   registrations RFC 0014 §4.4 adds are qualified by the same rule, the
-  extension RFC 0014 §9 row 6 records and gates on its staged spike (its
-  §13.1).
+  extension RFC 0014 §9 row 6 records — landed with that RFC's acceptance,
+  with the carriers arriving when mainlining closes RFC 0014 §13.1's open
+  tier.
 - **INV-19: command cancellation isolation.** Cancelling or replacing a full ID
   under one scope cannot affect an equal local ID under a different scope.
 - **INV-20: batch compatibility.** Scoping does not bypass RFC 0003's batch
@@ -857,7 +860,8 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   INV-11 states, that means child keys are still ignored while scoped explicit
   cancels fold; under RFC 0014 §3.4's multi-keyed lowering the boundary carries
   each child's own IDs and `scoped` distributes over them (RFC 0014 §9 row 3,
-  gated on its §13.1).
+  landed with that RFC's acceptance; the boundary it replaces holds until
+  mainlining closes RFC 0014 §13.1's open tier).
 - **INV-21: no implicit teardown.** Dropping a value returned by `scoped` or
   omitting one scoped command does not issue prefix cancellation beyond the
   lifecycle's existing ID-specific rules.
