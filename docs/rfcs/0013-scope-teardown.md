@@ -586,8 +586,9 @@ uniform across the three run kinds.
 
 Kernel tests, through the production dispatch path (pass-unit driver
 steps, RFC 0014 §7.2), on both lane modes where delivery is asserted —
-the bounded-mode witness being RFC 0014 §13.1's `bounded-lane
-revocation` series, which scripts a bounded lane under the two
+the bounded-mode witness being RFC 0014 §13.1's
+`bounded-lane revocation` series, which scripts a bounded lane under the
+two
 protocol conditions RFC 0014 §13.3 names and carries no bounded-lane
 determinism claim beyond the enqueue order the grant handshake fixes:
 

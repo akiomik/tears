@@ -1255,9 +1255,9 @@ tiers remain the regression suite afterward.
   waker with each member of the set, since no finite test proves a
   registration present for the source it did not exercise — with one
   behavioral row per source: §13.1's `idle wake` (data-lane readiness
-  and producer exit), `parked control-quit wake`, and `parked
-  subscription-quiescence wake`, each scripted from a genuinely parked
-  kernel with no other work pending.
+  and producer exit), `parked control-quit wake`, and
+  `parked subscription-quiescence wake`, each scripted from a genuinely
+  parked kernel with no other work pending.
 
 Surface–invariant coverage: `Reducer`/`Program`/adapter (INV-RC1;
 purity via RFC 0012 INV-SE6's transfer, §2.1), combinators and
@@ -1291,8 +1291,8 @@ under both script faces; both quit semantics; both panic classes;
 shutdown-scoped send failure — full topology: a blocked sender
 reclaimed by cancellation with the two-stage postconditions; component
 level: closure observation → error → autonomous stop (§6.1); idle
-wake; termination under owned work through every cause; `parked
-control-quit wake`; `parked subscription-quiescence wake`;
+wake; termination under owned work through every cause;
+`parked control-quit wake`; `parked subscription-quiescence wake`;
 `bounded-lane revocation`) green and repeat-stable, **driven
 pass-unit** — each driver step executing §3.5's full stage order
 (§7.2; stage-granular probes are outside the evidence surface). The
