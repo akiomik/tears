@@ -1037,7 +1037,13 @@ correspondence records what each clause becomes and adds no check of its own.
   beginning a pass (RFC 0014 §3.5, §6.3). This clause's "future-wakeable"
   property therefore survives with a wider source set than the shared and
   keyed receivers it names, and with the same force: a kernel that parks while
-  one of those has arrived unconsumed is non-conforming.
+  one of those has arrived unconsumed is non-conforming. The clause's second
+  half — shared input closed and keyed reconciliation `Quiescent` yielding
+  `Poll::Ready(None)` — is **superseded** with the receiver set it reports on:
+  the successor has no receiver collection to exhaust, and a live kernel with
+  no work parks rather than reporting exhaustion (RFC 0014 §6.3, INV-RC16).
+  What ends a run there is termination, whose routes and postconditions are
+  RFC 0011's (its §4), not an input-source exhaustion signal.
 
 ## 7. Testing Strategy
 

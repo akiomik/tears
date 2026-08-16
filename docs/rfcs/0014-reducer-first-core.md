@@ -49,11 +49,12 @@
   contract for `Application` users are unchanged (§2.4). `Added` —
   `Reducer`, `Program`, composition combinators (`scope`, `for_each`,
   `presented`, `into_program`) with `Keyed`/`Slot`,
-  `Command::on_teardown`, `ProgramRuntime`, `Exit`, and the stage-3
-  `TestDriver` (the RFC 0008 amendment §7.2 delegates); the
-  `Command::teardown` these combinators invoke is RFC 0013's surface and
-  is entered there, not here. Lands with the implementation, after
-  §13.1's gate.
+  `Command::on_teardown`, `ProgramRuntime`, and `Exit`. Two surfaces
+  this RFC pins the contract for are entered by their owners rather
+  than here: the `Command::teardown` these combinators invoke is
+  RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, landing in
+  that RFC's amendment (§13.2, §9 row 11). Lands with the
+  implementation, after §13.1's gate.
 
 ## Summary
 
@@ -1000,7 +1001,7 @@ edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
-| 1 | RFC 0003 | supersede | delivery topology: private keyed channels and receiver-based statements (INV-1's shared path, INV-2, the receiver clauses of INV-3/INV-4/INV-6/INV-7) → origin revocation on one lane (§3.1); INV-8's token rule, INV-10, INV-12 preserved; INV-9 → origin-liveness successor (§3.3); INV-16 → kernel park contract |
+| 1 | RFC 0003 | supersede | delivery topology: private keyed channels and receiver-based statements (INV-1's shared path, INV-2, the receiver clauses of INV-3/INV-4/INV-6/INV-7) → origin revocation on one lane (§3.1); INV-8's token rule, INV-10, INV-12 preserved; INV-9 → origin-liveness successor (§3.3); INV-16 splits — its arming half becomes the kernel park contract INV-RC16, its `Ready(None)` receiver-exhaustion half is superseded (a live kernel with no work parks, §6.3; termination is RFC 0011's) |
 | 2 | RFC 0003 / RFC 0006 / RFC 0007 | supersede + property loss | INV-14 shared-first pull and RFC 0006's two delivery classes → single FIFO (§3.1); the broad cancel-opportunity property is not preserved (§3.2) — recorded as a user-visible property loss. The private keyed channels go with them, and so does everything stated per channel: RFC 0007's `keyed_channel_capacity` leaves the public surface, RFC 0006 INV-L1's `m × keyed_channel_capacity` term has nothing to sum over, and INV-L9's per-command isolation — one key's full channel never delaying admission into another key's or into the shared channel — is **not preserved**: every producer awaiting capacity awaits the one data lane's. A second user-visible property loss, carried by this RFC's CHANGELOG |
 | 3 | RFC 0003 / RFC 0005 | supersede (breaking) | INV-11 batch folding → multi-keyed lowering (§3.4); RFC 0005 INV-20's "scoping does not bypass batch" restated over distribution |
 | 4 | RFC 0006 / RFC 0007 / RFC 0011 §7 | supersede (breaking) | the kernel's wall-clock reads: configured frame pacing — frame-branch pacing facts, INV-C5, the frame-rate config field and constructor parameter, the non-catch-up premise → §6.3's pass-bounded cadence — and the time-capped batching window (INV-L6's default) → an always-finite count cap (§3.5; `batch_max_messages = None` comes to mean the kernel's default count cap, an RFC 0007 doc change in the same cluster) |
