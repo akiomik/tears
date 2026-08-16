@@ -1356,7 +1356,7 @@ window; simultaneous readiness under both script faces; both quit
 semantics; both panic classes; shutdown-scoped send failure — full
 topology: a blocked sender reclaimed by cancellation with the
 two-stage postconditions; component level: closure observation →
-error → autonomous stop (§6.1); idle wake; termination under owned
+error → autonomous stop (§6.1); `idle wake`; termination under owned
 work through every cause; `bounded-lane revocation`, which runs
 INV-RC5's bounded-lane half over the single data lane.
 
