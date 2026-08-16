@@ -181,38 +181,43 @@ tests. It is lib-only: it needs the crate-private `compose_hook`, so the
 integration copy under `tests/common/panic_hook.rs` deliberately has no
 equivalent.
 
-A third category takes the guard without touching the hook at all: tests that
-deliberately raise panics, loom models included. The rule is about who *raises*
-panics, not only about who swaps hooks, and a test that panics on purpose holds
-`PANIC_HOOK_GUARD` for the whole panicking section even though it neither
-installs nor takes a hook — as the four `cell_core.rs` models do.
+**A recording hook filters by thread name. That is the primary defence, and it
+is the recording test's own obligation.** The guard serializes hook swaps, not
+the rest of the binary: any test in the process may panic while a recording hook
+is installed, and there is no way to enumerate — let alone guard — every test
+that panics on purpose, since `#[should_panic]` tests panic by construction. So
+a test that counts hook activity counts only panics raised on its own threads,
+the way `HookProbe` does, and the hook-restoration test in
+`src/test_support/panic_hook.rs` applies the same filter for the same reason.
+A recording hook without that filter is the defect: it asserts a count over the
+whole process while claiming to measure one test.
 
-What is measured, on the versions this crate locks (loom 0.7.2, generator 0.8.9,
-built both with and without `--cfg loom`): a loom model that succeeds never
-reaches the panic hook, and only a failing assertion inside a model reaches it,
-once — at which point the build is already red. The guard is therefore not
-holding back a stream of hook calls from ordinary exploration.
+Loom models take the guard as well, defensively rather than as the primary
+defence. What is measured, on the versions this crate locks (loom 0.7.2,
+generator 0.8.9, built both with and without `--cfg loom`): a model that
+succeeds never reaches the panic hook, and only a failing assertion inside a
+model reaches it, once — at which point the build is already red. The guard is
+therefore not holding back a stream of hook calls from ordinary exploration. It
+is kept because the measured behaviour is a property of dependency versions that
+nothing here pins and that `--cfg loom` already varies, and because the cost is
+four models serializing against the hook-holding tests, which is nothing. If a
+future version does start calling the hook, the filter above already contains
+the damage and the guard removes the interleaving entirely.
 
-It is still taken, for three reasons. A failing model's panic does reach whatever
-hook is installed, and the hook-restoration tests in
-`src/test_support/panic_hook.rs` install an unfiltered counter whose assertion
-that panic would move — one red test turning a second test red is a bad
-diagnostic. The measured behaviour is a property of those dependency versions,
-which nothing here pins and which `--cfg loom` already varies. And the cost is
-four loom models serializing against the hook-holding tests, which is nothing.
-
-The rule also has an observed origin worth recording as it happened. During the
-kernel spike the hook-restoration test began failing intermittently under the
-parallel full-suite run — three hook calls counted where one was expected — and
+The rule has an observed origin worth recording as it happened. During the kernel
+spike the hook-restoration test began failing intermittently under the parallel
+full-suite run — three hook calls counted where one was expected — and
 instrumenting the recording hook with thread names attributed the extra calls to
 panics raised on other tests' threads: deliberate panics in tests that were not
 holding the guard, and the loom models running in the same binary. Serializing
 both against `PANIC_HOOK_GUARD` closed it, with twelve consecutive green runs of
-the full lib suite where the same conditions had failed frequently before. The
-mechanism by which a loom model reached the hook was attributed at the time to
-the generator runtime's internals; it does not reproduce on the versions
-measured above, so treat this as an observed flake with an unconfirmed
-mechanism, not as a mechanism to reason from.
+the full lib suite where the same conditions had failed frequently before. That
+fix treated the symptom from the swapper side; the filter now treats it from the
+recorder side, which is the side that scales. The mechanism by which a loom model
+reached the hook was attributed at the time to the generator runtime's internals;
+it does not reproduce on the versions measured above, so treat this as an
+observed flake with an unconfirmed mechanism, not as a mechanism to reason
+from.
 
 Integration tests cannot use crate-private test support, so they use the focused
 local `with_silent_panic_hook` under `tests/common/panic_hook.rs`. Its guard uses

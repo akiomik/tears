@@ -188,6 +188,14 @@ mod tests {
         reason = "the test verifies hook restoration across an intentional panic on one thread"
     )]
     async fn silent_scope_restores_the_previous_hook_before_resuming_a_panic() {
+        // Counts only panics raised on this test's own thread, the same
+        // filter `HookProbe` applies and for the same reason: the guard
+        // serializes hook swaps, not the rest of the binary, so a panic
+        // from any concurrently running test would otherwise land in this
+        // counter (docs/testing.md "Process-Global Panic Hook Tests").
+        const PROBE: &str =
+            "test_support::panic_hook::tests::silent_scope_restores_the_previous_hook";
+
         let hook_guard = PANIC_HOOK_GUARD
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -195,7 +203,9 @@ mod tests {
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let recorded_calls = Arc::clone(&hook_calls);
         panic::set_hook(Box::new(move |_info| {
-            recorded_calls.fetch_add(1, Ordering::SeqCst);
+            if on_thread(PROBE) {
+                recorded_calls.fetch_add(1, Ordering::SeqCst);
+            }
         }));
 
         let outcome = AssertUnwindSafe(run_with_silent_panic_hook(async {

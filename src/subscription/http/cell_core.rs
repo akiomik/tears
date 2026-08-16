@@ -120,9 +120,9 @@ mod tests {
 
     /// Serializes a loom model against the process-global panic-hook
     /// tests. On the locked loom/generator versions a succeeding model
-    /// reaches no hook — only a failing assertion inside one does, and
-    /// that panic would move the unfiltered counter those tests install.
-    /// The guard is defensive at the cost of serializing four models
+    /// reaches no hook — only a failing assertion inside one does. The
+    /// recording tests filter by thread name, which is the primary
+    /// defence; this guard is a second one, cheap at four models
     /// (docs/testing.md "Process-Global Panic Hook Tests", which records
     /// the measurement and the flake it originated in).
     fn hook_guard() -> MutexGuard<'static, ()> {
