@@ -428,9 +428,11 @@ re-evaluation that itself issues stop requests admits nothing in the
 same pass (RFC 0014 §5.3).
 
 The barrier's subjects are subscription runs only: a teardown-selected
-command or cleanup run neither joins nor triggers it — they poll no
-input source, so there is no stolen-input hazard to close (RFC 0014
-§5.1). The availability coupling the uniform barrier carries — one
+command run neither joins the barrier nor triggers it, and neither
+does a cleanup run — which a teardown never selects at all (§3.1),
+and which is therefore outside the barrier for two reasons rather than
+one. Neither kind polls an input source, so there is no stolen-input
+hazard to close through them (RFC 0014 §5.1). The availability coupling the uniform barrier carries — one
 slow-quiescing teardown-stopped source defers unrelated children's
 admissions runtime-wide — is accepted as documented negative space
 (R5; RFC 0014 §5.1), and narrowing the barrier by declared conflict
@@ -456,8 +458,9 @@ the teardown-side participation:
   command consumes the old occupant's hooks and leaves the new
   registration armed (RFC 0014 §3.4);
 - re-applying a teardown re-fires nothing (§3.5); and
-- cleanup runs emit no messages, join no barrier, and their quiescence
-  marks no dirt (§4.3; RFC 0014 §5.1, §5.2).
+- cleanup runs produce no runtime-visible output at all — no message,
+  no producer quit, no directive — join no barrier, and their
+  quiescence marks no dirt (§4.3; RFC 0014 §4.4/INV-RC8, §5.1, §5.2).
 
 ## 6. Cross-domain ordering and termination
 
@@ -738,10 +741,11 @@ proof.
   task-exit timing", on both lane modes — are not independently owned
   here: INV-ST4 states them with RFC 0014 INV-RC5/INV-RC6 as its
   carrier, and their behavioral checks live there.
-- The cleanup finalizer contract (at most once, no messages,
-  termination discards) is not pinned here — RFC 0014 INV-RC8 owns
-  it; INV-ST1/INV-ST5 pin only its participation in selection and
-  idempotence.
+- The cleanup finalizer contract (at most once, no runtime-visible
+  output of any kind, termination discards) is not pinned here —
+  RFC 0014 INV-RC8 owns it, including the structural half at the
+  cleanup task's construction site; INV-ST1/INV-ST5 pin only its
+  participation in selection and idempotence.
 - Barrier scope and the stopping-pass defer are not pinned here —
   RFC 0012 §4 and RFC 0014 §5.1/§5.3 own them; §4.3 consumes them.
 - A dedicated teardown observability event is deliberately absent

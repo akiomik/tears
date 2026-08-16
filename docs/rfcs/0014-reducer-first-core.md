@@ -744,7 +744,13 @@ Contract (INV-RC8):
   application point that selects its scope (the start sits at the head
   of the stop-requested→quiesced interval RFC 0013 §1.2 places cleanup
   in; it runs concurrently with the torn-down runs' quiescence).
-- A cleanup run emits no messages — it cannot orphan.
+- A cleanup run produces **no runtime-visible output of any kind**:
+  no message on the data lane, no producer-originated quit on the
+  control lane, and no runtime directive. It is given no sender for
+  either lane, so it cannot orphan output, cannot terminate the
+  application, and cannot mark redraw or dirt. Its external side
+  effects are its whole purpose and are not restricted — what is closed
+  is the path back into the runtime, not the finalizer's own work.
 - Re-applying a teardown does not re-run consumed hooks (idempotence,
   INV-ST5-compatible).
 - **Termination always wins**: running cleanup runs are cancelled like
@@ -1199,9 +1205,15 @@ tiers remain the regression suite afterward.
   no composed child effect is unreachable. Behavioral: anonymous
   child effect torn down mid-flight, output retracted.
 - **INV-RC8 — cleanup.** §4.4's clauses: at-most-once, started at the
-  application point, no messages, consumed-not-rerun, termination
+  application point, no runtime-visible output of any kind (no
+  message, no quit, no directive), consumed-not-rerun, termination
   discards unfired hooks and cancels running ones. Behavioral per
-  clause; the termination row reuses the settle-loop discipline.
+  clause — the output clause asserting, for a cleanup run that
+  attempts each, no delivery to `update`, no termination, and no
+  redraw or subscription dirt attributable to it — with a structural
+  half at the cleanup task's construction site, where the run is
+  handed no lane sender to attempt any of them with; the termination
+  row reuses the settle-loop discipline.
 - **INV-RC9 — quit routes.** An `update`-returned quit terminates at
   its dispatch's completion with no intervening input processed. A
   producer quit is applied at the first control drain at or after its
