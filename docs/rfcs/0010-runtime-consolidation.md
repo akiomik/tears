@@ -595,12 +595,13 @@ the correction lives, and the superseding contract is RFC 0014 (§3.1,
 in the owner documents on that RFC's acceptance and gated there for
 mainlining (§13.1).
 
-**Return #8 (2026-08-16)**: one counterexample, recorded on each root
-it reaches — this root, `root-CMP` (§5.3), and `root-D18` (§6.2) —
-and correcting audit rows rather than root judgments: no verdict of
-§3–§7 changes on any of the three, and each entry says what it does
-change. Here it is LG-0006-047, the documentation guidance this root
-owns and the ledger records as reaffirmed: keying buys cancellability
+**Return #8 (2026-08-16)**: one counterexample, returned on each root
+it reaches — here, on `root-CMP` as return #9 (§5.3), and on
+`root-D18` as return #10 (§6.2) — and correcting audit rows rather
+than root judgments: no verdict of §3–§7 changes on any of the three,
+and each entry says what it does change. Here it is LG-0006-047, the
+documentation guidance this root owns and the ledger records as
+reaffirmed: keying buys cancellability
 at the cost of delivery deferral under load, so liveness-critical
 output routes to unkeyed commands. Neither half survives the successor
 this root's own return already records — one data lane defers no keyed
@@ -751,9 +752,10 @@ superseding contract is RFC 0014 (§2, §8), accepted at its staged
 spike's tier, with its owner-document edits landed and implementation
 mainlining still gated there (§13.1).
 
-**Return #8 (2026-08-16)**: the entry §3.2 opens, on the root that
-owns the cleanup-hook seam. What changes here is the condition text
-N27 carries for that seam, not this root's verdict: N27 describes a
+**Return #9 (2026-08-16)**: the same counterexample as return #8
+(§3.2), on the root that owns the cleanup-hook seam. What changes here
+is the condition text N27 carries for that seam, not this root's
+verdict: N27 describes a
 cleanup window that defers admission through the subscription barrier
 and is observable through the producer gauges, and the successor
 denies both — a cleanup run neither joins the barrier nor triggers it
@@ -865,9 +867,10 @@ decision (the dirty-source set), so per §1.9 it reopened `root-K51J46`
 and not `root-D18` — recorded here because this chapter's rules were
 the trigger.
 
-**Return #8 (2026-08-16)**: the entry §3.2 opens, on the root whose
-audit rows carry it. N27's sharpening and INT-6's joint walk both rest
-on cleanup delay being visible through this root's own machinery —
+**Return #10 (2026-08-16)**: the same counterexample as return #8
+(§3.2), on the root whose audit rows carry it. N27's sharpening and
+INT-6's joint walk both rest on cleanup delay being visible through
+this root's own machinery —
 cleanup delay defers admission through the barrier and is observable
 through the gauges, the same shape as a blocking source. The successor
 denies both halves: a command or cleanup run neither joins the

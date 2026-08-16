@@ -1653,6 +1653,20 @@ own.
   incidental strength INV-14 lends in unbounded mode; with shared-first
   pull superseded (row 2) the recorded loss is the general one
   (RFC 0014 §3.2), and the executions INV-L14 legalizes stay legal.
+- **Bounded mode's input path loses the separation it had.** Terminal
+  input reaches `update` as subscription output through the shared
+  channel, whose capacity no keyed output consumed, and INV-14 pulled
+  it ahead of every ready keyed result. On the successor it shares the
+  one data lane and the one configured capacity with every producer,
+  so in bounded mode an input's admission can queue behind keyed
+  command output that a full lane is holding — the interactivity a
+  bounded configuration buys is not what section 3.1's verdict and
+  section 4.1's sizing rule were written against. This follows from
+  rows 2 and 10 rather than adding to them, and it is why neither
+  document states a bounded-mode input-latency bound (RFC 0014 §3.2's
+  loss list carries the same statement, and its §3.3 declines the
+  bound); the successor's numbers are INV-L4's named prerequisite
+  above.
 - **INV-L15's negative space is preserved; its fact list follows rows 2
   and 10.** The delivery-channel classes become the data lane and the
   control lane, the shared-before-keyed fact and the keyed-quit
