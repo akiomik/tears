@@ -956,9 +956,9 @@ the delivery decision point by the producing run's liveness, and a
 producer-originated quit travels a dedicated control lane while an
 `update`-returned quit applies synchronously at its dispatch (RFC 0014 §3.1,
 §3.3). The register that decides this correspondence is RFC 0014 §9 rows 1–3,
-whose landing that RFC gates on its staged spike (its §13.1). On the runtime
-this document describes, every clause above holds as stated; each becomes the
-following. The successor's own enforcement classes are RFC 0014 §12's — this
+landed with that RFC's acceptance; the clauses above state the contract in
+force until mainlining closes RFC 0014 §13.1's open tier, and each becomes the
+following there. The successor's own enforcement classes are RFC 0014 §12's — this
 correspondence records what each clause becomes and adds no check of its own.
 
 - **INV-1 — superseded.** No separate shared path remains: an unkeyed
@@ -978,13 +978,17 @@ correspondence records what each clause becomes and adds no check of its own.
 - **INV-5 — preserved.** `CancelPolicy` and its arrival handling are
   unchanged; RFC 0014 §3.4 applies the policy per lowered entry, and occupancy
   is read from the run's deliverability rather than from a receiver.
-- **INV-6 — preserved, both faces.** Finishing is not revocation, so a run
-  that finishes on its own while its output is still queued stays deliverable
-  until that output is delivered; and it stays *revocable* for exactly that
-  window, so a later explicit cancel, supersession, teardown, or termination
-  still drops the queued output undelivered — which is what makes a
-  finished-but-buffered run's output cancellable, and what keeps its identity
-  occupied until one of the two happens (RFC 0014 §3.1, INV-RC5).
+- **INV-6 — property preserved (both faces), receiver formulation
+  superseded.** Finishing is not revocation, so a run that finishes on its own
+  while its output is still queued stays deliverable until that output is
+  delivered; and it stays *revocable* for exactly that window, so a later
+  explicit cancel, supersession, teardown, or termination still drops the
+  queued output undelivered — which is what makes a finished-but-buffered
+  run's output cancellable, and what keeps its identity occupied until one of
+  the two happens (RFC 0014 §3.1, INV-RC5). The clause's object changes with
+  the topology like INV-3's, INV-4's and INV-7's: "the receiver still contains
+  output" becomes the run's queued output on the one data lane, and occupancy
+  is the delivery accounting's, not a receiver's.
 - **INV-7 — property preserved, receiver facts superseded.** An identity whose
   run has finished and whose output has drained is free, so same-id work
   returned by the current `update` is not dropped as in-flight; what decides it
@@ -1026,9 +1030,14 @@ correspondence records what each clause becomes and adds no check of its own.
   kernel replaces; RFC 0014 §9 states no successor for it and none is claimed
   here.
 - **INV-16 — successor statement.** The property becomes the kernel's park
-  contract: a workless kernel parks, and a parked kernel is woken by a wake
-  source a pass can begin from — a producer exit included, which the woken
-  pass's exit-reflection stage consumes (RFC 0014 §3.5, §6.3).
+  contract, RFC 0014 INV-RC16: a workless kernel parks, and a parked kernel
+  holds a registered waker on every source that can create a pass's work —
+  data-lane readiness, control-lane arrival, and producer-exit or
+  subscription-quiescence notification — with the arrival of any one of them
+  beginning a pass (RFC 0014 §3.5, §6.3). This clause's "future-wakeable"
+  property therefore survives with a wider source set than the shared and
+  keyed receivers it names, and with the same force: a kernel that parks while
+  one of those has arrived unconsumed is non-conforming.
 
 ## 7. Testing Strategy
 
