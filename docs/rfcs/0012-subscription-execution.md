@@ -19,8 +19,9 @@
   additions, and restarts of already-finished subscriptions — admit
   immediately as today, and continuing subscriptions are unaffected.
   Subscription re-evaluation also gains a message-independent trigger:
-  the quiescence of a task stopped by re-evaluation marks
-  subscriptions dirty, so `subscriptions()` can run — and a finished,
+  the quiescence of a task stopped by a steady-state cause (§4.2)
+  marks subscriptions dirty, so `subscriptions()` can run — and a
+  finished,
   still-declared subscription restart — on a frame pass with no new
   message (§4.3); the `Application::subscriptions` rustdoc is updated
   to match. Lands with the implementation.
@@ -220,17 +221,27 @@ interference on top.
   stopped or started.
 - **INV-SE3 — no admission before outstanding stops quiesce.** A
   re-evaluation issues its stop requests first; no admission from its
-  desired set executes until every stop-requested task — its own
-  removals, and any still-unquiesced stop from an earlier
-  re-evaluation or from a scope teardown — has quiesced. A
-  re-evaluation that has issued stop requests therefore admits nothing
+  desired set executes until every stop-requested **subscription**
+  task — its own removals, and any still-unquiesced subscription stop
+  from an earlier re-evaluation or from a scope teardown — has
+  quiesced. Runs of other kinds are not subjects even when the same
+  teardown stopped them (§4.1): a teardown that selects a command run
+  and a subscription run defers admission behind the subscription run
+  alone. A re-evaluation that has issued stop requests admits nothing
   in its own pass, even when one of those tasks quiesces while that
   pass is still running: admission executes at a re-evaluation
   (INV-SE5), and a deferred admission is the next frame pass's. A
   re-evaluation with no outstanding stopped task (pure additions;
   restarts of already-finished tasks, which are quiesced by definition)
   admits immediately — the current synchronous behavior remains
-  conforming there.
+  conforming there. The two halves are checked differently, and
+  RFC 0014 INV-RC12 states the same split from the kernel side:
+  non-participation by command and cleanup runs is behavioral at the
+  reconcile seam, one row per run kind, while the same-pass clause is
+  structural at the same seam — the reconcile path takes no second
+  admission attempt after issuing its stops — because a mid-pass
+  quiescence is not constructible on the single-threaded executor
+  those behavioral rows use.
 - **INV-SE4 — a newer re-evaluation supersedes pending admissions.**
   When a new re-evaluation arrives while admissions are pending on the
   barrier, the older generation's pending desired set and its
@@ -322,12 +333,20 @@ it.
 
 ## 5. `subscriptions()` purity
 
-**INV-SE6**: `Application::subscriptions` is a pure function of
-application state — for a given state it returns the same declared set
-(the same identities, per RFC 0005), executes no side effects, and
-reads no external mutable state. The runtime may invoke it at any
-re-evaluation frequency; an application must not rely on call count or
-call timing for correctness.
+**INV-SE6**: a `subscriptions` declaration is a pure function of the
+state it is declared over — for a given state it returns the same
+declared set (the same identities, per RFC 0005), executes no side
+effects, and reads no external mutable state. The runtime may invoke it
+at any re-evaluation frequency; the declaring code must not rely on
+call count or call timing for correctness.
+
+The obligation is one clause with one owner of record, and it binds
+every declaration site the runtime drives: `Application::subscriptions`
+on the entry point this RFC is written over, and
+`Reducer::subscriptions` on the reducer-first core's protocol, whose
+adapter and composed reducers reach the same reconciliation through the
+same declared set (RFC 0014 §2.1, §9 row 12 — the register row that
+records this generalization). Neither site restates it.
 
 This obligation exists today only as `Application` rustdoc
 (`src/application.rs`); this RFC is its owner of record, and the
@@ -482,7 +501,8 @@ Enforcement classes follow the pre-review checklist's definitions.
   command and cleanup runs not being subjects (§4.1) — and a
   re-evaluation that issued stop requests admits nothing in its own
   pass even if one of them quiesces during it; a re-evaluation with no
-  outstanding stopped task admits immediately. Behavioral at the manager layer on a
+  outstanding stopped task admits immediately. Behavioral at the
+  manager layer on a
   single-threaded test executor, where the quiescence gap is
   deterministic: after a re-evaluation that stops A and adds B, assert
   B's spawner has not run before the executor processes A's
@@ -544,9 +564,12 @@ comment records exactly that hazard
 
 - **INV-SE6**: `subscriptions()` purity (§5) — same state, same
   declared set; no side effects; no reads of external mutable state;
-  no reliance on call count or timing. Structural: this is an
-  obligation on application code, carried by the `Application`
-  rustdoc citing this RFC; the crate-side check is review that runtime
+  no reliance on call count or timing — at every declaration site the
+  runtime drives, `Application::subscriptions` and
+  `Reducer::subscriptions` alike (§5, RFC 0014 §9 row 12). Structural:
+  this is an obligation on declaring code, carried by the `Application`
+  rustdoc citing this RFC, and by the `Reducer` rustdoc on the same
+  terms where that trait lands; the crate-side check is review that runtime
   and store code depend only on what purity licenses (dirty-frame
   gating, RFC 0011 §2; declaration observation, RFC 0008 INV-T11) —
   a behavioral test cannot prove purity of arbitrary user code.
