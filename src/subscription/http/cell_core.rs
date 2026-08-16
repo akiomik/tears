@@ -119,11 +119,12 @@ mod tests {
     use crate::test_support::PANIC_HOOK_GUARD;
 
     /// Serializes a loom model against the process-global panic-hook
-    /// tests: loom's generator runtime raises internal panics on every
-    /// explored execution, and those invoke whatever hook is installed —
-    /// a concurrently running test that installs an unfiltered counting
-    /// hook would count them (docs/testing.md "Process-Global Panic Hook
-    /// Tests").
+    /// tests. On the locked loom/generator versions a succeeding model
+    /// reaches no hook — only a failing assertion inside one does, and
+    /// that panic would move the unfiltered counter those tests install.
+    /// The guard is defensive at the cost of serializing four models
+    /// (docs/testing.md "Process-Global Panic Hook Tests", which records
+    /// the measurement and the flake it originated in).
     fn hook_guard() -> MutexGuard<'static, ()> {
         PANIC_HOOK_GUARD
             .lock()
