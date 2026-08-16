@@ -345,8 +345,8 @@ pub trait ReducerExt: Reducer + Sized {
     ) -> IntoProgram<Self, Flags>;
 }
 
-// IntoProgram<R, Flags> implements
-// Program<State = R::State, Message = R::Message, Flags = Flags>.
+// IntoProgram<R, Flags> is a Program whose Reducer half is R's: it
+// reduces R's State with R's Message, and takes Flags for init.
 ```
 
 Each combinator's parent state and message types are `Self`'s
@@ -457,6 +457,19 @@ re-checked one by one:
   — put liveness-critical output in an unkeyed command — has no
   successor, because one lane offers no faster class to move it to
   (§9 rows 2 and 10).
+- *Input admission is not prioritized over producer output* — **not
+  preserved, and newly consequential in bounded mode**: terminal input
+  reached `update` through the shared channel, whose capacity no keyed
+  output consumed, and with shared-first pull ahead of every ready
+  keyed result; on this kernel it is subscription output like any
+  other, sharing the one data lane and the one capacity with every
+  producer. In bounded mode an input's admission can therefore
+  queue behind keyed command output that a full lane is holding, so
+  the interactivity a bounded configuration buys is not what it was —
+  the same loss as the two above, stated separately because its
+  subject is the user-facing input path rather than a delivery order
+  (§3.3's latency statement declines a bounded-mode bound for exactly
+  this reason; RFC 0006 §5.2 records it on the owner side).
 - *Redraw cadence survives flood* — **preserved, deterministically**:
   the batch cap — always finite under this RFC (§3.5, superseding the
   time-capped default window; §9 row 4) — forces pass boundaries, a
@@ -484,8 +497,9 @@ Two physical routes replace the previous two:
   drained as a **mandatory stage of every pass, before the pass's
   input batch** (§3.5), never behind the data lane's backlog or its
   capacity-wait queue (R4's backlog independence, preserved for this
-  route), and applied only if its origin is still live. *Cancel beats a buffered quit*
-  (RFC 0003 INV-9's intent) is therefore preserved through origin
+  route), and applied only if its origin is still live. *Cancel beats
+  a buffered quit* (RFC 0003 INV-9's intent) is therefore preserved
+  through origin
   revocation rather than through private-channel drop.
 
 **Not preserved**: RFC 0006 INV-L10's keyed-quit ordering — a keyed
@@ -780,8 +794,8 @@ barrier nor trigger it — they poll no input source, so they cannot
 steal input, and extending the barrier to them would create a new
 coupling with no hazard to close. The availability trade-off — one
 slow-quiescing source defers unrelated children's admissions — remains
-the explicitly accepted negative space (RFC 0013 R5's coupling,
-RFC 0010's G-6 demand), and narrowing by declared conflict domains
+the explicitly accepted negative space (RFC 0013 R5's coupling), and
+narrowing by declared conflict domains
 stays rejected: the kernel cannot verify such declarations, and stolen
 input cannot be recovered by delivery-side filtering.
 
