@@ -361,7 +361,7 @@ mod tests {
 
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex};
     use std::task::Poll;
 
     use color_eyre::eyre::Result;
@@ -369,7 +369,7 @@ mod tests {
     use tokio::time::{Duration, sleep, timeout};
 
     use crate::subscription::mock::MockSource;
-    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD, TraceRecorder, wait_until};
+    use crate::test_support::{HookProbe, TraceRecorder, hook_guard, wait_until};
 
     struct OneshotSource {
         value: i32,
@@ -1363,9 +1363,7 @@ mod tests {
         reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
     )]
     async fn a_panicking_subscription_forwarder_skips_the_terminal_restore() {
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         let probe = HookProbe::install(
             "subscription::tests::a_panicking_subscription_forwarder_skips_the_terminal_restore",
         );

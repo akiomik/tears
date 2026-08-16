@@ -129,12 +129,12 @@ pub fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook)
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD};
+    use crate::test_support::{HookProbe, hook_guard};
 
     use super::*;
 
     use std::future::pending;
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex};
 
     use futures::future::join_all;
     use tokio::runtime::Builder;
@@ -154,9 +154,7 @@ mod tests {
     fn test_compose_hook_restores_then_delegates_once() {
         // Serialize against other tests that touch the global panic hook or
         // panic, so a concurrent panic cannot invoke our recording hook.
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
 
         // Records the order (and therefore the count) of the two stages.
         // `restore` must run first so the terminal is usable before the
@@ -204,9 +202,7 @@ mod tests {
     fn test_contained_producer_panic_skips_restore_while_application_panic_restores() {
         const PROBE: &str = "tears-panic-probe-contained";
 
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         let runtime = Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name(PROBE)
@@ -254,9 +250,7 @@ mod tests {
     fn test_contained_mark_does_not_span_await_points() {
         const PROBE: &str = "tears-panic-probe-parked";
 
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         // One worker thread, so the unrelated task below is guaranteed to run
         // on the very thread that parked the contained producer — the exact
         // condition a mark held across `.await` would misclassify.
@@ -311,9 +305,7 @@ mod tests {
         const PROBE: &str = "tears-panic-probe-migrating";
         const TASKS: usize = 8;
 
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         let runtime = Builder::new_multi_thread()
             .worker_threads(4)
             .thread_name(PROBE)
@@ -358,9 +350,7 @@ mod tests {
     fn test_aborted_contained_producer_leaves_no_mark_on_the_worker() {
         const PROBE: &str = "tears-panic-probe-aborted";
 
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         // One worker thread, so the panic below lands on the same thread the
         // aborted producer was polled and dropped on.
         let runtime = Builder::new_multi_thread()

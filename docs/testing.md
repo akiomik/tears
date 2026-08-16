@@ -155,10 +155,14 @@ across the two copies.
 
 ## Process-Global Panic Hook Tests
 
-Use `crate::test_support::PANIC_HOOK_GUARD` for crate-internal tests that directly
+Use `crate::test_support::hook_guard()` for crate-internal tests that directly
 call `std::panic::set_hook` or `std::panic::take_hook`. The panic hook is
 process-global and tests run in parallel by default, so hook-swapping tests can
-otherwise clobber each other or observe an unrelated panic.
+otherwise clobber each other or observe an unrelated panic. The helper locks the
+process-global `PANIC_HOOK_GUARD` and recovers from poisoning in one place —
+poisoning is ordinary here, since the tests it serializes panic on purpose, and
+recovering keeps one such panic from failing every later hook test with a poison
+error instead of its own assertion.
 
 Hold the guard for the full critical section: install or take the hook, trigger
 and catch the panic if needed, restore the previous hook, and then inspect any
@@ -176,7 +180,7 @@ restore skipped or taken) use `crate::test_support::HookProbe` instead: it
 installs a counting hook built from the real `compose_hook`, serves
 multi-thread runtimes and non-async tests, and filters its counts by worker
 thread name so a concurrent unrelated panic cannot move them. Callers hold
-`PANIC_HOOK_GUARD` themselves — including across `block_on` in non-async
+the guard themselves — including across `block_on` in non-async
 tests. It is lib-only: it needs the crate-private `compose_hook`, so the
 integration copy under `tests/common/panic_hook.rs` deliberately has no
 equivalent.
@@ -199,7 +203,7 @@ process-global hook around its own unwinds: tearing a coroutine down, it calls
 `take_hook`, installs a no-op so the internal unwind prints nothing, and
 reinstalls the previous hook afterwards (`generator`'s `gen_impl.rs`). A test
 running concurrently with that sequence is running concurrently with a hook
-swap it did not make — exactly what `PANIC_HOOK_GUARD` serializes. That the
+swap it did not make — exactly what the guard serializes. That the
 swap is performed by a dependency rather than by the test's own code changes
 nothing about the hazard. Robustness against future loom or generator versions
 is a secondary reason, and the cost is four models serializing against the
@@ -222,7 +226,7 @@ holding the guard, and the loom models running in the same binary. That
 diagnosis named generator's completion path as the primary cause, and it is a
 real path — `done()` raises `panic_any` in generator's `yield_.rs`, and loom's
 scheduler ends a coroutine body with it. Serializing both against
-`PANIC_HOOK_GUARD` closed the flake, with twelve consecutive green runs of the
+the guard closed the flake, with twelve consecutive green runs of the
 full lib suite where the same conditions had failed frequently before. The
 re-measurement above does not reproduce that path reaching an installed hook,
 and the two observations are left as they are rather than reconciled by

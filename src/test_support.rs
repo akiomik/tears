@@ -12,7 +12,7 @@ use crate::command::Command;
 use crate::subscription::Subscription;
 
 pub use async_utils::{assert_pending_until, gate_fetches, wait_until};
-pub use panic_hook::{HookProbe, PANIC_HOOK_GUARD, with_silent_panic_hook};
+pub use panic_hook::{HookProbe, hook_guard, with_silent_panic_hook};
 pub use trace_recorder::{TraceRecorder, set_default_subscriber};
 
 mod async_utils;

@@ -110,27 +110,19 @@ impl CellCore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{MutexGuard, PoisonError};
-
     use loom::sync::Arc;
     use loom::thread;
 
     use super::CellCore;
-    use crate::test_support::PANIC_HOOK_GUARD;
-
-    /// Serializes a loom model against the process-global panic-hook
-    /// tests, because a model *is* a hook swapper: loom drives each model
-    /// thread as a `generator` coroutine, and generator takes the global
-    /// hook, installs a no-op around its own unwind, and reinstalls the
-    /// previous one. That is the swap this guard exists to serialize —
-    /// the recording tests' thread-name filter guards their counts, but
-    /// not against a hook being swapped under them (docs/testing.md
-    /// "Process-Global Panic Hook Tests").
-    fn hook_guard() -> MutexGuard<'static, ()> {
-        PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
+    use crate::test_support::hook_guard;
+    // Each model holds the guard for its duration, because a loom model
+    // *is* a hook swapper: loom drives each model thread as a `generator`
+    // coroutine, and generator takes the global hook, installs a no-op
+    // around its own unwind, and reinstalls the previous one. That is the
+    // swap the guard exists to serialize — the recording tests'
+    // thread-name filter guards their counts, but not against a hook being
+    // swapped under them (docs/testing.md "Process-Global Panic Hook
+    // Tests").
 
     #[test]
     fn single_flight_selects_at_most_one_fetcher_per_generation() {

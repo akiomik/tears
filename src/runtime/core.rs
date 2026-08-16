@@ -265,8 +265,8 @@ mod tests {
 
     use std::future::pending;
     use std::num::{NonZeroU64, NonZeroUsize};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, PoisonError};
 
     use ratatui::backend::TestBackend;
     use ratatui::prelude::*;
@@ -277,7 +277,7 @@ mod tests {
     use crate::runtime::AppInput;
     use crate::subscription::Subscription;
     use crate::subscription::time::Timer;
-    use crate::test_support::{HookProbe, PANIC_HOOK_GUARD, TestApp, TestMessage, wait_until};
+    use crate::test_support::{HookProbe, TestApp, TestMessage, hook_guard, wait_until};
 
     #[test]
     fn test_new() {
@@ -690,9 +690,7 @@ mod tests {
         reason = "the test intentionally serializes the process-global hook across its current-thread awaits"
     )]
     async fn a_panicking_unkeyed_command_task_skips_the_terminal_restore() {
-        let _hook_guard = PANIC_HOOK_GUARD
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _hook_guard = hook_guard();
         let probe = HookProbe::install(
             "runtime::core::tests::a_panicking_unkeyed_command_task_skips_the_terminal_restore",
         );
