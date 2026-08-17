@@ -1150,7 +1150,7 @@ mod tests {
     use crate::command::{Command, CommandId};
     use crate::kernel::conformance::support::{
         Beacon, Script, TEST_TURNS, cap, config, driver, driver_with, failing_driver,
-        marking_effect, sending_effect, silent_effect,
+        marking_effect, parking_effect, sending_effect, silent_effect,
     };
     use crate::kernel::lane::SendGate;
     use crate::subscription::mock::MockSource;
@@ -1560,6 +1560,76 @@ mod tests {
 
         let token = driver.grant(run).expect("no other grant");
         let _confirmed = driver.confirm(0, token);
+    }
+
+    // A grant the gate has already resolved is the other thing
+    // `try_confirm` can report, and the one a probe that simply saw nothing
+    // would fail to distinguish: two `None` assertions on their own are
+    // satisfied by a peek that reads no state at all.
+    //
+    // The turn that resolves it comes from a `step_pass` whose source is a
+    // *producer exit* — the marking run's end makes that source ready — so
+    // the step is admitted and its leading turn hands the parked run its
+    // release, which commits before the pass itself runs.
+    #[test]
+    fn try_confirm_reports_a_grant_the_gate_has_already_resolved() {
+        let ended = Beacon::default();
+        let (mut driver, journal) = driver(Script::new(Command::batch([
+            marking_effect(ended.clone()),
+            parking_effect([7]),
+        ])));
+        let parker = driver.boot().started[1].clone();
+
+        driver.settle(TEST_TURNS, || ended.marked());
+        let token = driver.grant(parker).expect("no other grant");
+        driver
+            .step_pass(WakeSource::ProducerExit)
+            .expect("the marking run's exit is observable");
+
+        assert_eq!(
+            driver.try_confirm(&token),
+            Some(Confirmed::Accepted),
+            "the step's own turn released the send, and the gate holds its terminal"
+        );
+        assert_eq!(
+            driver.confirm(TEST_TURNS, token),
+            Confirmed::Accepted,
+            "and the peek took neither the token nor the grant"
+        );
+        assert_eq!(
+            journal.reduced(),
+            vec![7],
+            "the pass delivered the release its own turn let commit"
+        );
+    }
+
+    // §9.5's first bound has an edge the journal cannot show: a refused step
+    // drives *nothing*, not even a turn. An empty journal is equally what a
+    // step that spent a turn and delivered nothing would leave; an
+    // unresolved grant is not, because a turn is exactly what the release
+    // was waiting for — as the confirm at the end shows by supplying one.
+    #[test]
+    fn a_refused_step_hands_the_executor_no_turn() {
+        let (mut driver, _journal) = driver(Script::new(parking_effect([7])));
+        let run = driver.boot().started[0].clone();
+
+        let token = driver.grant(run).expect("no other grant");
+        assert_eq!(
+            driver.step_pass(WakeSource::Data).err(),
+            Some(NotReady),
+            "nothing has reached the data lane, so the step is refused"
+        );
+        assert_eq!(
+            driver.try_confirm(&token),
+            None,
+            "and the refusal drove nothing: the release is still untaken"
+        );
+
+        assert_eq!(
+            driver.confirm(TEST_TURNS, token),
+            Confirmed::Accepted,
+            "one turn is all it was waiting for"
+        );
     }
 
     // §9.6's first reclaiming fact: the send this grant released ended
