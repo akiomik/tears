@@ -1151,7 +1151,7 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   - **Introduced here**, arriving with that landing: `TestDriver`,
     `ParkProbe`, `WakeSource`, `Origin`, `AnonymousRun`, `StepReport`,
     `GrantToken`, `Confirmed`, `GrantOutstanding`, `NotReady`,
-    `DeliveryLedger`, `IntentLedger`.
+    `AcceptanceLedger`, `IntentLedger`.
   - **Existing and unchanged**: `CommandId` and `SubscriptionId`,
     RFC 0005's identity types.
   - **Entering or changing in the same landing**: `Program` and
@@ -1285,8 +1285,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// exits (§9.6).
     pub fn settle(&mut self);
 
-    /// Sends accepted past the gate, origin-tagged, in gate order.
-    pub fn deliveries(&self) -> DeliveryLedger;
+    /// Sends admitted past the gate, tagged with origin and lane,
+    /// in gate order. Admission, not delivery (§9.6).
+    pub fn accepted(&self) -> AcceptanceLedger;
 
     /// Send-intents recorded before the gate, origin-tagged, under
     /// no ordering or completeness guarantee (§9.6).
@@ -1346,7 +1347,7 @@ pub struct GrantOutstanding;
 /// The scripted wake source had not arrived; nothing was driven.
 pub struct NotReady;
 
-pub struct DeliveryLedger { /* private */ }
+pub struct AcceptanceLedger { /* private */ }
 pub struct IntentLedger { /* private */ }
 
 /// Park-boundary instrument. Evidence for INV-RC16 only (§9.7).
@@ -1420,7 +1421,7 @@ terminated is reached without ever passing through running.
 | `boot` | legal | misuse | misuse |
 | `step_pass`, `confirm` | misuse | legal | misuse |
 | `grant`, `settle` | misuse | legal under §9.6 | misuse |
-| `deliveries`, `intents` | legal, empty | legal | legal |
+| `accepted`, `intents` | legal, empty | legal | legal |
 
 The third row's condition is §9.6's grant lifecycle, which is where
 those two calls' legality is stated in full: `grant` is misuse at an
@@ -1547,7 +1548,7 @@ producer output reaches *either* lane before a grant is complete
 rather than data-lane-only, because a producer-originated quit is
 gated too. A producer's quit is scriptable exactly like its
 messages — the pass-unit series RFC 0014 §13.1 names for both quit
-semantics is driven by granting the quit's own send. And `deliveries`
+semantics is driven by granting the quit's own send. And `accepted`
 records accepted producer sends from both lanes, each record carrying
 the lane alongside its origin, so a test can tell a released quit
 from a released message.
@@ -1710,15 +1711,14 @@ pre-gate ledger is for, and a test reading `intents` after a `settle`
 is reading exactly the kind of record this section declines to
 guarantee.
 
-Two ledgers divide at the send gate. The first records the sends
-**accepted past it** — admitted, not delivered — each record carrying
-its origin and its lane, in gate order: the guaranteed observation
-sequence INV-RC14 scopes, which RFC 0014 §7.2 begins at the gate for
-exactly this reason. What the block spells `deliveries` is normative
-in that content and not in its spelling, the block's own latitude
-covering accessor names; a record in it says an item was admitted,
-and says nothing about whether `update` ever saw it. That order is
-the *driver's*, established by the sequence of grants, and cross-lane
+Two ledgers divide at the send gate. `accepted` records the sends
+admitted past it, each record carrying its origin and its lane, in
+gate order: the guaranteed observation sequence INV-RC14 scopes,
+which RFC 0014 §7.2 begins at the gate for exactly this reason.
+Admitted is not delivered — a record says an item passed the gate and
+says nothing about whether `update` ever saw it, which is why a
+revoked run's committed send belongs in it. That order is the
+*driver's*, established by the sequence of grants, and cross-lane
 it is nobody's claim about production: RFC 0014 §3.3 declines to
 order a run's own control-lane quit against its earlier data-lane
 output at all, so a reading that puts one before the other is the
@@ -1844,7 +1844,7 @@ what was verified and at what scope.
 - **The citation rule.** An order the driver establishes is never
   evidence of a production order — §4.2's rule, generalized by
   RFC 0014 §7.2 — and it reaches every order this section names: the
-  scripted sequence of wake sources, the gate order `deliveries`
+  scripted sequence of wake sources, the gate order `accepted`
   records, and the `started` order of a report. Which source production
   picks among several ready at once stays unobserved here (RFC 0014
   §3.5 pins the policy, not the occasion), and a
@@ -1919,7 +1919,7 @@ of §9.3's block maps to one of them, walked in order:
   INV-RC14's observation sequence only negatively, by initiating no
   append to it — a property §9.6 makes structural through the rule
   that `settle` is misuse while a grant is outstanding.
-- `deliveries`, `intents`, `DeliveryLedger`, `IntentLedger` →
+- `accepted`, `intents`, `AcceptanceLedger`, `IntentLedger` →
   INV-RC14's gate-scoped observation sequence, whose pre-gate
   exclusion is what the second ledger keeps separate.
 - `ParkProbe` and its three readers → INV-RC16, whose behavioral rows
@@ -1957,7 +1957,7 @@ of §9.3's block maps to one of them, walked in order:
   the armed sources only. Excluded by §9.5: `WakeSource` is the whole
   vocabulary, `boot` absorbs the one pending frame that ever exists,
   and there is no other entry point that begins a pass.
-- *Ledger as transcript* — a test that reads `deliveries` as the
+- *Ledger as transcript* — a test that reads `accepted` as the
   application's message transcript would turn a driver-established
   order into evidence about delivery. Excluded by §9.6's ledger
   content (send events by origin, not messages) together with §9.9's
@@ -1983,12 +1983,13 @@ of §9.3's block maps to one of them, walked in order:
   either; a budget exhausted before either arrives still fails the
   test, and the stranded token stays a dead end because it *is* a
   test-author error.
-- *Ledger as delivery record* — reading an entry in the gate ledger
-  as proof that `update` saw the item. A revoked run's send can
-  commit and be recorded, and is then dequeued with no `update` work
-  at all (RFC 0014 §4.3). Excluded by §9.6's ledger paragraph, which
-  scopes the record to admission, and by §9.11's mapping, which puts
-  INV-RC5's checks on the pass rather than on either ledger.
+- *Acceptance read as delivery* — reading an entry in `accepted` as
+  proof that `update` saw the item. A revoked run's send can commit
+  and be recorded, and is then dequeued with no `update` work at all
+  (RFC 0014 §4.3). The accessor's name carries the distinction now
+  rather than leaning on prose, and §9.6's ledger paragraph scopes
+  the record to admission besides; §9.11's mapping puts INV-RC5's
+  checks on the pass rather than on either ledger.
 
 **Excluded claims**, per the checklist's minimal-contract item: no
 INV-T-numbered restatement of INV-RC13, INV-RC14, or INV-RC16 is
