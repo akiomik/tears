@@ -53,7 +53,7 @@ use std::future::{Future, ready};
 #[cfg(test)]
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -62,9 +62,9 @@ use ratatui::backend::Backend;
 use tokio::runtime::{Builder, Runtime as Executor};
 
 use crate::command::CommandId;
-use crate::kernel::Kernel;
 use crate::kernel::lane::{GateMode, RunToken};
 use crate::kernel::registry::RunKind as EntryKind;
+use crate::kernel::{Kernel, StartedRun};
 use crate::reducer::{Exit, Program};
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::LoadObserver;
@@ -84,6 +84,16 @@ pub use crate::kernel::lane::{GrantOutstanding, Lane};
 /// [`TestDriver::settle`] and [`TestDriver::confirm`] — take their budgets
 /// from the caller instead (RFC 0008 §9.6).
 const TURN_BUDGET: usize = 1024;
+
+/// Hands each driver an identity of its own, so the names and tokens it
+/// mints are its own too.
+///
+/// Run tokens are the *kernel's*, and every kernel starts counting at one:
+/// two drivers' first runs carry the same token, so without this their names
+/// would compare equal and one driver's token would name the other's grant.
+/// A monotone counter is enough — it reads no clock and no entropy, and
+/// nothing about the value is observable beyond "not the other driver's".
+static NEXT_DRIVER: AtomicU64 = AtomicU64::new(1);
 
 /// One executor turn, by construction (RFC 0008 §9.6).
 ///
@@ -285,6 +295,13 @@ impl IntentRecorder {
 ///   and tags ledger records.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RunName {
+    /// The driver that minted this name.
+    ///
+    /// Part of the identity, not decoration. A run token counts from one in
+    /// every kernel, so two drivers' first runs share a token; without this
+    /// their names would be equal and a name minted by one driver would be
+    /// accepted by the other, naming a run its holder never observed.
+    driver: u64,
     /// The run the kernel already holds. Private: this is the side of the
     /// name that stops at the grant boundary.
     run: RunToken,
@@ -447,6 +464,12 @@ pub struct NotReady;
 /// any other — is refused ([`GrantOutstanding`]) until this one resolves.
 #[derive(Debug)]
 pub struct GrantToken {
+    /// The driver whose gate issued this grant.
+    ///
+    /// Grant sequences count from one per gate, so another driver's token
+    /// would match this one's outstanding grant by number alone and take a
+    /// resolution it never asked for.
+    driver: u64,
     sequence: u64,
     run: RunName,
 }
@@ -506,6 +529,8 @@ pub struct TestDriver<P: Program, B: Backend> {
     executor: Executor,
     kernel: Kernel<P>,
     terminal: Terminal<B>,
+    /// This driver's identity, stamped into every name and token it mints.
+    id: u64,
     state: DriverState,
     /// Every run the driver has observed starting, by the identity the
     /// kernel holds. This is the whole of the driver's naming: minting adds
@@ -613,6 +638,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             ),
             executor,
             terminal,
+            id: NEXT_DRIVER.fetch_add(1, Ordering::Relaxed),
             state: DriverState::Constructed,
             names: HashMap::new(),
         }
@@ -735,6 +761,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// gone. Panics too outside the running state.
     pub fn grant(&mut self, run: RunName) -> Result<GrantToken, GrantOutstanding> {
         self.assert_running("grant");
+        self.assert_own_name(&run, "grant");
         assert!(
             self.holds(&run),
             "`grant` names a run the kernel's bookkeeping does not hold — a run never started, \
@@ -742,7 +769,11 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             run.kind
         );
         let sequence = self.kernel.gate().issue_grant(run.run)?;
-        Ok(GrantToken { sequence, run })
+        Ok(GrantToken {
+            driver: self.id,
+            sequence,
+            run,
+        })
     }
 
     /// Consumes `token`, driving the executor — beginning no pass — for at
@@ -787,6 +818,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     )]
     pub fn confirm(&mut self, max_turns: usize, token: GrantToken) -> Confirmed {
         self.assert_running("confirm");
+        self.assert_own_token(&token, "confirm");
         for turns in 0..=max_turns {
             if let Some(outcome) = self.kernel.gate().take_resolution(token.sequence) {
                 return outcome;
@@ -844,6 +876,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     #[cfg(test)]
     pub(crate) fn try_confirm(&self, token: &GrantToken) -> Option<Confirmed> {
         self.assert_running("try_confirm");
+        self.assert_own_token(token, "try_confirm");
         self.kernel.gate().peek_resolution(token.sequence)
     }
 
@@ -955,6 +988,29 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             .is_some_and(|entry| !entry.exited)
     }
 
+    /// The check that a name this driver was handed is a name it minted.
+    ///
+    /// A name from another driver denotes a run this kernel never started,
+    /// so this is the same misuse the bookkeeping check states — "a run this
+    /// kernel does not hold" — caught one step earlier, where the token it
+    /// carries would otherwise collide with a local run's by number.
+    fn assert_own_name(&self, run: &RunName, call: &str) {
+        assert!(
+            run.driver == self.id,
+            "`{call}` names a run another driver minted: a name denotes a run of the kernel that \
+             started it, and this one never did (RFC 0008 §9.4)"
+        );
+    }
+
+    /// The same, for a grant token.
+    fn assert_own_token(&self, token: &GrantToken, call: &str) {
+        assert!(
+            token.driver == self.id,
+            "`{call}` names a grant another driver's gate issued: resolving it here would take a \
+             terminal this driver never asked for (RFC 0008 §9.6)"
+        );
+    }
+
     /// The state-table check every driving call but `boot` shares.
     fn assert_running(&self, call: &str) {
         assert!(
@@ -967,13 +1023,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
 
     /// Names the runs a step started, then reports whether it terminated the
     /// program, settling the kernel where it did.
-    ///
-    /// The naming happens before the settle, because settling clears the run
-    /// bookkeeping the mint reads.
     fn finish_step(
         &mut self,
         outcome: Result<(), B::Error>,
-        started: Vec<RunToken>,
+        started: Vec<StartedRun>,
     ) -> StepReport<B::Error> {
         let started = started.into_iter().map(|run| self.mint(run)).collect();
         let terminated = match outcome {
@@ -993,22 +1046,28 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         }
     }
 
-    /// Mints the name for one run the kernel has just started, reading its
-    /// kind from the bookkeeping rather than choosing one.
-    fn mint(&mut self, run: RunToken) -> RunName {
-        let kind = match &self
-            .kernel
-            .registry()
-            .get(run)
-            .expect("a run the kernel has just started has an entry")
-            .kind
-        {
-            EntryKind::Keyed(id) => RunKind::Keyed(id.clone()),
-            EntryKind::Sub(id) => RunKind::Subscription(id.clone()),
+    /// Mints the name for one run a step started, from the kind the kernel
+    /// recorded at the start rather than from bookkeeping read back after.
+    ///
+    /// Reading it back would be a lookup that can fail for a reason the test
+    /// has no part in: a run whose exit a pass has already reflected has no
+    /// entry left, and bootstrap can reach exactly that state for an init
+    /// effect that finishes before its continuation pass. Nothing about the
+    /// name is chosen here either way — the kind is still the kernel's, just
+    /// taken at the moment it was true.
+    fn mint(&mut self, started: StartedRun) -> RunName {
+        let StartedRun { token, kind } = started;
+        let kind = match kind {
+            EntryKind::Keyed(id) => RunKind::Keyed(id),
+            EntryKind::Sub(id) => RunKind::Subscription(id),
             EntryKind::Anon => RunKind::Anonymous,
         };
-        let name = RunName { run, kind };
-        self.names.insert(run, name.clone());
+        let name = RunName {
+            driver: self.id,
+            run: token,
+            kind,
+        };
+        self.names.insert(token, name.clone());
         name
     }
 
@@ -1150,7 +1209,7 @@ mod tests {
     use crate::command::{Command, CommandId};
     use crate::kernel::conformance::support::{
         Beacon, Script, TEST_TURNS, cap, config, driver, driver_with, failing_driver,
-        marking_effect, parking_effect, sending_effect, silent_effect,
+        marking_effect, parking_effect, sending_effect, silent_effect, threaded_driver_with,
     };
     use crate::kernel::lane::SendGate;
     use crate::subscription::mock::MockSource;
@@ -1630,6 +1689,89 @@ mod tests {
             Confirmed::Accepted,
             "one turn is all it was waiting for"
         );
+    }
+
+    // A run can be gone by the time its own step reports it. On a
+    // multi-worker executor an init effect that produces nothing races the
+    // bootstrap: its task can finish before the continuation pass, whose
+    // first stage then reflects the exit and retires an entry with nothing
+    // pending. The report still has to name the run — it *was* started by
+    // that step — so the name cannot be read back out of bookkeeping that
+    // no longer holds it.
+    #[test]
+    fn boot_names_a_run_that_finished_before_its_own_report() {
+        let ended = Beacon::default();
+        let (mut driver, _journal) = threaded_driver_with(
+            Script::new(marking_effect(ended.clone())).awaiting_at_reconcile(ended),
+            config(),
+        );
+
+        let report = driver.boot();
+
+        assert_eq!(
+            report.started.len(),
+            1,
+            "the init effect's run is one this step started, whatever became of it"
+        );
+        assert_eq!(
+            report.started[0].kind(),
+            RunKind::Anonymous,
+            "and its kind is the one it was started with"
+        );
+    }
+
+    // A name is one driver's, and two drivers' first runs are not the same
+    // run. Run tokens count from one in every kernel, so without the
+    // driver's own identity in the name these two would compare equal — and
+    // a test holding both would have no way to tell which kernel it was
+    // scripting.
+    #[test]
+    fn two_drivers_first_runs_are_named_apart() {
+        let (mut left, _left_journal) = driver(Script::new(silent_effect()));
+        let (mut right, _right_journal) = driver(Script::new(silent_effect()));
+
+        let first = left.boot().started[0].clone();
+        let second = right.boot().started[0].clone();
+
+        assert_eq!(
+            first.kind(),
+            second.kind(),
+            "the two runs are alike in everything the kernel holds for them"
+        );
+        assert_ne!(
+            first, second,
+            "and are still not the same run, because they are not the same kernel's"
+        );
+    }
+
+    // The misuse that identity closes: granting at another driver's name.
+    // It denotes a run this kernel never started, which is the bookkeeping
+    // rule's own case — caught here before the token it carries can collide
+    // with a local run's by number.
+    #[test]
+    #[should_panic(expected = "names a run another driver minted")]
+    fn granting_at_another_driver_s_name_is_misuse() {
+        let (mut left, _left_journal) = driver(Script::new(silent_effect()));
+        let (mut right, _right_journal) = driver(Script::new(silent_effect()));
+        left.boot();
+        let foreign = right.boot().started[0].clone();
+
+        drop(left.grant(foreign));
+    }
+
+    // And the same for a grant token, which sequences from one per gate:
+    // confirming another driver's token here would take a terminal this
+    // driver never asked for.
+    #[test]
+    #[should_panic(expected = "names a grant another driver's gate issued")]
+    fn confirming_another_driver_s_token_is_misuse() {
+        let (mut left, _left_journal) = driver(Script::new(sending_effect([7])));
+        let (mut right, _right_journal) = driver(Script::new(sending_effect([9])));
+        left.boot();
+        let elsewhere = right.boot().started[0].clone();
+        let foreign = right.grant(elsewhere).expect("no other grant");
+
+        let _confirmed = left.confirm(TEST_TURNS, foreign);
     }
 
     // §9.6's first reclaiming fact: the send this grant released ended

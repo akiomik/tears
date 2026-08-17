@@ -108,12 +108,28 @@ enum KernelPhase {
     Settled,
 }
 
+/// One run a driving call started, named at the moment it started.
+///
+/// The kind is a *snapshot*, not a pointer back into the bookkeeping, and
+/// that is the whole point of the type: a run can be gone by the time the
+/// step that started it reports it. An init effect that produces nothing can
+/// finish before bootstrap's continuation pass, whose first stage then
+/// reflects the exit and retires an entry with nothing pending — and the
+/// report still has to name the run, because that step did start it.
+#[derive(Clone, Debug)]
+pub struct StartedRun {
+    /// The run the kernel holds, or held.
+    pub token: RunToken,
+    /// Its species and logical identity, as it was started with.
+    pub kind: RunKind,
+}
+
 /// What bootstrap started, in spawn order.
 #[derive(Debug)]
 pub struct BootReport {
     /// The producer runs the init dispatch, the initial reconcile, and the
     /// continuation pass started.
-    pub producers: Vec<RunToken>,
+    pub producers: Vec<StartedRun>,
 }
 
 /// The quiescent-postcondition evidence a settle produces (RFC 0011
@@ -174,8 +190,8 @@ pub struct Kernel<P: Program> {
     gate: Arc<SendGate>,
     next_token: RunToken,
     /// Runs started since the last drain — the per-step `started` list, in
-    /// start order.
-    started: Vec<RunToken>,
+    /// start order, each carrying the kind it was started with.
+    started: Vec<StartedRun>,
     acceptances: AcceptanceRecorder,
     intents: IntentRecorder,
     settled: bool,
@@ -336,7 +352,7 @@ impl<P: Program> Kernel<P> {
     /// This is what a driving step reports as its `started` list. Draining
     /// rather than reading keeps the list per-step without the kernel
     /// tracking step boundaries it otherwise has no notion of.
-    pub fn take_started(&mut self) -> Vec<RunToken> {
+    pub fn take_started(&mut self) -> Vec<StartedRun> {
         mem::take(&mut self.started)
     }
 
@@ -427,6 +443,7 @@ impl<P: Program> Kernel<P> {
     ) -> RunToken {
         let token = self.next_token;
         self.next_token += 1;
+        let started_kind = kind.clone();
         let entry = producer::ProducerHarness {
             join_set: &mut self.join_set,
             task_index: &mut self.task_index,
@@ -439,7 +456,10 @@ impl<P: Program> Kernel<P> {
         }
         .start(token, kind, scope, body);
         self.registry.insert(entry);
-        self.started.push(token);
+        self.started.push(StartedRun {
+            token,
+            kind: started_kind,
+        });
         token
     }
 
@@ -895,7 +915,7 @@ mod tests {
         );
         let entry = kernel
             .registry()
-            .get(report.producers[0])
+            .get(report.producers[0].token)
             .expect("the admitted run has an entry");
         assert!(
             matches!(entry.kind, RunKind::Sub(_)),
@@ -912,7 +932,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(Setup::new(silent_effect()), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         for message in 1..=3 {
             kernel.enqueue(run, Payload::Msg(message));
@@ -937,7 +957,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(Setup::new(silent_effect()), &config);
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         for message in 1..=5 {
             kernel.enqueue(run, Payload::Msg(message));
@@ -966,7 +986,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(Setup::new(silent_effect()), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         kernel.enqueue(run, Payload::Msg(7));
         kernel.registry.stop_request(run);
@@ -986,7 +1006,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(Setup::new(silent_effect()), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
         let before = journal.calls().len();
 
         kernel.enqueue(run, Payload::Msg(7));
@@ -1011,7 +1031,7 @@ mod tests {
             &config(),
         );
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
         let before = journal.calls().len();
 
         kernel.enqueue(run, Payload::Msg(7));
@@ -1032,7 +1052,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(Setup::new(silent_effect()), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         kernel.enqueue(run, Payload::Msg(7));
         let woken = kernel.park().await;
@@ -1057,7 +1077,7 @@ mod tests {
         let mut screen = terminal();
         let (mut kernel, _journal) = kernel(Setup::new(silent_effect()), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         kernel.enqueue(run, Payload::Quit);
         let woken = kernel.park().await;
@@ -1077,7 +1097,7 @@ mod tests {
         let (mut kernel, _journal) =
             kernel(Setup::new(Command::stream(stream::empty())), &config());
         let report = kernel.boot(&mut screen).expect("the test backend renders");
-        let run = report.producers[0];
+        let run = report.producers[0].token;
 
         let woken = kernel.park().await;
 
