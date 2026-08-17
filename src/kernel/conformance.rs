@@ -11,6 +11,8 @@
 //! evidence surface for everything the driver can reach (RFC 0014 §7.2).
 
 pub mod delivery;
+pub mod lifecycle;
 pub mod park;
 pub mod quit;
 pub mod support;
+pub mod teardown;
