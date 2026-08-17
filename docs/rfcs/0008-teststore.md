@@ -1140,12 +1140,23 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   prelude membership, no feature flag.
 - **Gating.** This surface is contract, not code. It enters the crate
   with the reducer-first kernel, after RFC 0014 §13.1's open tier
-  closes. None of the types this section *introduces* exists in the
-  crate before then, and no statement here asserts that one does; the
-  types it merely names — `CommandId`, `SubscriptionId`,
-  `RuntimeConfig` — are the existing ones, unchanged. Its `Added`
-  CHANGELOG entry ships with that release, the same form RFC 0014's
-  own header states for it.
+  closes, and its `Added` CHANGELOG entry ships with that release —
+  the same form RFC 0014's own header states for it. The types §9.3
+  names divide in three, and no statement here asserts that anything
+  in the first or third division exists in the crate today:
+  - **Introduced here**, arriving with that landing: `TestDriver`,
+    `ParkProbe`, `WakeSource`, `Origin`, `AnonymousRun`, `StepReport`,
+    `GrantToken`, `GrantOutstanding`, `NotReady`, `DeliveryLedger`,
+    `IntentLedger`.
+  - **Existing and unchanged**: `CommandId` and `SubscriptionId`,
+    RFC 0005's identity types.
+  - **Entering or changing in the same landing**: `Program` and
+    `Exit`, which RFC 0014 §2.1 and §2.3 introduce, and
+    `RuntimeConfig`, which that landing revises — it loses the
+    frame-rate field and `keyed_channel_capacity`, and
+    `app_channel_capacity` becomes `data_lane_capacity` with no alias
+    (RFC 0014 §9 rows 2 and 4). `TestDriver::new`'s `config`
+    parameter is that revised type, never today's.
 - **The store's boundary is unmoved.** Stages 1 and 2 keep §1.2's
   non-execution boundary exactly: the store still never starts,
   polls, or restarts a subscription source and never spawns a task,
@@ -1161,14 +1172,16 @@ bookkeeping, producer execution, lanes, the phase machine, and
 termination with production, with five shapes not constructible from
 its API. Stated over this surface:
 
-- **Construction.** `TestDriver::new` takes exactly the inputs the
-  production entry point takes — the program, its flags, and a
-  `RuntimeConfig` (RFC 0014 §2.3) — plus the terminal that entry
-  point's `run` receives, and produces that runtime. There is no
-  reduced kernel, no alternative construction path, and no test-only
-  wiring parameter. Construction is inert, as it is for both
-  production entry points (RFC 0014 §6.1; RFC 0011 INV-LC3): nothing
-  starts until `boot`.
+- **Construction.** `TestDriver::new` takes the inputs the production
+  entry point takes — the program, its flags, and a `RuntimeConfig`
+  (RFC 0014 §2.3) — and owns a terminal to render into, producing
+  that runtime. There is no reduced kernel, no alternative
+  construction path, and no test-only wiring parameter. Construction
+  is inert, as it is for both production entry points (RFC 0014 §6.1;
+  RFC 0011 INV-LC3): nothing starts until `boot`. The driver is also
+  that kernel instance's sole driver, its driving methods taking
+  `&mut self` — RFC 0011 INV-LC9's exclusivity property, which §6 of
+  that RFC states a step-style surface must preserve.
 - **Manual run retention** has no constructor: no method returns a
   run, task, or join handle, and none accepts one. A test *names* a
   run (§9.4) and never holds one, so it cannot keep a run alive past
@@ -1180,14 +1193,18 @@ its API. Stated over this surface:
 - **A mirrored quit route** has no constructor: no method terminates
   the driven program. Quit reaches the kernel only through the two
   production routes (RFC 0014 §3.3).
-- **Manual effect polling** has no constructor: no `TestDriver`
-  method takes an effect, a leaf, or a producer future to poll.
+- **Manual effect polling** has no constructor on the driver: no
+  `TestDriver` method takes an effect, a leaf, or a future to poll.
   Effects run as production producer tasks on the executor, and what
   the driver releases is a send-intent such a task has already
-  produced (§9.6). `ParkProbe::poll` is no exception in this set: its
-  argument is the production driving future, never a producer's, and
-  polling that future is what the park boundary is observed through
-  (§9.7).
+  produced (§9.6). `ParkProbe::poll` is the one polling entry point
+  this section has, and its enforcement is two things rather than an
+  absent constructor: its parameter is bound to the production
+  driving future's output shape, `Result<Exit, E>`, which no producer
+  future has (a producer yields messages, a cleanup run yields `()`),
+  and the rule that what is passed is the driving future is carried
+  by the stated contract and INV-RC13's structural review. The bound
+  narrows; the review closes.
 - **Direct kernel injection** has no constructor: no method enqueues
   onto the data lane or the control lane, and none hands the kernel
   an item to deliver. What travels either lane is producer output,
@@ -1210,7 +1227,7 @@ pub struct TestDriver<P: Program, B: Backend> { /* private */ }
 
 impl<P: Program, B: Backend> TestDriver<P, B> {
     /// Inert construction from the production entry point's inputs
-    /// (RFC 0014 §2.3) plus the terminal its `run` receives.
+    /// (RFC 0014 §2.3), owning a terminal to render into.
     #[must_use]
     pub fn new(
         program: P,
@@ -1219,32 +1236,40 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         terminal: ratatui::Terminal<B>,
     ) -> Self;
 
-    /// Runs the production bootstrap whole (RFC 0014 §6.2).
+    /// Runs the production bootstrap through to a parked kernel
+    /// (§9.5): the intake order, then the continuation pass that
+    /// consumes the pending first render.
     pub fn boot(&mut self) -> StepReport<B::Error>;
 
     /// Executes one whole production pass — RFC 0014 §3.5's four
-    /// stages in their fixed order — begun at `start`. Drives
-    /// nothing and returns `Err(NotReady)` when `start` is not
-    /// ready: readiness is read from the production sources, never
+    /// stages in their fixed order — begun by `woken_by`. Drives
+    /// nothing and returns `Err(NotReady)` when that source has not
+    /// arrived: readiness is read from the production sources, never
     /// scripted (§9.5).
     pub fn step_pass(
         &mut self,
-        start: PassStart,
+        woken_by: WakeSource,
     ) -> Result<StepReport<B::Error>, NotReady>;
 
     /// Arms a grant at `origin`, releasing that origin's next
-    /// send-intent. The returned handle borrows neither the driver
-    /// nor the script. At most one grant per origin is outstanding,
-    /// and the next at that origin is admitted only after this one's
-    /// acceptance is confirmed (§9.6).
+    /// send-intent. The returned token borrows neither the driver
+    /// nor the script. At most one grant is outstanding across the
+    /// whole driver; the next — at this origin or any other — is
+    /// admitted only after this one's acceptance is confirmed
+    /// (§9.6).
     pub fn grant(
         &self,
         origin: Origin,
-    ) -> Result<GrantHandle, GrantOutstanding>;
+    ) -> Result<GrantToken, GrantOutstanding>;
 
-    /// Drives the executor — beginning no pass — until `handle`'s
-    /// acceptance is confirmed.
-    pub fn confirm(&mut self, handle: GrantHandle);
+    /// Drives the executor — beginning no pass — until `token`'s
+    /// acceptance is confirmed, consuming it (§9.6).
+    pub fn confirm(&mut self, token: GrantToken);
+
+    /// Drives the executor — beginning no pass and releasing no
+    /// send-intent — so that runs which send nothing can reach their
+    /// exits (§9.6).
+    pub fn settle(&mut self);
 
     /// Sends accepted past the gate, origin-tagged, in gate order.
     pub fn deliveries(&self) -> DeliveryLedger;
@@ -1263,16 +1288,16 @@ pub struct StepReport<E> {
     pub terminated: Option<Result<Exit, E>>,
 }
 
-/// Why a pass begins. `PendingFrame` is not a wake source (§9.5).
-pub enum PassStart { Data, Control, Exit, PendingFrame }
-
-/// The sources a parked kernel arms — INV-RC16's set, exactly.
-pub enum WakeSource { Data, Control, Exit }
-
-/// Every wake source names the pass start its arrival begins. No
-/// conversion back exists: `PassStart::PendingFrame` names no
-/// source, so the inverse is partial and is not provided.
-impl From<WakeSource> for PassStart { /* ... */ }
+/// The sources a parked kernel arms — INV-RC16's set, exactly, and
+/// the whole scripting vocabulary of the first seam (§9.5).
+pub enum WakeSource {
+    /// An item enqueued for delivery on the data lane.
+    Data,
+    /// A producer-originated quit on the control lane.
+    Control,
+    /// A producer-exit or subscription-quiescence notification.
+    ProducerExit,
+}
 
 /// A producer run, named by the identity it already has (§9.4).
 pub enum Origin {
@@ -1282,16 +1307,16 @@ pub enum Origin {
 }
 
 /// Driver-side name for an anonymous run: opaque, minted when the
-/// driver observes the run start, reaching no kernel surface (§9.4).
+/// driver observes the run start (§9.4).
 pub struct AnonymousRun(/* private */);
 
-/// A detached future resolving on the granted send's acceptance.
-pub struct GrantHandle { /* private */ }
+/// One outstanding grant, correlated to the commit it releases.
+pub struct GrantToken { /* private */ }
 
-/// A grant at that origin is already outstanding.
+/// A grant is already outstanding on this driver.
 pub struct GrantOutstanding;
 
-/// The scripted start was not ready; nothing was driven.
+/// The scripted wake source had not arrived; nothing was driven.
 pub struct NotReady;
 
 pub struct DeliveryLedger { /* private */ }
@@ -1301,12 +1326,20 @@ pub struct IntentLedger { /* private */ }
 pub struct ParkProbe { /* private */ }
 
 impl ParkProbe {
-    #[must_use]
-    pub fn new() -> Self;
+    /// Polls the production driving future with this probe's own
+    /// waker. The bound admits that future's output shape and no
+    /// producer's (§9.2).
+    pub fn poll<E, F>(&self, future: Pin<&mut F>)
+        -> Poll<Result<Exit, E>>
+    where
+        F: Future<Output = Result<Exit, E>>;
 
-    /// Polls `future` with this probe's own waker.
-    pub fn poll<F: Future>(&self, future: Pin<&mut F>)
-        -> Poll<F::Output>;
+    /// The sources the parked loop registered this probe's waker
+    /// with, on the poll that parked it.
+    pub fn armed(&self) -> Vec<WakeSource>;
+
+    /// The arrival that woke the parked loop, once one has.
+    pub fn woken_by(&self) -> Option<WakeSource>;
 
     /// Wake-ups this probe's waker has received.
     pub fn wakes(&self) -> usize;
@@ -1314,12 +1347,13 @@ impl ParkProbe {
 ```
 
 The block is normative for **what exists and what does not**: §9.2's
-absent constructors, the membership of `PassStart` and `WakeSource`
-and the one-way conversion between them (§9.5), `grant`'s detached
-handle and its per-origin admission rule (§9.6), and the ledgers'
-division at the send gate (§9.6). Spellings — parameter forms,
-accessor names, whether a report field is a slice or an iterator —
-are implementation latitude, exactly as for §3.1's block.
+absent constructors, `WakeSource`'s membership as the whole
+pass-initiation vocabulary (§9.5), `grant`'s detached token and its
+driver-wide admission rule (§9.6), and the ledgers' division at the
+send gate (§9.6). Spellings — parameter forms, accessor names,
+whether a report field is a slice or an iterator, what a probe's
+constructor looks like — are implementation latitude, exactly as for
+§3.1's block.
 
 **Waiting, in full.** Every wait this layer performs is a bounded
 number of executor turns: no method of this section sleeps, arms a
@@ -1330,12 +1364,23 @@ mechanism. Application-supplied effects sit outside that quantifier,
 as they sit outside INV-T4's determinism scope — an effect that
 sleeps times its own test.
 
-**Misuse fails the test**, in the store's own style (§5.3): `boot`
-twice, `step_pass` before `boot`, and any driving call —
-`boot`, `step_pass`, `grant`, `confirm` — after the driven program
-has terminated. The observation calls, `deliveries` and `intents`,
-stay callable after termination, as `state` and `finish` stay
-callable in the store's quit state.
+**The driver's states and what is callable in each.** Three states,
+entered in order: *constructed* (after `new`), *running* (after
+`boot` returns without a termination), and *terminated* (once any
+`StepReport` carries `terminated`).
+
+| Call | constructed | running | terminated |
+| --- | --- | --- | --- |
+| `boot` | legal | misuse | misuse |
+| `step_pass`, `grant`, `confirm`, `settle` | misuse | legal | misuse |
+| `deliveries`, `intents` | legal, empty | legal | legal |
+
+Misuse **fails the test** rather than returning an error, in the
+store's own style (§5.3), and the observation calls stay callable
+throughout, as `state` and `finish` stay callable in the store's quit
+state. The two error types are not misuse: `NotReady` reports a
+production fact (§9.5) and `GrantOutstanding` a script-order fact
+(§9.6), and both leave the driver untouched.
 
 ### 9.4 Naming a producer run
 
@@ -1348,84 +1393,157 @@ is named by an opaque handle the *driver* mints, under three rules:
 
 - **Minted from an observation.** The driver mints a handle when it
   observes the run start, and reports it in that step's `started`
-  list. A run is nameable only after the kernel has started it; there
-  is no way to name one in advance, and nothing about the run is
-  chosen by the test.
-- **It reaches no kernel surface.** No method that touches the kernel
-  accepts one, and the kernel's own identity for an anonymous run is
-  unchanged by the handle's existence. The handle is therefore not a
-  key: it carries no keyed capacity, no gauge membership, and no
-  admission semantics, and the auto-keying RFC 0013 §10 rejected
-  stays rejected.
-- **Its only uses are naming.** It is an argument to `grant`, which
-  releases a send-intent at the driver's own gate (§9.6), and a tag
-  on ledger records (§9.6).
+  list. An anonymous run is nameable only after the kernel has
+  started it; there is no way to name one in advance, and nothing
+  about the run is chosen by the test.
+- **It reaches no kernel identity surface.** The handle is not a key
+  and participates in no keyed semantics: no keyed capacity, no move
+  into the keyed gauge count — an anonymous run stays counted as one
+  (RFC 0014 §9 row 9) — and no admission or cancellation decision
+  reads it. The kernel's own identity for an
+  anonymous run — kernel-side scope membership without a logical key,
+  RFC 0013 §9's third resolution — is unchanged by its existence, so
+  the auto-keying RFC 0013 §10 rejected stays rejected.
+- **Its only uses are naming.** It names an origin to `grant` and
+  tags ledger records (§9.6). The send gate `grant` releases at is a
+  kernel-side seam, RFC 0014 §7.2's second driving differential, not
+  a driver-side queue; what crosses the grant boundary into the
+  kernel is the run identity the kernel already holds, which the
+  driver resolves the handle to there. The handle itself stops at
+  that boundary.
 
 `started` lists the runs in the order the step started them, which is
 what lets a test name a specific run when one step starts several.
 Like every order the driver establishes, it is not evidence of a
 production order (§9.9).
 
-### 9.5 Pass initiation: `PassStart` and `WakeSource`
+### 9.5 Pass initiation: one vocabulary, `WakeSource`
 
-`step_pass(start)` is the first of RFC 0014 §7.2's two driving
+`step_pass(woken_by)` is the first of RFC 0014 §7.2's two driving
 seams — which ready wake source begins the next pass — whose
 production implementation is the unbiased selection RFC 0014 §3.5
-makes normative. Two facts bound it:
+makes normative. `WakeSource` is the seam's whole vocabulary, and it
+is INV-RC16's armed set exactly: data-lane readiness, control-lane
+arrival, and producer-exit or subscription-quiescence notification.
+Three members, no fourth. Two facts bound the seam:
 
 - **Readiness is not scripted.** The driver reads readiness from the
-  production sources; a `start` that is not ready returns
-  `Err(NotReady)` and drives nothing. The script chooses *among ready
-  sources*, which is what the production selection site chooses
-  among — the seam replaces the choice, never the facts it chooses
-  between.
+  production sources; a source that has not arrived returns
+  `Err(NotReady)` and drives nothing. The script chooses *among
+  arrived sources*, which is what the production selection site
+  chooses among — the seam replaces the choice, never the facts it
+  chooses between.
 - **A step is a whole pass.** One `step_pass` runs all four of
   RFC 0014 §3.5's stages in their fixed order. No method runs one
   stage (§9.9).
 
-`PassStart` and `WakeSource` are separate types because the sets
-differ. `WakeSource` is INV-RC16's armed set, exactly: data-lane
-readiness, control-lane arrival, and producer-exit or
-subscription-quiescence notification. `PassStart` adds
-`PendingFrame`, which is not a wake source — it names a pass no
-arrival begins, where the kernel holds work an earlier pass left (a
-marked redraw, dirty subscriptions) and therefore never parked and
-never had to be woken (RFC 0014 §3.5, §10). The conversion is total
-from `WakeSource` to `PassStart` and absent in the other direction,
-and that missing inverse is the separation. One type carrying both
-would put a non-wake reason inside the set INV-RC16 quantifies over,
-which is that invariant's own inventory.
+**There is no fourth reason a pass begins, and the surface offers
+none.** A pending frame is not one: RFC 0014 §3.5's stage 4 consumes
+a pass's own redraw and dirt inside that same pass, so in steady
+state no frame work survives a pass to start the next, and RFC 0014
+§10 records the frame step's exclusion from the scripted set for the
+same reason — it is consumed inside the pass that marks its work. A
+type member for it would be dead surface, and a live one would widen
+the first driving differential past the wake sources RFC 0014 §7.2
+confines it to.
 
-### 9.6 The grant handshake and the two ledgers
+**Bootstrap is where a pending frame does exist, and `boot` carries
+it.** RFC 0011 §3.2's intake order — init dispatch, then the initial
+subscription reconcile, then the first render pending
+unconditionally — leaves the kernel with work outstanding, so
+INV-RC16's park condition ("nothing to make progress on") is not met
+and the kernel does not park. `boot` therefore runs that intake *and*
+the continuation pass that consumes the pending render. Absent a
+termination it returns with that render consumed and no lane item
+outstanding — no grant has released a send (§9.6) — so the kernel
+parks unless the application side has already produced an exit to
+notify, which is an ordinary `WakeSource::ProducerExit` the next step
+names. Production reaches the same state by the same route; the
+driver adds no step production does not take, and the seam above
+lands exactly where it belongs — the choice, from a parked kernel,
+among the three sources that can wake it.
+
+Two consequences worth stating. First, the bootstrap arbitration
+RFC 0014 §6.2 narrows to the init effect's output, initial
+subscription output, and the first render is **not observed** by the
+driver: no producer output reaches either lane before a grant
+releases it (§9.6), so what remains of that arbitration during `boot`
+is the render alone, which the continuation pass consumes. The driver
+therefore witnesses no arbitration here and cites none — the citation
+rule (§9.9) needs no exception for bootstrap. Second, an init command
+carrying `Command::quit()` terminates during the init dispatch,
+before the initial reconcile and before any render (RFC 0014 §6.2),
+so `boot` returns a `StepReport` whose `terminated` is set and whose
+continuation pass never runs — the row INV-RC11 carries.
+
+### 9.6 The grant handshake, `settle`, and the two ledgers
 
 The second seam is the send gate, whose production implementation is
 immediate release. `grant(origin)` arms a release at one origin; the
-returned `GrantHandle` resolves when that send's acceptance — the
-post-send acknowledgement — is confirmed. Three rules carry
-INV-RC14's enqueue-order guarantee onto the surface:
+returned `GrantToken` correlates to the commit that release produces,
+and `confirm` consumes it once that send's acceptance — the post-send
+acknowledgement — is confirmed. Three rules carry INV-RC14's
+enqueue-order guarantee onto the surface:
 
-- **Sequential, per origin.** At most one grant per origin is
-  outstanding: a second returns `Err(GrantOutstanding)` at issue
-  time, and the next grant at that origin is admitted only after the
-  previous acceptance. The API therefore cannot express raw grant
-  order — two releases at one origin with no confirmation between
-  them — which is the shape that guarantees nothing (RFC 0014 §7.2,
-  whose §11 excludes exactly that model).
-- **Detached.** The handle borrows neither the driver nor the script.
-  The driving methods take `&mut self`, so a handle that borrowed the
+- **One outstanding grant, driver-wide.** At most one grant is
+  outstanding across the whole driver, not one per origin: while a
+  token is unconfirmed, `grant` returns `Err(GrantOutstanding)` at
+  issue time whatever origin it names. The sequential handshake
+  *grant → enqueue-acceptance confirmed → next grant* is therefore
+  the only way two releases can be ordered at all, and raw grant
+  order is not expressible — neither `grant(A); grant(B)` across two
+  producers, which is the model RFC 0014 §11 excludes, nor two
+  releases at one origin. A per-origin rule would admit the first of
+  those, so the rule is driver-wide.
+- **Detached.** The token borrows neither the driver nor the script.
+  The driving methods take `&mut self`, so a token that borrowed the
   driver could not coexist with a step; detached, a test holds an
-  acceptance outstanding across `step_pass` calls. That is the shape
-  RFC 0014 §13.3's **driver progress** condition names: an acceptance
-  that needs the kernel to drain the lane its send waits on cannot be
-  confirmed without stepping, and a handle borrowing the driver could
-  not survive the step. `confirm` is the in-place form for the case
-  that needs no pass; like every wait here it is bounded and fails
-  rather than hangs.
+  acceptance outstanding across `step_pass` calls. That is what
+  RFC 0014 §13.3's **driver progress** condition needs — an
+  acceptance that requires the kernel to drain the lane its send
+  waits on cannot be confirmed without stepping, and a token
+  borrowing the driver could not survive the step. `confirm` is the
+  in-place form for the case that needs no pass; like every wait here
+  it is bounded and fails rather than hangs.
 - **The guarantee starts at the gate.** Scripted enqueue order is a
   claim about sends the gate has released and confirmed, never about
   the order producers reached the gate in.
 
-Two ledgers divide at that same gate. `deliveries` records the sends
+RFC 0014 §13.3's **ack correlation** condition reads, in full: "at
+most one outstanding grant per origin, or an explicit correlation of
+each grant to its exact commit; the next grant to an origin only
+after the previous acceptance." The driver-wide rule above satisfies
+the first disjunct strictly — one outstanding grant driver-wide
+implies at most one per origin — and `GrantToken` supplies the
+second, being correlated to the commit its release produces; the
+trailing clause holds because no grant at any origin is admitted
+before the outstanding acceptance.
+
+**Grant lifecycle, in full.** A grant at an origin the kernel's run
+bookkeeping does not currently hold — a run never started, or one
+whose exit a pass has already reflected — is misuse and fails the
+test: it is a script error the kernel cannot produce an outcome for,
+and an error return would let a test go on scripting against a run
+that is gone. A token dropped without `confirm` leaves its grant
+outstanding, so every later `grant` returns `Err(GrantOutstanding)`
+until the test ends — a stranded handshake, recorded here as the
+misuse pattern that error most often means. `confirm` and `grant`
+after termination are misuse under §9.3's state table, like every
+other driving call.
+
+**`settle` drives what sends nothing.** Some runs reach their exits
+without ever presenting a send-intent — a cleanup finalizer
+(RFC 0014 §4.4, whose `Output = ()` closes the message path), a
+future that completes with no message, a subscription run stopping
+after its last output. No grant releases them and no pass advances
+them, so `settle` is the executor-turn primitive that lets them
+finish: bounded turns, no wall clock, exhausting the bound fails the
+test. It begins no pass and releases no send-intent, and it appends
+nothing to either ledger; an exit it induces becomes visible the way
+every exit does, at the exit-reflection stage of the next
+`step_pass(WakeSource::ProducerExit)`.
+
+Two ledgers divide at the send gate. `deliveries` records the sends
 accepted past it, origin-tagged, in gate order — the guaranteed
 observation sequence INV-RC14 scopes. `intents` records send-intents
 before it, origin-tagged: pre-gate records, deliberately outside the
@@ -1433,14 +1551,19 @@ guarantee. A test may read `intents` to see that a producer reached
 the gate; it may not derive an order or a completeness claim from
 them.
 
-**Neither ledger is a public transcript surface** (RFC 0014 §7.2).
-They are the driving layer's own accounting: they record send events
-by origin, not the application's message transcript; no runtime,
-store, or production surface publishes either; and nothing outside a
-driver test consumes them. Neither is the store's delivery
-transcript, and neither is a substitute for it — §6's exhaustiveness
-is stated over the store's pending set and has no counterpart here
-(§9.11).
+**Neither ledger is a public transcript surface** (RFC 0014 §7.2),
+which fixes what each is and is not. Each is a **test-assertion
+surface**: a driver test reads it to assert about the execution it
+has just driven. Neither is a **schema surface** — no external
+consumer's dashboard, alert rule, or log parser reads either, and
+neither carries any part of RFC 0006 INV-L13's observability schema
+as RFC 0014 §9 row 9 amends it, so what a ledger record contains is
+free to change where a schema field is not. And neither is a
+**citation surface**: what is read from one is a fact about the
+driven execution, admissible only within §9.9's citation rule.
+Neither is the store's delivery transcript or a substitute for it —
+§6's exhaustiveness is stated over the store's pending set and has no
+counterpart here (§9.11).
 
 ### 9.7 `ParkProbe`
 
@@ -1454,7 +1577,13 @@ constrains.
 What the probe supplies is a waker and a poll, and nothing else. It
 polls the production driving future directly; it scripts nothing
 inside the kernel, adds no branch, and is neither a third runtime
-seam nor a second driver.
+seam nor a second driver. Its surface reports what RFC 0014 §7.2 says
+the probe observes: whether the loop parks (a `poll` returning
+`Pending`), which sources it armed (`armed`), and which arrival woke
+it (`woken_by`, with `wakes` counting the waker's calls). The two
+source-reporting readers speak `WakeSource`, the same vocabulary
+§9.5 scripts the seam with, because it is the same set: INV-RC16's
+armed sources.
 
 **Its evidence scope is INV-RC16's arming and wake claims, and
 nothing else.** A `ParkProbe` observation is never evidence for
@@ -1466,7 +1595,7 @@ other series is pass-unit driven.
 ### 9.8 Determinism, scoped
 
 A **script** is three things together: the application-side inputs
-and readiness (§9.2), the arbitration choices (one `start` per
+and readiness (§9.2), the arbitration choices (one `WakeSource` per
 `step_pass`), and the grants. For a deterministic application, one
 script yields one observation sequence across repeated runs, because
 the driver introduces no nondeterminism of its own (INV-RC14). As in
@@ -1504,9 +1633,20 @@ to this section, recording what was verified and at what scope.
   steady-state property is produced by pass-unit driving only: one
   `step_pass` executing one whole pass through RFC 0014 §3.5's stage
   order. `boot` is the same granularity for bootstrap — the whole
-  production bootstrap in one call, never a stage of it — and
+  production bootstrap in one call, never a stage of it (§9.5) — and
   bootstrap evidence (RFC 0014 §6.2's init-quit outcome, carried by
   INV-RC11) comes from it.
+- **The remaining driving calls carry no evidence of their own.**
+  `grant` and `confirm` are the route by which an entry is appended
+  to the guaranteed observation sequence; the entry becomes evidence
+  when the pass-unit step that delivers it consumes it, and the
+  handshake itself witnesses nothing about production. `settle`
+  appends nothing at all — the exit it lets a run reach is evidence
+  only once a `step_pass(WakeSource::ProducerExit)` reflects it
+  (§9.6). Neither is a second evidence surface beside pass-unit
+  driving, and neither is a stage of a pass: both leave the stage
+  order untouched, which is why they do not fall under the probe
+  exclusion below.
 - **Stage-granular probes sit outside that surface.** A probe running
   a single stage in isolation may exist as a component-level
   white-box instrument; it is no part of this public surface, and
@@ -1518,8 +1658,8 @@ to this section, recording what was verified and at what scope.
 - **The citation rule.** An order the driver establishes is never
   evidence of a production order — §4.2's rule, generalized by
   RFC 0014 §7.2 — and it reaches every order this section names: the
-  sequence of scripted `start`s, the gate order `deliveries` records,
-  and the `started` order of a step's report. Which source production
+  scripted sequence of wake sources, the gate order `deliveries`
+  records, and the `started` order of a report. Which source production
   picks among several ready at once stays unobserved here (RFC 0014
   §3.5 pins the policy, not the occasion), and a
   `ParkProbe`-established fact is evidence for the park contract
@@ -1569,19 +1709,29 @@ The driving contract's invariants are RFC 0014's, and every element
 of §9.3's block maps to one of them, walked in order:
 
 - `TestDriver::new` and §9.2's absent constructors → INV-RC13, whose
-  declared structural half is exactly this API-surface review.
-- `boot`, `step_pass`, `PassStart`, and `NotReady` → INV-RC13's
+  declared structural half is exactly this API-surface review; the
+  driving methods' `&mut self` receivers and the driver's sole
+  ownership of its kernel instance additionally hold RFC 0011
+  INV-LC9's exclusivity property, which that RFC's §6 requires any
+  step-style surface to preserve.
+- `boot`, `step_pass`, `WakeSource`, and `NotReady` → INV-RC13's
   behavioral half, which runs through pass-unit steps against the
   production seams; `boot`'s whole-bootstrap granularity additionally
-  serves INV-RC11's init-quit row (§9.9).
-- `grant`, `GrantHandle`, `GrantOutstanding`, and `confirm` →
+  serves INV-RC11's init-quit row (§9.5, §9.9).
+- `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` →
   INV-RC14, whose structural half is that the raw-grant shape is
-  unrepresentable.
+  unrepresentable — which is what the driver-wide outstanding rule
+  delivers (§9.6).
+- `settle` → INV-RC13: it drives the production executor and adds no
+  seam, appends to no ledger, and produces no evidence of its own
+  (§9.9), so it is covered by the same API-surface review and by no
+  observation-sequence claim.
 - `deliveries`, `intents`, `DeliveryLedger`, `IntentLedger` →
   INV-RC14's gate-scoped observation sequence, whose pre-gate
   exclusion is what the second ledger keeps separate.
-- `WakeSource`, its one-way conversion to `PassStart`, and
-  `ParkProbe` → INV-RC16, whose behavioral rows sit on that probe.
+- `ParkProbe` and its three readers → INV-RC16, whose behavioral rows
+  sit on that probe; `armed` and `woken_by` are the API form of the
+  arming and wake observations RFC 0014 §7.2 names.
 - `StepReport::terminated` → INV-RC11 (the production result
   contract, RFC 0011 INV-LC5's, preserved).
 - `Origin`, `AnonymousRun`, and `StepReport::started` → no invariant
@@ -1597,15 +1747,23 @@ of §9.3's block maps to one of them, walked in order:
 - *Handle as key* — an implementation that makes anonymous runs
   nameable by synthesizing a kernel-side key would reintroduce the
   identity model RFC 0013 §10 rejects, while passing every naming
-  test. Excluded by §9.4's confinement rule and INV-RC13's structural
+  test. Excluded by §9.4's second rule and INV-RC13's structural
   review: the handle is minted from an observation of a run the
-  kernel already started, and no method that reaches the kernel
-  accepts one.
-- *Fabricated readiness* — a driver that accepts any `PassStart` and
+  kernel already started, it participates in no keyed capacity,
+  gauge, or admission semantics, and what crosses the grant boundary
+  is the run identity the kernel already holds.
+- *Fabricated readiness* — a driver that accepts any `WakeSource` and
   runs a pass anyway can script pass orders production can never
   produce, and every pass-unit series would still pass. Excluded by
-  §9.5: readiness is read from the production sources and an unready
-  start drives nothing.
+  §9.5: readiness is read from the production sources and an
+  unarrived source drives nothing.
+- *A fourth initiation reason* — a surface that lets a test begin a
+  pass for something other than an arrived wake source widens
+  RFC 0014 §7.2's first differential past the set it confines it to,
+  and no invariant would catch it because INV-RC16 quantifies over
+  the armed sources only. Excluded by §9.5: `WakeSource` is the whole
+  vocabulary, `boot` absorbs the one pending frame that ever exists,
+  and there is no other entry point that begins a pass.
 - *Ledger as transcript* — a test that reads `deliveries` as the
   application's message transcript would turn a driver-established
   order into evidence about delivery. Excluded by §9.6's ledger
