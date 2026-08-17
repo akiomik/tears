@@ -45,7 +45,7 @@
 //! `recv` is an untimed block rather than a timed one, because a deadline
 //! would be a clock read.
 //!
-//! **Three rows drive a multi-worker executor**, and take their determinism
+//! **Four rows drive a multi-worker executor**, and take their determinism
 //! from an application-side handshake rather than from INV-RC14. A pass is a
 //! synchronous region — RFC 0014 §3.5's four stages run without the driving
 //! task yielding — so a control-lane arrival that lands strictly *inside* a
@@ -83,7 +83,8 @@
 //! backlog-proportional passes, a render between batches), and [`teardown`]
 //! carries RFC 0013 §7.1's kernel rows — INV-ST1, INV-ST3, INV-ST5, INV-ST6,
 //! and INV-ST7's observable half, with the kernel carriers INV-RC6 and
-//! INV-RC7.
+//! INV-RC7, plus the divergent composition where a run's placement prefix
+//! and its key's scope disagree and both still reach it.
 //!
 //! # What this surface does not reach
 //!

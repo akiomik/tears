@@ -350,7 +350,7 @@ impl<P: Program> Kernel<P> {
     /// A `None` from either lane is unreachable by construction — the
     /// kernel holds a clone of both senders for its whole lifetime — so
     /// that branch asserts in debug and otherwise parks forever rather than
-    /// spinning. Parking is what RFC 0014 §9 row 1 puts in place of RFC 0011
+    /// spinning. Parking is what RFC 0014 §9 row 1 puts in place of RFC 0003
     /// INV-16's `Ready(None)` half ("a live kernel with no work parks"), and
     /// it keeps a future change in lane ownership from turning a degenerate
     /// state into a busy loop.

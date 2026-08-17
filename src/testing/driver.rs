@@ -1453,6 +1453,80 @@ mod tests {
         driver.settle(TEST_TURNS, || false);
     }
 
+    // The other end of the same rule, on the other waiting call: a
+    // `confirm` whose grant does not resolve inside its budget fails the
+    // test with the turns it spent, rather than waiting longer. The grant
+    // here is armed at a run parked forever with nothing to send, so no
+    // number of turns would resolve it — which is the shape a script error
+    // takes.
+    #[test]
+    #[should_panic(expected = "bounded `confirm` exhausted")]
+    fn a_confirm_whose_grant_never_resolves_fails_the_test() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        let run = driver.boot().started[0].clone();
+
+        let token = driver.grant(run).expect("no other grant");
+        let _confirmed = driver.confirm(TEST_TURNS, token);
+    }
+
+    // Zero is a budget like any other, and both calls agree on what it
+    // means: the condition is evaluated before any turn is spent, so an
+    // already-settled one costs none — which is what makes the budget a
+    // statement about how many turns the *script* needs rather than a
+    // constant the driver picked.
+    #[test]
+    fn a_zero_budget_admits_a_condition_that_already_holds() {
+        let (mut driver, journal) = driver(Script::new(Command::batch([
+            sending_effect([7]),
+            sending_effect([9]),
+        ])));
+        let report = driver.boot();
+        let (first, second) = (report.started[0].clone(), report.started[1].clone());
+
+        driver.settle(0, || true);
+
+        let token = driver.grant(first).expect("no other grant");
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
+
+        // A grant can also resolve inside a `step_pass` — that call turns
+        // the executor too — which leaves the confirm that reports it
+        // needing no turn of its own.
+        let banked = driver.grant(second).expect("the previous grant resolved");
+        driver
+            .step_pass(WakeSource::Data)
+            .expect("the first release is in the lane");
+        assert_eq!(
+            driver.confirm(0, banked),
+            Confirmed::Accepted,
+            "already resolved, so the budget is never spent"
+        );
+        assert_eq!(
+            journal.reduced(),
+            vec![7, 9],
+            "the step's own turn committed the second release, and its batch delivered both"
+        );
+    }
+
+    // And zero refuses one that does not, on the same evaluation order.
+    #[test]
+    #[should_panic(expected = "still false after 0 executor turns")]
+    fn a_zero_budget_refuses_a_condition_that_does_not() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        driver.boot();
+
+        driver.settle(0, || false);
+    }
+
+    #[test]
+    #[should_panic(expected = "unresolved after 0 executor turns")]
+    fn a_zero_budget_confirm_refuses_an_unresolved_grant() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        let run = driver.boot().started[0].clone();
+
+        let token = driver.grant(run).expect("no other grant");
+        let _confirmed = driver.confirm(0, token);
+    }
+
     // §9.6's first reclaiming fact: the send this grant released ended
     // without getting into the lane. A capacity-blocked send whose run is
     // then cancelled is that shape, and reaching it needs the step the

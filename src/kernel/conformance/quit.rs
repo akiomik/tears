@@ -6,17 +6,17 @@
 //! send gate exactly as a producer's messages are (RFC 0008 §9.6) and
 //! applied at the first control drain at or after its arrival.
 //!
-//! **Two of INV-RC9's rows need a window a single-threaded executor does not
+//! **Three rows here need a window a single-threaded executor does not
 //! have**, and they get it from the harness rather than from a weaker claim.
-//! The *mid-batch* case ("a quit arriving later in a pass is preceded only by
-//! the in-progress batch's remainder") and the *cancel-beats-quit* case ("a
-//! buffered quit whose origin is revoked is discarded") both require a
-//! control-lane arrival that lands **strictly inside** a pass. A pass is a
-//! synchronous region — RFC 0014 §3.5's four stages run without the driving
-//! task yielding — so the producer has to be running on a thread the pass is
-//! not occupying.
+//! INV-RC9's *mid-batch* case ("a quit arriving later in a pass is preceded
+//! only by the in-progress batch's remainder"), its *cancel-beats-quit* case
+//! ("a buffered quit whose origin is revoked is discarded"), and the control
+//! drain's own accounting row all require a control-lane arrival that lands
+//! **strictly inside** a pass. A pass is a synchronous region — RFC 0014
+//! §3.5's four stages run without the driving task yielding — so the
+//! producer has to be running on a thread the pass is not occupying.
 //!
-//! Those two rows therefore drive a multi-worker executor, and **their
+//! Those three rows therefore drive a multi-worker executor, and **their
 //! determinism is their own**: the commit is pinned to a stage boundary by
 //! [`MidBatchHandshake`], an application-side rendezvous that neither side
 //! can pass, never by the scheduler. They cite no part of INV-RC14, whose

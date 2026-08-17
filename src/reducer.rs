@@ -57,8 +57,11 @@ pub trait Reducer {
 /// `Ok` side, and a render failure is the `Err` side carrying the backend's
 /// own error (RFC 0011 INV-LC5's classification, preserved). One variant is
 /// deliberate: the two quit routes reach the same end, and the kernel keeps
-/// no second controlled reason to report.
+/// no second controlled reason to report — and `#[non_exhaustive]` keeps
+/// that a decision this crate can revisit without a breaking change, which
+/// is the form RFC 0014 §2.3 declares.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Exit {
     /// A controlled quit.
     Quit,

@@ -25,9 +25,10 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
+use std::thread;
 use std::thread::Result as ThreadResult;
 
 use futures::stream::{self, BoxStream, StreamExt};
@@ -75,6 +76,16 @@ pub const TEST_TURNS: usize = 16;
 ///
 /// [`TestDriver::confirm`]: crate::testing::driver::TestDriver::confirm
 pub const THREADED_TURNS: usize = 4096;
+
+/// How many scheduler yields the reducer's half of a
+/// [`MidBatchHandshake`] spends waiting for the gated producer's commit.
+///
+/// A hang guard whose value is mechanism, in the same style as
+/// [`THREADED_TURNS`]: the ordering the handshake establishes does not
+/// depend on how many yields it took to observe the signal, and the bound
+/// only decides whether a producer that never commits fails the test or
+/// stops it.
+const HANDSHAKE_YIELDS: usize = 1_000_000;
 
 /// How many turns a park witness hands the executor before re-asserting that
 /// nothing has woken the loop.
@@ -329,12 +340,14 @@ impl SubscriptionSource for ProbeSource {
 /// producer's side, so no scheduling order is load-bearing; neither side can
 /// pass the other.
 ///
-/// One wait here is unbounded, and it is the only one in this suite: the
-/// reducer's `recv`. It is an untimed block rather than a timed one — a
-/// deadline would be a clock read, which RFC 0014 §6.3 and this crate's
-/// disallowed-method list both rule out — so a producer that never commits
-/// hangs this test instead of failing it. That is the price of the window,
-/// and it is paid on the test's side rather than the kernel's.
+/// The reducer's wait is bounded like every other wait here, and bounded
+/// without a clock: it hands the OS scheduler a counted number of yields and
+/// polls for the signal between them, failing on the bound rather than
+/// blocking forever. A blocking `recv` would have been simpler and is what
+/// the shape suggests, but a producer that never commits would then hang the
+/// suite instead of failing it, and the only way to bound a block is a
+/// deadline — a clock read, which RFC 0014 §6.3 and this crate's
+/// disallowed-method list both rule out.
 ///
 /// [`open_and_await_commit`]: MidBatchHandshake::open_and_await_commit
 pub struct MidBatchHandshake {
@@ -387,15 +400,35 @@ impl MidBatchHandshake {
     /// strictly after the commit, and everything the batch does before it is
     /// strictly before.
     ///
+    /// The wait is a counted number of scheduler yields with a poll for the
+    /// signal between them, so it ends either at the commit or at its bound,
+    /// and never on a clock. The bound's value is mechanism, like every
+    /// other hang guard here: the *ordering* this establishes does not
+    /// depend on how many yields it took to observe.
+    ///
     /// # Panics
     ///
-    /// Panics when the producer's half is gone without a signal, which means
-    /// the run ended before reaching its send.
+    /// Panics when the bound is spent with no signal, which means the gated
+    /// producer never reached its send.
+    #[expect(
+        clippy::panic,
+        reason = "an exhausted bound fails the test, which is what a panic is here"
+    )]
     pub fn open_and_await_commit(&self) {
         self.open.store(true, Ordering::SeqCst);
-        self.committed
-            .recv()
-            .expect("the gated producer commits while the batch is in progress");
+        for _ in 0..HANDSHAKE_YIELDS {
+            match self.committed.try_recv() {
+                Ok(()) => return,
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => {
+                    panic!("the gated producer's run ended before it reached its send")
+                }
+            }
+        }
+        panic!(
+            "the mid-batch handshake was not answered in {HANDSHAKE_YIELDS} scheduler yields: \
+             the gated producer never committed while the batch was running"
+        );
     }
 }
 
