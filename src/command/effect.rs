@@ -175,6 +175,19 @@ pub(super) struct Leaf<Msg: Send + 'static> {
     pub(super) key: Option<CancellableCommand>,
     pub(super) scope: ScopePath,
     pub(super) kind: LeafKind,
+    /// What the key *attachment* that filled this leaf reached, as
+    /// `(effect carriers, immediate-quit carriers)` — `(0, 0)` while the
+    /// leaf has no key of its own.
+    ///
+    /// Provenance, and it has to be recorded here because the leaves cannot
+    /// be told apart afterwards. Two children each keyed with the same id is
+    /// a legal shape (RFC 0014 §3.4: consecutive dispatches, the second a
+    /// replacement under its own policy); *one* key pushed across two
+    /// carriers is not. After the push the two look identical — same id,
+    /// same carriers — so the distinction is which attachment put it there,
+    /// which only the attachment knows.
+    #[cfg(debug_assertions)]
+    pub(super) key_reach: (usize, usize),
     pub(super) stream: BoxStream<'static, Action<Msg>>,
 }
 
@@ -184,6 +197,8 @@ impl<Msg: Send + 'static> Leaf<Msg> {
             key: None,
             scope: ScopePath::empty(),
             kind,
+            #[cfg(debug_assertions)]
+            key_reach: (0, 0),
             stream,
         }
     }
@@ -201,6 +216,8 @@ impl<Msg: Send + 'static> Leaf<Msg> {
             key: self.key,
             scope: self.scope,
             kind: self.kind,
+            #[cfg(debug_assertions)]
+            key_reach: self.key_reach,
             stream: wrap(self.stream),
         }
     }
@@ -292,11 +309,34 @@ impl<Msg: Send + 'static> Effect<Msg> {
     /// Carriers that already hold a key keep it: the key nearest the effect
     /// is the one that names its run.
     pub(super) fn attach_key(&mut self, key: &CancellableCommand) {
+        // What this one attachment is about to reach, read before it
+        // reaches anything. Recorded on each carrier it fills so the
+        // lowering can tell one key spread across several carriers from
+        // several carriers each keyed on their own — a distinction the
+        // carriers themselves stop carrying the moment the push is done.
+        #[cfg(debug_assertions)]
+        let reach = (
+            self.carriers_without_keys(LeafKind::Effect),
+            self.carriers_without_keys(LeafKind::ImmediateQuit),
+        );
         for leaf in &mut self.leaves {
             if leaf.key.is_none() {
                 leaf.key = Some(key.clone());
+                #[cfg(debug_assertions)]
+                {
+                    leaf.key_reach = reach;
+                }
             }
         }
+    }
+
+    /// How many carriers of `kind` are still waiting for a key.
+    #[cfg(debug_assertions)]
+    fn carriers_without_keys(&self, kind: LeafKind) -> usize {
+        self.leaves
+            .iter()
+            .filter(|leaf| leaf.key.is_none() && leaf.kind == kind)
+            .count()
     }
 
     /// Qualifies every carrier's spawn key and scope attribution with one

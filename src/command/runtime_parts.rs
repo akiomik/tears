@@ -133,30 +133,44 @@ impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
         }
     }
 
-    /// How far a *command-level* spawn key reaches, as `(effect carriers,
-    /// immediate-quit carriers)`, or `None` when the command carries no
-    /// such key.
+    /// Every spawn key this lowering carries, as the carriers each
+    /// *attachment* reached: `(effect carriers, immediate-quit carriers)`.
     ///
     /// This is the shape probe behind the kernel's not-constructible
-    /// placeholders (RFC 0014 §3.4): a key reaching more than one effect
-    /// carrier is a keyed batch, and a key reaching an immediate-quit
+    /// placeholders (RFC 0014 §3.4): an attachment reaching more than one
+    /// effect carrier is a keyed batch, and one reaching an immediate-quit
     /// carrier is a keyed quit. Both remain constructible through today's
     /// `Command` surface, so the check belongs at the lowering site rather
     /// than in the type.
+    ///
+    /// **Two sources, because nesting moves a key off the command and onto
+    /// its carriers.** The command-level key is the top-level shape, and it
+    /// reaches every carrier that has none of its own — the rule
+    /// [`into_kernel_parts`](Self::into_kernel_parts) applies. Everything
+    /// below the top level went through
+    /// [`Command::batch`](super::Command::batch)'s push-down, which records
+    /// what it reached on each carrier it filled, so those attachments are
+    /// read back from the leaves. A probe that consulted only the
+    /// command-level key returned early at any nesting depth past the
+    /// first, and both shapes slipped through it.
     #[cfg(debug_assertions)]
-    pub(crate) fn command_key_reach(&self) -> Option<(usize, usize)> {
-        self.key.as_ref()?;
-        let quits = self
+    pub(crate) fn key_reaches(&self) -> Vec<(usize, usize)> {
+        let mut reaches: Vec<(usize, usize)> = self
             .leaves
             .iter()
-            .filter(|leaf| leaf.key.is_none() && leaf.kind == LeafKind::ImmediateQuit)
-            .count();
-        let effects = self
-            .leaves
-            .iter()
-            .filter(|leaf| leaf.key.is_none() && leaf.kind == LeafKind::Effect)
-            .count();
-        Some((effects, quits))
+            .filter(|leaf| leaf.key.is_some())
+            .map(|leaf| leaf.key_reach)
+            .collect();
+        if self.key.is_some() {
+            let unkeyed = |kind| {
+                self.leaves
+                    .iter()
+                    .filter(|leaf| leaf.key.is_none() && leaf.kind == kind)
+                    .count()
+            };
+            reaches.push((unkeyed(LeafKind::Effect), unkeyed(LeafKind::ImmediateQuit)));
+        }
+        reaches
     }
 }
 

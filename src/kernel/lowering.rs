@@ -61,7 +61,7 @@ use super::registry::ScopeRegistry;
 /// the prefix and by the id, and neither reading is derived from the other.
 pub fn lower<Msg: Send + 'static>(parts: RuntimeCommandParts<Msg>) -> KernelParts<Msg> {
     #[cfg(debug_assertions)]
-    if let Some((effect_carriers, quit_carriers)) = parts.command_key_reach() {
+    for (effect_carriers, quit_carriers) in parts.key_reaches() {
         debug_assert!(
             effect_carriers <= 1,
             "a spawn key attaches to a single effect carrier only; keying a batch is not a \
@@ -191,7 +191,7 @@ pub fn spawn_decision(registry: &ScopeRegistry, key: Option<&CancellableCommand>
 mod tests {
     use super::*;
 
-    use crate::command::Command;
+    use crate::command::{Command, CommandId};
     use crate::runtime::load::LoadObserver;
 
     fn lowered(command: Command<i32>) -> KernelParts<i32> {
@@ -209,6 +209,29 @@ mod tests {
                 DispatchStep::Quit => "quit",
             })
             .collect()
+    }
+
+    // The two placeholder shapes, reached through an outer batch. Nesting is
+    // what moved them past the probe before: `Command::batch` pushes a
+    // child's key onto the child's own carriers, so the outer command holds
+    // no key of its own and a probe that asked the command rather than the
+    // leaves saw nothing at all.
+    #[test]
+    #[should_panic(expected = "a spawn key attaches to a single effect carrier only")]
+    fn a_nested_keyed_batch_is_still_not_a_lowering_shape() {
+        drop(lowered(Command::batch([Command::batch([
+            Command::message(1),
+            Command::message(2),
+        ])
+        .cancellable(CommandId::new("load"))])));
+    }
+
+    #[test]
+    #[should_panic(expected = "a spawn key")]
+    fn a_nested_keyed_quit_is_still_not_a_lowering_shape() {
+        drop(lowered(Command::batch([
+            Command::quit().cancellable(CommandId::new("load"))
+        ])));
     }
 
     #[test]
