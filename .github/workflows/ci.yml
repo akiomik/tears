@@ -89,9 +89,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
       # loom model checks are scoped to the `--lib` unit tests for the isolated
-      # `cell_core` primitives rather than the whole suite.
+      # `cell_core` and `accounting_core` mirrors rather than the whole suite.
       - name: Run loom tests
-        run: cargo test --features loom-core --lib -- cell_core
+        run: cargo test --features loom-core --lib -- cell_core accounting_core
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 3

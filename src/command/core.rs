@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
 
-use crate::structural_key::StructuralKey;
+use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
 use super::cancellation::{CancelPolicy, CancellableCommand, CommandCancellation, CommandId};
@@ -46,6 +46,11 @@ pub struct Command<Msg: Send + 'static> {
     pub(super) effect: Effect<Msg>,
     directives: RuntimeDirectives,
     cancellation: CommandCancellation,
+    // Scope prefixes to tear down. A carrier, not a stream: teardown is
+    // command metadata that applies in the cancel phase, so it travels
+    // beside `cancellation` rather than as an effect leaf (RFC 0013 §3.3,
+    // RFC 0014 §3.4).
+    teardowns: Vec<ScopePath>,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
@@ -57,6 +62,7 @@ impl<Msg: Send + 'static> Command<Msg> {
                 key: None,
                 cancels: Vec::new(),
             },
+            teardowns: Vec::new(),
         }
     }
 
@@ -74,14 +80,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd: Command<i32> = Command::none();
     /// ```
     pub const fn none() -> Self {
-        Self {
-            effect: Effect::none(),
-            directives: RuntimeDirectives::DEFAULT,
-            cancellation: CommandCancellation {
-                key: None,
-                cancels: Vec::new(),
-            },
-        }
+        Self::with_effect(Effect::none())
     }
 
     /// Returns `true` if the command has no side-effect stream.
@@ -144,6 +143,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             self.directives,
             self.effect.into_leaves(),
             self.cancellation,
+            self.teardowns,
         )
     }
 
@@ -273,6 +273,8 @@ impl<Msg: Send + 'static> Command<Msg> {
     where
         Scope: Eq + Hash + Send + Sync + 'static,
     {
+        // One erasure, shared by every carrier at this boundary, so the
+        // scope type itself need not be `Clone` (RFC 0005 §8.1).
         let segment = StructuralKey::new(scope);
 
         self.cancellation.key = self.cancellation.key.map(|cancellable| CancellableCommand {
@@ -287,6 +289,17 @@ impl<Msg: Send + 'static> Command<Msg> {
             .map(|id| id.scoped_with(segment.clone()))
             .collect();
 
+        self.teardowns = self
+            .teardowns
+            .into_iter()
+            .map(|prefix| prefix.prefixed_key(segment.clone()))
+            .collect();
+
+        // Per-carrier keys and scopes. The key half reaches a batched
+        // child's own key; the scope half is what an *unkeyed* carrier
+        // gets, so a prefix teardown can select it (RFC 0014 INV-RC7).
+        self.effect.apply_scope(&segment);
+
         self
     }
 
@@ -297,12 +310,41 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// requests a redraw unless followed by [`Command::without_redraw`].
     pub fn cancel(id: CommandId) -> Self {
         Self {
-            effect: Effect::none(),
-            directives: RuntimeDirectives::DEFAULT,
             cancellation: CommandCancellation {
                 key: None,
                 cancels: vec![id],
             },
+            ..Self::none()
+        }
+    }
+
+    /// Tears down every runtime-owned run under the structural scope
+    /// prefix `scope`, and consumes that prefix's unfired cleanup
+    /// registrations.
+    ///
+    /// This is the manual primitive behind RFC 0013's scope teardown: it
+    /// carries no effect stream, so [`Command::is_none`] stays `true`, and
+    /// it composes through [`Command::scoped`] exactly as an explicit
+    /// cancel id does (RFC 0013 INV-ST2).
+    ///
+    /// Crate-private for now: the runtime that applies it is the kernel of
+    /// RFC 0014, and a public constructor whose effect the current runtime
+    /// would accept and ignore is precisely the silent mismatch RFC 0007
+    /// INV-C5 prohibits.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel that applies a teardown, and the combinators that build one, land after this carrier"
+        )
+    )]
+    pub(crate) fn teardown<Scope>(scope: Scope) -> Self
+    where
+        Scope: Eq + Hash + Send + Sync + 'static,
+    {
+        Self {
+            teardowns: vec![ScopePath::empty().prefixed(scope)],
+            ..Self::none()
         }
     }
 
@@ -473,11 +515,30 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd: Command<i32> = Command::quit();
     /// ```
     pub fn quit() -> Self {
-        Self::effect(Action::Quit)
+        // The same single-`Action::Quit` stream `Self::effect(Action::Quit)`
+        // builds, tagged as the immediate-quit carrier so lowering can tell
+        // an `update`-returned quit from an effect that happens to emit one
+        // (RFC 0014 §3.3). Consumers that read streams alone see no change.
+        Self::with_effect(Effect::immediate_quit())
     }
 
     fn effect(action: Action<Msg>) -> Self {
         Self::with_effect(Effect::action(action))
+    }
+
+    /// An ordinary effect carrier built from a stream of raw actions.
+    ///
+    /// This is the only route to a **producer-originated** quit (RFC 0014
+    /// §3.3): [`Command::quit`] builds the immediate-quit carrier, which
+    /// lowering applies synchronously at its dispatch and never spawns, and
+    /// no other constructor here puts an [`Action::Quit`] into a carrier a
+    /// run is spawned for. The kernel's conformance series need that route
+    /// to script a producer quit at all, so it is crate-visible; the public
+    /// spelling belongs to the effect-constructor work RFC 0014 §13 leaves
+    /// open, not here.
+    #[cfg(test)]
+    pub(crate) fn actions(stream: impl Stream<Item = Action<Msg>> + Send + 'static) -> Self {
+        Self::with_effect(Effect::from_stream(stream.boxed()))
     }
 
     /// Batch multiple commands into a single command.
@@ -505,8 +566,9 @@ impl<Msg: Send + 'static> Command<Msg> {
         let mut any_child = false;
         let mut effects = Vec::new();
         let mut cancels = Vec::new();
+        let mut teardowns = Vec::new();
 
-        for cmd in commands {
+        for mut cmd in commands {
             any_child = true;
             directives = directives.combine(cmd.directives);
             if let Some(key) = cmd.cancellation.key {
@@ -515,8 +577,22 @@ impl<Msg: Send + 'static> Command<Msg> {
                     id = ?key.id,
                     "cancellable child key ignored by Command::batch"
                 );
+                // The warning still describes this runtime, which spawns
+                // one folded stream per command and so has no place to put
+                // a second key. It stops describing anything once the
+                // kernel is the only consumer of this lowering — a key
+                // reaching a batch is then honoured rather than ignored —
+                // so the warning is removed with the switch that lands
+                // RFC 0014 §9 row 3's supersession, not before. Pushing the
+                // key down onto the child's own carriers keeps it available
+                // to the kernel, which lowers each carrier to an
+                // independent keyed entry (RFC 0014
+                // §3.4) — until then the metadata is unreachable through
+                // `into_execution_parts`.
+                cmd.effect.attach_key(&key);
             }
             cancels.extend(cmd.cancellation.cancels);
+            teardowns.extend(cmd.teardowns);
             effects.push(cmd.effect);
         }
 
@@ -525,6 +601,7 @@ impl<Msg: Send + 'static> Command<Msg> {
                 effect: Effect::batch(effects),
                 directives,
                 cancellation: CommandCancellation { key: None, cancels },
+                teardowns,
             }
         } else {
             Self::none()
@@ -622,12 +699,14 @@ impl<Msg: Send + 'static> Command<Msg> {
     {
         let directives = self.directives;
         let cancellation = self.cancellation;
+        let teardowns = self.teardowns;
         let effect = self.effect.map(f);
 
         Command {
             effect,
             directives,
             cancellation,
+            teardowns,
         }
     }
 }
@@ -642,6 +721,7 @@ mod tests {
     use tokio::time::{advance, sleep};
     use tracing::Level;
 
+    use crate::command::KernelParts;
     use crate::test_support::TraceRecorder;
 
     #[test]
@@ -1703,6 +1783,222 @@ mod tests {
         let cmd = Command::<i32>::none().without_redraw().map(|v| v * 2);
         assert!(cmd.is_none());
         assert!(!cmd.requests_redraw());
+    }
+
+    // --- Leaf metadata: the kernel reading of the same lowering boundary ---
+
+    fn kernel_parts<Msg: Send + 'static>(command: Command<Msg>) -> KernelParts<Msg> {
+        command.into_runtime_parts().into_kernel_parts()
+    }
+
+    #[test]
+    fn quit_lowers_to_a_synchronous_quit_and_spawns_nothing() {
+        let parts = kernel_parts(Command::<i32>::quit());
+
+        assert!(parts.quit_now);
+        assert!(parts.spawns.is_empty());
+    }
+
+    // The execution reading is what today's runtime and `TestStore` consume;
+    // marking the quit carrier must leave it byte-for-byte the stream it was.
+    #[tokio::test]
+    async fn quit_still_reaches_the_execution_reading_as_a_plain_stream() {
+        let (cancels, key, mut streams) = Command::<i32>::quit()
+            .into_runtime_parts()
+            .into_execution_parts();
+
+        assert!(cancels.is_empty());
+        assert!(key.is_none());
+        assert_eq!(streams.len(), 1);
+
+        let mut stream = streams.pop().expect("length checked to be 1");
+        assert!(matches!(stream.next().await, Some(Action::Quit)));
+        assert!(stream.next().await.is_none());
+    }
+
+    // RFC 0003 INV-12 / RFC 0005 INV-17: the wrappers relay the stream and
+    // preserve identity metadata, so an immediate quit stays one after a
+    // `map` or a `timeout` (RFC 0014 §3.3 depends on the mark surviving).
+    #[test]
+    fn map_preserves_the_immediate_quit_carrier() {
+        let parts = kernel_parts(Command::<i32>::quit().map(|value| value.to_string()));
+
+        assert!(parts.quit_now);
+        assert!(parts.spawns.is_empty());
+    }
+
+    #[test]
+    fn timeout_preserves_the_immediate_quit_carrier() {
+        let parts = kernel_parts(Command::<i32>::quit().timeout(Duration::from_secs(1), || 99));
+
+        assert!(parts.quit_now);
+        assert!(parts.spawns.is_empty());
+    }
+
+    #[test]
+    fn map_over_a_batch_preserves_every_carrier_key() {
+        let parts = kernel_parts(
+            Command::batch([
+                Command::message(1).cancellable(CommandId::new("left")),
+                Command::message(2).cancellable(CommandId::new("right")),
+            ])
+            .map(|value| value * 10),
+        );
+        let keys: Vec<_> = parts
+            .spawns
+            .iter()
+            .map(|spawn| spawn.key.as_ref().map(|key| key.id.clone()))
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec![Some(CommandId::new("left")), Some(CommandId::new("right")),]
+        );
+    }
+
+    #[test]
+    fn batch_lowers_each_child_key_to_its_own_entry() {
+        let parts = kernel_parts(Command::batch([
+            Command::message(1).cancellable(CommandId::new("left")),
+            Command::message(2),
+            Command::message(3)
+                .cancellable_with(CommandId::new("right"), CancelPolicy::KeepInFlight),
+        ]));
+
+        assert_eq!(parts.spawns.len(), 3);
+        assert_eq!(
+            parts.spawns[0].key.as_ref().expect("keyed child").id,
+            CommandId::new("left")
+        );
+        assert!(parts.spawns[1].key.is_none());
+        let right = parts.spawns[2].key.as_ref().expect("keyed child");
+        assert_eq!(right.id, CommandId::new("right"));
+        assert_eq!(right.policy, CancelPolicy::KeepInFlight);
+    }
+
+    #[test]
+    fn a_top_level_key_names_the_single_carrier_it_reaches() {
+        let parts = kernel_parts(Command::message(1).cancellable(CommandId::new("load")));
+
+        assert_eq!(parts.spawns.len(), 1);
+        assert_eq!(
+            parts.spawns[0].key.as_ref().expect("keyed command").id,
+            CommandId::new("load")
+        );
+    }
+
+    #[test]
+    fn scoped_qualifies_every_carrier_and_the_key_it_already_held() {
+        let parts = kernel_parts(
+            Command::batch([
+                Command::message(1).cancellable(CommandId::new("load")),
+                Command::message(2),
+            ])
+            .scoped("pane-1"),
+        );
+        let scope = ScopePath::empty().prefixed("pane-1");
+
+        assert_eq!(parts.spawns.len(), 2);
+        for spawn in &parts.spawns {
+            assert_eq!(spawn.scope, scope);
+        }
+        // In *this* shape the two paths coincide, because one `scoped`
+        // call qualified the carrier and the key it already held at the
+        // same boundary. It is not an identity: the carrier's scope places
+        // the run and the key's scope is part of its cancel identity, and
+        // `work.scoped(s).cancellable(id)` — which this type's own docs
+        // bless — separates them.
+        assert_eq!(
+            parts.spawns[0]
+                .key
+                .as_ref()
+                .expect("keyed child")
+                .id
+                .scope(),
+            &parts.spawns[0].scope
+        );
+    }
+
+    #[test]
+    fn sibling_scopes_do_not_alias_carrier_attribution() {
+        let left = kernel_parts(Command::message(1).scoped("pane-a"));
+        let right = kernel_parts(Command::message(1).scoped("pane-b"));
+
+        assert_ne!(left.spawns[0].scope, right.spawns[0].scope);
+    }
+
+    #[test]
+    fn an_unscoped_carrier_is_attributed_to_the_root() {
+        let parts = kernel_parts(Command::message(1));
+
+        assert_eq!(parts.spawns[0].scope, ScopePath::empty());
+    }
+
+    #[test]
+    fn nested_scopes_nest_outermost_first() {
+        let parts = kernel_parts(Command::message(1).scoped("field").scoped("pane-1"));
+        let outer = ScopePath::empty().prefixed("pane-1");
+
+        assert!(parts.spawns[0].scope.starts_with(&outer));
+    }
+
+    #[test]
+    fn teardown_is_streamless_and_carries_one_prefix() {
+        let command = Command::<i32>::teardown("pane-1");
+
+        assert!(command.is_none());
+        assert!(command.cancellation.key.is_none());
+        assert!(command.cancellation.cancels.is_empty());
+
+        let parts = kernel_parts(command);
+        assert!(parts.spawns.is_empty());
+        assert!(!parts.quit_now);
+        assert_eq!(parts.teardowns, vec![ScopePath::empty().prefixed("pane-1")]);
+    }
+
+    #[test]
+    fn scoped_prepends_to_a_teardown_prefix() {
+        let parts = kernel_parts(Command::<i32>::teardown("field").scoped("pane-1"));
+        let outer = ScopePath::empty().prefixed("pane-1");
+
+        assert_eq!(parts.teardowns.len(), 1);
+        assert!(parts.teardowns[0].starts_with(&outer));
+    }
+
+    #[test]
+    fn batch_concatenates_teardown_prefixes_in_declaration_order() {
+        let parts = kernel_parts(Command::batch([
+            Command::<i32>::teardown("left"),
+            Command::teardown("right"),
+        ]));
+
+        assert_eq!(
+            parts.teardowns,
+            vec![
+                ScopePath::empty().prefixed("left"),
+                ScopePath::empty().prefixed("right"),
+            ]
+        );
+    }
+
+    #[test]
+    fn map_preserves_teardown_prefixes() {
+        let parts = kernel_parts(Command::<i32>::teardown("pane-1").map(|value| value * 2));
+
+        assert_eq!(parts.teardowns, vec![ScopePath::empty().prefixed("pane-1")]);
+    }
+
+    // Teardown is command metadata, so the execution reading — the one the
+    // current runtime and `TestStore` consume — cannot observe it at all.
+    #[test]
+    fn teardown_is_unreachable_through_the_execution_reading() {
+        let (cancels, key, streams) = Command::<i32>::teardown("pane-1")
+            .into_runtime_parts()
+            .into_execution_parts();
+
+        assert!(cancels.is_empty());
+        assert!(key.is_none());
+        assert!(streams.is_empty());
     }
 
     #[test]

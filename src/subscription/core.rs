@@ -140,7 +140,7 @@ impl<Msg: 'static> Subscription<Msg> {
     where
         Scope: Eq + Hash + Send + Sync + 'static,
     {
-        self.id.scope = AssertUnwindSafe(self.id.scope.appended(scope));
+        self.id.scope = AssertUnwindSafe(self.id.scope.prefixed(scope));
         self
     }
 
@@ -148,6 +148,20 @@ impl<Msg: 'static> Subscription<Msg> {
     /// Used by [`TestStore::subscription_ids`](crate::testing::TestStore::subscription_ids).
     pub(crate) const fn id(&self) -> &SubscriptionId {
         &self.id
+    }
+
+    /// Starts this declaration's source and returns its stream.
+    ///
+    /// The one way out of this module for the spawner, and it *consumes* the
+    /// declaration, so a source is started at most once per value — which is
+    /// how "the spawner is invoked exactly once per admission" (RFC 0012
+    /// INV-SE1) holds structurally rather than by the caller's discipline.
+    /// The call runs wherever the admitting code runs, which the kernel
+    /// fixes to its driving task so a lazy source constructor's panic
+    /// unwinds there (RFC 0011 §4.3) rather than inside a runtime-owned
+    /// task, where it would be contained.
+    pub(crate) fn into_stream(self) -> BoxStream<'static, Msg> {
+        (self.spawn)()
     }
 }
 
@@ -247,6 +261,13 @@ impl SubscriptionId {
             key: AssertUnwindSafe(StructuralKey::new(key)),
             scope: AssertUnwindSafe(ScopePath::empty()),
         }
+    }
+
+    /// This id's scope path, used to attribute a subscription run to the
+    /// composition boundary that declared it so a prefix teardown selects
+    /// it alongside command runs (RFC 0014 §4.1).
+    pub(crate) const fn scope(&self) -> &ScopePath {
+        &self.scope.0
     }
 }
 

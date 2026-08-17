@@ -95,6 +95,11 @@
 //! [`Command::batch`]: crate::Command::batch
 //! [`Command::timeout`]: crate::Command::timeout
 
+// The stage-3 driving surface (RFC 0008's amendment, RFC 0014 §7.2). It
+// drives the reducer-first kernel, so it stays crate-private for as long as
+// that kernel does; the non-executing store above is unaffected by it.
+pub(crate) mod driver;
+
 use std::fmt::Debug;
 use std::task::Poll;
 use std::thread;
