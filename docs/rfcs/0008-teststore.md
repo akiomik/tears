@@ -1276,8 +1276,8 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ) -> Result<GrantToken, GrantOutstanding>;
 
     /// Consumes `token`, driving the executor — beginning no pass —
-    /// until the granted send is accepted or its run is revoked, and
-    /// reports which resolved it (§9.6).
+    /// until the released send commits or is reclaimed, and reports
+    /// which of the two ended it (§9.6).
     pub fn confirm(&mut self, token: GrantToken) -> Confirmed;
 
     /// Drives the executor — beginning no pass and releasing no
@@ -1327,14 +1327,17 @@ pub struct AnonymousRun(/* private */);
 /// One outstanding grant, correlated to the commit it releases.
 pub struct GrantToken { /* private */ }
 
-/// How a grant resolved (§9.6). Both outcomes clear the outstanding
-/// grant; only `Accepted` appends to the guaranteed sequence.
+/// How a released send ended (§9.6). The two are disjoint and
+/// exhaustive; both clear the outstanding grant, and only `Accepted`
+/// appends to the guaranteed sequence.
+#[must_use]
 pub enum Confirmed {
-    /// The granted send was accepted past the gate.
+    /// The send committed: it was admitted past the gate. Whether
+    /// its run is revoked is a separate, delivery-side question.
     Accepted,
-    /// The granted run was revoked before its send was accepted,
-    /// and the kernel's bookkeeping now reflects that.
-    Revoked,
+    /// The send's reservation was released without committing —
+    /// the producer reclaimed it before admission.
+    Reclaimed,
 }
 
 /// A grant is already outstanding on this driver.
@@ -1389,14 +1392,16 @@ as they sit outside INV-T4's determinism scope — an effect that
 sleeps times its own test.
 
 **Executor turns are not selective, and this is a class fact about
-every driving call.** `boot`, `step_pass`, `confirm`, and `settle`
-all turn the executor, and a turn advances whatever is runnable
-rather than a run the caller has in mind. Two consequences hold for
-all four alike: any producer a turn advances to a send point presents
-a send-intent, so the **intent ledger may gain entries during any of
-them**; and the **guaranteed sequence gains an entry only at an
-acceptance**, which requires a send released through an armed grant,
-so no call appends to it except by that route (§9.6). What separates
+the four calls that turn the executor.** `boot`, `step_pass`,
+`confirm`, and `settle` all turn it, and a turn advances whatever is
+runnable rather than a run the caller has in mind. (`grant` is a
+driving call but not one of the four: it arms the gate and turns
+nothing.) Two consequences hold for all four alike: any producer a
+turn advances to a send point presents a send-intent, so the **intent
+ledger may gain entries during any of them**; and the **guaranteed
+sequence gains an entry only when a released send commits**, which
+requires a send released through an armed grant, so no call appends
+to it except by that route (§9.6). What separates
 `settle` from the other three is purpose, not effect: it is the call
 whose whole job is to supply turns, under a stated budget and
 completion condition, where the others produce turns as a by-product
@@ -1556,7 +1561,10 @@ therefore obtains its control arrival the way production does — the
 production gate is immediate, so a quit reaching a genuinely parked
 kernel is one an application-supplied effect emits at that moment,
 which is exactly the "scripted from a genuinely parked kernel with no
-other work pending" form RFC 0014 §13.1 requires of all three.
+other work pending" form RFC 0014 §13.1 requires of all three. How
+those three are harnessed — including what turns the emitting effect
+gets, which no call of this section supplies — belongs to RFC 0014
+§13.1 with the series themselves.
 
 Three rules carry INV-RC14's enqueue-order guarantee onto the
 surface:
@@ -1593,14 +1601,15 @@ each grant to its exact commit; the next grant to an origin only
 after the previous acceptance." The driver-wide rule above satisfies
 the first disjunct strictly — one outstanding grant driver-wide
 implies at most one per origin — and `GrantToken` supplies the
-second, being correlated to the commit its release produces; the
-trailing clause holds because no grant at any origin is admitted
-while the outstanding one is unresolved. A revoked resolution
-satisfies that clause the way an acceptance does: the clause exists
-to keep a second grant from being issued while a first commit is
-still uncorrelated, and a revoked run's released send has no commit
-to correlate — strict revocation is what guarantees it is never
-delivered (RFC 0014 §3.1).
+second, being correlated to the commit its release produces. The
+trailing clause holds as written wherever a grant resolves by
+acceptance: no grant at any origin is admitted while a commit is
+still uncorrelated. Where a grant resolves as `Confirmed::Reclaimed`
+there is no commit to correlate, so the clause has nothing to range
+over, and **how it reads in that case is not settled here**: it is
+part of what RFC 0014 §13.3's resolution fixes, which §9.8 keeps
+open. This section neither narrows nor widens that condition, and
+states no reading of it beyond the acceptance case its letter covers.
 
 **Grant lifecycle, in full.** A grant at an origin the kernel's run
 bookkeeping does not currently hold — a run never started, or one
@@ -1612,27 +1621,47 @@ stranded or not, for the reason its own paragraph gives. `confirm`
 and `grant` after termination are misuse under §9.3's state table,
 like every other driving call.
 
-**A granted send need not be accepted, and `confirm` resolves both
-ways.** The kernel may revoke the granted run — an explicit cancel, a
-`CancelInFlight` supersession, a scope teardown, or termination — and
-from a revocation's application point none of that run's output is
-ever delivered (RFC 0014 §3.1). A send released just before that, and
-still awaiting capacity, is then never accepted: no acceptance is
-coming, and no amount of driving will produce one. So `confirm`'s
-completion condition is a disjunction. It drives until **either** the
-granted send's acceptance is confirmed **or** the granted run's
-revocation is reflected in the kernel's own bookkeeping, and reports
-which as `Confirmed::Accepted` or `Confirmed::Revoked`. Both clear
+**A released send ends in one of exactly two states, and `confirm`
+reports which.** A send released at the gate either **commits** — it
+is admitted, and the guaranteed sequence gains its entry — or its
+reservation is **released without committing**, the producer having
+reclaimed it before admission. Those two are disjoint and exhaustive:
+there is no third *end* for a released send — though a send may sit
+in flight for as long as the lane makes it wait, which is why
+`confirm` carries a budget rather than a promise (below).
+`confirm` drives until one of the two is reached and
+returns `Confirmed::Accepted` or `Confirmed::Reclaimed`. Both clear
 the outstanding grant, so `grant` and `settle` are legal again after
-either. `Confirmed::Revoked` appends nothing to `deliveries`, which
-is what strict revocation requires rather than a concession to it.
+either.
 
-That disjunction is the *completion* condition, not a promise that
-one of its two arms always arrives inside the budget. Where the
-acceptance needs the kernel to drain the lane the send waits on,
-neither arm resolves under `confirm` and it fails on its bound like
-every other wait here; the test steps instead, which is what the
-detached token exists to permit.
+**Revocation is not one of those two states, and does not stop a
+send from committing.** Revoking a run filters its output at
+delivery, not at admission: from the application point no output of
+that run reaches `update`, buffered before or sent after (INV-RC5),
+while the items themselves still occupy the lane until dequeued and
+their dequeue does no `update` work (RFC 0014 §4.3, which states
+plainly that such sends are *filtered, not prevented*). So a granted
+send whose run is revoked mid-flight can perfectly well return
+`Confirmed::Accepted`, and the entry it puts in the ledger is true:
+that ledger records what passed the gate, not what reached `update`
+(§9.6's ledger paragraph). A test that wants to know the item was
+never delivered reads the pass that dequeues it, not the ledger —
+which is where INV-RC5 is checked in any case (§9.11).
+
+Whichever route ends a run — an explicit cancel, a `CancelInFlight`
+supersession, a scope teardown, or termination, whose task
+cancellation RFC 0014 §6.1 and RFC 0011 §4.4 make contract — the
+released send still lands in one of the two states above. *When* an
+abort falls relative to an in-flight send is mechanism, and this
+surface does not depend on it: either the commit happened before the
+producer was reclaimed, or it did not.
+
+The disjunction is `confirm`'s *completion* condition, not a promise
+that one of its arms arrives inside the budget. Where the commit
+needs the kernel to drain the lane the send waits on, neither arm is
+reached under `confirm` and it fails on its bound like every other
+wait here; the test steps instead, which is what the detached token
+exists to permit.
 
 This is a sanctioned observation of a state the *kernel* produced,
 and it is deliberately not the same thing as a **stranded token** — a
@@ -1640,10 +1669,14 @@ token dropped without `confirm`, which leaves its grant outstanding
 so that every later `grant` returns `Err(GrantOutstanding)` and every
 `settle` is misuse until the test ends. That one is a test-author
 error with no kernel state behind it, and it stays recorded as the
-misuse pattern that error most often means. None of RFC 0014 §13.1's
-twelve series needs the revoked resolution: the series that revoke a
-blocked sender observe the reclamation through the pass that reflects
-it, not through a grant awaiting an acceptance that will not arrive.
+misuse pattern that error most often means. The reclaimed resolution
+is not a corner case looking for a use: RFC 0014 §13.1's
+shutdown-scoped send-failure series is a blocked sender reclaimed by
+cancellation in the full topology (RFC 0014 §6.1, where the future is
+dropped at its await point), which is that resolution exactly. What
+such a series then asserts — RFC 0011 §4.4's two postcondition
+stages — it reads from the runtime, never from this resolution, which
+reports only how one released send ended.
 
 **`settle` is the call that contracts turns.** Some runs finish
 without ever presenting a send-intent — a cleanup finalizer, whose
@@ -1666,9 +1699,10 @@ ledgers is stated exactly rather than denied. It **initiates no
 append to the guaranteed sequence**, and that holds structurally
 rather than by intent: `settle` is misuse while a grant is
 outstanding, no send is released except through an outstanding grant,
-and a released send's grant stays outstanding until it resolves — so
-during a legal `settle` there is no armed gate and no
-released-but-unresolved send, and nothing can be accepted. The
+and a released send's grant stays outstanding until that send reaches
+one of its two terminal states — so during a legal `settle` there is
+no armed gate and no released send still in flight, and nothing can
+commit. The
 **intent ledger may gain entries**, on the other hand, from any
 producer the turns advance to a send point — as it may during any of
 the other three driving calls (§9.3). That is what a non-guaranteed
@@ -1676,14 +1710,19 @@ pre-gate ledger is for, and a test reading `intents` after a `settle`
 is reading exactly the kind of record this section declines to
 guarantee.
 
-Two ledgers divide at the send gate. `deliveries` records the sends
-accepted past it, each record carrying its origin and its lane, in
-gate order — the guaranteed observation sequence INV-RC14 scopes.
-That order is the *driver's*, established by the sequence of grants,
-and cross-lane it is nobody's claim about production: RFC 0014 §3.3
-declines to order a run's own control-lane quit against its earlier
-data-lane output at all, so a `deliveries` reading that puts one
-before the other is the citation rule's ordinary case (§9.9).
+Two ledgers divide at the send gate. The first records the sends
+**accepted past it** — admitted, not delivered — each record carrying
+its origin and its lane, in gate order: the guaranteed observation
+sequence INV-RC14 scopes, which RFC 0014 §7.2 begins at the gate for
+exactly this reason. What the block spells `deliveries` is normative
+in that content and not in its spelling, the block's own latitude
+covering accessor names; a record in it says an item was admitted,
+and says nothing about whether `update` ever saw it. That order is
+the *driver's*, established by the sequence of grants, and cross-lane
+it is nobody's claim about production: RFC 0014 §3.3 declines to
+order a run's own control-lane quit against its earlier data-lane
+output at all, so a reading that puts one before the other is the
+citation rule's ordinary case (§9.9).
 `intents` records send-intents before the gate, origin-tagged:
 pre-gate records, deliberately outside the guarantee. A test may read
 `intents` to see that a producer reached the gate; it may not derive
@@ -1777,12 +1816,13 @@ what was verified and at what scope.
   INV-RC11) comes from it.
 - **The remaining driving calls carry no evidence of their own.**
   `grant` opens the route by which an entry is appended to the
-  guaranteed observation sequence, and the acceptance that appends it
-  lands in one of three places: inside `confirm`, inside a
-  `step_pass` where the acceptance needs the kernel to drain the lane
-  the send waits on (the RFC 0014 §13.3 driver-progress form), or —
-  as no append at all — in a `Confirmed::Revoked` resolution (§9.6).
-  The entry becomes evidence when the pass-unit step that delivers it
+  guaranteed observation sequence, and the grant it opens resolves by
+  one of three routes: a commit reached inside `confirm`; a commit
+  reached inside a `step_pass`, where it needs the kernel to drain
+  the lane the send waits on (the RFC 0014 §13.3 driver-progress
+  form); or a `Confirmed::Reclaimed` resolution, which appends
+  nothing because no commit occurred (§9.6). The entry, where there
+  is one, becomes evidence when the pass-unit step that delivers it
   consumes it; the handshake itself witnesses nothing about
   production. `settle` contributes nothing to that sequence — it
   initiates no append to it (§9.6), and the exit it lets a run reach
@@ -1867,11 +1907,13 @@ of §9.3's block maps to one of them, walked in order:
 - `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` →
   INV-RC14, whose structural half is that the raw-grant shape is
   unrepresentable — which is what the driver-wide outstanding rule
-  delivers (§9.6). `Confirmed` reaches two invariants at once: its
-  `Accepted` arm is INV-RC14's acceptance, and its `Revoked` arm is
-  how INV-RC5's strict revocation appears at this surface — a
-  revoked run's released send is never delivered and appends nothing
-  (RFC 0014 §3.1).
+  delivers (§9.6). `Confirmed` maps to INV-RC14 through both arms: it
+  reports which terminal state a released send reached, and only the
+  committing one appends to the gate-scoped sequence. It maps to
+  INV-RC5 through *neither* — strict revocation is a delivery-side
+  property, so neither ledger witnesses it, and its behavioral rows
+  read the pass that dequeues a revoked item without doing `update`
+  work (RFC 0014 §4.3), not any record this surface keeps.
 - `settle` → INV-RC13: it drives the production executor and adds no
   seam, so it is covered by the same API-surface review. It reaches
   INV-RC14's observation sequence only negatively, by initiating no
@@ -1932,13 +1974,21 @@ of §9.3's block maps to one of them, walked in order:
   a fact about all four driving calls, the intent ledger may gain
   entries during any of them, and the only thing claimed of `settle`
   is that it initiates no append to the guaranteed sequence.
-- *Unresolvable grant* — a surface on which a granted send that the
-  kernel revokes before acceptance leaves the driver permanently
-  unusable: `confirm` exhausting its budget, `settle` barred, every
-  later `grant` refused. That state is the kernel's own doing and
-  needs a sanctioned exit, which §9.6's `Confirmed::Revoked`
-  resolution supplies; what stays a dead end is the stranded token,
-  which is a test-author error rather than a kernel outcome.
+- *Unresolvable grant* — a surface whose grant clears only on a
+  commit leaves the driver permanently unusable whenever a released
+  send is reclaimed instead: `confirm` exhausting its budget,
+  `settle` barred, every later `grant` refused, with no test-author
+  error anywhere. Excluded by §9.6's two terminal states, which
+  partition what can become of a released send and clear the grant on
+  either; a budget exhausted before either arrives still fails the
+  test, and the stranded token stays a dead end because it *is* a
+  test-author error.
+- *Ledger as delivery record* — reading an entry in the gate ledger
+  as proof that `update` saw the item. A revoked run's send can
+  commit and be recorded, and is then dequeued with no `update` work
+  at all (RFC 0014 §4.3). Excluded by §9.6's ledger paragraph, which
+  scopes the record to admission, and by §9.11's mapping, which puts
+  INV-RC5's checks on the pass rather than on either ledger.
 
 **Excluded claims**, per the checklist's minimal-contract item: no
 INV-T-numbered restatement of INV-RC13, INV-RC14, or INV-RC16 is
