@@ -329,10 +329,10 @@ the reviewer then caught their own suggestion's promotion). A
 measurement someone else ran elsewhere is the same class of hypothesis.
 That is a rule about how to verify, not about who is right: measure it
 here first; where that is impossible, consult this repository's own
-record of what was observed; treat any outside report as standing until
-one of those two bears on it. When two verified observations disagree,
-neither is discarded — see the measurement-citation bullets below for
-what to write instead.
+record of what was observed; hold any outside report as an open
+hypothesis until one of those two bears on it. When two verified
+observations disagree, neither is discarded — see the
+measurement-citation bullets below for what to write instead.
 
 *From PR #211:* "quit occupancy is bounded by producer count" — false,
 because a task terminates after `send` while its signal stays queued.
@@ -462,12 +462,12 @@ routines are doing at that moment, so a claim about the dependency's
 *effect* is checked across the paths that reach the site, and settled
 by measurement when reading cannot settle it. *From PR #282:* a
 coroutine crate raises a panic on its normal completion path, which a
-panic hook would see, and separately installs a no-op hook around the
-resume it uses to cancel a coroutine, restoring the previous hook
-afterwards — two sites, two paths, hook handling that differs between
-them. Neither reading establishes what an installed hook observes
-during a successful run; the in-repo measurement did, and the two
-sites are described rather than argued into agreement. *From PR #246:*
+panic hook would see, and separately silences the hook around the
+resume it uses to cancel a coroutine — two sites, two paths, hook
+handling that differs between them, and neither site settling what an
+installed hook observes during a successful run. What settled it, and
+how the result was written, are the measurement-citation bullets
+below. *From PR #246:*
 a `Timer` contract asserted no catch-up burst "because
 `MissedTickBehavior::Skip` skips missed ticks", but Tokio's Skip engages
 only once a tick is late past a fixed 5 ms margin, so sub-margin
@@ -608,21 +608,27 @@ fix adds, strengthens, or rewords — and run items 1–5 on exactly that
 list as if it were new RFC text, before pushing. The fix's own
 rationale sets that list's scope: a commit that explains itself by
 naming a defect class has claimed every instance of that class in the
-corpus, so the sweep is the class, not the sites the finding happened
-to cite. *From PR #282:* a commit that corrected "these edits are
-described as gated when they have landed" fixed the six sites in the
-document the finding named and left the identical sentence in eight
-places across seven owner documents, which returned as the next pass's
-blocker; later in the same review, a clause rewritten in three places
-regenerated the finding from a fourth in one of the same documents.
+tracked documents its subject reaches — the RFCs plus the repository
+documents they cite, which is where a contract claim's siblings live —
+so the sweep is the class, not the sites the finding happened to cite.
+Sweep that scope, or record in the changed-claims list which boundary
+was swept and why the remainder is out of it; an unrecorded boundary
+is the same defect as an unrecorded division under item 1. *From
+PR #282:* a commit that corrected "these edits are described as gated
+when they have landed" fixed the six sites in the document the finding
+named and left the identical construction in nine places across six
+sibling documents — the next pass's blocker, whose own enumeration
+found eight of the nine; later in the same review, a clause rewritten
+in three places regenerated the finding from a fourth in one of the
+documents already touched.
 
 The list is the enforcement; without it the pass silently shrinks to
 the sentences the finding pointed at, and a small patch is precisely
 the patch whose re-check gets skipped. *From PR #221:* two of the three
 findings sat in claims PR #220's review-fix commit had added or
 reshaped — the reference-machine-exclusivity sentence, and the
-rewritten pass/fail derivation that carried "cannot fail on speed" into new
-surroundings — and both would have appeared on that commit's
+rewritten pass/fail derivation that carried "cannot fail on speed"
+into new surroundings — and both would have appeared on that commit's
 changed-claims list.
 
 ## 7. Mechanical pass
