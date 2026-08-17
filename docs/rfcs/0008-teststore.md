@@ -1420,14 +1420,8 @@ impl ParkProbe {
     where
         F: Future<Output = Result<Exit, E>>;
 
-    /// The sources the parked loop registered this probe's waker
-    /// with, on the poll that parked it.
-    pub fn armed(&self) -> Vec<WakeSource>;
-
-    /// The arrival that woke the parked loop, once one has.
-    pub fn woken_by(&self) -> Option<WakeSource>;
-
-    /// Wake-ups this probe's waker has received.
+    /// Wake-ups this probe's waker has received. Which source caused
+    /// one is established by the script, not reported here (§9.7).
     pub fn wakes(&self) -> usize;
 }
 ```
@@ -1918,15 +1912,43 @@ driving future directly" of RFC 0014 §7.2. No `TestDriver` hands one
 out, and none could — §9.2's manual-effect-polling rule turns on
 exactly that.
 
-What the probe supplies is a waker and a poll, and nothing else. It polls
-that future directly; it scripts nothing inside the kernel, adds no
-branch, and is neither a third runtime seam nor a second driver. Its
-surface reports what RFC 0014 §7.2 says the probe observes: whether the
-loop parks (a `poll` returning `Pending`), which sources it armed
-(`armed`), and which arrival woke it (`woken_by`, with `wakes` counting
-the waker's calls). The two source-reporting readers speak `WakeSource`,
-the same vocabulary §9.5 scripts the seam with, because it is the same
-set: INV-RC16's armed sources.
+What the probe supplies is a waker and a poll, and nothing else. It
+polls that future directly; it scripts nothing inside the kernel,
+adds no branch, and is neither a third runtime seam nor a second
+driver. Its whole surface is that poll and a count of the wake-ups
+its waker has received.
+
+**Which source armed and which woke is established by the script,
+not reported by the probe.** RFC 0014 §7.2 says the probe observes
+whether the loop parks, which sources it armed, and which arrival
+wakes it — and those are observations, not accessors. Each is
+established the way RFC 0014 §13.1 already requires its three series
+to be built, "scripted from a genuinely parked kernel with no other
+work pending":
+
+- **That it parked**, in two stages: a re-poll returns `Pending`
+  while neither ledger gains a record and the wake count does not
+  move; then, after the arrival, the count moves exactly once.
+- **Which source**, by construction: the script arranges the arrival
+  of one source and no other, so the wake it observes can have come
+  from nothing else. That the kernel had armed that source is what
+  the wake witnesses.
+
+An accessor form is not available, and the reason is worth recording
+because it is a fact about the kernel rather than a choice here. The
+park registers **one** waker across both lanes and the exit
+notifications, and a wake carries no tag saying which of them fired;
+recovering a per-source answer would take per-source instrumentation
+inside the kernel — a branch — and RFC 0014 §7.2 says of this
+instrument that it "scripts nothing inside the kernel, adds no
+branch". An `armed`/`woken_by` pair would have been that branch.
+
+This is a surface *reduction*, and it costs INV-RC16 nothing. The
+invariant's enforcement was never these accessors: its arming half is
+structural at the park site — no finite test proves a registration
+for a source it did not exercise — and its behavioral half is the
+three series, one per armed source, which the construction above
+carries exactly as before.
 
 **Its evidence scope is INV-RC16's arming and wake claims, and
 nothing else.** A `ParkProbe` observation is never evidence for
@@ -2140,9 +2162,11 @@ of §9.3's block maps to one of them, walked in order:
   records that name their run and lane — is what makes that sequence
   assertable at all; without it the invariant would have a contract
   and no instrument.
-- `ParkProbe` and its three readers → INV-RC16, whose behavioral rows
-  sit on that probe; `armed` and `woken_by` are the API form of the
-  arming and wake observations RFC 0014 §7.2 names.
+- `ParkProbe`, its `poll`, and its wake count → INV-RC16, whose
+  behavioral rows sit on that probe. The arming and wake observations
+  RFC 0014 §7.2 names are established by how a series is scripted
+  rather than by any accessor, for a reason about the kernel rather
+  than a choice here (§9.7).
 - `StepReport::terminated` → INV-RC11 (the production result
   contract, RFC 0011 INV-LC5's, preserved).
 - `RunName`, `RunKind`, and `StepReport::started` → no invariant of
@@ -2227,28 +2251,32 @@ of §9.3's block maps to one of them, walked in order:
   checks on the pass rather than on either ledger.
 
 **Excluded claims**, per the checklist's minimal-contract item: no
-INV-T-numbered restatement of INV-RC13, INV-RC14, or INV-RC16 is
-added — a second statement of an invariant owned elsewhere is one a
-later amendment can drift from, and the surface above maps to the
-originals instead; no exhaustiveness or leak-check rule is stated for
-the driver, because what becomes of undelivered output is the
-kernel's own revocation and termination contract (RFC 0014 §3.1,
-RFC 0011 §4.4) and a store-style pending set does not exist here; no
-correspondence between `started`'s order and a command's declaration
-order is claimed, that lowering order being RFC 0014 §3.4's to state;
-and no bounded-lane determinism claim is made (§9.8). **No
-render-observation surface is offered either**: the driver owns its
-terminal and never hands it back, and `StepReport` carries `started`
-and `terminated` and nothing about frames, so no call here reports
-that a render happened or what it drew. Render evidence is
-application-side, where a `view` under test can record its own calls,
-and that is where INV-RC10's redraw row is read — its own enforcement
-line calls for "a scripted flood with an interposed probe and a
-pending redraw", and the interposed probe is that application-side
-instrument, not a driver method. This is deliberate negative space
-rather than an omission: a frame observation on the driver would be a
-third thing the surface reports about a pass, beside the two seams
-RFC 0014 §7.2 confines it to.
+INV-T-numbered restatement of INV-RC13, INV-RC14, or INV-RC16 is added —
+a second statement of an invariant owned elsewhere is one a later
+amendment can drift from, and the surface above maps to the originals
+instead; no exhaustiveness or leak-check rule is stated for the driver,
+because what becomes of undelivered output is the kernel's own revocation
+and termination contract (RFC 0014 §3.1, RFC 0011 §4.4) and a store-style
+pending set does not exist here; no correspondence between `started`'s
+order and a command's declaration order is claimed, that lowering order
+being RFC 0014 §3.4's to state; and no bounded-lane determinism claim is
+made (§9.8). **No per-source arming or wake accessor is offered on
+`ParkProbe`**: the park registers one waker and a wake carries no tag, so
+reporting which source fired would take a branch inside the kernel that
+RFC 0014 §7.2 forbids this instrument — the observation is
+script-established instead, and INV-RC16's enforcement is unchanged by
+the reduction (§9.7). **No render-observation surface is offered
+either**: the driver owns its terminal and never hands it back, and
+`StepReport` carries `started` and `terminated` and nothing about frames,
+so no call here reports that a render happened or what it drew. Render
+evidence is application-side, where a `view` under test can record its
+own calls, and that is where INV-RC10's redraw row is read — its own
+enforcement line calls for "a scripted flood with an interposed probe and
+a pending redraw", and the interposed probe is that application-side
+instrument, not a driver method. This is deliberate negative space rather
+than an omission: a frame observation on the driver would be a third
+thing the surface reports about a pass, beside the two seams RFC 0014
+§7.2 confines it to.
 
 Two elements were suspected of redundancy and kept, neither implied
 by its suspected survivor. `confirm` against `step_pass`, which also drives
