@@ -1784,12 +1784,17 @@ kernel's own revocation and termination contract (RFC 0014 §3.1,
 RFC 0011 §4.4) and a store-style pending set does not exist here; no
 correspondence between `started`'s order and a command's declaration
 order is claimed, that lowering order being RFC 0014 §3.4's to state;
-and no bounded-lane determinism claim is made (§9.8). One element was
-suspected of redundancy and kept: `confirm` against `step_pass`,
-which also drives the executor. `step_pass` does not imply it —
-stepping runs a whole pass, so confirming an acceptance through a
-step would put a pass between two grants and change the very enqueue
-order the handshake exists to script.
+and no bounded-lane determinism claim is made (§9.8). Two elements
+were suspected of redundancy and kept, neither implied by its
+suspected survivor. `confirm` against `step_pass`, which also drives
+the executor: stepping runs a whole pass, so confirming an acceptance
+through a step would put a pass between two grants and change the
+very enqueue order the handshake exists to script. And `settle`
+against `confirm`, which also drives the executor without a pass:
+`confirm` consumes a token, so it reaches only runs that have
+presented a send-intent — a cleanup finalizer, whose `Output = ()`
+closes the message path entirely, can never have one, and would be
+undriveable.
 
 ## 10. Open questions
 
