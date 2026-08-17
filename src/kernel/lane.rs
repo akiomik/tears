@@ -263,6 +263,38 @@ impl SendGate {
         Some(outcome)
     }
 
+    /// Driver side: the terminal the grant `sequence` has reached, **without
+    /// taking it** — the non-consuming read beside
+    /// [`take_resolution`](Self::take_resolution).
+    ///
+    /// The grant stays outstanding either way, so a caller can ask "has this
+    /// released send committed yet?" at a point where consuming the answer
+    /// would end the very state it wants to observe. It reports only the
+    /// terminal the *gate* holds: a grant that released nothing has none to
+    /// report, and the fact that would clear such a grant — the granted
+    /// run's exit reflected in the kernel's bookkeeping — is the caller's to
+    /// establish (§9.6's second reclaiming fact), which is why this reports
+    /// `None` there rather than guessing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `sequence` is not the outstanding grant's, on the same
+    /// discipline as [`take_resolution`](Self::take_resolution).
+    pub fn peek_resolution(&self, sequence: u64) -> Option<Confirmed> {
+        let state = self.lock();
+        let grant = state
+            .outstanding
+            .as_ref()
+            .expect("a peeked token names this gate's outstanding grant");
+        assert_eq!(
+            grant.sequence, sequence,
+            "a grant is peeked through its own token"
+        );
+        let outcome = grant.outcome;
+        drop(state);
+        outcome
+    }
+
     /// Driver side: clears the outstanding grant `sequence` when no producer
     /// ever took its release, reporting whether it did.
     ///

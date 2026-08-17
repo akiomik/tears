@@ -812,6 +812,35 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         unreachable!("the budget assertion above ends the loop");
     }
 
+    /// Whether the grant `token` names has reached a terminal yet, without
+    /// consuming the token, spending a turn, or clearing the grant.
+    ///
+    /// **Test-only internal, outside RFC 0008 §9.3's block**, on the same
+    /// footing as [`on_worker_threads`](Self::on_worker_threads). It exists
+    /// because the published surface has no non-destructive way to ask the
+    /// question: [`confirm`](Self::confirm) consumes the token and fails on
+    /// its budget, so a row that wants to assert "this release has *not*
+    /// committed yet" and then go on driving has nothing to assert with —
+    /// and a row that instead reads the acceptance ledger asserts nothing at
+    /// all, since a grant that has not been taken leaves the ledger
+    /// unchanged for reasons that have nothing to do with the lane. Whether
+    /// the driving contract should carry a public form of it belongs to the
+    /// bounded-lane work RFC 0014 §13.3 leaves open.
+    ///
+    /// It reports the terminal the *gate* holds. A grant that released no
+    /// send has none, so this is `None` there — the second reclaiming fact
+    /// is the caller's to establish and `confirm` is where it is reported.
+    ///
+    /// # Panics
+    ///
+    /// Panics outside the running state, and on a token this driver's gate
+    /// no longer holds.
+    #[cfg(test)]
+    pub(crate) fn try_confirm(&mut self, token: &GrantToken) -> Option<Confirmed> {
+        self.assert_running("try_confirm");
+        self.kernel.gate().peek_resolution(token.sequence)
+    }
+
     /// Drives the executor — beginning no pass and releasing no send-intent
     /// — until `until` holds (RFC 0008 §9.6).
     ///

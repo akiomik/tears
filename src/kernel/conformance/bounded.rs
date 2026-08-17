@@ -16,6 +16,14 @@
 //! on — which the token's detachment is for. **Ack correlation**: at most one
 //! grant is outstanding driver-wide, so no acceptance can be some other
 //! release's.
+//!
+//! **Each capacity claim here is a pair of rows, and it needs both.** A
+//! positive row shows a release committing after a pass drained the lane; on
+//! its own that is compatible with a release that would have committed
+//! anyway, because `grant` turns nothing and an unreached ledger reads the
+//! same as an unoffered one. The negative row is where the budget is spent
+//! with the lane still full, and it is what makes "only after a dequeue" a
+//! claim rather than a restatement of the script's order.
 
 use crate::command::{Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
@@ -68,14 +76,10 @@ fn a_bounded_lane_filters_a_revoked_run_s_committed_item_and_frees_its_slot_at_t
     accept(&mut driver, live);
     assert_eq!(driver.accepted().len(), 3, "three sends have committed");
 
-    // Issued *after* the revocation: if revoking freed the revoked item's
-    // slot, this send would commit. It does not.
+    // Issued *after* the revocation, onto a lane the revoked envelope still
+    // fills. That it cannot commit until something dequeues is the row
+    // below; what this one adds is which dequeue does it.
     let queued = driver.grant(trigger).expect("the previous grant resolved");
-    assert_eq!(
-        driver.accepted().len(),
-        3,
-        "revocation frees no capacity: the revoked envelope still holds its slot"
-    );
 
     driver
         .step_pass(WakeSource::Data)
@@ -85,11 +89,16 @@ fn a_bounded_lane_filters_a_revoked_run_s_committed_item_and_frees_its_slot_at_t
         vec![1],
         "no update invocation for the revoked origin's item"
     );
+    assert_eq!(
+        driver.try_confirm(&queued),
+        None,
+        "the dequeue freed the slot but did not itself commit the waiting send"
+    );
 
     assert_eq!(
         driver.confirm(TEST_TURNS, queued),
         Confirmed::Accepted,
-        "the dequeue that filtered it is what freed the capacity"
+        "the dequeue that filtered the revoked envelope is what freed the capacity"
     );
     assert_eq!(driver.accepted().len(), 4, "so the waiting send committed");
 
@@ -169,16 +178,16 @@ fn a_full_bounded_lane_acknowledges_only_after_a_dequeue_frees_capacity() {
 
     accept(&mut driver, first);
     let blocked = driver.grant(second).expect("the previous grant resolved");
-    assert_eq!(
-        driver.accepted().len(),
-        1,
-        "the one-slot lane is full, so the released send waits"
-    );
 
     driver
         .step_pass(WakeSource::Data)
         .expect("the committed message is in the lane");
     assert_eq!(journal.reduced(), vec![1], "the dequeue freed the slot");
+    assert_eq!(
+        driver.try_confirm(&blocked),
+        None,
+        "the dequeue freed the slot but did not itself commit the waiting send"
+    );
 
     assert_eq!(
         driver.confirm(TEST_TURNS, blocked),
@@ -193,4 +202,69 @@ fn a_full_bounded_lane_acknowledges_only_after_a_dequeue_frees_capacity() {
         vec![1, 2],
         "delivery follows the scripted enqueue order across the capacity wait"
     );
+}
+
+// The other half of the two rows above, and the one that makes them say
+// something: **without a dequeue the release never commits, however many
+// turns it gets.** Both positive rows show a send committing after a pass
+// drained the lane; on their own that is compatible with a send that would
+// have committed anyway, because a grant turns nothing and a ledger a
+// released send has not reached says the same thing as a ledger it has not
+// been offered. What separates the two readings is a budget spent with the
+// lane still full, which is what this row spends — and what `confirm` fails
+// on rather than waiting out.
+#[test]
+#[should_panic(expected = "bounded `confirm` exhausted")]
+fn a_release_onto_a_full_lane_does_not_commit_without_a_dequeue() {
+    let (mut driver, _journal) = driver_with(
+        Script::new(Command::batch([parking_effect([1]), parking_effect([2])])),
+        config()
+            .app_channel_capacity(cap(1))
+            .batch_max_messages(cap(1)),
+    );
+    let report = driver.boot();
+    let (first, second) = (report.started[0].clone(), report.started[1].clone());
+
+    accept(&mut driver, first);
+    let blocked = driver.grant(second).expect("the previous grant resolved");
+    let _confirmed = driver.confirm(TEST_TURNS, blocked);
+}
+
+// The same negative for the revocation row: a revoked envelope holds its
+// lane slot exactly as a live one does, so a release issued after the
+// revocation waits on it. Revoking frees no capacity — the delivery-side
+// dequeue does, which is the pass the positive row interposes and this one
+// omits.
+#[test]
+#[should_panic(expected = "bounded `confirm` exhausted")]
+fn a_revocation_frees_no_capacity_for_a_waiting_send() {
+    let worker = CommandId::new("worker");
+    let (mut driver, journal) = driver_with(
+        Script::new(Command::batch([
+            parking_effect([1, 2]),
+            parking_effect([10]).cancellable(worker.clone()),
+            parking_effect([20]),
+        ]))
+        .replying([Command::cancel(worker)]),
+        config()
+            .app_channel_capacity(cap(2))
+            .batch_max_messages(cap(1)),
+    );
+    let report = driver.boot();
+    let (trigger, revoked, live) = (
+        report.started[0].clone(),
+        report.started[1].clone(),
+        report.started[2].clone(),
+    );
+
+    accept(&mut driver, trigger.clone());
+    accept(&mut driver, revoked);
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the cancel trigger is in the lane");
+    assert_eq!(journal.reduced(), vec![1], "the cancel applied");
+
+    accept(&mut driver, live);
+    let queued = driver.grant(trigger).expect("the previous grant resolved");
+    let _confirmed = driver.confirm(TEST_TURNS, queued);
 }
