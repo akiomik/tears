@@ -966,10 +966,16 @@ contract; its API body lands in that amendment. Contract:
   (unbiased selection, immediate grant) and observably equivalent to
   the seamless kernel; production scheduling stays uninstrumented.
 - **Determinism, scoped (INV-RC14).** The driver guarantees scripted
-  reproducibility: one script (inputs, readiness, arbitration
-  choices, grants) yields one observation sequence, for a
+  reproducibility: one script yields one observation sequence, for a
   deterministic application — the driver introduces no nondeterminism
-  of its own. Enqueue-order scripting is guaranteed only through the
+  of its own. A script is inputs, readiness, arbitration choices, and
+  grants, together with whatever driving vocabulary the stage-3
+  surface adds and the arguments of those calls; what that surface
+  adds is fixed by RFC 0008 §9, not here. The enumeration is open in
+  that one direction because a driving call whose arguments change
+  the observation sequence must be scripted for this guarantee to
+  hold, and every such addition is bound by the clauses below.
+  Enqueue-order scripting is guaranteed only through the
   sequential handshake *grant → enqueue-acceptance confirmed → next
   grant*; raw grant order guarantees nothing and is not expressible
   in the API. The guaranteed observation sequence begins at the send
