@@ -38,7 +38,7 @@ use crate::structural_key::ScopePath;
 use crate::testing::driver::{DeliveryLedger, IntentLedger};
 
 use super::accounting::PendingCounter;
-use super::lane::{ControlSender, DataSender, GateMode, IngressHandle, RunToken, SendGate};
+use super::lane::{ControlSender, DataSender, IngressHandle, RunToken, SendGate};
 use super::registry::{Phase, RunEntry, RunKind};
 
 /// What a producer body receives.
@@ -155,8 +155,12 @@ pub struct ProducerHarness<'a, Msg: Send + 'static> {
     pub delivery: &'a DeliveryLedger,
     /// The load observer this run's gauge guard reports to.
     pub observer: &'a LoadObserver,
-    /// Which gate the run's ingress waits on before each send.
-    pub gate_mode: GateMode,
+    /// The gate the run's ingress waits on before each send.
+    ///
+    /// The kernel's one gate, cloned per run rather than built per run: the
+    /// driver's "at most one outstanding grant" rule is driver-wide, which
+    /// only a shared object can express (RFC 0008 §9.6).
+    pub gate: &'a Arc<SendGate>,
 }
 
 impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
@@ -179,7 +183,7 @@ impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
         body: EffectBody<Msg>,
     ) -> RunEntry {
         let counter = Arc::new(PendingCounter::default());
-        let gate = Arc::new(SendGate::new(self.gate_mode));
+        let gate = Arc::clone(self.gate);
         let handle = IngressHandle::new(
             token,
             Arc::clone(&counter),
