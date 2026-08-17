@@ -87,14 +87,6 @@ pub const THREADED_TURNS: usize = 4096;
 /// stops it.
 const HANDSHAKE_YIELDS: usize = 1_000_000;
 
-/// Scheduler yields [`await_mark`] spends *after* the mark it waited for.
-///
-/// A producer marks from inside its own body, which is a moment before the
-/// task carrying it is finished and joinable — a difference no application
-/// surface reports. This tail is what makes "the run has ended" mean the
-/// kernel could observe it. Its value is mechanism.
-const MARK_TAIL_YIELDS: usize = 4_096;
-
 /// How many turns a park witness hands the executor before re-asserting that
 /// nothing has woken the loop.
 ///
@@ -440,36 +432,6 @@ impl MidBatchHandshake {
     }
 }
 
-/// Blocks the driving thread until `beacon` is marked, on the same counted
-/// bound the mid-batch handshake uses and for the same reason: a wait that
-/// cannot end is a test that fails rather than one that stops, and bounding
-/// it with a deadline would be a clock read.
-///
-/// # Panics
-///
-/// Panics when the bound is spent with the beacon unmarked.
-#[expect(
-    clippy::panic,
-    reason = "an exhausted bound fails the test, which is what a panic is here"
-)]
-pub fn await_mark(beacon: &Beacon, what: &str) {
-    for _ in 0..HANDSHAKE_YIELDS {
-        if beacon.marked() {
-            // A mark made from a producer's own body lands before the task
-            // it belongs to is finished and joinable, and no application
-            // surface reports the difference. The tail closes that window
-            // by construction rather than by timing: the yields are counted,
-            // and nothing here reads a clock.
-            for _ in 0..MARK_TAIL_YIELDS {
-                thread::yield_now();
-            }
-            return;
-        }
-        thread::yield_now();
-    }
-    panic!("bounded wait exhausted after {HANDSHAKE_YIELDS} scheduler yields: {what}");
-}
-
 /// A named, state-gated subscription declaration.
 ///
 /// The scripted program declares a feed exactly while its name is in the
@@ -531,10 +493,6 @@ pub struct Script {
     /// The message whose `update` runs the mid-batch handshake, and the
     /// handshake it runs.
     handshake: Option<(u8, MidBatchHandshake)>,
-    /// A beacon the *initial* reconcile holds for, so a producer the init
-    /// command started can be made to finish before bootstrap's
-    /// continuation pass runs.
-    reconcile_wait: Option<Beacon>,
 }
 
 impl Script {
@@ -550,7 +508,6 @@ impl Script {
             redeclare: HashMap::new(),
             panic_on: None,
             handshake: None,
-            reconcile_wait: None,
         }
     }
 
@@ -611,19 +568,6 @@ impl Script {
         self.handshake = Some((message, handshake));
         self
     }
-
-    /// Holds the **initial reconcile** until `beacon` is marked.
-    ///
-    /// Bootstrap's order is init dispatch, then the initial reconcile, then
-    /// the continuation pass (RFC 0011 §3.2 as RFC 0008 §9.5 extends it), so
-    /// a hold placed here lets a run the init command started reach its own
-    /// end before that pass begins — which is what makes a race into a
-    /// script.
-    #[must_use]
-    pub fn awaiting_at_reconcile(mut self, beacon: Beacon) -> Self {
-        self.reconcile_wait = Some(beacon);
-        self
-    }
 }
 
 /// The scripted program's state: the script, minus what `init` consumed.
@@ -635,7 +579,6 @@ pub struct State {
     redeclare: HashMap<u8, Vec<&'static str>>,
     panic_on: Option<u8>,
     handshake: Option<(u8, MidBatchHandshake)>,
-    reconcile_wait: Option<Beacon>,
 }
 
 /// A program that replies from its script and records every call the kernel
@@ -670,13 +613,6 @@ impl Reducer for Scripted {
 
     fn subscriptions(&self, state: &State) -> Vec<Subscription<u8>> {
         self.journal.record(Call::Subscriptions);
-        // Only the initial reconcile holds: it is the one that runs between
-        // the init dispatch and the continuation pass.
-        if let Some(beacon) = state.reconcile_wait.as_ref()
-            && self.journal.evaluations() == 1
-        {
-            await_mark(beacon, "the init command's run reaches its own end");
-        }
         state
             .mocks
             .iter()
@@ -706,7 +642,6 @@ impl Program for Scripted {
             redeclare,
             panic_on,
             handshake,
-            reconcile_wait,
         } = flags;
         (
             State {
@@ -717,7 +652,6 @@ impl Program for Scripted {
                 redeclare,
                 panic_on,
                 handshake,
-                reconcile_wait,
             },
             init,
         )

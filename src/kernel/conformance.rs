@@ -16,7 +16,9 @@
 //! stage in isolation — a stage-granular probe can fabricate a permuted
 //! execution the fixed order forbids, so nothing observed through one would
 //! be evidence for INV-RC13 — and this suite has none, so the `whitebox_`
-//! prefix that would mark one appears nowhere in it.
+//! prefix that would mark one appears nowhere in it. The driver's own test
+//! module carries one such row, marked that way, guarding a property of the
+//! harness rather than of the kernel; it is no part of any series here.
 //!
 //! **The three `ParkProbe` series carry INV-RC16 and nothing else.** They
 //! poll the production driving future by hand, with the probe's own waker,

@@ -1209,7 +1209,7 @@ mod tests {
     use crate::command::{Command, CommandId};
     use crate::kernel::conformance::support::{
         Beacon, Script, TEST_TURNS, cap, config, driver, driver_with, failing_driver,
-        marking_effect, parking_effect, sending_effect, silent_effect, threaded_driver_with,
+        marking_effect, parking_effect, sending_effect, silent_effect,
     };
     use crate::kernel::lane::SendGate;
     use crate::subscription::mock::MockSource;
@@ -1691,32 +1691,78 @@ mod tests {
         );
     }
 
-    // A run can be gone by the time its own step reports it. On a
-    // multi-worker executor an init effect that produces nothing races the
-    // bootstrap: its task can finish before the continuation pass, whose
-    // first stage then reflects the exit and retires an entry with nothing
-    // pending. The report still has to name the run — it *was* started by
-    // that step — so the name cannot be read back out of bookkeeping that
-    // no longer holds it.
+    // A run can be gone by the time the step that started it is reported,
+    // and the name still has to be minted. The state is: a token in the
+    // kernel's `started` log whose registry entry a later pass has already
+    // reflected and retired — reachable in production during bootstrap,
+    // whose continuation pass can reflect an init effect that finished
+    // while it was being set up.
+    //
+    // **White-box, and outside the evidence surface**: no driving call
+    // leaves the log undrained, so reaching the state at all means driving
+    // the kernel's stages directly. What it guards is one property and not
+    // a contract — that the mint reads the kind the kernel recorded at the
+    // start, and consults no bookkeeping that a pass is free to retire
+    // first. Nothing observed here is evidence for INV-RC13 or for any
+    // §13.1 series (RFC 0014 §7.2).
     #[test]
-    fn boot_names_a_run_that_finished_before_its_own_report() {
-        let ended = Beacon::default();
-        let (mut driver, _journal) = threaded_driver_with(
-            Script::new(marking_effect(ended.clone())).awaiting_at_reconcile(ended),
-            config(),
+    fn whitebox_mint_names_a_run_whose_entry_a_pass_has_retired() {
+        let (mut driver, _journal) =
+            driver(Script::new(parking_effect([1])).replying([marking_effect(Beacon::default())]));
+        let trigger = driver.boot().started[0].clone();
+        let token = driver.grant(trigger).expect("no other grant");
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
+
+        let started = {
+            let TestDriver {
+                executor,
+                kernel,
+                terminal,
+                ..
+            } = &mut driver;
+            executor.block_on(async {
+                // The pass that starts the run. Its `started` entry stays in
+                // the log, because nothing here is a driving call.
+                kernel
+                    .pass_cycle(terminal)
+                    .expect("the test backend renders");
+
+                // Turns until the kernel itself can see the exit. The wait
+                // ends on the fact it is waiting for — the kernel's own
+                // readiness read — rather than on a count, so no scheduling
+                // order is load-bearing.
+                for _ in 0..TEST_TURNS {
+                    if kernel.wake_source_ready(WakeSource::ProducerExit) {
+                        break;
+                    }
+                    executor_turn().await;
+                }
+                assert!(
+                    kernel.wake_source_ready(WakeSource::ProducerExit),
+                    "the started run reached its end"
+                );
+
+                // The pass that reflects it. The run sent nothing, so the
+                // entry is removable and this retires it.
+                kernel
+                    .pass_cycle(terminal)
+                    .expect("the test backend renders");
+                kernel.take_started()
+            })
+        };
+
+        assert_eq!(started.len(), 1, "the log still holds the run it started");
+        let run = started[0].token;
+        assert!(
+            driver.kernel.registry().get(run).is_none(),
+            "and the bookkeeping no longer does: a mint that read it back would find nothing"
         );
 
-        let report = driver.boot();
-
+        let name = driver.mint(started.into_iter().next().expect("the one entry"));
         assert_eq!(
-            report.started.len(),
-            1,
-            "the init effect's run is one this step started, whatever became of it"
-        );
-        assert_eq!(
-            report.started[0].kind(),
+            name.kind(),
             RunKind::Anonymous,
-            "and its kind is the one it was started with"
+            "the name carries the kind the kernel recorded when it started the run"
         );
     }
 
