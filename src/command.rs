@@ -27,6 +27,7 @@
 mod cancellation;
 pub(crate) mod core;
 mod effect;
+mod kernel_parts;
 mod retry;
 mod runtime_directives;
 mod runtime_parts;
@@ -34,6 +35,7 @@ mod runtime_parts;
 pub(crate) use cancellation::CancellableCommand;
 pub use cancellation::{CancelPolicy, CommandId};
 pub(crate) use core::Command;
+pub(crate) use kernel_parts::{KernelParts, SpawnEntry};
 pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};
 pub(crate) use runtime_parts::{RuntimeCommandParts, fold_leaves};
 

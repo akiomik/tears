@@ -11,7 +11,10 @@ use futures::{
 };
 use tokio::time::{Sleep, sleep};
 
+use crate::structural_key::{ScopePath, StructuralKey};
+
 use super::Action;
+use super::cancellation::CancellableCommand;
 
 /// Wraps one effect leaf with a lazily started overall deadline and terminal
 /// timeout handling.
@@ -139,23 +142,83 @@ where
     }
 }
 
+/// What a leaf lowers to.
+///
+/// The distinction is metadata, not stream shape: an `ImmediateQuit` leaf
+/// still carries the same one-item `Action::Quit` stream any other leaf
+/// would, so a consumer that reads streams alone observes no difference.
+/// What it names is the lowering bucket — an `update`-returned quit applies
+/// synchronously at the dispatch that returned it rather than being spawned
+/// as a producer run (RFC 0014 §3.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LeafKind {
+    /// An ordinary effect carrier: the runtime spawns its stream.
+    Effect,
+    /// The carrier [`Command::quit`](super::Command::quit) builds.
+    ImmediateQuit,
+}
+
+/// One effect carrier: its stream plus the identity metadata that travels
+/// with it through `Command` composition.
+///
+/// `key` is the carrier's spawn key. It is `None` on construction — a
+/// top-level `cancellable` call still records the key on the command — and
+/// is filled in when [`Command::batch`](super::Command::batch) pushes a
+/// child's key down to the child's own carriers, which is what lets each
+/// child lower to an independent keyed entry (RFC 0014 §3.4).
+///
+/// `scope` is the carrier's composition-boundary attribution, applied by
+/// [`Command::scoped`](super::Command::scoped). A carrier with no key still
+/// carries one, so a prefix teardown reaches anonymous effects spawned
+/// through a boundary (RFC 0014 INV-RC7).
+pub(super) struct Leaf<Msg: Send + 'static> {
+    pub(super) key: Option<CancellableCommand>,
+    pub(super) scope: ScopePath,
+    pub(super) kind: LeafKind,
+    pub(super) stream: BoxStream<'static, Action<Msg>>,
+}
+
+impl<Msg: Send + 'static> Leaf<Msg> {
+    fn new(kind: LeafKind, stream: BoxStream<'static, Action<Msg>>) -> Self {
+        Self {
+            key: None,
+            scope: ScopePath::empty(),
+            kind,
+            stream,
+        }
+    }
+
+    /// Rewraps the stream — possibly at a new message type — keeping every
+    /// piece of metadata. This is the one shape `map` and `timeout` use, so
+    /// their metadata pass-through (RFC 0003 INV-12, RFC 0005 INV-17) holds
+    /// by construction rather than by each wrapper remembering to copy three
+    /// fields.
+    fn relay<T: Send + 'static>(
+        self,
+        wrap: impl FnOnce(BoxStream<'static, Action<Msg>>) -> BoxStream<'static, Action<T>>,
+    ) -> Leaf<T> {
+        Leaf {
+            key: self.key,
+            scope: self.scope,
+            kind: self.kind,
+            stream: wrap(self.stream),
+        }
+    }
+}
+
 // Effects own and compose the asynchronous action stream; runtime directives
 // stay separate because they describe how the runtime treats the update result.
 //
 // Rather than folding children into a single opaque stream at construction
-// time, an effect keeps the flat sequence of leaf streams and hands them out
+// time, an effect keeps the flat sequence of leaves and hands them out
 // unfolded at the `into_leaves()` boundary, from where `RuntimeCommandParts`
-// carries them to each consumer (RFC 0008 §4.1): the runtime folds them (via
-// `fold_leaves`) at its spawn site, `TestStore` drives them one by one.
-// Keeping the leaves apart preserves each leaf's identity through `Command`
-// composition, which is what a future per-leaf cancellation id would attach
-// to.
-//
-// Future room: to carry per-leaf metadata, `leaves` could hold
-// `Vec<(LeafMeta, BoxStream<'static, Action<Msg>>)>` without reworking the
-// consumers of the `into_leaves()` boundary.
+// carries them to each consumer (RFC 0008 §4.1): the runtime folds their
+// streams (via `fold_leaves`) at its spawn site, `TestStore` drives them one
+// by one. Keeping the leaves apart preserves each leaf's identity through
+// `Command` composition, which is what the per-leaf spawn key and scope
+// attach to.
 pub(super) struct Effect<Msg: Send + 'static> {
-    leaves: Vec<BoxStream<'static, Action<Msg>>>,
+    leaves: Vec<Leaf<Msg>>,
 }
 
 impl<Msg: Send + 'static> Effect<Msg> {
@@ -165,7 +228,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
 
     fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
         Self {
-            leaves: vec![stream],
+            leaves: vec![Leaf::new(LeafKind::Effect, stream)],
         }
     }
 
@@ -175,6 +238,19 @@ impl<Msg: Send + 'static> Effect<Msg> {
 
     pub(super) fn action(action: Action<Msg>) -> Self {
         Self::from_stream(stream::once(async move { action }).boxed())
+    }
+
+    /// The carrier behind [`Command::quit`](super::Command::quit): the same
+    /// single-`Action::Quit` stream [`Effect::action`] would build, marked
+    /// [`LeafKind::ImmediateQuit`] so lowering can apply it synchronously
+    /// (RFC 0014 §3.3) instead of spawning it.
+    pub(super) fn immediate_quit() -> Self {
+        Self {
+            leaves: vec![Leaf::new(
+                LeafKind::ImmediateQuit,
+                stream::once(async { Action::Quit }).boxed(),
+            )],
+        }
     }
 
     pub(super) fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
@@ -201,9 +277,42 @@ impl<Msg: Send + 'static> Effect<Msg> {
         let leaves = self
             .leaves
             .into_iter()
-            .map(|leaf| TimeoutLeaf::new(leaf, duration, Arc::clone(&on_timeout)).boxed())
+            .map(|leaf| {
+                let on_timeout = Arc::clone(&on_timeout);
+                leaf.relay(|stream| TimeoutLeaf::new(stream, duration, on_timeout).boxed())
+            })
             .collect();
         Self { leaves }
+    }
+
+    /// Pushes a spawn key down onto every carrier that does not already have
+    /// one, so a batched child's key reaches the child's own carriers rather
+    /// than the batch (RFC 0014 §3.4).
+    ///
+    /// Carriers that already hold a key keep it: the key nearest the effect
+    /// is the one that names its run.
+    pub(super) fn attach_key(&mut self, key: &CancellableCommand) {
+        for leaf in &mut self.leaves {
+            if leaf.key.is_none() {
+                leaf.key = Some(key.clone());
+            }
+        }
+    }
+
+    /// Qualifies every carrier's spawn key and scope attribution with one
+    /// already-erased composition-boundary segment.
+    ///
+    /// Both halves matter: the key half keeps a batched child's key distinct
+    /// per boundary, and the scope half is what gives an *unkeyed* carrier a
+    /// scope for a prefix teardown to select (RFC 0014 INV-RC7).
+    pub(super) fn apply_scope(&mut self, segment: &StructuralKey) {
+        for leaf in &mut self.leaves {
+            leaf.key = leaf.key.take().map(|cancellable| CancellableCommand {
+                id: cancellable.id.scoped_with(segment.clone()),
+                policy: cancellable.policy,
+            });
+            leaf.scope = leaf.scope.prefixed_key(segment.clone());
+        }
     }
 
     pub(super) fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Effect<T>
@@ -225,16 +334,18 @@ impl<Msg: Send + 'static> Effect<Msg> {
             .boxed()
         }
 
-        // Map each leaf on its own to preserve leaf count and order. A single
-        // leaf moves `f` straight into its closure with no shared-ownership
-        // cost (the pre-refactor path). Several leaves must share `f`: `Arc<F>`
-        // alone would require `F: Sync`, but the public `map` bound is only
-        // `Fn + Send`, so a `Mutex` supplies the needed `Sync`.
+        // Map each leaf on its own to preserve leaf count, order, and every
+        // leaf's identity metadata (RFC 0003 INV-12, RFC 0005 INV-17). A
+        // single leaf moves `f` straight into its closure with no
+        // shared-ownership cost (the pre-refactor path). Several leaves must
+        // share `f`: `Arc<F>` alone would require `F: Sync`, but the public
+        // `map` bound is only `Fn + Send`, so a `Mutex` supplies the needed
+        // `Sync`.
         let mut leaves = self.leaves;
         if leaves.len() == 1 {
             let leaf = leaves.pop().expect("length checked to be 1");
             return Effect {
-                leaves: vec![map_leaf(leaf, f)],
+                leaves: vec![leaf.relay(|stream| map_leaf(stream, f))],
             };
         }
 
@@ -243,15 +354,17 @@ impl<Msg: Send + 'static> Effect<Msg> {
             .into_iter()
             .map(|leaf| {
                 let f = Arc::clone(&f);
-                map_leaf(leaf, move |msg| {
-                    // The mutex only lends `Sync` to the shared `Fn`; it
-                    // guards no mutable state, so a poisoned lock carries
-                    // no corrupted invariant. Recover the guard rather
-                    // than panicking, which would otherwise turn one
-                    // leaf's panic into a misleading "mutex poisoned"
-                    // cascade across its sibling leaves.
-                    let guard = f.lock().unwrap_or_else(PoisonError::into_inner);
-                    (*guard)(msg)
+                leaf.relay(|stream| {
+                    map_leaf(stream, move |msg| {
+                        // The mutex only lends `Sync` to the shared `Fn`; it
+                        // guards no mutable state, so a poisoned lock carries
+                        // no corrupted invariant. Recover the guard rather
+                        // than panicking, which would otherwise turn one
+                        // leaf's panic into a misleading "mutex poisoned"
+                        // cascade across its sibling leaves.
+                        let guard = f.lock().unwrap_or_else(PoisonError::into_inner);
+                        (*guard)(msg)
+                    })
                 })
             })
             .collect();
@@ -275,7 +388,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
 
     /// Hands the flat leaf sequence to `RuntimeCommandParts`, preserving
     /// `Command::batch`'s flattened declaration order (RFC 0008 §4.1).
-    pub(super) fn into_leaves(self) -> Vec<BoxStream<'static, Action<Msg>>> {
+    pub(super) fn into_leaves(self) -> Vec<Leaf<Msg>> {
         self.leaves
     }
 
@@ -283,7 +396,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
     // through `into_leaves()` and fold at their own site.
     #[cfg(test)]
     pub(super) fn into_stream(self) -> Option<BoxStream<'static, Action<Msg>>> {
-        super::runtime_parts::fold_leaves(self.leaves)
+        super::runtime_parts::fold_leaves(self.leaves.into_iter().map(|leaf| leaf.stream).collect())
     }
 }
 
