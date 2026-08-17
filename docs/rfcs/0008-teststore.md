@@ -145,7 +145,8 @@ what the application side supplies, which is **inputs and readiness**
 (mock sources satisfying RFC 0012 §6.1's template, and test-controlled
 gates inside application-supplied effects); scripted determinism over
 the whole script — inputs, readiness, arbitration choices, and
-grants — for a deterministic application, with the
+grants, together with the driving calls §9 adds and their
+arguments — for a deterministic application, with the
 grant-then-acceptance handshake as the narrower condition under which
 *enqueue order* is guaranteed at all, and the whole determinism claim
 scoped to its verified range: a current-thread executor and unbounded
@@ -1286,8 +1287,14 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ) -> Result<GrantToken, GrantOutstanding>;
 
     /// Consumes `token`, driving the executor — beginning no pass —
-    /// until the grant resolves, and reports how (§9.6).
-    pub fn confirm(&mut self, token: GrantToken) -> Confirmed;
+    /// for at most `max_turns` turns, until the grant resolves, and
+    /// reports how. Exhausting `max_turns` fails the test, reporting
+    /// the turns consumed (§9.6).
+    pub fn confirm(
+        &mut self,
+        max_turns: usize,
+        token: GrantToken,
+    ) -> Confirmed;
 
     /// Drives the executor — beginning no pass and releasing no
     /// send-intent — for at most `max_turns` turns, until `until`
@@ -1800,44 +1807,54 @@ and releases no send-intent, and an exit it lets a run reach becomes
 visible the way every exit does, at the exit-reflection stage of the next
 `step_pass(WakeSource::ProducerExit)`.
 
-**What a turn is, normatively.** One **turn** is the driver task
-yielding control to the executor once, under this condition: every
-task that was ready at that yield gets the executor before `settle`
-evaluates the predicate again. The definition is here rather than
-left to the implementation because without it two conforming drivers
-disagree on the same test — one whose turn admits a single ready task
-and one whose turn admits all of them reach different states after
-the same call, and a test written against either fails on the other.
+**What a turn is, normatively — and it is defined by construction.**
+One **turn** is the driver task spawning a fresh no-op task onto its
+own executor and awaiting that task's completion, suspending until it
+resolves. Nothing but public primitives: a spawn and a join. The
+definition is a construction rather than a property because the
+property one would rather state — that every task ready at the yield
+gets the executor first — is not something the executor's public
+contract offers. There is no ready-set observation, and a bare yield
+may re-poll the yielding task immediately; the only way to *assert*
+that property would be to instrument the scheduler, which RFC 0014
+§7.2 forbids outright ("production scheduling stays uninstrumented").
+Spawning one ordinary task is not instrumentation — it adds no hook
+and reads no scheduler state.
 
-It is implementable inside the determinism claim's existing scope and
-promises nothing outside it: on a current-thread executor a FIFO
-ready queue satisfies it directly, and for executors outside that
-scope (§9.8's verified range) this section claims nothing. Nor does
-it intrude on RFC 0011 §2.3's unspecified producer scheduling — a
-turn is a unit of *opportunity*, not of progress. It says every ready
-task is given the executor; it says nothing about how far any of them
-runs, in what order they are picked, or whether one completes.
+What the construction buys is the thing the property was wanted for:
+two conforming drivers build the same turn, so on the same executor
+they produce the same observation sequence, and a test cannot pass
+under one and fail under the other.
 
-**The completion condition is the caller's, given as a predicate**,
-and so is the budget. `settle` evaluates the predicate once before
-the first turn — an already-true condition costs none — and again
-after each turn, taking at most `max_turns` of them; exhausting the
-budget fails the test with the count consumed, as every wait here
-fails on its bound. Both are the caller's for the same reason the
-turn is defined above: a driver-chosen budget is a mechanism two
-implementations may pick differently, and a test that passes under a
-bound of two and fails under a bound of one would make conformance
-depend on it. Naming the budget at the call site puts it in the
-script (§9.8) instead.
+*Informative, not contract:* on the current-thread executor of §9.8's
+verified range, a FIFO ready queue means a turn constructed this way
+does in practice let the tasks ready at the spawn run before the join
+resolves. That is an observation about that executor, not a promise
+this section makes, and nothing outside the verified range is claimed
+at all. The normative content stays what the construction pins, and
+RFC 0011 §2.3's unspecified producer scheduling is untouched: a turn
+is a unit of *opportunity*, not of progress. It says nothing about
+how far any task runs, in what order tasks are picked, or whether
+one completes.
 
-`confirm` takes no budget for the same reason, read the other way.
-Its completion condition is not the caller's: a grant resolves or it
-does not, and any two bounds agree on every execution where the
-resolution arrives — a longer one is only more patient. The bound
-there is a guard against a test that hangs, so its value is
-mechanism. `settle`'s is semantic, because a predicate may first hold
-on the *n*th turn and the budget decides whether that test can
-observe it.
+**Both waiting calls take their budget from the caller.** `settle`
+and `confirm` each take `max_turns`, spend at most that many turns,
+and fail the test with the count consumed when they run out. The
+reason is the one the turn definition serves: a driver-chosen budget
+is a mechanism two implementations may pick differently, and a test
+that passes under a bound of three and fails under a bound of one
+would make conformance depend on it. That is as true of `confirm` as
+of `settle` — a producer granted a release may take several turns to
+reach its send, so a bound of one can report exhaustion where a bound
+of three reports `Accepted`, on the same finite execution. Naming
+both budgets at the call site puts them in the script (§9.8) instead.
+
+What differs between the two is only the completion condition, not
+who owns the budget: `settle`'s is the caller's predicate, and
+`confirm`'s is the gate's — the grant resolving one way or the other
+(§9.6's two states).
+
+The predicate is supplied rather than fixed because the obvious fixed
 
 The predicate is supplied rather than fixed because the obvious fixed
 condition, "until the executor is idle", is not a thing this contract
@@ -1926,9 +1943,14 @@ established the way RFC 0014 §13.1 already requires its three series
 to be built, "scripted from a genuinely parked kernel with no other
 work pending":
 
-- **That it parked**, in two stages: a re-poll returns `Pending`
-  while neither ledger gains a record and the wake count does not
-  move; then, after the arrival, the count moves exactly once.
+- **That it parked**, in two stages, over what this execution
+  actually has to observe: a re-poll returns `Pending`, the wake
+  count does not move, and the application's own instrumentation
+  stays silent — no journal entry, no `view` call. Then, after the
+  arrival, the count moves exactly once. The ledgers are not among
+  these witnesses and could not be: a probe series polls the future
+  from `ProgramRuntime::run` and no `TestDriver` is in play, so
+  neither ledger exists in that execution.
 - **Which source**, by construction: the script arranges the arrival
   of one source and no other, so the wake it observes can have come
   from nothing else. That the kernel had armed that source is what
@@ -1959,16 +1981,19 @@ other series is pass-unit driven.
 
 ### 9.8 Determinism, scoped
 
-A **script** is the ordered sequence of driving calls, with each
-call's own arguments — `boot`, each `step_pass`'s `WakeSource`, each
-`grant`'s run and its paired `confirm`, and **each `settle`'s
-predicate and `max_turns`** — together with the application-side
-inputs and readiness (§9.2). `boot` is listed for completeness rather
-than as a choice: §9.3's state table admits it in exactly one
-position, so it is not a free variable.
+A **script** is the ordered sequence of driving calls, with each call's
+own arguments — `boot`, each `step_pass`'s `WakeSource`, each `grant`'s
+run and its paired `confirm` with that call's `max_turns`, and **each
+`settle`'s predicate and `max_turns`** — together with the
+application-side inputs and readiness (§9.2). `boot` is listed for
+completeness rather than as a choice: §9.3's state table admits it in
+exactly one position, so it is not a free variable.
 
-A `settle`'s arguments are free variables and are named as such,
-because they are: `settle(n, || true)` and `settle(n, || done())`
+These arguments are free variables and are named as such, because
+they are. A budget is one: the same call at the same position
+resolves or exhausts depending on the number given, so two runs
+differing only in a `max_turns` are two scripts. A predicate is
+another: `settle(n, || true)` and `settle(n, || done())`
 placed identically take different numbers of turns, and turns are
 observable — they can grow the intent ledger (§9.3) and carry a run
 to an exit that a later `step_pass(WakeSource::ProducerExit)` has
@@ -2135,17 +2160,18 @@ of §9.3's block maps to one of them, walked in order:
   behavioral half, which runs through pass-unit steps against the
   production seams; `boot`'s whole-bootstrap granularity additionally
   serves INV-RC11's init-quit row (§9.5, §9.9).
-- `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` → INV-RC14,
-  whose structural half is that the raw-grant shape is unrepresentable —
-  which is what the driver-wide outstanding rule delivers (§9.6).
-  `Confirmed` maps to INV-RC14 through both arms: it reports which of the
-  two states a grant ended in, and only the one that got a send into the
-  lane appends to the gate-scoped sequence. It maps to INV-RC5 through
-  *neither* — strict revocation is a delivery-side property, so neither
-  ledger witnesses it. Its behavioral rows observe that `update` never runs
-  for the revoked item, which the reducer under test records for itself;
-  the dequeue that drops it does no `update` work at all (RFC 0014 §4.3),
-  which is why there is nothing for a record of this section's to hold.
+- `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` with its
+  `max_turns` → INV-RC14, whose structural half is that the raw-grant
+  shape is unrepresentable — which is what the driver-wide outstanding
+  rule delivers (§9.6). `Confirmed` maps to INV-RC14 through both arms:
+  it reports which of the two states a grant ended in, and only the one
+  that got a send into the lane appends to the gate-scoped sequence. It
+  maps to INV-RC5 through *neither* — strict revocation is a
+  delivery-side property, so neither ledger witnesses it. Its behavioral
+  rows observe that `update` never runs for the revoked item, which the
+  reducer under test records for itself; the dequeue that drops it does
+  no `update` work at all (RFC 0014 §4.3), which is why there is nothing
+  for a record of this section's to hold.
 - `settle` and its completion predicate → INV-RC13: it drives the
   production executor and adds no seam, so it is covered by the same
   API-surface review. It reaches INV-RC14's observation sequence only
@@ -2218,9 +2244,9 @@ of §9.3's block maps to one of them, walked in order:
   a fact about all four driving calls, the intent ledger may gain
   entries during any of them, and the only thing claimed of `settle`
   is that it initiates no append to the guaranteed sequence. §9.6's
-  turn definition closes it from the other side: a turn is not
-  satisfied until every task ready at that yield has had the
-  executor, so a selective one is not a turn.
+  turn definition closes it from the other side, and by construction
+  rather than by promise: a turn is a spawn and a join, which gives
+  the driver no per-task control to be selective *with*.
 - *Identity as run* — naming runs by `CommandId` or `SubscriptionId`
   alone passes every single-run test and then silently conflates a
   superseded run with its successor: the identity slot is free for
