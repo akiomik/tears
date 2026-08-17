@@ -40,9 +40,9 @@ test-integration:
 test-doc:
     cargo test --doc
 
-# Run loom concurrency model tests (scoped to the isolated cell_core primitives)
+# Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:
-    RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test --features loom-core --lib -- cell_core
+    RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test --features loom-core --lib -- cell_core accounting_core
 
 # Run criterion benchmarks
 bench:
