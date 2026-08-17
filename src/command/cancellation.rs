@@ -43,6 +43,13 @@ impl CommandId {
 
     /// This id's scope path, used by the kernel to attribute a keyed run to
     /// the composition boundary that spawned it (RFC 0014 §4.1).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel that attributes runs by scope lands after this accessor"
+        )
+    )]
     pub(crate) const fn scope(&self) -> &ScopePath {
         &self.scope
     }

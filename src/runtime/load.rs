@@ -82,11 +82,20 @@ use std::time::Duration;
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
-/// `channel` field (`"shared"` or `"keyed"`).
+/// `channel` field (`"shared"`, `"keyed"`, or `"data"`).
 #[derive(Clone, Copy)]
 pub enum Channel {
     Shared,
     Keyed,
+    /// The kernel's single data lane, which every producer shares (RFC 0014
+    /// §3.1). Once the kernel owns the production path this is the only
+    /// value the field takes, and `"shared"`/`"keyed"` retire with the
+    /// channels they name (RFC 0014 §9 row 9).
+    #[expect(
+        dead_code,
+        reason = "the kernel that builds the data lane lands after its channel label"
+    )]
+    Data,
 }
 
 impl Channel {
@@ -94,6 +103,7 @@ impl Channel {
         match self {
             Self::Shared => "shared",
             Self::Keyed => "keyed",
+            Self::Data => "data",
         }
     }
 }

@@ -331,6 +331,13 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// RFC 0014, and a public constructor whose effect the current runtime
     /// would accept and ignore is precisely the silent mismatch RFC 0007
     /// INV-C5 prohibits.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel that applies a teardown, and the combinators that build one, land after this carrier"
+        )
+    )]
     pub(crate) fn teardown<Scope>(scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,

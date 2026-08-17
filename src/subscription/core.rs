@@ -252,6 +252,10 @@ impl SubscriptionId {
     /// This id's scope path, used to attribute a subscription run to the
     /// composition boundary that declared it so a prefix teardown selects
     /// it alongside command runs (RFC 0014 §4.1).
+    #[expect(
+        dead_code,
+        reason = "the kernel that attributes runs by scope lands after this accessor"
+    )]
     pub(crate) const fn scope(&self) -> &ScopePath {
         &self.scope.0
     }

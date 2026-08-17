@@ -94,9 +94,15 @@
 pub(crate) mod application;
 pub(crate) mod cadence;
 pub mod command;
+// The reducer-first core (RFC 0014). Crate-private while the production
+// entry point still runs the older topology: a public constructor whose
+// effect nothing applies is the silent mismatch RFC 0007 INV-C5 prohibits,
+// so nothing here is reachable from outside the crate until the switch.
+pub(crate) mod kernel;
 pub(crate) mod noop_waker;
 pub(crate) mod panic;
 pub mod prelude;
+pub(crate) mod reducer;
 pub(crate) mod runtime;
 mod structural_key;
 pub mod subscription;

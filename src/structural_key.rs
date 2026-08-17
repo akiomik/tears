@@ -136,6 +136,13 @@ impl ScopePath {
     /// returns `true`. A path is its own prefix, the empty path is a
     /// prefix of every path, and shorter, reordered, subset, and
     /// deeper-position paths are not selected.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel registry that performs prefix selection lands after this predicate"
+        )
+    )]
     pub fn starts_with(&self, prefix: &Self) -> bool {
         self.0.len() >= prefix.0.len() && self.0[..prefix.0.len()] == prefix.0[..]
     }

@@ -382,7 +382,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
     // Observe the leaf count so tests in `command.rs` can pin down nested-batch
     // flattening. Not needed by non-test builds.
     #[cfg(test)]
-    pub(super) fn leaf_count(&self) -> usize {
+    pub(super) const fn leaf_count(&self) -> usize {
         self.leaves.len()
     }
 

@@ -1,3 +1,11 @@
+// The teardown carrier and the kernel reading below have no production
+// consumer until the kernel owns the driving path; the command layer's own
+// tests are what exercise them meanwhile.
+#![allow(
+    dead_code,
+    reason = "the kernel reading of the lowering boundary lands before the kernel"
+)]
+
 use futures::StreamExt;
 use futures::stream::{BoxStream, select_all};
 

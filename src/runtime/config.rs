@@ -176,6 +176,29 @@ impl RuntimeConfig {
         self.batch_max_messages = Some(max);
         self
     }
+
+    /// The two construction-time controls that survive on the reducer-first
+    /// core, as `(data lane capacity, input batch count cap)` (RFC 0014 §9
+    /// rows 2 and 4).
+    ///
+    /// The first element reads [`app_channel_capacity`](Self::app_channel_capacity)
+    /// as the data lane's capacity. With one lane every producer shares, the
+    /// control stops sizing the shared application-message channel and
+    /// starts sizing that lane; the rename that says so lands with the
+    /// switch, so this method carries the reinterpretation until then.
+    ///
+    /// [`frame_rate`](FrameRate) and
+    /// [`keyed_channel_capacity`](Self::keyed_channel_capacity) are absent,
+    /// and their absence is the point: the return type is what makes them
+    /// unreadable from the kernel, rather than the kernel remembering not
+    /// to read them.
+    #[expect(
+        dead_code,
+        reason = "the kernel that reads these controls lands after the accessor that bounds them"
+    )]
+    pub(crate) const fn kernel_controls(&self) -> (Option<NonZeroUsize>, Option<NonZeroUsize>) {
+        (self.app_channel_capacity, self.batch_max_messages)
+    }
 }
 
 #[cfg(test)]
