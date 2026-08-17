@@ -1660,13 +1660,12 @@ so there is nothing left that could arrive. The outcome is what this
 section pins; RFC 0014 §10's reservation-and-commit accounting is one
 informative way to reach it, not the contract.
 
-Those two outcomes are disjoint and exhaustive: there is no third
-*end* for a grant — though one may stay unresolved for as long as the
-lane makes a send wait, which is why `confirm` carries a budget
-rather than a promise (below). `confirm` drives until one of the two
-is reached and returns `Confirmed::Accepted` or
-`Confirmed::Reclaimed`. Both clear the outstanding grant, so `grant`
-and `settle` are legal again after either.
+Those two outcomes are disjoint and exhaustive: there is no third *end*
+for a grant — though one may stay unresolved for as long as the lane
+makes a send wait, which is why `confirm` carries a budget rather than a
+promise (below). `confirm` drives until one of the two is reached and
+returns `Confirmed::Accepted` or `Confirmed::Reclaimed`. Both clear the
+outstanding grant, so `grant` and `settle` are legal again after either.
 
 **Revocation is not one of those two states, and does not stop a
 send from committing.** Revoking a run filters its output at
@@ -1744,36 +1743,32 @@ way every exit does, at the exit-reflection stage of the next
 `step_pass(WakeSource::ProducerExit)`.
 
 Since turns are not selective (§9.3), what `settle` does to the two
-ledgers is stated exactly rather than denied. It **initiates no
-append to the guaranteed sequence**, and that holds structurally
-rather than by intent: `settle` is misuse while a grant is
-outstanding, no send is released except through an outstanding grant,
-and a grant stays outstanding until it resolves — so during a legal
-`settle` there is no armed gate and no released send still in
-flight, and nothing can get into the lane. The
-**intent ledger may gain entries**, on the other hand, from any
-producer the turns advance to a send point — as it may during any of
+ledgers is stated exactly rather than denied. It **initiates no append to
+the guaranteed sequence**, and that holds structurally rather than by
+intent: `settle` is misuse while a grant is outstanding, no send is
+released except through an outstanding grant, and a grant stays
+outstanding until it resolves — so during a legal `settle` there is no
+armed gate and no released send still in flight, and nothing can get into
+the lane. The **intent ledger may gain entries**, on the other hand, from
+any producer the turns advance to a send point — as it may during any of
 the other three driving calls (§9.3). That is what a non-guaranteed
-pre-gate ledger is for, and a test reading `intents` after a `settle`
-is reading exactly the kind of record this section declines to
-guarantee.
+pre-gate ledger is for, and a test reading `intents` after a `settle` is
+reading exactly the kind of record this section declines to guarantee.
 
 Two ledgers divide at the send gate. `accepted` records the sends
-admitted past it, each record carrying its origin and its lane, in
-gate order: the guaranteed observation sequence INV-RC14 scopes,
-which RFC 0014 §7.2 begins at the gate for exactly this reason.
-Admitted is not delivered — a record says an item passed the gate and
-says nothing about whether `update` ever saw it, which is why a
-revoked run's committed send belongs in it. That order is the
-*driver's*, established by the sequence of grants, and cross-lane
-it is nobody's claim about production: RFC 0014 §3.3 declines to
-order a run's own control-lane quit against its earlier data-lane
-output at all, so a reading that puts one before the other is the
-citation rule's ordinary case (§9.9).
-`intents` records send-intents before the gate, origin-tagged:
-pre-gate records, deliberately outside the guarantee. A test may read
-`intents` to see that a producer reached the gate; it may not derive
-an order or a completeness claim from them.
+admitted past it, each record carrying its origin and its lane, in gate
+order: the guaranteed observation sequence INV-RC14 scopes, which RFC
+0014 §7.2 begins at the gate for exactly this reason. Admitted is not
+delivered — a record says an item passed the gate and says nothing about
+whether `update` ever saw it, which is why a revoked run's committed send
+belongs in it. That order is the *driver's*, established by the sequence
+of grants, and cross-lane it is nobody's claim about production: RFC 0014
+§3.3 declines to order a run's own control-lane quit against its earlier
+data-lane output at all, so a reading that puts one before the other is
+the citation rule's ordinary case (§9.9). `intents` records send-intents
+before the gate, origin-tagged: pre-gate records, deliberately outside
+the guarantee. A test may read `intents` to see that a producer reached
+the gate; it may not derive an order or a completeness claim from them.
 
 **Neither ledger is a public transcript surface** (RFC 0014 §7.2),
 which fixes what each is and is not. Each is a **test-assertion
@@ -1805,16 +1800,15 @@ driving future directly" of RFC 0014 §7.2. No `TestDriver` hands one
 out, and none could — §9.2's manual-effect-polling rule turns on
 exactly that.
 
-What the probe supplies is a waker and a poll, and nothing else. It
-polls that future directly; it scripts nothing
-inside the kernel, adds no branch, and is neither a third runtime
-seam nor a second driver. Its surface reports what RFC 0014 §7.2 says
-the probe observes: whether the loop parks (a `poll` returning
-`Pending`), which sources it armed (`armed`), and which arrival woke
-it (`woken_by`, with `wakes` counting the waker's calls). The two
-source-reporting readers speak `WakeSource`, the same vocabulary
-§9.5 scripts the seam with, because it is the same set: INV-RC16's
-armed sources.
+What the probe supplies is a waker and a poll, and nothing else. It polls
+that future directly; it scripts nothing inside the kernel, adds no
+branch, and is neither a third runtime seam nor a second driver. Its
+surface reports what RFC 0014 §7.2 says the probe observes: whether the
+loop parks (a `poll` returning `Pending`), which sources it armed
+(`armed`), and which arrival woke it (`woken_by`, with `wakes` counting
+the waker's calls). The two source-reporting readers speak `WakeSource`,
+the same vocabulary §9.5 scripts the seam with, because it is the same
+set: INV-RC16's armed sources.
 
 **Its evidence scope is INV-RC16's arming and wake claims, and
 nothing else.** A `ParkProbe` observation is never evidence for
@@ -1885,28 +1879,28 @@ what scope.
   production bootstrap in one call, never a stage of it (§9.5) — and
   bootstrap evidence (RFC 0014 §6.2's init-quit outcome, carried by
   INV-RC11) comes from it.
-- **The remaining driving calls carry no evidence of their own.** `grant`
-  opens the route by which an entry is appended to the guaranteed
-  observation sequence, and the grant it opens resolves by one of three
-  routes: a commit reached inside `confirm`; a commit reached inside a
-  `step_pass`, where it needs the kernel to drain the lane the send waits
-  on (the RFC 0014 §13.3 driver-progress form); or a
+- **The remaining driving calls carry no evidence of their own.**
+  `grant` opens the route by which an entry is appended to the
+  guaranteed observation sequence, and the grant it opens resolves by
+  one of three routes: a commit reached inside `confirm`; a commit
+  reached inside a `step_pass`, where it needs the kernel to drain the
+  lane the send waits on (the RFC 0014 §13.3 driver-progress form); or a
   `Confirmed::Reclaimed` resolution, which appends nothing because no
-  commit occurred. Two of the three therefore need a pass before the
-  `confirm` that reports them, and the reclaiming route needs one
-  whenever its establishing fact is an origin's exit, which reaches the
-  bookkeeping only at a pass's stage 1 (§9.6). The entry, where there is
-  one, becomes evidence when the pass-unit step that delivers it consumes
-  it; the handshake itself witnesses nothing about production. `settle`
-  contributes nothing to that sequence — it initiates no append to it
-  (§9.6), and the exit it lets a run reach is evidence only once a
-  `step_pass(WakeSource::ProducerExit)` reflects it. Any pre-gate record
-  these calls produce is outside the guaranteed sequence by construction,
-  which is what makes the intent ledger inadmissible here rather than
-  merely unreliable. Neither call is a second evidence surface beside
-  pass-unit driving, and neither is a stage of a pass: both leave the
-  stage order untouched, which is why they do not fall under the probe
-  exclusion below.
+  commit occurred. Of those three, one always needs a pass before the
+  `confirm` that reports it — the commit that needs a drain — and
+  another needs one when its establishing fact is an origin's exit,
+  which reaches the bookkeeping only at a pass's stage 1 (§9.6). The
+  entry, where there is one, becomes evidence when the pass-unit step
+  that delivers it consumes it; the handshake itself witnesses nothing
+  about production. `settle` contributes nothing to that sequence — it
+  initiates no append to it (§9.6), and the exit it lets a run reach is
+  evidence only once a `step_pass(WakeSource::ProducerExit)` reflects
+  it. Any pre-gate record these calls produce is outside the guaranteed
+  sequence by construction, which is what makes the intent ledger
+  inadmissible here rather than merely unreliable. None of the three is
+  a second evidence surface beside pass-unit driving, and none is a
+  stage of a pass: they leave the stage order untouched, which is why
+  they do not fall under the probe exclusion below.
 - **Stage-granular probes sit outside that surface.** A probe running
   a single stage in isolation may exist as a component-level
   white-box instrument; it is no part of this public surface, and
