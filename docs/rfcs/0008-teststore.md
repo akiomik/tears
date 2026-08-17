@@ -1453,10 +1453,10 @@ reads a wall clock, and the kernel they drive reads no wall clock either
 (RFC 0014 §6.3). Exhausting a bound fails the test with a diagnostic
 rather than waiting longer. The two calls that wait on a condition are
 `settle` and `confirm`, and both take their bound from the caller as a
-script element, for the reason §9.6 gives; `boot` and `step_pass` wait
-on no condition, each completing by its own definition. Application-supplied effects sit outside that
-quantifier, as they sit outside INV-T4's determinism scope — an effect
-that sleeps times its own test.
+script element, for the reason §9.6 gives; `boot` and `step_pass` wait on
+no condition, each completing by its own definition. Application-supplied
+effects sit outside that quantifier, as they sit outside INV-T4's
+determinism scope — an effect that sleeps times its own test.
 
 **Executor turns are not selective, and this is a class fact about
 the four calls that turn the executor.** `boot`, `step_pass`,
