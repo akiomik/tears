@@ -226,7 +226,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
         Self { leaves: Vec::new() }
     }
 
-    fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
+    pub(super) fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
         Self {
             leaves: vec![Leaf::new(LeafKind::Effect, stream)],
         }

@@ -526,6 +526,21 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self::with_effect(Effect::action(action))
     }
 
+    /// An ordinary effect carrier built from a stream of raw actions.
+    ///
+    /// This is the only route to a **producer-originated** quit (RFC 0014
+    /// §3.3): [`Command::quit`] builds the immediate-quit carrier, which
+    /// lowering applies synchronously at its dispatch and never spawns, and
+    /// no other constructor here puts an [`Action::Quit`] into a carrier a
+    /// run is spawned for. The kernel's conformance series need that route
+    /// to script a producer quit at all, so it is crate-visible; the public
+    /// spelling belongs to the effect-constructor work RFC 0014 §13 leaves
+    /// open, not here.
+    #[cfg(test)]
+    pub(crate) fn actions(stream: impl Stream<Item = Action<Msg>> + Send + 'static) -> Self {
+        Self::with_effect(Effect::from_stream(stream.boxed()))
+    }
+
     /// Batch multiple commands into a single command.
     ///
     /// All command streams execute concurrently. Commands with no side-effect

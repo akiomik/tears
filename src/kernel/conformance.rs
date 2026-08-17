@@ -1,16 +1,13 @@
-//! The kernel conformance suite.
+//! The kernel conformance suite: RFC 0014 §13.1's twelve series.
 //!
 //! The series live here rather than in `tests/` because they drive the
 //! kernel directly through the stage-3 driver, which is crate-private until
-//! the switch. Each series file is named for the property it holds, and the
-//! shared fixtures — the counter program, the mock source, gated effects,
-//! and the bounded settle helpers — live in `support`.
+//! the switch. The shared fixtures — the scripted program, its journal, the
+//! probe source, the gated effects, and the bounded waits — live in
+//! [`support`], and the series files are named for the property they hold.
 //!
-//! Two rules bind every file here:
-//!
-//! - **No sleep, no timer, no wall clock.** Waiting is bounded yielding, so
-//!   a would-be hang becomes a failed assertion rather than a slow test.
-//! - **The evidence surface is pass-unit driving.** Stage-granular probes
-//!   bypass the fixed stage order, so tests that use them are white-box
-//!   probes of one stage's mechanism, named with a `whitebox_` prefix and
-//!   excluded from the same-topology acceptance evidence (RFC 0014 §7.2).
+//! Two rules bind every file here, and [`support`]'s own header states the
+//! rest: no sleep, no timer, no wall clock; and pass-unit driving is the
+//! evidence surface for everything the driver can reach (RFC 0014 §7.2).
+
+pub mod support;

@@ -48,7 +48,7 @@ pub mod accounting;
 pub mod accounting_core;
 pub mod arbiter;
 #[cfg(test)]
-mod conformance;
+pub mod conformance;
 pub mod lane;
 pub mod lowering;
 pub mod pass;
