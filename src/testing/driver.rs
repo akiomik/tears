@@ -122,31 +122,58 @@ pub struct GatedSend {
     pub lane: Lane,
 }
 
-/// An append-only observation log shared with the producers that append to
-/// it.
+/// An append-only observation log, or nothing at all.
 ///
 /// This is a driver-side observation surface, deliberately not part of the
 /// `tears::runtime::load` schema: it records what a test asserts on, and
 /// widening the observability vocabulary to carry it would make an
 /// evidence-gathering detail into a public contract (the RFC 0012 INV-SE8
 /// boundary).
-#[derive(Clone, Debug, Default)]
-struct Records(Arc<Mutex<Vec<GatedSend>>>);
+///
+/// **It divides the way the send gate does, on the same construction-time
+/// value.** Production builds it [`Inert`](Records::Inert): no allocation,
+/// no lock on the send path, and no log that grows for the life of the
+/// process with nobody to read it. A driven kernel builds it
+/// [`Recording`](Records::Recording). That split is part of the second
+/// driving seam's instrumentation rather than a third difference: the
+/// producer's send path is one function either way, and the branch it takes
+/// is the one [`GateMode`] already decides — an inert gate beside an inert
+/// ledger, both observably equivalent to a kernel with neither.
+#[derive(Clone, Debug)]
+enum Records {
+    /// Production: nothing is recorded and nothing is held.
+    Inert,
+    /// Driven: an append-only log shared with the producers that append.
+    Recording(Arc<Mutex<Vec<GatedSend>>>),
+}
 
 impl Records {
-    /// Appends one record.
-    fn push(&self, record: GatedSend) {
-        self.lock().push(record);
+    /// The log a kernel in `mode` records into.
+    fn new(mode: GateMode) -> Self {
+        match mode {
+            GateMode::Immediate => Self::Inert,
+            GateMode::Scripted => Self::Recording(Arc::default()),
+        }
     }
 
-    /// Snapshot of every record, in append order.
+    /// Appends one record, where there is a log to append to.
+    fn push(&self, record: GatedSend) {
+        if let Self::Recording(log) = self {
+            Self::lock(log).push(record);
+        }
+    }
+
+    /// Snapshot of every record, in append order. Empty when inert.
     fn snapshot(&self) -> Vec<GatedSend> {
-        self.lock().clone()
+        match self {
+            Self::Inert => Vec::new(),
+            Self::Recording(log) => Self::lock(log).clone(),
+        }
     }
 
     /// How many records name `origin`.
     fn count_for(&self, origin: RunToken) -> usize {
-        self.lock()
+        self.snapshot()
             .iter()
             .filter(|record| record.origin == origin)
             .count()
@@ -158,8 +185,8 @@ impl Records {
     /// in place of the test's own assertion. The data is an append-only
     /// list with no cross-record invariant, so a partial append cannot
     /// leave it inconsistent.
-    fn lock(&self) -> MutexGuard<'_, Vec<GatedSend>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(log: &Mutex<Vec<GatedSend>>) -> MutexGuard<'_, Vec<GatedSend>> {
+        log.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -169,7 +196,7 @@ impl Records {
 /// Accepted is not delivered: a record says an item passed the gate and says
 /// nothing about whether `update` ever saw it, which is why a revoked run's
 /// committed send belongs in it (RFC 0008 §9.6).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AcceptanceRecorder(Records);
 
 /// The recorder every run's ingress appends a **send-intent** to, before the
@@ -182,10 +209,16 @@ pub struct AcceptanceRecorder(Records);
 /// This is also the *only* record of an intent. The gate keeps no second
 /// count beside it, so "how many intents has this run reached" is a question
 /// with one answer, derived from the records themselves.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct IntentRecorder(Records);
 
 impl AcceptanceRecorder {
+    /// The acceptance ledger a kernel in `mode` records into — inert in
+    /// production, recording under the driver.
+    pub fn new(mode: GateMode) -> Self {
+        Self(Records::new(mode))
+    }
+
     /// Appends the acceptance of one send. Called at the commit, which is
     /// the moment the envelope is in the lane.
     pub fn record(&self, origin: RunToken, lane: Lane) {
@@ -204,6 +237,12 @@ impl AcceptanceRecorder {
 }
 
 impl IntentRecorder {
+    /// The intent ledger a kernel in `mode` records into — inert in
+    /// production, recording under the driver.
+    pub fn new(mode: GateMode) -> Self {
+        Self(Records::new(mode))
+    }
+
     /// Appends one send-intent. Called before the gate wait, so it records
     /// a producer that reached its send and nothing more.
     pub fn record(&self, origin: RunToken, lane: Lane) {

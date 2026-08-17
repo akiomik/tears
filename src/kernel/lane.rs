@@ -413,8 +413,9 @@ pub struct IngressHandle<Msg> {
     control: ControlSender<Msg>,
     // Observation only, and deliberately not the `tears::runtime::load`
     // schema: the two ledgers record what a driving test asserts on, either
-    // side of the gate. Holding them here rather than only in test builds
-    // keeps the driven topology identical to the production one.
+    // side of the gate. The fields are here in every build, so the driven
+    // topology is the production one; what differs is the runtime value,
+    // which is inert in production exactly as the gate beside it is.
     intents: IntentRecorder,
     acceptances: AcceptanceRecorder,
 }
@@ -542,8 +543,8 @@ mod tests {
             let (control_tx, control_rx) = control_lane::<u32>();
             let counter = Arc::new(PendingCounter::default());
             let gate = Arc::new(SendGate::new(mode));
-            let intents = IntentRecorder::default();
-            let acceptances = AcceptanceRecorder::default();
+            let intents = IntentRecorder::new(mode);
+            let acceptances = AcceptanceRecorder::new(mode);
             let handle = IngressHandle::new(
                 ALICE,
                 Arc::clone(&counter),
@@ -615,11 +616,55 @@ mod tests {
             1,
             "a committed send stays pending until the dequeue side decrements"
         );
+    }
+
+    // The other half of production's inertness: an immediate gate records
+    // nothing either. The ledgers divide on the same construction-time value
+    // the gate does, so a production kernel holds no log, takes no lock on
+    // its send path, and accumulates nothing for a reader that does not
+    // exist. The scripted counterpart is pinned by every test below that
+    // reads a ledger at all.
+    #[tokio::test]
+    async fn an_immediate_gate_records_neither_intent_nor_acceptance() {
+        let mut fixture = Fixture::immediate();
+
+        for value in 0..4 {
+            fixture.handle.send(value).await.expect("the lane is open");
+            fixture.data_rx.try_recv().expect("the envelope is queued");
+        }
+
+        assert!(
+            fixture.intents.snapshot().is_empty(),
+            "no send-intent is recorded in production"
+        );
+        assert!(
+            fixture.acceptances.snapshot().is_empty(),
+            "and no acceptance either, however many sends commit"
+        );
+    }
+
+    // The scripted counterpart, at the same pinned order: both ledgers gain
+    // their entry, on the sides of the gate they belong to.
+    #[tokio::test]
+    async fn a_scripted_gate_records_the_intent_and_then_the_acceptance() {
+        let fixture = Fixture::scripted();
+
+        let send = fixture.handle.send(7);
+        tokio::pin!(send);
+        assert!(poll!(send.as_mut()).is_pending(), "no grant yet");
         assert_eq!(
             fixture.intents.snapshot(),
             vec![record(ALICE, Lane::Data)],
             "the intent is recorded before the gate"
         );
+        assert!(
+            fixture.acceptances.snapshot().is_empty(),
+            "and nothing has passed it"
+        );
+
+        fixture.gate.issue_grant(ALICE).expect("no other grant");
+        send.await.expect("the lane is open");
+
         assert_eq!(
             fixture.acceptances.snapshot(),
             vec![record(ALICE, Lane::Data)],

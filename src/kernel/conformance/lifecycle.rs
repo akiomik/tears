@@ -180,8 +180,8 @@ async fn a_producer_body_observes_lane_closure_and_stops_itself() {
     let (data, data_rx) = channel_observed(Some(cap(4)), Channel::Data, observer);
     let (control, control_rx) = control_lane::<u8>();
     let counter = Arc::new(PendingCounter::default());
-    let intents = IntentRecorder::default();
-    let acceptances = AcceptanceRecorder::default();
+    let intents = IntentRecorder::new(GateMode::Scripted);
+    let acceptances = AcceptanceRecorder::new(GateMode::Scripted);
     let handle = IngressHandle::new(
         1,
         Arc::clone(&counter),

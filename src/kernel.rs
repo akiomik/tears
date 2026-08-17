@@ -223,8 +223,8 @@ impl<P: Program> Kernel<P> {
             gate: Arc::new(SendGate::new(gate_mode)),
             next_token: 1,
             started: Vec::new(),
-            acceptances: AcceptanceRecorder::default(),
-            intents: IntentRecorder::default(),
+            acceptances: AcceptanceRecorder::new(gate_mode),
+            intents: IntentRecorder::new(gate_mode),
             settled: false,
         }
     }
@@ -623,6 +623,7 @@ mod tests {
     use futures::stream;
     use ratatui::Frame;
     use ratatui::backend::TestBackend;
+    use tokio::task::yield_now;
 
     use crate::reducer::Reducer;
     use crate::runtime::frame_rate::FrameRate;
@@ -1075,6 +1076,39 @@ mod tests {
         assert!(
             kernel.registry().get(run).is_none(),
             "the reflected exit retired an entry with nothing pending"
+        );
+    }
+
+    // The production kernel's ledgers are inert: a run's sends commit and
+    // deliver through the ordinary path, and neither ledger gains an entry
+    // for them. The split is the send gate's own — production builds an
+    // immediate gate beside an inert ledger — which is what keeps an
+    // append-only log with no reader out of a process that runs for days.
+    #[tokio::test]
+    async fn a_production_kernel_records_nothing_in_either_ledger() {
+        let mut screen = terminal();
+        let (mut kernel, journal) = kernel(
+            Setup::new(Command::stream(stream::iter(1..=4_u8))),
+            &config(),
+        );
+        kernel.boot(&mut screen).expect("the test backend renders");
+
+        for _ in 0..8 {
+            yield_now().await;
+        }
+        kernel.pass_cycle(&mut screen).expect("no render failed");
+
+        assert!(
+            journal.calls().contains(&Call::Reduce(1)),
+            "the production send path ran and delivered"
+        );
+        assert!(
+            kernel.acceptances().snapshot().is_empty(),
+            "yet no acceptance was recorded"
+        );
+        assert!(
+            kernel.intents().snapshot().is_empty(),
+            "and no send-intent either"
         );
     }
 
