@@ -8,24 +8,22 @@
 //! belongs in it, which is exactly why "the item was accepted" and "the item
 //! was delivered" are asserted from different places here.
 //!
-//! **Not reachable from this surface**: INV-RC5's *buffered-quit* half — a
-//! producer quit already on the control lane whose origin is then revoked.
-//! Revocation is applied by `update`, which runs in stage 3 of a pass, and
-//! the control drain that would discard the quit is stage 2 of the *same*
-//! pass; on the current-thread executor the driver owns, a pass is a
-//! synchronous region, so a control arrival can never land strictly inside
-//! one. The window has measure zero here rather than being unexercised, and
-//! no sleep, stage probe, or kernel change would give it to a pass-unit
-//! script. The message half below is the constructible half of the same
-//! invariant.
+//! INV-RC5's *buffered-quit* half needs a window a single-threaded executor
+//! does not have — a control-lane arrival that lands strictly inside a pass,
+//! which a synchronous pass on one thread cannot produce — so its row drives
+//! a multi-worker executor and takes its determinism from
+//! [`MidBatchHandshake`] rather than from INV-RC14, whose claim RFC 0008
+//! §9.8 scopes to the current-thread range. Pass-unit driving is unchanged
+//! there: one step is still one whole pass in the fixed stage order.
 
 use crate::command::{Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
-use crate::testing::driver::{NotReady, SendRecord};
+use crate::testing::driver::{Confirmed, Lane, NotReady, SendRecord};
 
 use super::support::{
-    Beacon, Call, Script, TEST_TURNS, accept, cap, config, driver, driver_with, finishing_effect,
-    marking_effect, parking_effect,
+    Beacon, Call, MidBatchHandshake, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
+    cap, config, driver, driver_with, finishing_effect, gated_quitting_effect, marking_effect,
+    parking_effect, threaded_driver_with,
 };
 
 // --- `cancel vs buffered output` ------------------------------------------
@@ -99,6 +97,93 @@ fn a_revoked_run_s_buffered_output_never_reaches_update() {
             .map(SendRecord::run)
             .any(|run| *run == revoked),
         "including the record naming the run whose output was retracted"
+    );
+}
+
+// INV-RC5 over its whole quantifier, on one run: **no output of the revoked
+// run is delivered to `update` — buffered before or sent after, message or
+// quit**. The run commits a message, then commits a quit from inside the
+// batch that tears its scope down, so at the revocation's application point
+// it owns one buffered item on each lane. Neither reaches the application:
+// the message runs no `update` when the batch dequeues it, and the quit
+// terminates nothing when the next pass's control drain reaches it.
+//
+// This is the row that needs a producer running beside the pass rather than
+// inside it, so it drives the multi-worker harness; the ordering is the
+// handshake's and nothing here reads INV-RC14.
+#[test]
+fn a_revoked_run_s_buffered_message_and_quit_are_both_retracted() {
+    let (handshake, gate) = MidBatchHandshake::new();
+    let (mut driver, journal) = threaded_driver_with(
+        Script::new(Command::batch([
+            parking_effect([5, 6, 7]),
+            gated_quitting_effect(vec![99], gate).scoped("pane"),
+        ]))
+        .handshaking_on(5, handshake)
+        .replying([Command::teardown("pane")]),
+        config().batch_max_messages(cap(3)),
+    );
+    let report = driver.boot();
+    let (feed, emitter) = (report.started[0].clone(), report.started[1].clone());
+
+    // The handshake fixes the enqueue order: the teardown's own trigger,
+    // then the run's message, then the rest of the feed.
+    accept_within(&mut driver, feed.clone(), THREADED_TURNS);
+    accept_within(&mut driver, emitter.clone(), THREADED_TURNS);
+    accept_within(&mut driver, feed.clone(), THREADED_TURNS);
+    accept_within(&mut driver, feed, THREADED_TURNS);
+
+    let banked = driver
+        .grant(emitter.clone())
+        .expect("the previous grant resolved");
+    let stepped = driver
+        .step_pass(WakeSource::Data)
+        .expect("the feed is in the lane");
+    assert!(
+        stepped.terminated.is_none(),
+        "the quit was not applied here"
+    );
+    assert_eq!(
+        driver.confirm(THREADED_TURNS, banked),
+        Confirmed::Accepted,
+        "the quit was committed before its origin was revoked"
+    );
+
+    assert_eq!(
+        journal.calls()[3..6],
+        [Call::Reduce(5), Call::Committed, Call::Reduce(6)],
+        "the quit's commit landed inside the batch, before the item that was filtered"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![5, 6],
+        "the run's buffered message ran no update: it was filtered at its dequeue"
+    );
+
+    let stepped = driver
+        .step_pass(WakeSource::Control)
+        .expect("the run's buffered quit is on the control lane");
+    assert!(
+        stepped.terminated.is_none(),
+        "and its buffered quit terminated nothing"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![5, 6, 7],
+        "while the live origin's item queued behind them still delivered"
+    );
+
+    let accepted = driver.accepted();
+    assert_eq!(
+        accepted.len(),
+        5,
+        "all five sends passed the gate, the two retracted ones included"
+    );
+    assert!(
+        accepted
+            .iter()
+            .any(|record| *record.run() == emitter && record.lane() == Lane::Control),
+        "the ledger records the quit it admitted, which is not the same question as delivery"
     );
 }
 

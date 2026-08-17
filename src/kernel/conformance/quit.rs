@@ -6,34 +6,35 @@
 //! send gate exactly as a producer's messages are (RFC 0008 §9.6) and
 //! applied at the first control drain at or after its arrival.
 //!
-//! **Two of INV-RC9's rows are not reachable from this surface, for one
-//! structural reason.** The *mid-batch* row ("a quit arriving later in a
-//! pass is preceded only by the in-progress batch's remainder") and the
-//! *cancel-beats-quit* row ("a buffered quit whose origin is revoked is
-//! discarded") both need a control-lane arrival that lands **strictly
-//! inside** a pass. A pass is a synchronous region here: RFC 0014 §3.5's
-//! four stages run to completion without the driving task yielding, and the
-//! executor the determinism claim is scoped to (RFC 0008 §9.8) has one
-//! thread, so no producer can commit while a pass is running. The window is
-//! empty rather than unexercised. It is reachable in production on a
-//! multi-worker executor, which is outside INV-RC14's verified range, and no
-//! sleep, stage probe, or kernel change would give it to a pass-unit script.
+//! **Two of INV-RC9's rows need a window a single-threaded executor does not
+//! have**, and they get it from the harness rather than from a weaker claim.
+//! The *mid-batch* case ("a quit arriving later in a pass is preceded only by
+//! the in-progress batch's remainder") and the *cancel-beats-quit* case ("a
+//! buffered quit whose origin is revoked is discarded") both require a
+//! control-lane arrival that lands **strictly inside** a pass. A pass is a
+//! synchronous region — RFC 0014 §3.5's four stages run without the driving
+//! task yielding — so the producer has to be running on a thread the pass is
+//! not occupying.
 //!
-//! What *is* driven for those two: the pass-boundary neighbour of the
-//! mid-batch bound (below), which witnesses the bound's observable content —
-//! a batch bounded by the cap, then the next pass's control drain applying
-//! the quit with no further input — minus the mid-pass arrival itself. The
-//! cancel-beats-quit row has no such neighbour and is left to the
-//! implementation-acceptance tier.
+//! Those two rows therefore drive a multi-worker executor, and **their
+//! determinism is their own**: the commit is pinned to a stage boundary by
+//! [`MidBatchHandshake`], an application-side rendezvous that neither side
+//! can pass, never by the scheduler. They cite no part of INV-RC14, whose
+//! scripted-determinism claim RFC 0008 §9.8 scopes to the current-thread
+//! range. What they do keep is pass-unit driving — one step is still one
+//! whole pass in the fixed stage order — so they stay inside the evidence
+//! surface RFC 0008 §9.9 names, under the same citation rule as every other
+//! series here.
 
 use crate::command::Command;
 use crate::kernel::arbiter::WakeSource;
 use crate::reducer::Exit;
-use crate::testing::driver::NotReady;
+use crate::testing::driver::{Confirmed, NotReady};
 
 use super::support::{
-    Script, accept, cap, config, driver, driver_with, parking_effect, quitting_effect,
-    silent_effect,
+    Call, MidBatchHandshake, Script, THREADED_TURNS, accept, accept_within, cap, config, driver,
+    driver_with, gated_quitting_effect, parking_effect, quitting_effect, silent_effect,
+    threaded_driver_with,
 };
 
 // --- the synchronous route ------------------------------------------------
@@ -178,13 +179,13 @@ fn a_pass_begun_by_the_data_lane_still_drains_the_arrived_quit_first() {
     );
 }
 
-// INV-RC9's mid-batch bound, at the pass boundary — the constructible
-// neighbour of the row this module's header says is unreachable. The batch
-// that ran is bounded by the cap, the quit is committed after it, and the
-// next pass's control drain applies it before any further batch begins: no
-// input at all follows the arrival. What this does *not* witness is the
-// arrival landing inside the batch; the bound's remainder clause is
-// therefore exercised at its degenerate value here, and the row stays open.
+// The between-passes case, which the mid-batch row below does not cover: a
+// quit committed after a capped batch has ended is applied by the next
+// pass's control drain before any further batch begins, so the number of
+// inputs that follow its arrival is zero. Its remainder is the degenerate
+// one — the batch had already ended when the quit arrived — which is exactly
+// what makes it a different row from the mid-batch case rather than a
+// weaker reading of it.
 #[test]
 fn a_quit_committed_after_a_capped_batch_applies_before_the_next_batch_begins() {
     let (mut driver, journal) = driver_with(
@@ -263,5 +264,140 @@ fn a_quit_whose_origin_is_revoked_at_the_gate_never_reaches_the_control_lane() {
         driver.step_pass(WakeSource::Control).err(),
         Some(NotReady),
         "nothing ever reached the control lane, so no quit can be applied"
+    );
+}
+
+// --- the mid-batch window ---------------------------------------------------
+
+// INV-RC9's mid-batch row, in full: the quit's send commits **during** the
+// in-progress input batch, and only that batch's remainder — bounded by the
+// cap — precedes its application, which happens at the next pass's control
+// drain with no further batch beginning.
+//
+// The arrival is a literal reading of the journal rather than an inference.
+// `update` for the first message opens the gate and blocks until the gated
+// producer reports its commit, then records `Committed`; the batch's next
+// message follows. So `Reduce(1), Committed, Reduce(2)` is the interleaving,
+// and the handshake — not the scheduler — is what produced it.
+#[test]
+fn a_quit_committed_mid_batch_is_preceded_only_by_that_batch_s_remainder() {
+    let (handshake, gate) = MidBatchHandshake::new();
+    let (mut driver, journal) = threaded_driver_with(
+        Script::new(Command::batch([
+            parking_effect([1, 2, 3, 4]),
+            gated_quitting_effect(Vec::new(), gate),
+        ]))
+        .handshaking_on(1, handshake),
+        config().batch_max_messages(cap(2)),
+    );
+    let report = driver.boot();
+    let (flood, quitter) = (report.started[0].clone(), report.started[1].clone());
+
+    for _ in 0..4 {
+        accept_within(&mut driver, flood.clone(), THREADED_TURNS);
+    }
+
+    // Banked before the pass and outstanding across it: this is the release
+    // the quitter takes when the reducer opens its gate, mid-batch. Holding
+    // a token across a step is what the token's detachment is for.
+    let banked = driver.grant(quitter).expect("the previous grant resolved");
+    let stepped = driver
+        .step_pass(WakeSource::Data)
+        .expect("the flood is in the lane");
+
+    assert!(
+        stepped.terminated.is_none(),
+        "a quit arriving mid-pass is not applied by the pass it arrived in"
+    );
+    assert_eq!(
+        driver.confirm(THREADED_TURNS, banked),
+        Confirmed::Accepted,
+        "the quit reached the control lane while the batch was running"
+    );
+    assert_eq!(
+        journal.calls(),
+        vec![
+            Call::Init,
+            Call::Subscriptions,
+            Call::View,
+            Call::Reduce(1),
+            Call::Committed,
+            Call::Reduce(2),
+            Call::View,
+            Call::Subscriptions,
+        ],
+        "the arrival landed inside the batch, and only the remainder followed it"
+    );
+
+    let stepped = driver
+        .step_pass(WakeSource::Control)
+        .expect("the quit is on the control lane");
+    assert!(
+        stepped.terminated.is_some(),
+        "applied at the first control drain at or after its arrival"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![1, 2],
+        "and the next input batch never began"
+    );
+}
+
+// INV-RC9's cancel-beats-quit row: a producer quit that is already buffered
+// on the control lane when its origin is revoked is **discarded**, not
+// applied, and the kernel keeps running. The revocation is the teardown the
+// same `update` returns — after the handshake, so the commit is strictly
+// first — which is RFC 0003 INV-9's intent preserved through origin
+// revocation rather than through a private channel's drop.
+#[test]
+fn a_quit_buffered_before_its_origin_s_revocation_is_discarded() {
+    let (handshake, gate) = MidBatchHandshake::new();
+    let (mut driver, journal) = threaded_driver_with(
+        Script::new(Command::batch([
+            parking_effect([5, 6, 7]),
+            gated_quitting_effect(Vec::new(), gate).scoped("quit"),
+        ]))
+        .handshaking_on(5, handshake)
+        .replying([Command::teardown("quit")]),
+        config().batch_max_messages(cap(2)),
+    );
+    let report = driver.boot();
+    let (feed, quitter) = (report.started[0].clone(), report.started[1].clone());
+
+    for _ in 0..3 {
+        accept_within(&mut driver, feed.clone(), THREADED_TURNS);
+    }
+
+    let banked = driver.grant(quitter).expect("the previous grant resolved");
+    let stepped = driver
+        .step_pass(WakeSource::Data)
+        .expect("the feed is in the lane");
+
+    assert!(
+        stepped.terminated.is_none(),
+        "the quit was not applied here"
+    );
+    assert_eq!(
+        driver.confirm(THREADED_TURNS, banked),
+        Confirmed::Accepted,
+        "the quit was buffered before its origin was revoked"
+    );
+    assert_eq!(
+        journal.calls()[3..6],
+        [Call::Reduce(5), Call::Committed, Call::Reduce(6)],
+        "the commit landed between the teardown's own message and the batch's next"
+    );
+
+    let stepped = driver
+        .step_pass(WakeSource::Control)
+        .expect("the buffered quit is on the control lane");
+    assert!(
+        stepped.terminated.is_none(),
+        "a revoked origin's quit never terminates the application"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![5, 6, 7],
+        "and the kernel kept delivering past it"
     );
 }
