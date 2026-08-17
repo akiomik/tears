@@ -1160,10 +1160,11 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
     `AcceptanceLedger`, `IntentLedger`.
   - **Existing and unchanged**: `CommandId` and `SubscriptionId`,
     RFC 0005's identity types.
-  - **Entering or changing in the same landing**: `Program` and
-    `Exit`, which RFC 0014 §2.1 and §2.3 introduce, and
-    `RuntimeConfig`, which that landing revises — it loses the
-    frame-rate field and `keyed_channel_capacity`, and
+  - **Entering or changing in the same landing**: `Program`, `Exit`,
+    and `ProgramRuntime`, which RFC 0014 §2.1 and §2.3 introduce —
+    the last of them named by §9.7 as where a probe's future comes
+    from — and `RuntimeConfig`, which that landing revises: it loses
+    the frame-rate field and `keyed_channel_capacity`, and
     `app_channel_capacity` becomes `data_lane_capacity` with no alias
     (RFC 0014 §9 rows 2 and 4). `TestDriver::new`'s `config`
     parameter is that revised type, never today's.
@@ -1189,9 +1190,10 @@ its API. Stated over this surface:
   construction path, and no test-only wiring parameter. Construction
   is inert, as it is for both production entry points (RFC 0014 §6.1;
   RFC 0011 INV-LC3): nothing starts until `boot`. The driver is also
-  that kernel instance's sole driver, its driving methods taking
-  `&mut self` — RFC 0011 INV-LC9's exclusivity property, which §6 of
-  that RFC states a step-style surface must preserve.
+  that kernel instance's sole driver, and every `TestDriver` driving
+  method takes `&mut self` — RFC 0011 INV-LC9's exclusivity
+  property, which §6 of that RFC states a step-style surface must
+  preserve.
 - **Manual run retention** has no constructor: no method returns a
   run, task, or join handle, and none accepts one. A test *names* a
   run (§9.4) and never holds one — the opaque name §9.4 mints is a
@@ -1332,7 +1334,8 @@ pub enum Origin {
 /// driver observes the run start (§9.4).
 pub struct AnonymousRun(/* private */);
 
-/// One outstanding grant, correlated to the commit it releases.
+/// One outstanding grant: correlated to the send it releases, and
+/// through it to that send's commit where one happens.
 pub struct GrantToken { /* private */ }
 
 /// How a grant ended (§9.6). The two are disjoint and exhaustive;
@@ -1387,13 +1390,13 @@ absent constructors, `WakeSource`'s membership as the whole
 pass-initiation vocabulary (§9.5), `grant`'s detached token and its
 driver-wide admission rule (§9.6), and the ledgers' division at the
 send gate (§9.6). The **receivers are normative too**, and not as a
-spelling: every driving method takes `&mut self` and every
-observation method `&self`, which is how the block carries RFC 0011
-INV-LC9's exclusivity (§9.2, §9.11) and what makes a borrowing grant
-token unrepresentable (§9.6). Spellings — parameter names, accessor
-names, whether a report field is a slice or an iterator, what a
-probe's constructor looks like — are implementation latitude, exactly
-as for §3.1's block.
+spelling: every `TestDriver` driving method takes `&mut self` and
+every `TestDriver` observation method `&self`, which is how the
+block carries RFC 0011 INV-LC9's exclusivity (§9.2, §9.11) and what
+makes a borrowing grant token unrepresentable (§9.6).
+Spellings — parameter names, accessor names, whether a report field
+is a slice or an iterator, what a probe's constructor looks like —
+are implementation latitude, exactly as for §3.1's block.
 
 **Waiting, in full.** Every wait this layer performs is a bounded
 number of executor turns: no method of this section sleeps, arms a
@@ -1606,10 +1609,10 @@ surface:
   **driver progress** condition needs — a grant whose resolution
   requires the kernel to drain the lane its send waits on cannot be
   resolved without stepping, so the test must be able to hold the
-  token *across* `step_pass` calls, and every driving method takes
-  `&mut self`. A borrowing token could not survive one of those
-  calls, which is precisely the shape that cannot satisfy the
-  condition. `confirm` is the in-place form for the case that needs
+  token *across* `step_pass` calls, and every `TestDriver` driving
+  method takes `&mut self`. A borrowing token could not survive one
+  of those calls, which is precisely the shape that cannot satisfy
+  the condition. `confirm` is the in-place form for the case that needs
   no pass; like every wait here it is bounded and fails rather than
   hangs. Where a drain is needed the resolution happens inside a
   `step_pass` instead, which is the same route by that other name.
@@ -1689,11 +1692,24 @@ got in before its producer ended, or it did not and nothing more will
 follow it.
 
 The disjunction is `confirm`'s *completion* condition, not a promise
-that one of its arms arrives inside the budget. Where the commit
-needs the kernel to drain the lane the send waits on, neither arm is
-reached under `confirm` and it fails on its bound like every other
-wait here; the test steps instead, which is what the detached token
-exists to permit.
+that one of its arms arrives inside the budget. `confirm` begins no
+pass, and two of the ways a grant ends need one, so in both the test
+steps first and confirms after:
+
+- **A commit that needs a drain.** Where the send waits on lane
+  capacity, only a `step_pass` can drain the lane ahead of it (the
+  RFC 0014 §13.3 driver-progress form).
+- **The second reclaiming fact.** An origin's exit reaches the
+  kernel's bookkeeping at stage 1 of a pass (RFC 0014 §3.5), so a
+  grant armed at a run that has exited but whose exit no pass has
+  reflected cannot reach that fact inside `confirm` at all: the test
+  interposes a `step_pass(WakeSource::ProducerExit)` and confirms
+  after it.
+
+In both, a `confirm` issued too early exhausts its budget and fails
+like every other wait here, and the fix is the same and needs no
+change to this contract: the token is detached, so it survives the
+step that makes the resolution reachable.
 
 This is a sanctioned observation of a state the *kernel* produced,
 and it is deliberately not the same thing as a **stranded token** — a
@@ -1809,17 +1825,19 @@ other series is pass-unit driven.
 
 ### 9.8 Determinism, scoped
 
-A **script** is the ordered sequence of driving calls — each
+A **script** is the ordered sequence of driving calls — `boot`, each
 `step_pass`'s `WakeSource`, and the positions of `grant`, `confirm`,
 and `settle` among them — together with the application-side inputs
-and readiness (§9.2). That is an instantiation of RFC 0014 §7.2's
-triple rather than a widening of it: the arbitration choices are the
-`step_pass` arguments, the grants are the `grant`/`confirm` pairs,
-and inputs and readiness are unchanged. `settle` is in the sequence
-because this section adds it as a driving call and its position is
-observable — it can carry a run to an exit that a later
-`step_pass(WakeSource::ProducerExit)` then has something to reflect —
-even though it contributes no entry to the guaranteed sequence
+and readiness (§9.2). `boot` is listed for completeness rather than
+as a choice: §9.3's state table admits it in exactly one position, so
+it is not a free variable of the script. That is an instantiation of
+RFC 0014 §7.2's triple rather than a widening of it: the arbitration
+choices are the `step_pass` arguments, the grants are the
+`grant`/`confirm` pairs, and inputs and readiness are unchanged.
+`settle` is in the sequence because this section adds it as a driving
+call and its position is observable — it can carry a run to an exit that
+a later `step_pass(WakeSource::ProducerExit)` then has something to
+reflect — even though it contributes no entry to the guaranteed sequence
 (§9.6).
 
 For a deterministic application, one script yields one observation
@@ -1867,25 +1885,28 @@ what scope.
   production bootstrap in one call, never a stage of it (§9.5) — and
   bootstrap evidence (RFC 0014 §6.2's init-quit outcome, carried by
   INV-RC11) comes from it.
-- **The remaining driving calls carry no evidence of their own.**
-  `grant` opens the route by which an entry is appended to the
-  guaranteed observation sequence, and the grant it opens resolves by
-  one of three routes: a commit reached inside `confirm`; a commit
-  reached inside a `step_pass`, where it needs the kernel to drain
-  the lane the send waits on (the RFC 0014 §13.3 driver-progress
-  form); or a `Confirmed::Reclaimed` resolution, which appends
-  nothing because no commit occurred (§9.6). The entry, where there
-  is one, becomes evidence when the pass-unit step that delivers it
-  consumes it; the handshake itself witnesses nothing about
-  production. `settle` contributes nothing to that sequence — it
-  initiates no append to it (§9.6), and the exit it lets a run reach
-  is evidence only once a `step_pass(WakeSource::ProducerExit)`
-  reflects it. Any pre-gate record these calls produce is outside the
-  guaranteed sequence by construction, which is what makes the intent
-  ledger inadmissible here rather than merely unreliable. Neither
-  call is a second evidence surface beside pass-unit driving, and
-  neither is a stage of a pass: both leave the stage order untouched,
-  which is why they do not fall under the probe exclusion below.
+- **The remaining driving calls carry no evidence of their own.** `grant`
+  opens the route by which an entry is appended to the guaranteed
+  observation sequence, and the grant it opens resolves by one of three
+  routes: a commit reached inside `confirm`; a commit reached inside a
+  `step_pass`, where it needs the kernel to drain the lane the send waits
+  on (the RFC 0014 §13.3 driver-progress form); or a
+  `Confirmed::Reclaimed` resolution, which appends nothing because no
+  commit occurred. Two of the three therefore need a pass before the
+  `confirm` that reports them, and the reclaiming route needs one
+  whenever its establishing fact is an origin's exit, which reaches the
+  bookkeeping only at a pass's stage 1 (§9.6). The entry, where there is
+  one, becomes evidence when the pass-unit step that delivers it consumes
+  it; the handshake itself witnesses nothing about production. `settle`
+  contributes nothing to that sequence — it initiates no append to it
+  (§9.6), and the exit it lets a run reach is evidence only once a
+  `step_pass(WakeSource::ProducerExit)` reflects it. Any pre-gate record
+  these calls produce is outside the guaranteed sequence by construction,
+  which is what makes the intent ledger inadmissible here rather than
+  merely unreliable. Neither call is a second evidence surface beside
+  pass-unit driving, and neither is a stage of a pass: both leave the
+  stage order untouched, which is why they do not fall under the probe
+  exclusion below.
 - **Stage-granular probes sit outside that surface.** A probe running
   a single stage in isolation may exist as a component-level
   white-box instrument; it is no part of this public surface, and
@@ -1949,27 +1970,25 @@ of §9.3's block maps to one of them, walked in order:
 
 - `TestDriver::new` and §9.2's absent constructors → INV-RC13, whose
   declared structural half is exactly this API-surface review; the
-  driving methods' uniform `&mut self` receivers and the driver's sole
-  ownership of its kernel instance additionally hold RFC 0011
+  `TestDriver` driving methods' uniform `&mut self` receivers and
+  its sole ownership of its kernel instance additionally hold RFC 0011
   INV-LC9's exclusivity property, which that RFC's §6 requires any
   step-style surface to preserve.
 - `boot`, `step_pass`, `WakeSource`, and `NotReady` → INV-RC13's
   behavioral half, which runs through pass-unit steps against the
   production seams; `boot`'s whole-bootstrap granularity additionally
   serves INV-RC11's init-quit row (§9.5, §9.9).
-- `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` →
-  INV-RC14, whose structural half is that the raw-grant shape is
-  unrepresentable — which is what the driver-wide outstanding rule
-  delivers (§9.6). `Confirmed` maps to INV-RC14 through both arms: it
-  reports which of the two states a grant ended in, and only the one
-  that got a send into the lane appends to the gate-scoped sequence.
-  It maps to
-  INV-RC5 through *neither* — strict revocation is a delivery-side
-  property, so neither ledger witnesses it. Its behavioral rows
-  observe that `update` never runs for the revoked item, which the
-  reducer under test records for itself; the dequeue that drops it
-  does no `update` work at all (RFC 0014 §4.3), which is why there is
-  nothing for a record of this section's to hold.
+- `grant`, `GrantToken`, `GrantOutstanding`, and `confirm` → INV-RC14,
+  whose structural half is that the raw-grant shape is unrepresentable —
+  which is what the driver-wide outstanding rule delivers (§9.6).
+  `Confirmed` maps to INV-RC14 through both arms: it reports which of the
+  two states a grant ended in, and only the one that got a send into the
+  lane appends to the gate-scoped sequence. It maps to INV-RC5 through
+  *neither* — strict revocation is a delivery-side property, so neither
+  ledger witnesses it. Its behavioral rows observe that `update` never runs
+  for the revoked item, which the reducer under test records for itself;
+  the dequeue that drops it does no `update` work at all (RFC 0014 §4.3),
+  which is why there is nothing for a record of this section's to hold.
 - `settle` → INV-RC13: it drives the production executor and adds no
   seam, so it is covered by the same API-surface review. It reaches
   INV-RC14's observation sequence only negatively, by initiating no
@@ -2067,12 +2086,16 @@ terminal and never hands it back, and `StepReport` carries `started`
 and `terminated` and nothing about frames, so no call here reports
 that a render happened or what it drew. Render evidence is
 application-side, where a `view` under test can record its own calls,
-and that is where INV-RC10's redraw row is read. This is deliberate
-negative space rather than an omission — a frame observation on the
-driver would be a third thing the surface reports about a pass,
-beside the two seams RFC 0014 §7.2 confines it to. Two elements
-were suspected of redundancy and kept, neither implied by its
-suspected survivor. `confirm` against `step_pass`, which also drives
+and that is where INV-RC10's redraw row is read — its own enforcement
+line calls for "a scripted flood with an interposed probe and a
+pending redraw", and the interposed probe is that application-side
+instrument, not a driver method. This is deliberate negative space
+rather than an omission: a frame observation on the driver would be a
+third thing the surface reports about a pass, beside the two seams
+RFC 0014 §7.2 confines it to.
+
+Two elements were suspected of redundancy and kept, neither implied
+by its suspected survivor. `confirm` against `step_pass`, which also drives
 the executor: stepping runs a whole pass, so confirming an acceptance
 through a step would put a pass between two grants and change the
 very enqueue order the handshake exists to script. And `settle`
