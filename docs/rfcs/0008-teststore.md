@@ -1155,9 +1155,9 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   `Pin`, and `Poll` to `std`, so neither group is this crate's to
   place.
   - **Introduced here**, arriving with that landing: `TestDriver`,
-    `ParkProbe`, `WakeSource`, `Origin`, `AnonymousRun`, `StepReport`,
-    `GrantToken`, `Confirmed`, `GrantOutstanding`, `NotReady`,
-    `AcceptanceLedger`, `IntentLedger`.
+    `ParkProbe`, `WakeSource`, `RunName`, `RunKind`, `SendRecord`,
+    `Lane`, `StepReport`, `GrantToken`, `Confirmed`, `GrantOutstanding`,
+    `NotReady`, `AcceptanceLedger`, `IntentLedger`.
   - **Existing and unchanged**: `CommandId` and `SubscriptionId`,
     RFC 0005's identity types.
   - **Entering or changing in the same landing**: `Program`, `Exit`,
@@ -1273,16 +1273,16 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         woken_by: WakeSource,
     ) -> Result<StepReport<B::Error>, NotReady>;
 
-    /// Arms a grant at `origin`, releasing the next of that origin's
+    /// Arms a grant at `run`, releasing the next of that run's
     /// send-intents that no grant has released yet — one already
     /// waiting at the gate when this is called, or else the first to
     /// arrive after it. The returned token borrows neither the
     /// driver nor the script. At most one grant is outstanding
-    /// across the whole driver; the next — at this origin or any
+    /// across the whole driver; the next — at this run or any
     /// other — is admitted only after this one resolves (§9.6).
     pub fn grant(
         &mut self,
-        origin: Origin,
+        run: RunName,
     ) -> Result<GrantToken, GrantOutstanding>;
 
     /// Consumes `token`, driving the executor — beginning no pass —
@@ -1290,23 +1290,25 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     pub fn confirm(&mut self, token: GrantToken) -> Confirmed;
 
     /// Drives the executor — beginning no pass and releasing no
-    /// send-intent — so that runs which send nothing can reach their
-    /// exits (§9.6).
-    pub fn settle(&mut self);
+    /// send-intent — until `until` holds. Evaluated before the first
+    /// turn, so an already-true condition costs none; bounded, and
+    /// exhausting the bound fails the test (§9.6).
+    pub fn settle(&mut self, until: impl FnMut() -> bool);
 
-    /// Sends admitted past the gate, tagged with origin and lane,
-    /// in gate order. Admission, not delivery (§9.6).
+    /// Sends admitted past the gate, in gate order. Admission, not
+    /// delivery (§9.6).
     pub fn accepted(&self) -> AcceptanceLedger;
 
-    /// Send-intents recorded before the gate, origin-tagged, under
-    /// no ordering or completeness guarantee (§9.6).
+    /// Send-intents recorded before the gate, under no ordering or
+    /// completeness guarantee (§9.6).
     pub fn intents(&self) -> IntentLedger;
 }
 
 /// What a step started, and whether it terminated the program.
 pub struct StepReport<E> {
     /// The runs this step started, in the order it started them.
-    pub started: Vec<Origin>,
+    /// The only place a `RunName` is minted (§9.4).
+    pub started: Vec<RunName>,
     /// Present exactly when the step terminated the program,
     /// carrying the production result (RFC 0014 §2.3, INV-RC11).
     pub terminated: Option<Result<Exit, E>>,
@@ -1323,16 +1325,24 @@ pub enum WakeSource {
     ProducerExit,
 }
 
-/// A producer run, named by the identity it already has (§9.4).
-pub enum Origin {
-    Keyed(CommandId),
-    Subscription(SubscriptionId),
-    Anonymous(AnonymousRun),
+/// Names one producer *run* — one start, not one identity. Opaque,
+/// minted only when the driver observes that run start, and never a
+/// handle to the run itself (§9.4).
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+pub struct RunName(/* private */);
+
+impl RunName {
+    /// What kind of run this names, with the logical identity the
+    /// kernel holds for it where there is one.
+    pub fn kind(&self) -> RunKind;
 }
 
-/// Driver-side name for an anonymous run: opaque, minted when the
-/// driver observes the run start (§9.4).
-pub struct AnonymousRun(/* private */);
+/// A run's kind, read off a `RunName` (§9.4).
+pub enum RunKind {
+    Keyed(CommandId),
+    Subscription(SubscriptionId),
+    Anonymous,
+}
 
 /// One outstanding grant: correlated to the send it releases, and
 /// through it to that send's commit where one happens.
@@ -1347,8 +1357,8 @@ pub enum Confirmed {
     /// run is revoked is a separate, delivery-side question.
     Accepted,
     /// This grant will never put anything into the lane — the send
-    /// it released ended without getting in, or its origin is gone
-    /// with no send released at all.
+    /// it released ended without getting in, or the run it was armed
+    /// at is gone with no send released at all.
     Reclaimed,
 }
 
@@ -1358,8 +1368,39 @@ pub struct GrantOutstanding;
 /// The scripted wake source had not arrived; nothing was driven.
 pub struct NotReady;
 
+/// One send, named by the run that made it and the lane it was for.
+/// The same record shape serves both ledgers; what differs is what
+/// each ledger's *order* is worth (§9.6).
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct SendRecord { /* private */ }
+
+impl SendRecord {
+    pub fn run(&self) -> &RunName;
+    pub fn lane(&self) -> Lane;
+}
+
+/// Which lane a send was for (RFC 0014 §3.1).
+pub enum Lane { Data, Control }
+
+/// Sends admitted past the gate, in gate order (§9.6).
 pub struct AcceptanceLedger { /* private */ }
+
+/// Send-intents recorded before the gate, in no guaranteed order
+/// (§9.6).
 pub struct IntentLedger { /* private */ }
+
+// Both ledgers read the same way: a length and an ordered walk.
+impl AcceptanceLedger {
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn iter(&self) -> impl Iterator<Item = &SendRecord>;
+}
+
+impl IntentLedger {
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn iter(&self) -> impl Iterator<Item = &SendRecord>;
+}
 
 /// Park-boundary instrument. Evidence for INV-RC16 only (§9.7).
 pub struct ParkProbe { /* private */ }
@@ -1440,7 +1481,7 @@ terminated is reached without ever passing through running.
 
 The third row's condition is §9.6's grant lifecycle, which is where
 those two calls' legality is stated in full: `grant` is misuse at an
-origin the kernel's run bookkeeping does not hold, and `settle` is
+run the kernel's bookkeeping does not hold, and `settle` is
 misuse while a grant is outstanding.
 
 Misuse **fails the test** rather than returning an error, in the
@@ -1452,34 +1493,53 @@ production fact (§9.5) and `GrantOutstanding` a script-order fact
 
 ### 9.4 Naming a producer run
 
-An `Origin` is a producer run's name, and the driver introduces **no
-second identity model**. A keyed run is named by its `CommandId` and
-a subscription run by its `SubscriptionId` — RFC 0005's identity
-types, unchanged. An anonymous run has no logical key by decision
-(RFC 0013 §9's third resolution; its §10 rejects auto-keying), so it
-is named by an opaque handle the *driver* mints, under three rules:
+A `RunName` names **one run** — one start — for every producer kind
+alike, and the driver introduces **no second identity model**.
 
-- **Minted from an observation.** The driver mints a handle when it
-  observes the run start, and reports it in that step's `started`
-  list. An anonymous run is nameable only after the kernel has
-  started it; there is no way to name one in advance, and nothing
-  about the run is chosen by the test.
-- **It reaches no kernel identity surface.** The handle is not a key
+The reason it is per run rather than per identity is that a logical
+identity does not pick out a run. A `CancelInFlight` supersession
+frees the identity slot for a successor *immediately* at the
+revocation's application point, while the revoked run may still send
+late; both are inert with respect to the successor, but both exist
+(RFC 0014 §3.1's no-stale-resurrection clause, carrying RFC 0003
+INV-8's token discipline). A subscription restarted under the same
+`SubscriptionId` is the same case. Naming runs by `CommandId` or
+`SubscriptionId` alone would leave a grant unable to say *which* of
+the two it means, and a ledger unable to record which one sent — so
+the name is minted per start.
+
+That is the test-surface counterpart of a discipline the kernel
+already keeps: the kernel distinguishes those same two runs by its
+own per-run token (INV-8), and a `RunName` is the driver's way of
+referring to the same distinction. It is not a second kernel
+identity, and the kernel's own identity model is untouched —
+RFC 0005's `CommandId` and `SubscriptionId` for the kinds that have
+one, kernel-side scope membership without a logical key for the ones
+that do not (RFC 0013 §9's third resolution).
+
+Three rules, and they now hold for every kind rather than for
+anonymous runs alone:
+
+- **Minted from an observation.** The driver mints a `RunName` when
+  it observes a run start, and reports it in that step's `started`
+  list — the only place one is minted. A run is nameable only after
+  the kernel has started it; there is no way to name one in advance,
+  and nothing about the run is chosen by the test.
+- **It reaches no kernel identity surface.** A `RunName` is not a key
   and participates in no keyed semantics: no keyed capacity, no move
-  into the keyed gauge count — an anonymous run stays counted as an
-  anonymous run, under `unkeyed_commands` (RFC 0014 §9 row 9) — and
-  no admission or cancellation decision reads it. The kernel's own
-  identity for an anonymous run — kernel-side scope membership
-  without a logical key, RFC 0013 §9's third resolution — is
-  unchanged by its existence, so the auto-keying RFC 0013 §10
-  rejected stays rejected.
-- **Its only uses are naming.** It names an origin to `grant` and
-  tags ledger records (§9.6). The send gate `grant` releases at is a
+  into or out of a gauge count — each kind stays counted as its own
+  kind (RFC 0014 §9 row 9) — and no admission, cancellation, or
+  teardown decision reads it. For a keyed or subscription run it
+  carries the identity the kernel already holds, readable through
+  `kind`, and adds nothing to it; for an anonymous run it adds no key
+  where the kernel has none, so the auto-keying RFC 0013 §10 rejected
+  stays rejected.
+- **Its only uses are naming.** It names a run to `grant` and tags
+  ledger records (§9.6). The send gate `grant` releases at is a
   kernel-side seam, RFC 0014 §7.2's second driving differential, not
   a driver-side queue; what crosses the grant boundary into the
-  kernel is the run identity the kernel already holds, which the
-  driver resolves the handle to there. The handle itself stops at
-  that boundary.
+  kernel is the run the kernel already holds, which the driver
+  resolves the name to there. The name itself stops at that boundary.
 
 `started` lists the runs in the order the step started them, which is
 what lets a test name a specific run when one step starts several.
@@ -1548,25 +1608,24 @@ continuation pass never runs — the row INV-RC11 carries.
 ### 9.6 The grant handshake, `settle`, and the two ledgers
 
 The second seam is the send gate, whose production implementation is
-immediate release. `grant(origin)` arms a release at one origin; the
+immediate release. `grant(run)` arms a release at one run; the
 returned `GrantToken` correlates to the commit that release produces,
 and `confirm` consumes it once that send's acceptance — the post-send
 acknowledgement — is confirmed.
 
-**What the gate covers**, stated here because the rest of this
-section quantifies over it: **every** send a producer run makes, on
-either lane. RFC 0014 §3.1 splits producer output in two — message
-output on the data lane, and the one producer output that does not
-travel it, a producer-originated quit, on the control lane — and the
-gate holds both. Three things follow. §9.5's bootstrap claim that no
-producer output reaches *either* lane before a grant is complete
-rather than data-lane-only, because a producer-originated quit is
-gated too. A producer's quit is scriptable exactly like its
-messages — the pass-unit series RFC 0014 §13.1 names for both quit
-semantics is driven by granting the quit's own send. And `accepted`
-records accepted producer sends from both lanes, each record carrying
-the lane alongside its origin, so a test can tell a released quit
-from a released message.
+**What the gate covers**, stated here because the rest of this section
+quantifies over it: **every** send a producer run makes, on either lane.
+RFC 0014 §3.1 splits producer output in two — message output on the data
+lane, and the one producer output that does not travel it, a
+producer-originated quit, on the control lane — and the gate holds both.
+Three things follow. §9.5's bootstrap claim that no producer output
+reaches *either* lane before a grant is complete rather than
+data-lane-only, because a producer-originated quit is gated too. A
+producer's quit is scriptable exactly like its messages — the pass-unit
+series RFC 0014 §13.1 names for both quit semantics is driven by granting
+the quit's own send. And `accepted` records accepted producer sends from
+both lanes, each record carrying the lane alongside the run that sent it,
+so a test can tell a released quit from a released message.
 
 The gate belongs to the driver, so it reaches only what the driver
 drives. RFC 0014 §13.1's `ParkProbe`-driven series are outside it:
@@ -1582,7 +1641,7 @@ those three are harnessed — including what turns the emitting effect
 gets, which no call of this section supplies — belongs to RFC 0014
 §13.1 with the series themselves.
 
-**Which intent a grant releases.** The next one at that origin that
+**Which intent a grant releases.** The next one at that run that
 no grant has released yet: if an intent is already waiting at the
 gate when `grant` is called, that is the one; if none is, the grant
 stays armed and releases the first to arrive after it. A grant is
@@ -1594,14 +1653,14 @@ Three rules carry INV-RC14's enqueue-order guarantee onto the
 surface:
 
 - **One outstanding grant, driver-wide.** At most one grant is
-  outstanding across the whole driver, not one per origin: while a
+  outstanding across the whole driver, not one per run: while a
   token is unconfirmed, `grant` returns `Err(GrantOutstanding)` at
-  issue time whatever origin it names. The sequential handshake
+  issue time whatever run it names. The sequential handshake
   *grant → enqueue-acceptance confirmed → next grant* is therefore
   the only way two releases can be ordered at all, and raw grant
   order is not expressible — neither `grant(A); grant(B)` across two
   producers, which is the model RFC 0014 §11 excludes, nor two
-  releases at one origin. A per-origin rule would admit the first of
+  releases at one run. A per-run rule would admit the first of
   those, so the rule is driver-wide.
 - **Detached.** The token is `'static`: it borrows neither the driver
   nor the script, and it carries its correlation with it rather than
@@ -1620,23 +1679,23 @@ surface:
   claim about sends the gate has released and confirmed, never about
   the order producers reached the gate in.
 
-RFC 0014 §13.3's **ack correlation** condition reads, in full: "at
-most one outstanding grant per origin, or an explicit correlation of
-each grant to its exact commit; the next grant to an origin only
-after the previous acceptance." The driver-wide rule above satisfies
-the first disjunct strictly — one outstanding grant driver-wide
-implies at most one per origin — and `GrantToken` supplies the
-second, being correlated to the commit its release produces. The
-trailing clause holds as written wherever a grant resolves by
-acceptance: no grant at any origin is admitted while a commit is
-still uncorrelated. Where a grant resolves as `Confirmed::Reclaimed`
-there is no commit to correlate, so the clause has nothing to range
-over, and **how it reads in that case is not settled here**: it is
-part of what RFC 0014 §13.3's resolution fixes, which §9.8 keeps
-open. This section neither narrows nor widens that condition, and
+RFC 0014 §13.3's **ack correlation** condition reads, in full: "at most
+one outstanding grant per origin, or an explicit correlation of each
+grant to its exact commit; the next grant to an origin only after the
+previous acceptance." The driver-wide rule above satisfies the first
+disjunct strictly — one outstanding grant driver-wide implies at most one
+per origin however coarsely "origin" is read, this section's runs being
+the finest such grouping — and `GrantToken` supplies the second, being
+correlated to the commit its release produces. The trailing clause holds
+as written wherever a grant resolves by acceptance: no grant at any run
+is admitted while a commit is still uncorrelated. Where a grant resolves
+as `Confirmed::Reclaimed` there is no commit to correlate, so the clause
+has nothing to range over, and **how it reads in that case is not settled
+here**: it is part of what RFC 0014 §13.3's resolution fixes, which §9.8
+keeps open. This section neither narrows nor widens that condition, and
 states no reading of it beyond the acceptance case its letter covers.
 
-**Grant lifecycle, in full.** A grant at an origin the kernel's run
+**Grant lifecycle, in full.** A grant at a run the kernel's
 bookkeeping does not currently hold — a run never started, or one
 whose exit a pass has already reflected — is misuse and fails the
 test: it is a script error the kernel cannot produce an outcome for,
@@ -1648,13 +1707,13 @@ like every other driving call.
 
 **A grant ends in one of exactly two states, and `confirm` reports
 which.** The subject is the grant, not any particular send, because a
-grant can be armed at an origin that never presents one. Either the
+grant can be armed at a run that never presents one. Either the
 send this grant released **gets into the lane** — it is admitted, and
 the guaranteed sequence gains its entry — or **this grant will never
 put anything into the lane**. Two facts establish the second, and
 either suffices: the send it released ended without getting in (its
 producer reclaimed at an await point, or stopped after observing
-closure — RFC 0014 §6.1), or the granted origin's exit is reflected
+closure — RFC 0014 §6.1), or the granted run's exit is reflected
 in the kernel's bookkeeping and this grant released no send at all,
 so there is nothing left that could arrive. The outcome is what this
 section pins; RFC 0014 §10's reservation-and-commit accounting is one
@@ -1684,7 +1743,7 @@ which is where INV-RC5 is checked in any case (§9.11).
 Whichever route ends a run — an explicit cancel, a `CancelInFlight`
 supersession, a scope teardown, or termination, whose task
 cancellation RFC 0014 §6.1 and RFC 0011 §4.4 make contract — a grant
-outstanding at that origin still lands in one of the two states
+outstanding at that run still lands in one of the two states
 above. *When* an abort falls relative to an in-flight send is
 mechanism, and this surface does not depend on it: either the send
 got in before its producer ended, or it did not and nothing more will
@@ -1698,7 +1757,7 @@ steps first and confirms after:
 - **A commit that needs a drain.** Where the send waits on lane
   capacity, only a `step_pass` can drain the lane ahead of it (the
   RFC 0014 §13.3 driver-progress form).
-- **The second reclaiming fact.** An origin's exit reaches the
+- **The second reclaiming fact.** A run's exit reaches the
   kernel's bookkeeping at stage 1 of a pass (RFC 0014 §3.5), so a
   grant armed at a run that has exited but whose exit no pass has
   reflected cannot reach that fact inside `confirm` at all: the test
@@ -1736,11 +1795,31 @@ a runnable producer incidentally at an await point, but it promises
 no turns at all — a pass that never awaits yields none. That is the
 gap `settle` closes, and its whole content is the three things a
 by-product cannot offer: turns as the *purpose* of the call, a stated
-budget, and a completion condition. Bounded turns, no wall clock,
-exhausting the budget fails the test. It begins no pass and releases
-no send-intent, and an exit it lets a run reach becomes visible the
-way every exit does, at the exit-reflection stage of the next
+budget, and a completion condition. It begins no pass and releases no
+send-intent, and an exit it lets a run reach becomes visible the way
+every exit does, at the exit-reflection stage of the next
 `step_pass(WakeSource::ProducerExit)`.
+
+**The completion condition is the caller's, given as a predicate.**
+`settle` turns the executor until the predicate holds, evaluating it
+once before the first turn — so a condition already true costs no
+turns — and again at turn boundaries until it does; exhausting the
+budget fails the test, as every wait here does. The predicate is
+supplied rather than fixed because the obvious fixed condition,
+"until the executor is idle", is not a thing this contract can
+observe: idleness is not exposed by any surface here, and
+implementations disagree about what it means, so a `settle` defined
+that way would differ between two conforming kernels. A predicate is
+deterministic instead — on the current-thread executor its evaluation
+points are exactly the turn boundaries, so the same script drives the
+same number of turns.
+
+What a predicate can see is what the test can see, which is
+ordinarily its own application-side instrumentation: a cleanup
+finalizer that sets a flag, a mock source that records its stop. It
+is deliberately *not* a run's exit as the driver knows it — an exit
+reaches the driver only at a pass's stage 1 (§9.6's completion
+condition above), which `settle` does not run.
 
 Since turns are not selective (§9.3), what `settle` does to the two
 ledgers is stated exactly rather than denied. It **initiates no append to
@@ -1756,9 +1835,9 @@ pre-gate ledger is for, and a test reading `intents` after a `settle` is
 reading exactly the kind of record this section declines to guarantee.
 
 Two ledgers divide at the send gate. `accepted` records the sends
-admitted past it, each record carrying its origin and its lane, in gate
-order: the guaranteed observation sequence INV-RC14 scopes, which RFC
-0014 §7.2 begins at the gate for exactly this reason. Admitted is not
+admitted past it, each record carrying the run that sent it and the lane,
+in gate order: the guaranteed observation sequence INV-RC14 scopes, which
+RFC 0014 §7.2 begins at the gate for exactly this reason. Admitted is not
 delivered — a record says an item passed the gate and says nothing about
 whether `update` ever saw it, which is why a revoked run's committed send
 belongs in it. That order is the *driver's*, established by the sequence
@@ -1766,9 +1845,10 @@ of grants, and cross-lane it is nobody's claim about production: RFC 0014
 §3.3 declines to order a run's own control-lane quit against its earlier
 data-lane output at all, so a reading that puts one before the other is
 the citation rule's ordinary case (§9.9). `intents` records send-intents
-before the gate, origin-tagged: pre-gate records, deliberately outside
-the guarantee. A test may read `intents` to see that a producer reached
-the gate; it may not derive an order or a completeness claim from them.
+before the gate, tagged the same way: pre-gate records, deliberately
+outside the guarantee. A test may read `intents` to see that a producer
+reached the gate; it may not derive an order or a completeness claim from
+them.
 
 **Neither ledger is a public transcript surface** (RFC 0014 §7.2),
 which fixes what each is and is not. Each is a **test-assertion
@@ -1829,10 +1909,16 @@ RFC 0014 §7.2's triple rather than a widening of it: the arbitration
 choices are the `step_pass` arguments, the grants are the
 `grant`/`confirm` pairs, and inputs and readiness are unchanged.
 `settle` is in the sequence because this section adds it as a driving
-call and its position is observable — it can carry a run to an exit that
-a later `step_pass(WakeSource::ProducerExit)` then has something to
-reflect — even though it contributes no entry to the guaranteed sequence
-(§9.6).
+call and its position is observable — it can carry a run to an exit
+that a later `step_pass(WakeSource::ProducerExit)` then has something
+to reflect — even though it contributes no entry to the guaranteed
+sequence (§9.6).
+
+Its completion predicate is **not** a further free variable. A
+predicate reads application-side state (§9.6), which the script
+already fixes as inputs and readiness, so how many turns a `settle`
+takes is determined by the script rather than added to it — which is
+what keeps the determinism claim below over the same triple.
 
 For a deterministic application, one script yields one observation
 sequence across repeated runs, because the driver introduces no
@@ -1888,7 +1974,7 @@ what scope.
   `Confirmed::Reclaimed` resolution, which appends nothing because no
   commit occurred. Of those three, one always needs a pass before the
   `confirm` that reports it — the commit that needs a drain — and
-  another needs one when its establishing fact is an origin's exit,
+  another needs one when its establishing fact is a run's exit,
   which reaches the bookkeeping only at a pass's stage 1 (§9.6). The
   entry, where there is one, becomes evidence when the pass-unit step
   that delivers it consumes it; the handshake itself witnesses nothing
@@ -1983,23 +2069,31 @@ of §9.3's block maps to one of them, walked in order:
   for the revoked item, which the reducer under test records for itself;
   the dequeue that drops it does no `update` work at all (RFC 0014 §4.3),
   which is why there is nothing for a record of this section's to hold.
-- `settle` → INV-RC13: it drives the production executor and adds no
-  seam, so it is covered by the same API-surface review. It reaches
-  INV-RC14's observation sequence only negatively, by initiating no
-  append to it — a property §9.6 makes structural through the rule
-  that `settle` is misuse while a grant is outstanding.
-- `accepted`, `intents`, `AcceptanceLedger`, `IntentLedger` →
-  INV-RC14's gate-scoped observation sequence, whose pre-gate
-  exclusion is what the second ledger keeps separate.
+- `settle` and its completion predicate → INV-RC13: it drives the
+  production executor and adds no seam, so it is covered by the same
+  API-surface review. It reaches INV-RC14's observation sequence only
+  negatively, by initiating no append to it — a property §9.6 makes
+  structural through the rule that `settle` is misuse while a grant
+  is outstanding — and its predicate reads application-side state, so
+  it adds no free variable to a script (§9.8).
+- `accepted`, `intents`, `AcceptanceLedger`, `IntentLedger`,
+  `SendRecord`, `Lane` → INV-RC14's gate-scoped observation
+  sequence, whose pre-gate exclusion is what the second ledger keeps
+  separate. The read surface — a length and an ordered walk over
+  records that name their run and lane — is what makes that sequence
+  assertable at all; without it the invariant would have a contract
+  and no instrument.
 - `ParkProbe` and its three readers → INV-RC16, whose behavioral rows
   sit on that probe; `armed` and `woken_by` are the API form of the
   arming and wake observations RFC 0014 §7.2 names.
 - `StepReport::terminated` → INV-RC11 (the production result
   contract, RFC 0011 INV-LC5's, preserved).
-- `Origin`, `AnonymousRun`, and `StepReport::started` → no invariant
-  of their own: the identity models are RFC 0005's, and the handle's
+- `RunName`, `RunKind`, and `StepReport::started` → no invariant of
+  their own: the identity models are RFC 0005's, and the name's
   confinement falls inside INV-RC13's structural review, which walks
-  the API for surfaces reaching the kernel.
+  the API for surfaces reaching the kernel. Naming per run rather
+  than per identity is what lets INV-RC14's sequence stay assertable
+  across a supersession, where one identity has two runs (§9.4).
 
 §9.10's parity extension maps to INV-T3, unchanged.
 
@@ -2029,7 +2123,7 @@ of §9.3's block maps to one of them, walked in order:
 - *Ledger as transcript* — a test that reads `accepted` as the
   application's message transcript would turn a driver-established
   order into evidence about delivery. Excluded by §9.6's ledger
-  content (send events by origin, not messages) together with §9.9's
+  content (send events by run, not messages) together with §9.9's
   citation rule.
 - *Shape as verification* — reading §9.6's driver-wide admission rule
   and detached token as discharging RFC 0014 §13.3. Excluded by §9.8:
@@ -2043,10 +2137,18 @@ of §9.3's block maps to one of them, walked in order:
   a fact about all four driving calls, the intent ledger may gain
   entries during any of them, and the only thing claimed of `settle`
   is that it initiates no append to the guaranteed sequence.
+- *Identity as run* — naming runs by `CommandId` or `SubscriptionId`
+  alone passes every single-run test and then silently conflates a
+  superseded run with its successor: the identity slot is free for
+  the successor at the revocation's application point while the old
+  run can still send late (RFC 0014 §3.1), so a grant could not say
+  which it meant and a ledger record could not say which had sent.
+  Excluded by §9.4's per-run naming, which mints one name per start
+  and carries the logical identity inside it rather than as it.
 - *Unresolvable grant* — a surface whose grant clears only on a
   commit leaves the driver permanently unusable in two reachable
   cases, neither of them a test-author error: a released send that
-  ends without getting into the lane, and a grant armed at an origin
+  ends without getting into the lane, and a grant armed at a run
   that exits before presenting a send at all — the second reachable
   by granting at a run whose exit `settle` has induced but no pass
   has yet reflected. Either way `confirm` would exhaust its budget,
@@ -2123,7 +2225,7 @@ and no way to reach that run at all.
   (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
 - RFC 0005 — structural lifecycle identity: `SubscriptionId`, the
   declared-set semantics `subscription_ids` observes; with `CommandId`,
-  the two identity types §9.4's origins name runs by.
+  the two identity types §9.4's run names carry.
 - RFC 0006 — runtime load control: the shutdown discard carve-out §5.3
   mirrors (INV-L2); the runtime contracts §1.2 excludes.
 - RFC 0004 — command timeout and retry: the first-poll deadline anchor
@@ -2144,7 +2246,7 @@ and no way to reach that run at all.
   preserves; §6.1's source template, the injection surface §9.2's
   application-side inputs go through.
 - RFC 0013 — scope teardown: §9's third resolution and §10's rejection
-  of auto-keying, which §9.4's origin naming honors.
+  of auto-keying, which §9.4's run naming honors.
 - RFC 0014 — reducer-first core: §7.1's store parity extension, §7.2's
   driving contract, §7.3's per-layer claims, and the amendment register
   §9 whose row 11 names this RFC; §3.5's pass stages and wake arming,
