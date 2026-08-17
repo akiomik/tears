@@ -52,7 +52,7 @@
 //! pass needs a producer running on a thread the pass is not occupying. The
 //! executor a driver turns is mechanism: RFC 0008 §9.8 scopes INV-RC14's
 //! determinism *claim* to a current-thread executor rather than fixing the
-//! driver's construction, and those three rows cite no part of that claim —
+//! driver's construction, and those four rows cite no part of that claim —
 //! their ordering is pinned by
 //! [`support::MidBatchHandshake`], which neither side can pass. Pass-unit
 //! driving is unchanged: one step is still one whole pass in the fixed stage

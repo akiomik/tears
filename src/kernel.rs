@@ -130,7 +130,15 @@ pub struct BootReport {
 pub struct ExitReport {
     /// Why the kernel terminated.
     pub reason: ExitReason,
-    /// Tasks joined during settle, the exits already reflected included.
+    /// How many runtime-owned tasks this settle accounted for: those still
+    /// in the join set when it began, plus those whose exit had been
+    /// *observed* but not yet reflected into the bookkeeping, which had
+    /// already left the join set and would otherwise be counted nowhere.
+    ///
+    /// Exits a pass **did** reflect are not in either group. A reflected
+    /// exit left the join set when it was observed and left the buffer when
+    /// it was reflected, so it belongs to the pass that consumed it rather
+    /// than to this drain.
     pub joined: usize,
 }
 
@@ -491,8 +499,10 @@ impl<P: Program> Kernel<P> {
         let reason = self
             .pending_exit_reason()
             .expect("settle follows termination");
-        // Exits already reflected into the bookkeeping left the join set
-        // before this drain, so they are counted here rather than lost.
+        // Observed-but-unreflected exits left the join set when they were
+        // observed, so the drain below cannot see them; counting the buffer
+        // first is what keeps them from being lost. Exits a pass already
+        // reflected are in neither place and are not counted here.
         let mut joined = self.exit_buf.len();
         self.exit_buf.clear();
         while self.join_set.join_next().await.is_some() {

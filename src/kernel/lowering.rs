@@ -18,6 +18,20 @@
 //! Both are `debug_assert!`s rather than errors on purpose: they are
 //! placeholders for a type-level split, and turning a constructible public
 //! call into a release-mode panic would be the worse of the two failures.
+//! The rejected third option is a fallback — log and lower the first
+//! carrier — which would pick a meaning for a shape that has none, silently,
+//! and that is the failure class RFC 0007 INV-C5 exists to prevent.
+//!
+//! **Their lifecycle, stated so the assertions are not read as a standing
+//! hazard.** Before the switch they are unreachable from an application:
+//! nothing outside this crate constructs the kernel, so no user's debug
+//! build runs this lowering at all. The switch does not arrive on its own —
+//! it lands together with the effect-constructor split that makes both
+//! shapes unconstructible in the first place, after which these two
+//! assertions are structurally dead and are deleted with the placeholders
+//! they stand in for. Neither half of that pairing is optional: landing the
+//! switch without the split would expose exactly the debug-build panic the
+//! choice above rejects.
 //!
 //! [`RuntimeCommandParts::into_kernel_parts`]: crate::command::RuntimeCommandParts::into_kernel_parts
 

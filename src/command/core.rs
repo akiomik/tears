@@ -579,9 +579,14 @@ impl<Msg: Send + 'static> Command<Msg> {
                 );
                 // The warning still describes this runtime, which spawns
                 // one folded stream per command and so has no place to put
-                // a second key. Pushing the key down onto the child's own
-                // carriers keeps it available to the kernel, which lowers
-                // each carrier to an independent keyed entry (RFC 0014
+                // a second key. It stops describing anything once the
+                // kernel is the only consumer of this lowering — a key
+                // reaching a batch is then honoured rather than ignored —
+                // so the warning is removed with the switch that lands
+                // RFC 0014 §9 row 3's supersession, not before. Pushing the
+                // key down onto the child's own carriers keeps it available
+                // to the kernel, which lowers each carrier to an
+                // independent keyed entry (RFC 0014
                 // §3.4) — until then the metadata is unreachable through
                 // `into_execution_parts`.
                 cmd.effect.attach_key(&key);
