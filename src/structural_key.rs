@@ -81,13 +81,23 @@ impl Hash for StructuralKey {
 /// An ordered sequence of structural composition-boundary segments.
 ///
 /// This implements the scope path described in RFC 0005 section 2.3.
-/// Segments are recorded in call order (the order successive `scoped()`
-/// calls append them), which is a stable internal convention: comparing two
-/// paths only needs to agree with itself, not with any particular
-/// outermost-to-innermost display order. Path equality therefore compares
-/// segment count and each segment in order, so reversing two unequal
-/// segments changes identity while reversing two equal segments preserves
-/// it.
+/// Segments are stored **root-first**: index 0 is the outermost
+/// composition boundary and the last element the innermost. A `scoped()`
+/// call therefore *prepends* its segment, because scope boundaries apply
+/// from the inside out — the innermost boundary qualifies an identity
+/// first, and each enclosing boundary re-anchors the result one level
+/// closer to the root.
+///
+/// Root-first order is what makes prefix selection read from the root:
+/// [`starts_with`](Self::starts_with) compares leading segments, so a
+/// teardown of an outer boundary selects everything beneath it (RFC 0013
+/// section 3.1) and section 3.2's "`scoped(s)` prepends `s` to the
+/// teardown prefix" is literal rather than reversed.
+///
+/// Path equality compares segment count and each segment in order, so
+/// reversing two unequal segments changes identity while reversing two
+/// equal segments preserves it. Hash values are an internal detail:
+/// comparing two paths only needs to agree with itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ScopePath(Vec<StructuralKey>);
 
@@ -96,25 +106,38 @@ impl ScopePath {
         Self(Vec::new())
     }
 
-    /// Returns a new path with `scope` appended after this path's existing
-    /// segments, erasing it into a fresh [`StructuralKey`].
-    pub fn appended<Scope>(&self, scope: Scope) -> Self
+    /// Returns a new path with `scope` prepended before this path's
+    /// existing segments, erasing it into a fresh [`StructuralKey`].
+    pub fn prefixed<Scope>(&self, scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,
     {
-        self.appended_key(StructuralKey::new(scope))
+        self.prefixed_key(StructuralKey::new(scope))
     }
 
-    /// Returns a new path with an already-erased `segment` appended.
+    /// Returns a new path with an already-erased `segment` prepended.
     ///
     /// Lets a caller erase one scope value once and apply it to several ids
     /// sharing one composition boundary (for example a command's spawn key
     /// and every explicit cancel id), without requiring the scope type
     /// itself to be `Clone`.
-    pub fn appended_key(&self, segment: StructuralKey) -> Self {
-        let mut segments = self.0.clone();
+    pub fn prefixed_key(&self, segment: StructuralKey) -> Self {
+        let mut segments = Vec::with_capacity(self.0.len() + 1);
         segments.push(segment);
+        segments.extend(self.0.iter().cloned());
         Self(segments)
+    }
+
+    /// Whether this path lies under `prefix`, comparing leading segments
+    /// from the root.
+    ///
+    /// This is the structural selection test RFC 0013 section 3.1 states:
+    /// a teardown of `prefix` selects exactly the paths for which this
+    /// returns `true`. A path is its own prefix, the empty path is a
+    /// prefix of every path, and shorter, reordered, subset, and
+    /// deeper-position paths are not selected.
+    pub fn starts_with(&self, prefix: &Self) -> bool {
+        self.0.len() >= prefix.0.len() && self.0[..prefix.0.len()] == prefix.0[..]
     }
 }
 
@@ -234,15 +257,15 @@ mod tests {
     #[test]
     fn empty_path_is_distinct_from_a_one_segment_path() {
         let empty = ScopePath::empty();
-        let one = ScopePath::empty().appended(1_u64);
+        let one = ScopePath::empty().prefixed(1_u64);
 
         assert_ne!(empty, one);
     }
 
     #[test]
     fn equal_segments_in_equal_order_are_equal() {
-        let first = ScopePath::empty().appended(1_u64).appended(2_u64);
-        let second = ScopePath::empty().appended(1_u64).appended(2_u64);
+        let first = ScopePath::empty().prefixed(1_u64).prefixed(2_u64);
+        let second = ScopePath::empty().prefixed(1_u64).prefixed(2_u64);
 
         assert_eq!(first, second);
         assert_eq!(hash_path(&first), hash_path(&second));
@@ -250,24 +273,24 @@ mod tests {
 
     #[test]
     fn reversing_two_unequal_segments_changes_identity() {
-        let forward = ScopePath::empty().appended(1_u64).appended(2_u64);
-        let backward = ScopePath::empty().appended(2_u64).appended(1_u64);
+        let forward = ScopePath::empty().prefixed(1_u64).prefixed(2_u64);
+        let backward = ScopePath::empty().prefixed(2_u64).prefixed(1_u64);
 
         assert_ne!(forward, backward);
     }
 
     #[test]
     fn reversing_two_equal_segments_preserves_identity() {
-        let forward = ScopePath::empty().appended(1_u64).appended(1_u64);
-        let backward = ScopePath::empty().appended(1_u64).appended(1_u64);
+        let forward = ScopePath::empty().prefixed(1_u64).prefixed(1_u64);
+        let backward = ScopePath::empty().prefixed(1_u64).prefixed(1_u64);
 
         assert_eq!(forward, backward);
     }
 
     #[test]
     fn segment_type_differences_affect_equality() {
-        let as_u64 = ScopePath::empty().appended(1_u64);
-        let as_i64 = ScopePath::empty().appended(1_i64);
+        let as_u64 = ScopePath::empty().prefixed(1_u64);
+        let as_i64 = ScopePath::empty().prefixed(1_i64);
 
         assert_ne!(as_u64, as_i64);
     }
@@ -283,19 +306,68 @@ mod tests {
             }
         }
 
-        let first = ScopePath::empty().appended(Collision(1));
-        let second = ScopePath::empty().appended(Collision(2));
+        let first = ScopePath::empty().prefixed(Collision(1));
+        let second = ScopePath::empty().prefixed(Collision(2));
 
         assert_eq!(hash_path(&first), hash_path(&second));
         assert_ne!(first, second);
     }
 
     #[test]
-    fn appended_key_shares_one_erasure_across_paths() {
+    fn prefixed_key_shares_one_erasure_across_paths() {
         let segment = StructuralKey::new(7_u64);
-        let first = ScopePath::empty().appended_key(segment.clone());
-        let second = ScopePath::empty().appended_key(segment);
+        let first = ScopePath::empty().prefixed_key(segment.clone());
+        let second = ScopePath::empty().prefixed_key(segment);
 
         assert_eq!(first, second);
+    }
+
+    // Root-first storage: the *last* `prefixed` call names the outermost
+    // boundary, so it lands at the head of the path and prefix selection
+    // reads from there (RFC 0013 §3.1, §3.2).
+    #[test]
+    fn the_last_prefix_applied_becomes_the_selection_prefix() {
+        let inner = ScopePath::empty().prefixed("field");
+        let path = inner.prefixed("pane-1");
+        let outer = ScopePath::empty().prefixed("pane-1");
+
+        assert!(path.starts_with(&outer));
+        assert!(!path.starts_with(&inner));
+    }
+
+    #[test]
+    fn every_path_starts_with_the_empty_path_and_with_itself() {
+        let path = ScopePath::empty().prefixed("field").prefixed("pane-1");
+
+        assert!(path.starts_with(&ScopePath::empty()));
+        assert!(path.starts_with(&path));
+        assert!(ScopePath::empty().starts_with(&ScopePath::empty()));
+    }
+
+    #[test]
+    fn a_shorter_or_reordered_path_is_not_selected_by_a_prefix() {
+        let prefix = ScopePath::empty().prefixed("b").prefixed("a");
+        let shorter = ScopePath::empty().prefixed("a");
+        let reordered = ScopePath::empty().prefixed("a").prefixed("b");
+
+        assert!(!shorter.starts_with(&prefix));
+        assert!(!reordered.starts_with(&prefix));
+    }
+
+    #[test]
+    fn a_prefix_match_is_positional_not_a_subset_test() {
+        // "a" sits at a deeper position than the prefix requires.
+        let deeper = ScopePath::empty().prefixed("a").prefixed("outer");
+        let prefix = ScopePath::empty().prefixed("a");
+
+        assert!(!deeper.starts_with(&prefix));
+    }
+
+    #[test]
+    fn segment_type_differences_affect_prefix_selection() {
+        let path = ScopePath::empty().prefixed(1_u64);
+        let same_value_other_type = ScopePath::empty().prefixed(1_i64);
+
+        assert!(!path.starts_with(&same_value_other_type));
     }
 }

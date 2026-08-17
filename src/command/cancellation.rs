@@ -26,15 +26,25 @@ impl CommandId {
         }
     }
 
-    /// Returns a new id with an already-erased scope segment appended (see
+    /// Returns a new id with an already-erased scope segment prepended (see
     /// RFC 0005 section 4.3). Used by [`Command::scoped`](super::Command::scoped)
     /// to apply one scope value to every lifecycle id present at its call
     /// boundary without requiring the scope type to be `Clone`.
+    ///
+    /// The segment goes to the head of the path because the enclosing
+    /// boundary is the outer one: scope paths are root-first, so prefix
+    /// selection reads from the root (see [`ScopePath`]).
     pub(super) fn scoped_with(&self, segment: StructuralKey) -> Self {
         Self {
             inner: self.inner.clone(),
-            scope: self.scope.appended_key(segment),
+            scope: self.scope.prefixed_key(segment),
         }
+    }
+
+    /// This id's scope path, used by the kernel to attribute a keyed run to
+    /// the composition boundary that spawned it (RFC 0014 §4.1).
+    pub(crate) const fn scope(&self) -> &ScopePath {
+        &self.scope
     }
 }
 

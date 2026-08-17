@@ -140,7 +140,7 @@ impl<Msg: 'static> Subscription<Msg> {
     where
         Scope: Eq + Hash + Send + Sync + 'static,
     {
-        self.id.scope = AssertUnwindSafe(self.id.scope.appended(scope));
+        self.id.scope = AssertUnwindSafe(self.id.scope.prefixed(scope));
         self
     }
 
@@ -247,6 +247,13 @@ impl SubscriptionId {
             key: AssertUnwindSafe(StructuralKey::new(key)),
             scope: AssertUnwindSafe(ScopePath::empty()),
         }
+    }
+
+    /// This id's scope path, used to attribute a subscription run to the
+    /// composition boundary that declared it so a prefix teardown selects
+    /// it alongside command runs (RFC 0014 §4.1).
+    pub(crate) const fn scope(&self) -> &ScopePath {
+        &self.scope.0
     }
 }
 
