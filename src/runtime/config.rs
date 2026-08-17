@@ -192,10 +192,6 @@ impl RuntimeConfig {
     /// and their absence is the point: the return type is what makes them
     /// unreadable from the kernel, rather than the kernel remembering not
     /// to read them.
-    #[expect(
-        dead_code,
-        reason = "the kernel that reads these controls lands after the accessor that bounds them"
-    )]
     pub(crate) const fn kernel_controls(&self) -> (Option<NonZeroUsize>, Option<NonZeroUsize>) {
         (self.app_channel_capacity, self.batch_max_messages)
     }

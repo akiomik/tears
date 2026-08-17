@@ -91,10 +91,6 @@ pub enum Channel {
     /// §3.1). Once the kernel owns the production path this is the only
     /// value the field takes, and `"shared"`/`"keyed"` retire with the
     /// channels they name (RFC 0014 §9 row 9).
-    #[expect(
-        dead_code,
-        reason = "the kernel that builds the data lane lands after its channel label"
-    )]
     Data,
 }
 

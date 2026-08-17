@@ -56,7 +56,7 @@ use crate::kernel::{BootReport, ExitReport, Kernel};
 use crate::reducer::Program;
 use crate::runtime::config::RuntimeConfig;
 
-pub use crate::kernel::arbiter::{PassStart, WakeSource};
+pub use crate::kernel::arbiter::WakeSource;
 
 /// The driver-facing form of a run token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,7 +79,7 @@ impl ProducerId {
 pub enum StepError {
     /// The named start has no work. Readiness is read from the real lanes
     /// and join set, so this cannot be scripted away.
-    NotReady(PassStart),
+    NotReady(WakeSource),
     /// The kernel has terminated; only settling remains.
     Terminated,
     /// The pass's render failed (RFC 0011 INV-LC5's `Err` classification).
@@ -290,7 +290,9 @@ impl<P: Program> TestDriver<P> {
 
     /// Drives the real bootstrap.
     pub fn boot(&mut self) -> BootReport {
-        self.kernel.boot()
+        self.kernel
+            .boot(&mut self.terminal)
+            .expect("the test backend's render is infallible")
     }
 
     /// Runs one whole pass in the fixed stage order, through the same
@@ -300,7 +302,7 @@ impl<P: Program> TestDriver<P> {
     /// This is the evidence surface: pass initiation is exactly the
     /// arbitration RFC 0014 §3.5 leaves scriptable, and everything after it
     /// is the pinned pipeline.
-    pub fn step_pass(&mut self, _start: PassStart) -> Result<(), StepError> {
+    pub fn step_pass(&mut self, _start: WakeSource) -> Result<(), StepError> {
         todo!("scripted pass initiation")
     }
 
