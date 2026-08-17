@@ -208,3 +208,64 @@ fn a_teardown_is_total_and_idempotent() {
         "and every application left the kernel delivering"
     );
 }
+
+// The divergent composition the `Command` surface deliberately admits:
+// `work.scoped(s).cancellable(id)` places a run under `s` while giving it a
+// root-global key, which `Command::scoped`'s own docs bless as a scoped
+// effect participating in an application-wide slot. Its two identity paths
+// disagree — the carrier's scope is `s`, the key's is the root — and the
+// kernel reaches the run from **both** directions, neither derived from the
+// other: the prefix selects it because that is where the run is placed
+// (RFC 0014 §4.1), and the explicit cancel reaches it because that is its
+// cancel identity (RFC 0005 §4.3).
+//
+// One shape, two runs, because the two reaches are separate claims: the
+// first run is taken by the teardown and the second by the cancel.
+#[test]
+fn a_scoped_run_under_a_root_global_key_is_reachable_by_prefix_and_by_id() {
+    let global = CommandId::new("slot");
+    let (by_prefix, by_id) = (Beacon::default(), Beacon::default());
+    let (mut driver, journal) = driver_with(
+        Script::new(Command::batch([
+            holding_effect(by_prefix.clone())
+                .scoped("pane")
+                .cancellable(global.clone()),
+            parking_effect([1, 2]),
+        ]))
+        .replying([
+            // The teardown's prefix names where the run sits, not its key.
+            Command::batch([
+                Command::teardown("pane"),
+                holding_effect(by_id.clone())
+                    .scoped("pane")
+                    .cancellable(global.clone()),
+            ]),
+            // The cancel names the key, which the boundary never qualified.
+            Command::cancel(global),
+        ]),
+        config().batch_max_messages(cap(1)),
+    );
+    let trigger = driver.boot().started[1].clone();
+
+    accept(&mut driver, trigger.clone());
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the teardown trigger is in the lane");
+    driver.settle(TEST_TURNS, || by_prefix.marked());
+    assert!(
+        !by_id.marked(),
+        "the successor this same command spawned starts fresh under the torn-down prefix"
+    );
+
+    accept(&mut driver, trigger);
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the cancel trigger is in the lane");
+    driver.settle(TEST_TURNS, || by_id.marked());
+
+    assert_eq!(
+        journal.reduced(),
+        vec![1, 2],
+        "both reaches applied through the ordinary dispatch path"
+    );
+}

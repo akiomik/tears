@@ -1883,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_qualifies_every_carrier_and_agrees_with_the_keys_own_scope() {
+    fn scoped_qualifies_every_carrier_and_the_key_it_already_held() {
         let parts = kernel_parts(
             Command::batch([
                 Command::message(1).cancellable(CommandId::new("load")),
@@ -1897,8 +1897,12 @@ mod tests {
         for spawn in &parts.spawns {
             assert_eq!(spawn.scope, scope);
         }
-        // Decision B of the scope-attribution mapping: a keyed run's scope
-        // and its key's scope are the same path by construction.
+        // In *this* shape the two paths coincide, because one `scoped`
+        // call qualified the carrier and the key it already held at the
+        // same boundary. It is not an identity: the carrier's scope places
+        // the run and the key's scope is part of its cancel identity, and
+        // `work.scoped(s).cancellable(id)` — which this type's own docs
+        // bless — separates them.
         assert_eq!(
             parts.spawns[0]
                 .key

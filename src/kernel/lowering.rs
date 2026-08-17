@@ -32,6 +32,19 @@ use super::registry::ScopeRegistry;
 /// Lowers one command into the phase buckets a dispatch applies: the cancel
 /// phase (explicit cancels and teardown prefixes) before every spawn of the
 /// same command, then the spawn phase in declaration order (RFC 0014 §3.4).
+///
+/// **A spawn's scope and its key's scope are two paths, not one.** The
+/// spawn's `scope` is where the run is *placed* — what a prefix teardown
+/// selects it by (RFC 0014 §4.1) — and the key's own scope path is part of
+/// the *cancel identity* a boundary qualifies (RFC 0005 §4.3). One
+/// `Command::scoped` call qualifies both, so the common shapes make them
+/// coincide, but nothing requires it and the surface deliberately admits a
+/// shape where they diverge: `work.scoped(s).cancellable(id)` places the run
+/// under `s` while giving it a root-global key, which
+/// [`Command::scoped`](crate::command::Command::scoped) documents as an
+/// intentional composition — a scoped effect participating in an
+/// application-wide slot. Such a run is reachable from both directions, by
+/// the prefix and by the id, and neither reading is derived from the other.
 pub fn lower<Msg: Send + 'static>(parts: RuntimeCommandParts<Msg>) -> KernelParts<Msg> {
     #[cfg(debug_assertions)]
     if let Some((effect_carriers, quit_carriers)) = parts.command_key_reach() {
@@ -47,24 +60,7 @@ pub fn lower<Msg: Send + 'static>(parts: RuntimeCommandParts<Msg>) -> KernelPart
         );
     }
 
-    let parts = parts.into_kernel_parts();
-
-    // A keyed run's scope attribution and its key's own scope path are the
-    // same path by construction: `Command::scoped` prefixes both with the
-    // same segment at the same boundary. Asserting it here keeps the two
-    // sources of the same fact from drifting apart silently.
-    #[cfg(debug_assertions)]
-    for spawn in &parts.spawns {
-        if let Some(key) = spawn.key.as_ref() {
-            debug_assert_eq!(
-                key.id.scope(),
-                &spawn.scope,
-                "a keyed run's scope and its key's scope are one path"
-            );
-        }
-    }
-
-    parts
+    parts.into_kernel_parts()
 }
 
 /// One step of a dispatch.
