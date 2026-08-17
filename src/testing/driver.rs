@@ -831,12 +831,18 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// send has none, so this is `None` there — the second reclaiming fact
     /// is the caller's to establish and `confirm` is where it is reported.
     ///
+    /// The receiver is `&self`, with the observation calls rather than the
+    /// driving ones: this turns nothing, takes nothing, and clears nothing.
+    /// The normative `&mut self` spelling belongs to RFC 0008 §9.3's block,
+    /// which this is outside of, and claiming exclusivity it does not need
+    /// would misreport what the call is.
+    ///
     /// # Panics
     ///
     /// Panics outside the running state, and on a token this driver's gate
     /// no longer holds.
     #[cfg(test)]
-    pub(crate) fn try_confirm(&mut self, token: &GrantToken) -> Option<Confirmed> {
+    pub(crate) fn try_confirm(&self, token: &GrantToken) -> Option<Confirmed> {
         self.assert_running("try_confirm");
         self.kernel.gate().peek_resolution(token.sequence)
     }
