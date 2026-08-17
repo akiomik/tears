@@ -141,7 +141,10 @@ pub struct SendClosed;
 ///
 /// A released send has exactly two terminals — commit, or its reservation
 /// released without committing — and both are recorded here, which is what
-/// makes [`Confirmed`]'s two arms observable rather than inferred.
+/// makes [`Confirmed`]'s two arms observable rather than inferred. A grant
+/// that released nothing has no terminal to record, so the driver clears it
+/// with [`reclaim_untaken`](Self::reclaim_untaken) instead, on a fact the
+/// gate cannot see.
 #[derive(Debug)]
 pub struct SendGate {
     mode: GateMode,
@@ -258,6 +261,48 @@ impl SendGate {
         state.outstanding = None;
         drop(state);
         Some(outcome)
+    }
+
+    /// Driver side: clears the outstanding grant `sequence` when no producer
+    /// ever took its release, reporting whether it did.
+    ///
+    /// The gate cannot see the fact this rests on — that the granted run's
+    /// exit is reflected in the kernel's run bookkeeping, so nothing is left
+    /// to take the release — so the caller establishes it and this only
+    /// records it (RFC 0008 §9.6's second reclaiming fact). What is checked
+    /// here is the half the gate *does* own: a grant a producer has already
+    /// taken is never cleared this way, because its released send has a
+    /// terminal of its own to reach and report.
+    ///
+    /// This clears a grant that never entered the send protocol at all. The
+    /// gate wait precedes the reservation, so an untaken grant holds no
+    /// reservation, has no [`ReleasedSend`] guard, and appears in neither
+    /// ledger: removing it takes nothing out of the delivery accounting and
+    /// leaves the enqueue-side rules exactly as they were. Production never
+    /// reaches it — an [`Immediate`](GateMode::Immediate) gate issues no
+    /// grants — so it is inert there by construction rather than by a check.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `sequence` is not the outstanding grant's, on the same
+    /// discipline as [`take_resolution`](Self::take_resolution): a token that
+    /// names a grant this gate no longer holds is a script error.
+    pub fn reclaim_untaken(&self, sequence: u64) -> bool {
+        let mut state = self.lock();
+        let grant = state
+            .outstanding
+            .as_ref()
+            .expect("a reclaimed token names this gate's outstanding grant");
+        assert_eq!(
+            grant.sequence, sequence,
+            "a grant is reclaimed through its own token"
+        );
+        if grant.taken {
+            return false;
+        }
+        state.outstanding = None;
+        drop(state);
+        true
     }
 
     /// Whether a grant is outstanding — the predicate that makes a settle
@@ -682,6 +727,62 @@ mod tests {
         assert!(
             fixture.gate.issue_grant(BOB).is_ok(),
             "the next grant is admitted once the previous one resolved"
+        );
+    }
+
+    // The clearing side of the same slot: a grant no producer took holds no
+    // reservation and has no terminal to report, so the driver clears it on
+    // a fact the gate cannot see — and a grant a producer *has* taken is
+    // refused here, because its released send still has its own terminal to
+    // reach.
+    #[tokio::test]
+    async fn an_untaken_grant_is_reclaimable_and_a_taken_one_is_not() {
+        let fixture = Fixture::new(GateMode::Scripted, Some(one()));
+        fixture
+            .data_tx
+            .send(Envelope {
+                origin: BOB,
+                payload: Payload::Msg(1),
+            })
+            .await
+            .expect("the lane is open");
+
+        let taken = fixture.gate.issue_grant(ALICE).expect("the first grant");
+        {
+            let send = fixture.handle.send(7);
+            tokio::pin!(send);
+            assert!(
+                poll!(send.as_mut()).is_pending(),
+                "the released send took the grant and waits on the full lane"
+            );
+            assert!(
+                !fixture.gate.reclaim_untaken(taken),
+                "a release a producer took is not cleared this way"
+            );
+            assert!(
+                fixture.gate.grant_outstanding(),
+                "so the grant stays outstanding, with its own terminal to reach"
+            );
+        }
+        assert_eq!(
+            fixture.gate.take_resolution(taken),
+            Some(Confirmed::Reclaimed),
+            "which it reaches when the released send ends without committing"
+        );
+
+        let untaken = fixture.gate.issue_grant(BOB).expect("the next grant");
+        assert!(
+            fixture.gate.reclaim_untaken(untaken),
+            "a grant no producer took is cleared"
+        );
+        assert!(
+            !fixture.gate.grant_outstanding(),
+            "and the next grant is admitted after it"
+        );
+        assert_eq!(
+            fixture.counter.value(),
+            0,
+            "neither path left counter residue: the gate wait precedes the reservation"
         );
     }
 

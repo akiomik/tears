@@ -615,7 +615,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     pub fn grant(&mut self, run: RunName) -> Result<GrantToken, GrantOutstanding> {
         self.assert_running("grant");
         assert!(
-            self.kernel.registry().get(run.run).is_some(),
+            self.holds(&run),
             "`grant` names a run the kernel's bookkeeping does not hold — a run never started, \
              or one whose exit a pass has already reflected (RFC 0008 §9.6): {:?}",
             run.kind
@@ -626,6 +626,15 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
 
     /// Consumes `token`, driving the executor — beginning no pass — until
     /// the grant resolves, and reports how (RFC 0008 §9.6).
+    ///
+    /// A grant ends in one of exactly two states, and the two facts that
+    /// establish the second are read from different places. The gate holds
+    /// the first — a released send that ended without getting into the lane
+    /// records its own terminal there. The second is the *kernel's*: the
+    /// granted run's exit is reflected in the run bookkeeping and this grant
+    /// released no send at all, so nothing is left that could arrive. The
+    /// gate cannot see that one, so this call reads the bookkeeping and
+    /// clears the grant on it.
     ///
     /// The disjunction is this call's *completion* condition, not a promise
     /// that one of its arms arrives inside the budget. Two of the ways a
@@ -649,6 +658,14 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         for _ in 0..TURN_BUDGET {
             if let Some(outcome) = self.kernel.gate().take_resolution(token.sequence) {
                 return outcome;
+            }
+            // The second reclaiming fact, in the order the two are checked:
+            // a terminal the gate already holds is the released send's own
+            // and wins, and this arm is reached only where no send was
+            // released — the gate refuses to clear a taken grant, so a
+            // release still in flight keeps its own resolution.
+            if !self.holds(&token.run) && self.kernel.gate().reclaim_untaken(token.sequence) {
+                return Confirmed::Reclaimed;
             }
             self.turn();
         }
@@ -752,6 +769,20 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         IntentLedger {
             records: self.records(self.kernel.intents().snapshot()),
         }
+    }
+
+    /// Whether the kernel's run bookkeeping still holds `run`.
+    ///
+    /// "Holds" is the bookkeeping's own reading and not merely map
+    /// membership: an entry whose exit a pass has reflected is a tombstone
+    /// kept for envelopes still in a lane, and the run it names is gone. A
+    /// grant is misuse at such a run, and a grant outstanding at one has
+    /// nothing left that could take its release.
+    fn holds(&self, run: &RunName) -> bool {
+        self.kernel
+            .registry()
+            .get(run.run)
+            .is_some_and(|entry| !entry.exited)
     }
 
     /// The state-table check every driving call but `boot` shares.
@@ -1510,6 +1541,53 @@ mod tests {
             driver.accepted().len(),
             1,
             "a reclaimed grant appends nothing to the guaranteed sequence"
+        );
+    }
+
+    // §9.6's second reclaiming fact: the granted run's exit is reflected in
+    // the bookkeeping and this grant released no send at all, so nothing is
+    // left that could arrive. The fact reaches the driver only at a pass's
+    // first stage, which is why the step is interposed between the grant and
+    // the confirm — and why the token is detached.
+    #[test]
+    fn a_grant_at_a_run_that_exits_without_sending_confirms_reclaimed() {
+        let beacon = Beacon::default();
+        let (mut driver, _journal) = driver(Script::new(Command::batch([
+            marking_effect(beacon.clone()),
+            silent_effect(),
+        ])));
+        let report = driver.boot();
+        let (ended, still_running) = (report.started[0].clone(), report.started[1].clone());
+
+        // The run reaches its end under the settle's turns; its exit is not
+        // reflected yet, so the bookkeeping still holds it and the grant is
+        // legal.
+        driver.settle(TEST_TURNS, || beacon.marks() > 0);
+        let token = driver
+            .grant(ended)
+            .expect("the bookkeeping still holds the run");
+
+        let reflected = driver
+            .step_pass(WakeSource::ProducerExit)
+            .expect("the settled run's exit is observable");
+        assert!(reflected.terminated.is_none(), "an exit is not a quit");
+
+        assert_eq!(
+            driver.confirm(token),
+            Confirmed::Reclaimed,
+            "the grant will never put anything into the lane"
+        );
+        assert!(
+            driver.accepted().is_empty(),
+            "a reclaimed grant appends nothing to the guaranteed sequence"
+        );
+
+        // Both arms clear the outstanding grant, so the driver is usable
+        // again: this is what keeps the reclaimed resolution from being a
+        // dead end.
+        assert!(
+            driver.grant(still_running).is_ok(),
+            "the cleared grant admits the next one"
         );
     }
 
