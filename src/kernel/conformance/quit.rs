@@ -26,9 +26,10 @@
 //! surface RFC 0008 §9.9 names, under the same citation rule as every other
 //! series here.
 
-use crate::command::Command;
+use crate::command::{Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
 use crate::reducer::Exit;
+use crate::test_support::TraceRecorder;
 use crate::testing::driver::{Confirmed, NotReady};
 
 use super::support::{
@@ -399,5 +400,91 @@ fn a_quit_buffered_before_its_origin_s_revocation_is_discarded() {
         journal.reduced(),
         vec![5, 6, 7],
         "and the kernel kept delivering past it"
+    );
+}
+
+// The control drain's own half of the delivery accounting, in steady state.
+//
+// A discarded envelope is still a *dequeue*: it takes the accounting's
+// rule-4 decrement exactly as a delivered one does, and that decrement is
+// what lets the revoked run's entry — a `Draining` tombstone kept alive by
+// the very quit being discarded — finally retire. Without it the tombstone
+// would outlive its own last envelope forever, and the only thing that
+// would ever clear it is termination's `clear`, which is why this row is
+// scripted to stay **running**: the retirement here is the steady-state
+// rule's, not the quiescent postcondition's.
+//
+// The observation is the `keyed_commands` gauge, which the registry
+// publishes at its single membership mutation point. That is a production
+// observability surface (RFC 0006 §4.4 as RFC 0014 §9 row 9 amends it), read
+// the way RFC 0011 INV-LC7's gauge half is read — not a driver accessor and
+// not a stage probe — so this row stays pass-unit driven like the rest.
+#[test]
+fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running() {
+    let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+    let _subscriber = recorder.set_default();
+
+    let (handshake, gate) = MidBatchHandshake::new();
+    let reclaimed = handshake.reclaimed();
+    let (mut driver, journal) = threaded_driver_with(
+        Script::new(Command::batch([
+            parking_effect([5, 6, 7, 8]),
+            gated_quitting_effect(Vec::new(), gate)
+                .cancellable(CommandId::new("quitter"))
+                .scoped("quit"),
+        ]))
+        .handshaking_on(5, handshake)
+        .replying([Command::teardown("quit")]),
+        config().batch_max_messages(cap(1)),
+    );
+    let report = driver.boot();
+    let (feed, quitter) = (report.started[0].clone(), report.started[1].clone());
+    assert_eq!(
+        recorder.u64_values("keyed_commands").last(),
+        Some(&1),
+        "the keyed run is in the bookkeeping"
+    );
+
+    for _ in 0..4 {
+        accept_within(&mut driver, feed.clone(), THREADED_TURNS);
+    }
+
+    let banked = driver.grant(quitter).expect("the previous grant resolved");
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the feed is in the lane");
+    assert_eq!(
+        driver.confirm(THREADED_TURNS, banked),
+        Confirmed::Accepted,
+        "the quit was committed before the teardown revoked its origin"
+    );
+
+    driver.settle(THREADED_TURNS, || reclaimed.marked());
+    assert_eq!(
+        recorder.u64_values("keyed_commands").last(),
+        Some(&1),
+        "the entry outlives its own task: the quit it committed is still in the control lane"
+    );
+
+    for _ in 0..3 {
+        let stepped = driver
+            .step_pass(WakeSource::Data)
+            .expect("the feed's backlog is still ready");
+        assert!(
+            stepped.terminated.is_none(),
+            "the discarded quit terminates nothing, so the kernel is still running"
+        );
+    }
+
+    assert_eq!(
+        recorder.u64_values("keyed_commands").last(),
+        Some(&0),
+        "the discarding dequeue took the last committed item off the count, and the tombstone \
+         retired on the steady-state rule rather than at a settle"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![5, 6, 7, 8],
+        "with every live delivery intact"
     );
 }

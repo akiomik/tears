@@ -340,6 +340,7 @@ impl SubscriptionSource for ProbeSource {
 pub struct MidBatchHandshake {
     open: Arc<AtomicBool>,
     committed: Receiver<()>,
+    reclaimed: Beacon,
 }
 
 /// The producer half of a [`MidBatchHandshake`], handed to the effect that
@@ -347,6 +348,7 @@ pub struct MidBatchHandshake {
 pub struct MidBatchGate {
     open: Arc<AtomicBool>,
     committed: Sender<()>,
+    reclaimed: Beacon,
 }
 
 impl MidBatchHandshake {
@@ -354,13 +356,28 @@ impl MidBatchHandshake {
     pub fn new() -> (Self, MidBatchGate) {
         let open = Arc::new(AtomicBool::new(false));
         let (committed, received) = mpsc::channel();
+        let reclaimed = Beacon::default();
         (
             Self {
                 open: Arc::clone(&open),
                 committed: received,
+                reclaimed: reclaimed.clone(),
             },
-            MidBatchGate { open, committed },
+            MidBatchGate {
+                open,
+                committed,
+                reclaimed,
+            },
         )
+    }
+
+    /// The beacon the gated producer's body marks when it is dropped.
+    ///
+    /// The application-side view of that run's quiescence, for a `settle`
+    /// predicate: the driver's own view of an exit reaches a test only at a
+    /// pass's first stage.
+    pub fn reclaimed(&self) -> Beacon {
+        self.reclaimed.clone()
     }
 
     /// Reducer side: open the producer's gate, then wait for its commit.
@@ -832,7 +849,12 @@ pub fn quitting_effect() -> Command<u8> {
 /// reducer that is blocked on it resumes only once the quit is in the
 /// control lane.
 pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> Command<u8> {
-    let MidBatchGate { open, committed } = gate;
+    let MidBatchGate {
+        open,
+        committed,
+        reclaimed,
+    } = gate;
+    let guard = DropMark::new(reclaimed);
     Command::actions(
         stream::iter(messages.into_iter().map(Action::Message))
             .chain(stream::once(async move {
@@ -842,6 +864,9 @@ pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> Command<u
                 Action::Quit
             }))
             .chain(stream::once(async move {
+                // Held for the park below, so dropping this run — which is
+                // what a revocation does — marks the handshake's beacon.
+                let _reclaimed = guard;
                 // A closed receiver means the reducer that opened this gate
                 // is gone, which is the test failing elsewhere; there is
                 // nothing useful to do about it from a producer task.

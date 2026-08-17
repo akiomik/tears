@@ -67,7 +67,7 @@
 //! | --- | --- | --- |
 //! | `cancel vs buffered output` | [`delivery`] | INV-RC5 in full — message half, buffered-*quit* half, natural-finish control, late-task-exit adversary |
 //! | `simultaneous readiness` (both script faces) | [`delivery`] | INV-RC14 (producer face: the handshake is the only order; initiation face: one script, one sequence) |
-//! | `both quit semantics` | [`quit`] | INV-RC9 in full — synchronous, pass-start, flooded lane, between-passes, **mid-batch**, **cancel-beats-quit** — and INV-RC11 (the init-quit row) |
+//! | `both quit semantics` | [`quit`] | INV-RC9 in full — synchronous, pass-start, flooded lane, between-passes, **mid-batch**, **cancel-beats-quit** — INV-RC11 (the init-quit row), and the control drain's own rule-4 decrement |
 //! | `both panic classes` | [`lifecycle`] | INV-RC11 via RFC 0011 INV-LC8 (contained producer panic, fail-fast application panic) |
 //! | `shutdown-scoped send failure` | [`lifecycle`] | INV-RC11 via RFC 0011 §4.4's two stages (full topology), RFC 0014 §6.1's send-stop policy (component level) |
 //! | `termination under owned work` | [`lifecycle`] | INV-RC11 over all four causes: `update` quit, producer quit, render failure, host-side drop |
