@@ -60,3 +60,116 @@ pub fn lower<Msg: Send + 'static>(parts: RuntimeCommandParts<Msg>) -> KernelPart
 
     parts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::command::{CancelPolicy, Command, CommandId};
+    use crate::structural_key::ScopePath;
+
+    fn lowered(command: Command<i32>) -> KernelParts<i32> {
+        lower(command.into_runtime_parts())
+    }
+
+    #[test]
+    fn a_keyed_effect_lowers_to_one_keyed_entry() {
+        let parts = lowered(Command::message(1).cancellable(CommandId::new("load")));
+
+        assert_eq!(parts.spawns.len(), 1);
+        assert_eq!(
+            parts.spawns[0].key.as_ref().expect("keyed").id,
+            CommandId::new("load")
+        );
+    }
+
+    #[test]
+    fn batch_children_lower_to_independent_entries() {
+        let parts = lowered(Command::batch([
+            Command::message(1).cancellable(CommandId::new("left")),
+            Command::message(2),
+            Command::message(3).cancellable(CommandId::new("right")),
+        ]));
+
+        assert_eq!(parts.spawns.len(), 3);
+    }
+
+    // RFC 0014 §3.4: two same-key spawns in one batch are a *legal* shape —
+    // they apply in declaration order as two consecutive dispatches, the
+    // second replacing the first under its policy. The placeholders must not
+    // mistake this for a keyed batch.
+    #[test]
+    fn two_same_key_spawns_in_one_batch_lower_cleanly() {
+        let parts = lowered(Command::batch([
+            Command::message(1).cancellable(CommandId::new("slot")),
+            Command::message(2)
+                .cancellable_with(CommandId::new("slot"), CancelPolicy::KeepInFlight),
+        ]));
+
+        assert_eq!(parts.spawns.len(), 2);
+    }
+
+    #[test]
+    fn a_scoped_batch_lowers_with_every_carrier_under_the_boundary() {
+        let parts = lowered(
+            Command::batch([
+                Command::message(1).cancellable(CommandId::new("load")),
+                Command::message(2),
+            ])
+            .scoped("pane-1"),
+        );
+        let boundary = ScopePath::empty().prefixed("pane-1");
+
+        assert!(parts.spawns.iter().all(|spawn| spawn.scope == boundary));
+    }
+
+    #[test]
+    fn a_teardown_lowers_to_a_cancel_phase_entry_and_no_spawn() {
+        let parts = lowered(Command::teardown("pane-1"));
+
+        assert_eq!(parts.teardowns.len(), 1);
+        assert!(parts.spawns.is_empty());
+    }
+
+    #[test]
+    fn an_update_returned_quit_lowers_synchronously() {
+        let parts = lowered(Command::quit());
+
+        assert!(parts.quit_now);
+        assert!(parts.spawns.is_empty());
+    }
+
+    // A quit *inside* a batch is a legal shape: it applies at the dispatch's
+    // completion and its already-spawned siblings are then torn down by
+    // termination (RFC 0014 §3.4).
+    #[test]
+    fn a_quit_beside_a_keyed_sibling_lowers_cleanly() {
+        let parts = lowered(Command::batch([
+            Command::quit(),
+            Command::message(1).cancellable(CommandId::new("load")),
+        ]));
+
+        assert!(parts.quit_now);
+        assert_eq!(parts.spawns.len(), 1);
+    }
+
+    // The two shapes RFC 0014 §3.4 declares not constructible. They still
+    // build through today's `Command` surface, so the placeholders are what
+    // reports them until the constructors are split.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "keying a batch")]
+    fn keying_a_batch_trips_the_placeholder() {
+        let _ = lowered(
+            Command::batch([Command::message(1), Command::message(2)])
+                .cancellable(CommandId::new("whole")),
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "names no run")]
+    fn keying_a_quit_trips_the_placeholder() {
+        let _ = lowered(Command::quit().cancellable(CommandId::new("whole")));
+    }
+}
