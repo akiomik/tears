@@ -1333,11 +1333,12 @@ pub struct GrantToken { /* private */ }
 /// appends to the guaranteed sequence.
 #[must_use]
 pub enum Confirmed {
-    /// The send committed: it was admitted past the gate. Whether
-    /// its run is revoked is a separate, delivery-side question.
+    /// The send got into the lane. Whether its run is revoked is a
+    /// separate, delivery-side question.
     Accepted,
-    /// The send's reservation was released without committing —
-    /// the producer reclaimed it before admission.
+    /// The send never got into the lane and never will. A producer
+    /// reclaimed at its await point and one that observes closure
+    /// and stops (RFC 0014 §6.1) both end here.
     Reclaimed,
 }
 
@@ -1623,10 +1624,14 @@ and `grant` after termination are misuse under §9.3's state table,
 like every other driving call.
 
 **A released send ends in one of exactly two states, and `confirm`
-reports which.** A send released at the gate either **commits** — it
-is admitted, and the guaranteed sequence gains its entry — or its
-reservation is **released without committing**, the producer having
-reclaimed it before admission. Those two are disjoint and exhaustive:
+reports which.** A send released at the gate either **gets into the
+lane** — it is admitted, and the guaranteed sequence gains its
+entry — or it **never does and never will**, its producer having
+ended without that admission: reclaimed at its await point, or
+stopped after observing closure (RFC 0014 §6.1). The outcome is what
+this section pins; RFC 0014 §10's reservation-and-commit accounting
+is one informative way to reach it, not the contract.
+Those two outcomes are disjoint and exhaustive:
 there is no third *end* for a released send — though a send may sit
 in flight for as long as the lane makes it wait, which is why
 `confirm` carries a budget rather than a promise (below).
@@ -1670,14 +1675,15 @@ token dropped without `confirm`, which leaves its grant outstanding
 so that every later `grant` returns `Err(GrantOutstanding)` and every
 `settle` is misuse until the test ends. That one is a test-author
 error with no kernel state behind it, and it stays recorded as the
-misuse pattern that error most often means. The reclaimed resolution
-is not a corner case looking for a use: RFC 0014 §13.1's
-shutdown-scoped send-failure series is a blocked sender reclaimed by
-cancellation in the full topology (RFC 0014 §6.1, where the future is
-dropped at its await point), which is that resolution exactly. What
-such a series then asserts — RFC 0011 §4.4's two postcondition
-stages — it reads from the runtime, never from this resolution, which
-reports only how one released send ended.
+misuse pattern that error most often means. One boundary on the
+reclaimed resolution is worth stating, because the case that first
+comes to mind is not an instance of it: where **termination** is what
+ends the run, the driver is in its terminated state (§9.3) and
+`confirm` is misuse there, so a shutdown-time reclamation is not
+something this resolution reports. What earns the resolution its
+place is that the state is reachable at all while the driver still
+runs, which is the argument §9.11's *Unresolvable grant* model
+carries.
 
 **`settle` is the call that contracts turns.** Some runs finish
 without ever presenting a send-intent — a cleanup finalizer, whose
@@ -1797,12 +1803,16 @@ deadlock the handshake — and **ack correlation** — at most one
 outstanding grant per origin, *or* an explicit correlation of each
 grant to its exact commit, with the next grant to an origin only
 after the previous acceptance. §9.6 quotes that second condition in
-full and answers it clause by clause. This section's surface is
-shaped to satisfy both (§9.6's detached token and its driver-wide
-admission rule), but a shape is not a verification: until that pass
-lands, the claim keeps the verified range above and RFC 0014 §13.3
-stays open. It resolves as an addition to this section, recording
-what was verified and at what scope.
+full and answers its letter for the case that letter covers, a grant
+resolving by acceptance; how the trailing clause reads where a grant
+resolves with no commit at all is part of what §13.3's own resolution
+fixes, and §9.6 settles nothing about it. This section's surface is
+shaped to satisfy both conditions as far as that letter reaches
+(§9.6's detached token and its driver-wide admission rule), but a
+shape is not a verification: until that pass lands, the claim keeps
+the verified range above and RFC 0014 §13.3 stays open. It resolves
+as an addition to this section, recording what was verified and at
+what scope.
 
 ### 9.9 The evidence surface and the citation rule
 
@@ -1911,9 +1921,11 @@ of §9.3's block maps to one of them, walked in order:
   reports which terminal state a released send reached, and only the
   committing one appends to the gate-scoped sequence. It maps to
   INV-RC5 through *neither* — strict revocation is a delivery-side
-  property, so neither ledger witnesses it, and its behavioral rows
-  read the pass that dequeues a revoked item without doing `update`
-  work (RFC 0014 §4.3), not any record this surface keeps.
+  property, so neither ledger witnesses it. Its behavioral rows
+  observe that `update` never runs for the revoked item, which the
+  reducer under test records for itself; the dequeue that drops it
+  does no `update` work at all (RFC 0014 §4.3), which is why there is
+  nothing for a record of this section's to hold.
 - `settle` → INV-RC13: it drives the production executor and adds no
   seam, so it is covered by the same API-surface review. It reaches
   INV-RC14's observation sequence only negatively, by initiating no
