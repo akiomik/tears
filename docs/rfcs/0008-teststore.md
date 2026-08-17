@@ -1290,10 +1290,16 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     pub fn confirm(&mut self, token: GrantToken) -> Confirmed;
 
     /// Drives the executor — beginning no pass and releasing no
-    /// send-intent — until `until` holds. Evaluated before the first
-    /// turn, so an already-true condition costs none; bounded, and
-    /// exhausting the bound fails the test (§9.6).
-    pub fn settle(&mut self, until: impl FnMut() -> bool);
+    /// send-intent — for at most `max_turns` turns, until `until`
+    /// holds. `until` is evaluated before the first turn, so an
+    /// already-true condition costs none; exhausting `max_turns`
+    /// fails the test, reporting the turns consumed. A turn is
+    /// defined in §9.6.
+    pub fn settle(
+        &mut self,
+        max_turns: usize,
+        until: impl FnMut() -> bool,
+    );
 
     /// Sends admitted past the gate, in gate order. Admission, not
     /// delivery (§9.6).
@@ -1439,14 +1445,15 @@ Spellings — parameter names, accessor names, whether a report field
 is a slice or an iterator, what a probe's constructor looks like —
 are implementation latitude, exactly as for §3.1's block.
 
-**Waiting, in full.** Every wait this layer performs is a bounded
-number of executor turns: no method of this section sleeps, arms a
-timer, or reads a wall clock, and the kernel they drive reads no wall
-clock either (RFC 0014 §6.3). Exhausting a bound fails the test with
-a diagnostic rather than waiting longer; the bound's value is
-mechanism. Application-supplied effects sit outside that quantifier,
-as they sit outside INV-T4's determinism scope — an effect that
-sleeps times its own test.
+**Waiting, in full.** Every wait this layer performs is a bounded number
+of executor turns: no method of this section sleeps, arms a timer, or
+reads a wall clock, and the kernel they drive reads no wall clock either
+(RFC 0014 §6.3). Exhausting a bound fails the test with a diagnostic
+rather than waiting longer. Where the bound is the driver's own its value
+is mechanism; `settle`'s is the caller's and is part of the script, for
+the reason §9.6 gives. Application-supplied effects sit outside that
+quantifier, as they sit outside INV-T4's determinism scope — an effect
+that sleeps times its own test.
 
 **Executor turns are not selective, and this is a class fact about
 the four calls that turn the executor.** `boot`, `step_pass`,
@@ -1460,7 +1467,7 @@ sequence gains an entry only when a released send commits**, which
 requires a send released through an armed grant, so no call appends
 to it except by that route (§9.6). What separates
 `settle` from the other three is purpose, not effect: it is the call
-whose whole job is to supply turns, under a stated budget and
+whose whole job is to supply turns, under a caller-stated budget and
 completion condition, where the others produce turns as a by-product
 of the work they contract for.
 
@@ -1785,34 +1792,65 @@ place is that the state is reachable at all while the driver still
 runs, which is the argument §9.11's *Unresolvable grant* model
 carries.
 
-**`settle` is the call that contracts turns.** Some runs finish
-without ever presenting a send-intent — a cleanup finalizer, whose
-`Output = ()` closes the message path outright (RFC 0014 §4.4), a
-future that completes with no message, a subscription run stopping
-after its last output. No grant releases them, and no pass
-*guarantees* them anything: a pass turns the executor and may advance
-a runnable producer incidentally at an await point, but it promises
-no turns at all — a pass that never awaits yields none. That is the
-gap `settle` closes, and its whole content is the three things a
-by-product cannot offer: turns as the *purpose* of the call, a stated
-budget, and a completion condition. It begins no pass and releases no
-send-intent, and an exit it lets a run reach becomes visible the way
-every exit does, at the exit-reflection stage of the next
+**`settle` is the call that contracts turns.** Some runs finish without
+ever presenting a send-intent — a cleanup finalizer, whose `Output = ()`
+closes the message path outright (RFC 0014 §4.4), a future that completes
+with no message, a subscription run stopping after its last output. No
+grant releases them, and no pass *guarantees* them anything: a pass turns
+the executor and may advance a runnable producer incidentally at an await
+point, but it promises no turns at all — a pass that never awaits yields
+none. That is the gap `settle` closes, and its whole content is the three
+things a by-product cannot offer: turns as the *purpose* of the call, and
+a budget and completion condition the caller states. It begins no pass
+and releases no send-intent, and an exit it lets a run reach becomes
+visible the way every exit does, at the exit-reflection stage of the next
 `step_pass(WakeSource::ProducerExit)`.
 
-**The completion condition is the caller's, given as a predicate.**
-`settle` turns the executor until the predicate holds, evaluating it
-once before the first turn — so a condition already true costs no
-turns — and again at turn boundaries until it does; exhausting the
-budget fails the test, as every wait here does. The predicate is
-supplied rather than fixed because the obvious fixed condition,
-"until the executor is idle", is not a thing this contract can
-observe: idleness is not exposed by any surface here, and
+**What a turn is, normatively.** One **turn** is the driver task
+yielding control to the executor once, under this condition: every
+task that was ready at that yield gets the executor before `settle`
+evaluates the predicate again. The definition is here rather than
+left to the implementation because without it two conforming drivers
+disagree on the same test — one whose turn admits a single ready task
+and one whose turn admits all of them reach different states after
+the same call, and a test written against either fails on the other.
+
+It is implementable inside the determinism claim's existing scope and
+promises nothing outside it: on a current-thread executor a FIFO
+ready queue satisfies it directly, and for executors outside that
+scope (§9.8's verified range) this section claims nothing. Nor does
+it intrude on RFC 0011 §2.3's unspecified producer scheduling — a
+turn is a unit of *opportunity*, not of progress. It says every ready
+task is given the executor; it says nothing about how far any of them
+runs, in what order they are picked, or whether one completes.
+
+**The completion condition is the caller's, given as a predicate**,
+and so is the budget. `settle` evaluates the predicate once before
+the first turn — an already-true condition costs none — and again
+after each turn, taking at most `max_turns` of them; exhausting the
+budget fails the test with the count consumed, as every wait here
+fails on its bound. Both are the caller's for the same reason the
+turn is defined above: a driver-chosen budget is a mechanism two
+implementations may pick differently, and a test that passes under a
+bound of two and fails under a bound of one would make conformance
+depend on it. Naming the budget at the call site puts it in the
+script (§9.8) instead.
+
+`confirm` takes no budget for the same reason, read the other way.
+Its completion condition is not the caller's: a grant resolves or it
+does not, and any two bounds agree on every execution where the
+resolution arrives — a longer one is only more patient. The bound
+there is a guard against a test that hangs, so its value is
+mechanism. `settle`'s is semantic, because a predicate may first hold
+on the *n*th turn and the budget decides whether that test can
+observe it.
+
+The predicate is supplied rather than fixed because the obvious fixed
+condition, "until the executor is idle", is not a thing this contract
+can observe: idleness is exposed by no surface here, and
 implementations disagree about what it means, so a `settle` defined
-that way would differ between two conforming kernels. A predicate is
-deterministic instead — on the current-thread executor its evaluation
-points are exactly the turn boundaries, so the same script drives the
-same number of turns.
+that way would differ between two conforming kernels. A predicate
+evaluated at the boundaries above is deterministic instead.
 
 What a predicate can see is what the test can see, which is
 ordinarily its own application-side instrumentation: a cleanup
@@ -1899,26 +1937,43 @@ other series is pass-unit driven.
 
 ### 9.8 Determinism, scoped
 
-A **script** is the ordered sequence of driving calls — `boot`, each
-`step_pass`'s `WakeSource`, and the positions of `grant`, `confirm`,
-and `settle` among them — together with the application-side inputs
-and readiness (§9.2). `boot` is listed for completeness rather than
-as a choice: §9.3's state table admits it in exactly one position, so
-it is not a free variable of the script. That is an instantiation of
-RFC 0014 §7.2's triple rather than a widening of it: the arbitration
-choices are the `step_pass` arguments, the grants are the
-`grant`/`confirm` pairs, and inputs and readiness are unchanged.
-`settle` is in the sequence because this section adds it as a driving
-call and its position is observable — it can carry a run to an exit
-that a later `step_pass(WakeSource::ProducerExit)` then has something
-to reflect — even though it contributes no entry to the guaranteed
-sequence (§9.6).
+A **script** is the ordered sequence of driving calls, with each
+call's own arguments — `boot`, each `step_pass`'s `WakeSource`, each
+`grant`'s run and its paired `confirm`, and **each `settle`'s
+predicate and `max_turns`** — together with the application-side
+inputs and readiness (§9.2). `boot` is listed for completeness rather
+than as a choice: §9.3's state table admits it in exactly one
+position, so it is not a free variable.
 
-Its completion predicate is **not** a further free variable. A
-predicate reads application-side state (§9.6), which the script
-already fixes as inputs and readiness, so how many turns a `settle`
-takes is determined by the script rather than added to it — which is
-what keeps the determinism claim below over the same triple.
+A `settle`'s arguments are free variables and are named as such,
+because they are: `settle(n, || true)` and `settle(n, || done())`
+placed identically take different numbers of turns, and turns are
+observable — they can grow the intent ledger (§9.3) and carry a run
+to an exit that a later `step_pass(WakeSource::ProducerExit)` has
+something to reflect. Two runs differing only in a predicate are
+therefore two scripts, and calling them one would have put INV-RC14's
+guarantee over a set that does not determine its own observation
+sequence.
+
+Stated honestly against RFC 0014 §7.2's tuple: that tuple is inputs,
+readiness, arbitration choices, and grants, and this section already
+went past it when it added `settle` to the driving vocabulary — a
+call §7.2 does not name. The predicate and budget ride that same
+extension rather than a second one. What the extension does not do is
+weaken §7.2: every element of its tuple is still a script element
+here, the guarantee is still one observation sequence per script, and
+the additions are constrained by the same rule as the rest — a
+`settle` contributes no entry to the guaranteed sequence (§9.6).
+
+The determinism this preserves is worth deriving rather than
+asserting. Under a fixed script, the application-side state evolves
+deterministically: its inputs and readiness are script elements, and
+the driving calls that advance it are fixed in order and arguments. A
+predicate is a function of that state, evaluated at the turn
+boundaries §9.6 defines. So the sequence of predicate evaluations —
+and with it the number of turns each `settle` takes — is a function
+of the script, not a further degree of freedom, which is exactly what
+naming the predicate as a script element buys.
 
 For a deterministic application, one script yields one observation
 sequence across repeated runs, because the driver introduces no
@@ -2074,8 +2129,10 @@ of §9.3's block maps to one of them, walked in order:
   API-surface review. It reaches INV-RC14's observation sequence only
   negatively, by initiating no append to it — a property §9.6 makes
   structural through the rule that `settle` is misuse while a grant
-  is outstanding — and its predicate reads application-side state, so
-  it adds no free variable to a script (§9.8).
+  is outstanding. Its predicate and budget are free variables of a
+  script, named as such in §9.8, and its turn is defined normatively
+  in §9.6 so that two conforming drivers cannot disagree on what one
+  call does.
 - `accepted`, `intents`, `AcceptanceLedger`, `IntentLedger`,
   `SendRecord`, `Lane` → INV-RC14's gate-scoped observation
   sequence, whose pre-gate exclusion is what the second ledger keeps
@@ -2136,7 +2193,10 @@ of §9.3's block maps to one of them, walked in order:
   the exclusion is stated over the class: §9.3 makes non-selectivity
   a fact about all four driving calls, the intent ledger may gain
   entries during any of them, and the only thing claimed of `settle`
-  is that it initiates no append to the guaranteed sequence.
+  is that it initiates no append to the guaranteed sequence. §9.6's
+  turn definition closes it from the other side: a turn is not
+  satisfied until every task ready at that yield has had the
+  executor, so a selective one is not a turn.
 - *Identity as run* — naming runs by `CommandId` or `SubscriptionId`
   alone passes every single-run test and then silently conflates a
   superseded run with its successor: the identity slot is free for
