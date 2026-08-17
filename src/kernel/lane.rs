@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{Notify, mpsc};
 
 use crate::runtime::channel;
-use crate::testing::driver::{Confirmed, DeliveryLedger, IntentLedger};
+use crate::testing::driver::{AcceptanceRecorder, Confirmed, IntentRecorder};
 
 use super::accounting::{PendingCounter, PendingReservation};
 
@@ -370,8 +370,8 @@ pub struct IngressHandle<Msg> {
     // schema: the two ledgers record what a driving test asserts on, either
     // side of the gate. Holding them here rather than only in test builds
     // keeps the driven topology identical to the production one.
-    intents: IntentLedger,
-    delivery: DeliveryLedger,
+    intents: IntentRecorder,
+    acceptances: AcceptanceRecorder,
 }
 
 impl<Msg: Send + 'static> IngressHandle<Msg> {
@@ -382,8 +382,8 @@ impl<Msg: Send + 'static> IngressHandle<Msg> {
         gate: Arc<SendGate>,
         data: DataSender<Msg>,
         control: ControlSender<Msg>,
-        intents: IntentLedger,
-        delivery: DeliveryLedger,
+        intents: IntentRecorder,
+        acceptances: AcceptanceRecorder,
     ) -> Self {
         Self {
             origin,
@@ -392,7 +392,7 @@ impl<Msg: Send + 'static> IngressHandle<Msg> {
             data,
             control,
             intents,
-            delivery,
+            acceptances,
         }
     }
 
@@ -443,7 +443,7 @@ impl<Msg: Send + 'static> IngressHandle<Msg> {
         match sent {
             Ok(()) => {
                 reservation.commit();
-                self.delivery.record(self.origin, lane);
+                self.acceptances.record(self.origin, lane);
                 released.commit();
                 Ok(())
             }
@@ -469,7 +469,7 @@ mod tests {
     };
     use crate::kernel::accounting::PendingCounter;
     use crate::runtime::channel;
-    use crate::testing::driver::{DeliveryLedger, IntentLedger, SendRecord};
+    use crate::testing::driver::{AcceptanceRecorder, GatedSend, IntentRecorder};
 
     const ALICE: RunToken = 1;
     const BOB: RunToken = 2;
@@ -482,8 +482,8 @@ mod tests {
         gate: Arc<SendGate>,
         data_rx: DataReceiver<u32>,
         control_rx: ControlReceiver<u32>,
-        intents: IntentLedger,
-        delivery: DeliveryLedger,
+        intents: IntentRecorder,
+        acceptances: AcceptanceRecorder,
         // The kernel's own sender clones, which a live kernel holds for its
         // whole lifetime: a test uses them to fill a bounded lane and to
         // mint a second run's handle on the same lanes.
@@ -497,8 +497,8 @@ mod tests {
             let (control_tx, control_rx) = control_lane::<u32>();
             let counter = Arc::new(PendingCounter::default());
             let gate = Arc::new(SendGate::new(mode));
-            let intents = IntentLedger::default();
-            let delivery = DeliveryLedger::default();
+            let intents = IntentRecorder::default();
+            let acceptances = AcceptanceRecorder::default();
             let handle = IngressHandle::new(
                 ALICE,
                 Arc::clone(&counter),
@@ -506,7 +506,7 @@ mod tests {
                 data_tx.clone(),
                 control_tx.clone(),
                 intents.clone(),
-                delivery.clone(),
+                acceptances.clone(),
             );
             Self {
                 handle,
@@ -515,7 +515,7 @@ mod tests {
                 data_rx,
                 control_rx,
                 intents,
-                delivery,
+                acceptances,
                 data_tx,
                 control_tx,
             }
@@ -538,7 +538,7 @@ mod tests {
                 self.data_tx.clone(),
                 self.control_tx.clone(),
                 self.intents.clone(),
-                self.delivery.clone(),
+                self.acceptances.clone(),
             )
         }
     }
@@ -547,8 +547,8 @@ mod tests {
         NonZeroUsize::new(1).expect("one is non-zero")
     }
 
-    fn record(origin: RunToken, lane: Lane) -> SendRecord {
-        SendRecord { origin, lane }
+    fn record(origin: RunToken, lane: Lane) -> GatedSend {
+        GatedSend { origin, lane }
     }
 
     // Production's gate is transparent: the send completes with no grant,
@@ -576,7 +576,7 @@ mod tests {
             "the intent is recorded before the gate"
         );
         assert_eq!(
-            fixture.delivery.snapshot(),
+            fixture.acceptances.snapshot(),
             vec![record(ALICE, Lane::Data)],
             "the acceptance is recorded with its lane"
         );
@@ -607,7 +607,7 @@ mod tests {
                 "the intent was recorded before the gate wait"
             );
             assert!(
-                fixture.delivery.snapshot().is_empty(),
+                fixture.acceptances.snapshot().is_empty(),
                 "nothing is accepted before the gate releases it"
             );
         }
@@ -645,7 +645,7 @@ mod tests {
             "a resolved grant is cleared"
         );
         assert_eq!(
-            fixture.delivery.snapshot(),
+            fixture.acceptances.snapshot(),
             vec![record(ALICE, Lane::Data)],
             "acceptance appends to the guaranteed sequence"
         );
@@ -748,7 +748,7 @@ mod tests {
             "the release is the grant's terminal"
         );
         assert!(
-            fixture.delivery.snapshot().is_empty(),
+            fixture.acceptances.snapshot().is_empty(),
             "a reclaimed send appends nothing to the guaranteed sequence"
         );
     }
@@ -771,7 +771,7 @@ mod tests {
             "a failed send releases its reservation"
         );
         assert!(
-            fixture.delivery.snapshot().is_empty(),
+            fixture.acceptances.snapshot().is_empty(),
             "a failed send is not an acceptance"
         );
     }
@@ -813,7 +813,7 @@ mod tests {
             "a released quit resolves like any other send"
         );
         assert_eq!(
-            fixture.delivery.snapshot(),
+            fixture.acceptances.snapshot(),
             vec![record(ALICE, Lane::Control)],
             "the acceptance record carries the control lane"
         );

@@ -50,6 +50,20 @@ pub trait Reducer {
     }
 }
 
+/// How a run of a [`Program`] ended, when it ended in the controlled way.
+///
+/// The production result is `Result<Exit, E>` over the backend's error
+/// (RFC 0014 §2.3): a controlled quit — of either physical route — is the
+/// `Ok` side, and a render failure is the `Err` side carrying the backend's
+/// own error (RFC 0011 INV-LC5's classification, preserved). One variant is
+/// deliberate: the two quit routes reach the same end, and the kernel keeps
+/// no second controlled reason to report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Exit {
+    /// A controlled quit.
+    Quit,
+}
+
 /// A reducer that can be run: it can produce its initial state and render.
 pub trait Program: Reducer {
     /// The construction-time input.

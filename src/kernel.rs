@@ -71,7 +71,7 @@ use crate::runtime::channel::channel_observed;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::{Channel, LoadObserver};
 use crate::structural_key::ScopePath;
-use crate::testing::driver::{DeliveryLedger, IntentLedger};
+use crate::testing::driver::{AcceptanceRecorder, IntentRecorder};
 
 use lane::{
     ControlReceiver, ControlSender, DataReceiver, DataSender, Envelope, GateMode, RunToken,
@@ -168,8 +168,8 @@ pub struct Kernel<P: Program> {
     /// Runs started since the last drain — the per-step `started` list, in
     /// start order.
     started: Vec<RunToken>,
-    delivery: DeliveryLedger,
-    intents: IntentLedger,
+    acceptances: AcceptanceRecorder,
+    intents: IntentRecorder,
     settled: bool,
 }
 
@@ -223,8 +223,8 @@ impl<P: Program> Kernel<P> {
             gate: Arc::new(SendGate::new(gate_mode)),
             next_token: 1,
             started: Vec::new(),
-            delivery: DeliveryLedger::default(),
-            intents: IntentLedger::default(),
+            acceptances: AcceptanceRecorder::default(),
+            intents: IntentRecorder::default(),
             settled: false,
         }
     }
@@ -341,13 +341,14 @@ impl<P: Program> Kernel<P> {
         self.join_set.len()
     }
 
-    /// The post-gate observation ledger.
-    pub fn delivery(&self) -> DeliveryLedger {
-        self.delivery.clone()
+    /// The post-gate acceptance ledger: what passed the send gate, which is
+    /// not the same question as what `update` saw (RFC 0008 §9.6).
+    pub fn acceptances(&self) -> AcceptanceRecorder {
+        self.acceptances.clone()
     }
 
     /// The pre-gate intent ledger.
-    pub fn intents(&self) -> IntentLedger {
+    pub fn intents(&self) -> IntentRecorder {
         self.intents.clone()
     }
 
@@ -424,7 +425,7 @@ impl<P: Program> Kernel<P> {
             data: &self.data_tx,
             control: &self.control_tx,
             intents: &self.intents,
-            delivery: &self.delivery,
+            acceptances: &self.acceptances,
             observer: &self.observer,
             gate: &self.gate,
         }

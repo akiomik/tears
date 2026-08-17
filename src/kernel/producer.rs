@@ -35,7 +35,7 @@ use crate::command::Action;
 use crate::panic::contained_producer;
 use crate::runtime::load::{GaugeGuard, LoadObserver};
 use crate::structural_key::ScopePath;
-use crate::testing::driver::{DeliveryLedger, IntentLedger};
+use crate::testing::driver::{AcceptanceRecorder, IntentRecorder};
 
 use super::accounting::PendingCounter;
 use super::lane::{ControlSender, DataSender, IngressHandle, RunToken, SendGate};
@@ -150,9 +150,9 @@ pub struct ProducerHarness<'a, Msg: Send + 'static> {
     /// The control lane's sending half, cloned per run.
     pub control: &'a ControlSender<Msg>,
     /// The pre-gate observation ledger handed to the run's ingress.
-    pub intents: &'a IntentLedger,
-    /// The post-gate observation ledger handed to the run's ingress.
-    pub delivery: &'a DeliveryLedger,
+    pub intents: &'a IntentRecorder,
+    /// The post-gate acceptance ledger handed to the run's ingress.
+    pub acceptances: &'a AcceptanceRecorder,
     /// The load observer this run's gauge guard reports to.
     pub observer: &'a LoadObserver,
     /// The gate the run's ingress waits on before each send.
@@ -191,7 +191,7 @@ impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
             self.data.clone(),
             self.control.clone(),
             self.intents.clone(),
-            self.delivery.clone(),
+            self.acceptances.clone(),
         );
         let gauge = gauge_guard(self.observer, &kind);
         let run = body(EffectCtx { handle });
