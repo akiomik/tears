@@ -1287,9 +1287,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ) -> Result<GrantToken, GrantOutstanding>;
 
     /// Consumes `token`, driving the executor — beginning no pass —
-    /// for at most `max_turns` turns, until the grant resolves, and
-    /// reports how. Exhausting `max_turns` fails the test, reporting
-    /// the turns consumed (§9.6).
+    /// until the grant resolves, and reports how. Checked before
+    /// the first turn, so a grant already resolved costs none;
+    /// otherwise at most `max_turns`, and exhausting them fails the
+    /// test, reporting the turns consumed (§9.6).
     pub fn confirm(
         &mut self,
         max_turns: usize,
@@ -1450,9 +1451,10 @@ are implementation latitude, exactly as for §3.1's block.
 of executor turns: no method of this section sleeps, arms a timer, or
 reads a wall clock, and the kernel they drive reads no wall clock either
 (RFC 0014 §6.3). Exhausting a bound fails the test with a diagnostic
-rather than waiting longer. Where the bound is the driver's own its value
-is mechanism; `settle`'s is the caller's and is part of the script, for
-the reason §9.6 gives. Application-supplied effects sit outside that
+rather than waiting longer. The two calls that wait on a condition are
+`settle` and `confirm`, and both take their bound from the caller as a
+script element, for the reason §9.6 gives; `boot` and `step_pass` wait
+on no condition, each completing by its own definition. Application-supplied effects sit outside that
 quantifier, as they sit outside INV-T4's determinism scope — an effect
 that sleeps times its own test.
 
@@ -1854,7 +1856,16 @@ who owns the budget: `settle`'s is the caller's predicate, and
 `confirm`'s is the gate's — the grant resolving one way or the other
 (§9.6's two states).
 
-The predicate is supplied rather than fixed because the obvious fixed
+**Both check that condition before the first turn**, so a call that
+has nothing to wait for spends nothing. A grant already resolved —
+by a `step_pass` that drained the lane ahead of its send, say —
+returns from `confirm` at once, and `confirm(0, token)` is therefore
+the way a test asserts exactly that: it succeeds on an already
+resolved grant and fails on exhaustion otherwise. `settle(0, until)`
+reads the same way against its predicate. Leaving this open would
+have split conformance twice over — on whether `confirm(0, token)`
+can succeed at all, and on whether the extra turn a resolved grant
+did not need moves the intent ledger or carries a run to an exit.
 
 The predicate is supplied rather than fixed because the obvious fixed
 condition, "until the executor is idle", is not a thing this contract
