@@ -33,6 +33,7 @@ use std::sync::atomic::AtomicU64;
 use tokio::sync::{Notify, Semaphore, mpsc};
 
 use crate::runtime::channel;
+use crate::testing::driver::{DeliveryLedger, IntentLedger};
 
 use super::accounting::PendingCounter;
 
@@ -183,6 +184,12 @@ pub struct IngressHandle<Msg> {
     gate: Arc<SendGate>,
     data: DataSender<Msg>,
     control: ControlSender<Msg>,
+    // Observation only, and deliberately not the `tears::runtime::load`
+    // schema: the two ledgers record what a driving test asserts on, either
+    // side of the gate. Holding them here rather than only in test builds
+    // keeps the driven topology identical to the production one.
+    intents: IntentLedger,
+    delivery: DeliveryLedger,
 }
 
 impl<Msg: Send + 'static> IngressHandle<Msg> {
@@ -193,6 +200,8 @@ impl<Msg: Send + 'static> IngressHandle<Msg> {
         _gate: Arc<SendGate>,
         _data: DataSender<Msg>,
         _control: ControlSender<Msg>,
+        _intents: IntentLedger,
+        _delivery: DeliveryLedger,
     ) -> Self {
         todo!("ingress construction")
     }
