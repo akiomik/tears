@@ -74,6 +74,16 @@ externally completed), and a post-quit no-poll exception named only
 the finish/drop checks while send/receive were also polling sites
 that could reach a leaf on their way to failing.
 
+A cited invariant's own clauses are an inventory. A correspondence or
+successor claim that quantifies over invariants — *each becomes*, *all
+hold*, *every clause is preserved* — is checked clause by clause inside
+each one, because an invariant that pins two properties needs two
+answers. *From PR #282:* a successor mapping opened "every clause above
+holds as stated; each becomes the following", walked all sixteen
+invariants, and answered only the arming half of the one that also
+pinned a receiver-exhaustion result — the second half had no successor
+anywhere, in a section whose lead promised one for each.
+
 A universal claim about executions quantifies over the behavior other
 parties supply. A harness, runtime, or wrapper cannot promise a
 property of the whole execution when part of the execution is the
@@ -101,6 +111,18 @@ presented as enforcing "every time read" missed `UNIX_EPOCH.elapsed()`
 the fix text then claimed the list was "derived by walking `std`'s
 surface" while `std::net`'s nameable timed I/O was still absent from
 it.
+
+A rationale that generalizes is quantified too. When a decision is
+justified by a principle rather than by its own particulars — *a
+silently accepted old name would misstate what it bounds* — that
+principle reaches every surface of the same shape, so either apply it
+to all of them or record where it divides and why. An unrecorded
+division reads as an arbitrary decision on re-reading. *From PR #282:*
+a renamed configuration control and a re-read telemetry schema were
+decided oppositely on the same page; the reason is real — a renamed
+config field fails the build that uses it, a renamed telemetry field
+breaks dashboards silently, off the compiler's path — but it was
+recorded only after a reviewer asked why the principle stopped.
 
 A universal negative over a set that contains the rule's own
 instrument is checked against that member first. A contract that
@@ -199,7 +221,18 @@ Prompts that have already paid off:
   repeated failing `receive*` calls and kept driving the store, whose
   post-panic state no clause pins; restated over non-failing scans that
   observe the same pending-ness by receiving a later-enqueued
-  control leaf's output).
+  control leaf's output). The walk includes the document's own rules
+  about what counts as evidence: a mandated check whose only workable
+  instrument that document excludes has no witness at all, however
+  sound the invariant is (from PR #282: a park-and-wake invariant's
+  behavioral rows needed a probe at the park boundary, which the
+  evidence rule — acceptance evidence comes from whole-pass driving
+  only — could not admit, since a driver step begins a pass and a
+  parked kernel is one with no pass running, while the suite declared
+  every one of its series driven that way; the resolution now stands in
+  RFC 0014 §7.2, which names the park-boundary probe and scopes what it
+  may be cited for, and §13.1, which splits the suite into the series
+  each instrument can carry).
 - A normative contract stated as *observable properties*, not as the
   implementation mechanism that happens to produce them. A clause phrased
   over a specific call (`.skip(1)`, an `interval` handle) is satisfiable
@@ -292,12 +325,17 @@ citation, and promoting it into normative text is what triggers the
 check (from PR #253: a review suggestion listed `tokio::time::pause`
 among the clock calls an effect could issue; the fix promoted the list
 to a normative "succeeds", but pausing an already-paused clock panics —
-the reviewer then caught their own suggestion's promotion).
+the reviewer then caught their own suggestion's promotion). A
+measurement someone else ran elsewhere is the same class of hypothesis.
+That is a rule about how to verify, not about who is right: measure it
+here first; where that is impossible, consult this repository's own
+record of what was observed; hold any outside report as an open
+hypothesis until one of those two bears on it. When two verified
+observations disagree, neither is discarded — see the
+measurement-citation bullets below for what to write instead.
 
 *From PR #211:* "quit occupancy is bounded by producer count" — false,
-because a task terminates after `send` while its signal stays queued —
-and a misdescription of `StreamMap::poll_next` as draining all ready
-receivers.
+because a task terminates after `send` while its signal stays queued.
 
 The document's own derivations are citations too: when a clause credits
 a mechanism with resolving a failure mode, re-read the section that
@@ -343,7 +381,7 @@ labels, not the release semantics the paragraph leaned on, so the
 document contradicted the contract it claimed parity with.
 
 Measurement citations are code claims too, and they prove only what they
-measured. Two classes from PR #220:
+measured. Five classes, two from PR #220 and three from PR #282/#283:
 
 - An observed average or p50 supports an estimate, never an *at most*.
   Deriving a worst-case bound as `n × average cost` is invalid — the
@@ -360,6 +398,27 @@ measured. Two classes from PR #220:
   #220: `keyed_channel_capacity = 16` was justified by a scenario whose
   25ms-cadence probe never buffers two messages and thus cannot
   distinguish 16 from 1.)
+- An instrument proves its own liveness in the same run, or its null
+  result measures nothing. A counter that observed no event and a
+  counter that was never wired produce the same zero, so a run that
+  reports "none" carries a deliberate positive alongside it. (From PR
+  #282: a probe counting panic-hook calls during a model reported zero
+  because it had been restored before the check ran; moving the
+  self-check inside the installed window — a deliberate panic the
+  counter did count — turned the same zero into evidence.)
+- Two verified observations that disagree are recorded side by side,
+  not reconciled by argument, and the rule they support is grounded on
+  what neither of them has to settle. (From PR #282: a historical flake
+  and a fresh zero-reach measurement were left as they stand, with the
+  guard's reason moved onto a class membership the sources agree on —
+  the model *is* a hook swapper, because its coroutine crate swaps the
+  process-global hook — rather than onto how often the hook is reached.)
+- A number in a commit message or PR body is a measurement citation.
+  It reports the tree it describes, measured on that tree; a figure
+  carried over from a sibling branch or an earlier run is a false
+  citation even when both runs were green. (From PR #283: a commit
+  message quoted a passing count from the previous branch's run while
+  its own branch measured a different total.)
 
 Operational absolutes are code claims about a whole mechanism. A
 normative *only*, *never*, or *cannot fail* over a workflow, harness,
@@ -396,7 +455,19 @@ delegated remainder even when it is currently empty (item 1).
 
 A behavioral claim about a dependency is a code claim, verified against
 that dependency's documented semantics — thresholds, margins, and
-"best-effort" hedges included — not its assumed behavior. *From PR #246:*
+"best-effort" hedges included — not its assumed behavior. Reading one
+source site is not reading the mechanism: what a call does observably
+can depend on which path reaches it and on what the surrounding
+routines are doing at that moment, so a claim about the dependency's
+*effect* is checked across the paths that reach the site, and settled
+by measurement when reading cannot settle it. *From PR #282:* a
+coroutine crate raises a panic on its normal completion path, which a
+panic hook would see, and separately silences the hook around the
+resume it uses to cancel a coroutine — two sites, two paths, hook
+handling that differs between them, and neither site settling what an
+installed hook observes during a successful run. What settled it, and
+how the result was written, are the measurement-citation bullets
+below. *From PR #246:*
 a `Timer` contract asserted no catch-up burst "because
 `MissedTickBehavior::Skip` skips missed ticks", but Tokio's Skip engages
 only once a tick is late past a fixed 5 ms margin, so sub-margin
@@ -534,14 +605,30 @@ patch text and sit squarely in classes items 1, 2, and 7 already name.
 Make the re-check mechanical rather than remembered: for every
 review-fix commit, write out its changed-claims list — each claim the
 fix adds, strengthens, or rewords — and run items 1–5 on exactly that
-list as if it were new RFC text, before pushing. The list is the
-enforcement; without it the pass silently shrinks to the sentences the
-finding pointed at, and a small patch is precisely the patch whose
-re-check gets skipped. *From PR #221:* two of the three findings sat
-in claims PR #220's review-fix commit had added or reshaped
-— the reference-machine-exclusivity sentence, and the rewritten
-pass/fail derivation that carried "cannot fail on speed" into new
-surroundings — and both would have appeared on that commit's
+list as if it were new RFC text, before pushing. The fix's own
+rationale sets that list's scope: a commit that explains itself by
+naming a defect class has claimed every instance of that class in the
+tracked documents its subject reaches — the RFCs plus the repository
+documents they cite, which is where a contract claim's siblings live —
+so the sweep is the class, not the sites the finding happened to cite.
+Sweep that scope, or record in the changed-claims list which boundary
+was swept and why the remainder is out of it; an unrecorded boundary
+is the same defect as an unrecorded division under item 1. *From
+PR #282:* a commit that corrected "these edits are described as gated
+when they have landed" fixed the six sites in the document the finding
+named and left the identical construction in nine places across six
+sibling documents — the next pass's blocker, whose own enumeration
+found eight of the nine; later in the same review, a clause rewritten
+in three places regenerated the finding from a fourth in one of the
+documents already touched.
+
+The list is the enforcement; without it the pass silently shrinks to
+the sentences the finding pointed at, and a small patch is precisely
+the patch whose re-check gets skipped. *From PR #221:* two of the three
+findings sat in claims PR #220's review-fix commit had added or
+reshaped — the reference-machine-exclusivity sentence, and the
+rewritten pass/fail derivation that carried "cannot fail on speed"
+into new surroundings — and both would have appeared on that commit's
 changed-claims list.
 
 ## 7. Mechanical pass
@@ -574,7 +661,14 @@ changed-claims list.
   the old term across the RFC, its references section, and the index
   (from PR #213: "RFC 0003's FIFO" survived in R5, §4.3, the
   open-question text, and the references after the body had already
-  conceded RFC 0003 states no FIFO invariant).
+  conceded RFC 0003 states no FIFO invariant). Resolve every cited
+  identifier — invariant, row, register, ledger entry — inside the
+  tracked corpus, not inside whatever notes were open while drafting:
+  a token that traces only to an untracked working artifact reads as
+  authoritative and cannot be checked by anyone else (from PR #282: a
+  demand cited as another RFC's `G-6` existed only in an untracked
+  gate-era note, was never defined in that RFC or any other, and
+  survived from the first draft through six review rounds).
 - A corrected claim's stale restatements rarely share its wording: grep
   for the claim's *subject* vocabulary across the whole document, not
   only for the sentence that was rewritten (from PR #240: rewriting the
@@ -634,7 +728,14 @@ changed-claims list.
   intended reader before naming it (from PR #257: RFC 0009 §5.5 placed
   a downstream-application testing recipe in `docs/testing.md`,
   contributor test policy — the deliverable moved to rustdoc, the
-  crate's user-facing surface alongside the README and examples).
+  crate's user-facing surface alongside the README and examples). A
+  visibility change sweeps the same way: a sentence that *instructs* a
+  caller to reach a symbol they can no longer reach is a corrected
+  claim, while one that *describes* what the code does internally keeps
+  the internal name and is already right (from PR #283: making a
+  test-support static private left one rustdoc telling callers to hold
+  it — corrected to the helper — beside another saying the helper holds
+  it internally, which needed no change).
 - `typos` and `git diff --check` are clean.
 - English only (repository artifact).
 
