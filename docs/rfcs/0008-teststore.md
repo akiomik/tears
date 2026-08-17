@@ -1141,7 +1141,13 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
 - **Gating.** This surface is contract, not code. It enters the crate
   with the reducer-first kernel, after RFC 0014 §13.1's open tier
   closes, and its `Added` CHANGELOG entry ships with that release —
-  the same form RFC 0014's own header states for it. The crate's own
+  the same form RFC 0014's own header states for it. Sibling
+  documents that reserve this surface keep pointing at it as future
+  work until then, deliberately: RFC 0014 §13.2, RFC 0012 §6.2 and
+  its §12's second question, and RFC 0010's TS-1, TS-3, and TS-6
+  condition rows all close their status at the landing, not at this
+  section — a contract stated is not a surface delivered, and those
+  rows are conditioned on the delivery. The crate's own
   types in §9.3 divide in three, and no statement here asserts that
   anything in the first or third division exists in the crate today.
   The partition covers those and nothing else: `Backend` and
@@ -1265,19 +1271,20 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         woken_by: WakeSource,
     ) -> Result<StepReport<B::Error>, NotReady>;
 
-    /// Arms a grant at `origin`, releasing that origin's next
-    /// send-intent. The returned token borrows neither the driver
-    /// nor the script. At most one grant is outstanding across the
-    /// whole driver; the next — at this origin or any other — is
-    /// admitted only after this one resolves (§9.6).
+    /// Arms a grant at `origin`, releasing the next of that origin's
+    /// send-intents that no grant has released yet — one already
+    /// waiting at the gate when this is called, or else the first to
+    /// arrive after it. The returned token borrows neither the
+    /// driver nor the script. At most one grant is outstanding
+    /// across the whole driver; the next — at this origin or any
+    /// other — is admitted only after this one resolves (§9.6).
     pub fn grant(
-        &self,
+        &mut self,
         origin: Origin,
     ) -> Result<GrantToken, GrantOutstanding>;
 
     /// Consumes `token`, driving the executor — beginning no pass —
-    /// until the released send commits or is reclaimed, and reports
-    /// which of the two ended it (§9.6).
+    /// until the grant resolves, and reports how (§9.6).
     pub fn confirm(&mut self, token: GrantToken) -> Confirmed;
 
     /// Drives the executor — beginning no pass and releasing no
@@ -1328,17 +1335,17 @@ pub struct AnonymousRun(/* private */);
 /// One outstanding grant, correlated to the commit it releases.
 pub struct GrantToken { /* private */ }
 
-/// How a released send ended (§9.6). The two are disjoint and
-/// exhaustive; both clear the outstanding grant, and only `Accepted`
-/// appends to the guaranteed sequence.
+/// How a grant ended (§9.6). The two are disjoint and exhaustive;
+/// both clear the outstanding grant, and only `Accepted` appends to
+/// the guaranteed sequence.
 #[must_use]
 pub enum Confirmed {
-    /// The send got into the lane. Whether its run is revoked is a
-    /// separate, delivery-side question.
+    /// The send this grant released got into the lane. Whether its
+    /// run is revoked is a separate, delivery-side question.
     Accepted,
-    /// The send never got into the lane and never will. A producer
-    /// reclaimed at its await point and one that observes closure
-    /// and stops (RFC 0014 §6.1) both end here.
+    /// This grant will never put anything into the lane — the send
+    /// it released ended without getting in, or its origin is gone
+    /// with no send released at all.
     Reclaimed,
 }
 
@@ -1379,10 +1386,14 @@ The block is normative for **what exists and what does not**: §9.2's
 absent constructors, `WakeSource`'s membership as the whole
 pass-initiation vocabulary (§9.5), `grant`'s detached token and its
 driver-wide admission rule (§9.6), and the ledgers' division at the
-send gate (§9.6). Spellings — parameter forms, accessor names,
-whether a report field is a slice or an iterator, what a probe's
-constructor looks like — are implementation latitude, exactly as for
-§3.1's block.
+send gate (§9.6). The **receivers are normative too**, and not as a
+spelling: every driving method takes `&mut self` and every
+observation method `&self`, which is how the block carries RFC 0011
+INV-LC9's exclusivity (§9.2, §9.11) and what makes a borrowing grant
+token unrepresentable (§9.6). Spellings — parameter names, accessor
+names, whether a report field is a slice or an iterator, what a
+probe's constructor looks like — are implementation latitude, exactly
+as for §3.1's block.
 
 **Waiting, in full.** Every wait this layer performs is a bounded
 number of executor turns: no method of this section sleeps, arms a
@@ -1455,10 +1466,10 @@ is named by an opaque handle the *driver* mints, under three rules:
   into the keyed gauge count — an anonymous run stays counted as an
   anonymous run, under `unkeyed_commands` (RFC 0014 §9 row 9) — and
   no admission or cancellation decision reads it. The kernel's own
-  identity for an
-  anonymous run — kernel-side scope membership without a logical key,
-  RFC 0013 §9's third resolution — is unchanged by its existence, so
-  the auto-keying RFC 0013 §10 rejected stays rejected.
+  identity for an anonymous run — kernel-side scope membership
+  without a logical key, RFC 0013 §9's third resolution — is
+  unchanged by its existence, so the auto-keying RFC 0013 §10
+  rejected stays rejected.
 - **Its only uses are naming.** It names an origin to `grant` and
   tags ledger records (§9.6). The send gate `grant` releases at is a
   kernel-side seam, RFC 0014 §7.2's second driving differential, not
@@ -1568,6 +1579,14 @@ those three are harnessed — including what turns the emitting effect
 gets, which no call of this section supplies — belongs to RFC 0014
 §13.1 with the series themselves.
 
+**Which intent a grant releases.** The next one at that origin that
+no grant has released yet: if an intent is already waiting at the
+gate when `grant` is called, that is the one; if none is, the grant
+stays armed and releases the first to arrive after it. A grant is
+therefore issuable ahead of the producer that will satisfy it, which
+is what lets a script fix an order before the run reaches its send
+point.
+
 Three rules carry INV-RC14's enqueue-order guarantee onto the
 surface:
 
@@ -1581,18 +1600,19 @@ surface:
   producers, which is the model RFC 0014 §11 excludes, nor two
   releases at one origin. A per-origin rule would admit the first of
   those, so the rule is driver-wide.
-- **Detached.** The token borrows neither the driver nor the script.
-  The driving methods take `&mut self`, so a token that borrowed the
-  driver could not coexist with a step; detached, a test holds an
-  acceptance outstanding across `step_pass` calls. That is what
-  RFC 0014 §13.3's **driver progress** condition needs — an
-  acceptance that requires the kernel to drain the lane its send
-  waits on cannot be confirmed without stepping, and a token
-  borrowing the driver could not survive the step. `confirm` is the
-  in-place form for the case that needs no pass; like every wait here
-  it is bounded and fails rather than hangs. Where the acceptance
-  does need a drain, it happens inside a `step_pass` instead, which
-  is the same route by that other name.
+- **Detached.** The token is `'static`: it borrows neither the driver
+  nor the script, and it carries its correlation with it rather than
+  as a loan against the driver. That is what RFC 0014 §13.3's
+  **driver progress** condition needs — a grant whose resolution
+  requires the kernel to drain the lane its send waits on cannot be
+  resolved without stepping, so the test must be able to hold the
+  token *across* `step_pass` calls, and every driving method takes
+  `&mut self`. A borrowing token could not survive one of those
+  calls, which is precisely the shape that cannot satisfy the
+  condition. `confirm` is the in-place form for the case that needs
+  no pass; like every wait here it is bounded and fails rather than
+  hangs. Where a drain is needed the resolution happens inside a
+  `step_pass` instead, which is the same route by that other name.
 - **The guarantee starts at the gate.** Scripted enqueue order is a
   claim about sends the gate has released and confirmed, never about
   the order producers reached the gate in.
@@ -1623,22 +1643,27 @@ stranded or not, for the reason its own paragraph gives. `confirm`
 and `grant` after termination are misuse under §9.3's state table,
 like every other driving call.
 
-**A released send ends in one of exactly two states, and `confirm`
-reports which.** A send released at the gate either **gets into the
-lane** — it is admitted, and the guaranteed sequence gains its
-entry — or it **never does and never will**, its producer having
-ended without that admission: reclaimed at its await point, or
-stopped after observing closure (RFC 0014 §6.1). The outcome is what
-this section pins; RFC 0014 §10's reservation-and-commit accounting
-is one informative way to reach it, not the contract.
-Those two outcomes are disjoint and exhaustive:
-there is no third *end* for a released send — though a send may sit
-in flight for as long as the lane makes it wait, which is why
-`confirm` carries a budget rather than a promise (below).
-`confirm` drives until one of the two is reached and
-returns `Confirmed::Accepted` or `Confirmed::Reclaimed`. Both clear
-the outstanding grant, so `grant` and `settle` are legal again after
-either.
+**A grant ends in one of exactly two states, and `confirm` reports
+which.** The subject is the grant, not any particular send, because a
+grant can be armed at an origin that never presents one. Either the
+send this grant released **gets into the lane** — it is admitted, and
+the guaranteed sequence gains its entry — or **this grant will never
+put anything into the lane**. Two facts establish the second, and
+either suffices: the send it released ended without getting in (its
+producer reclaimed at an await point, or stopped after observing
+closure — RFC 0014 §6.1), or the granted origin's exit is reflected
+in the kernel's bookkeeping and this grant released no send at all,
+so there is nothing left that could arrive. The outcome is what this
+section pins; RFC 0014 §10's reservation-and-commit accounting is one
+informative way to reach it, not the contract.
+
+Those two outcomes are disjoint and exhaustive: there is no third
+*end* for a grant — though one may stay unresolved for as long as the
+lane makes a send wait, which is why `confirm` carries a budget
+rather than a promise (below). `confirm` drives until one of the two
+is reached and returns `Confirmed::Accepted` or
+`Confirmed::Reclaimed`. Both clear the outstanding grant, so `grant`
+and `settle` are legal again after either.
 
 **Revocation is not one of those two states, and does not stop a
 send from committing.** Revoking a run filters its output at
@@ -1656,11 +1681,12 @@ which is where INV-RC5 is checked in any case (§9.11).
 
 Whichever route ends a run — an explicit cancel, a `CancelInFlight`
 supersession, a scope teardown, or termination, whose task
-cancellation RFC 0014 §6.1 and RFC 0011 §4.4 make contract — the
-released send still lands in one of the two states above. *When* an
-abort falls relative to an in-flight send is mechanism, and this
-surface does not depend on it: either the commit happened before the
-producer was reclaimed, or it did not.
+cancellation RFC 0014 §6.1 and RFC 0011 §4.4 make contract — a grant
+outstanding at that origin still lands in one of the two states
+above. *When* an abort falls relative to an in-flight send is
+mechanism, and this surface does not depend on it: either the send
+got in before its producer ended, or it did not and nothing more will
+follow it.
 
 The disjunction is `confirm`'s *completion* condition, not a promise
 that one of its arms arrives inside the budget. Where the commit
@@ -1706,10 +1732,9 @@ ledgers is stated exactly rather than denied. It **initiates no
 append to the guaranteed sequence**, and that holds structurally
 rather than by intent: `settle` is misuse while a grant is
 outstanding, no send is released except through an outstanding grant,
-and a released send's grant stays outstanding until that send reaches
-one of its two terminal states — so during a legal `settle` there is
-no armed gate and no released send still in flight, and nothing can
-commit. The
+and a grant stays outstanding until it resolves — so during a legal
+`settle` there is no armed gate and no released send still in
+flight, and nothing can get into the lane. The
 **intent ledger may gain entries**, on the other hand, from any
 producer the turns advance to a send point — as it may during any of
 the other three driving calls (§9.3). That is what a non-guaranteed
@@ -1757,8 +1782,15 @@ running and none beginning until a source arrives — so the driver's
 pass-initiation seam replaces the very mechanism INV-RC16
 constrains.
 
+The future it polls comes from the production entry point, not from
+this section: the test calls `ProgramRuntime::run` itself and pins
+the future that call returns, which is the "polls the production
+driving future directly" of RFC 0014 §7.2. No `TestDriver` hands one
+out, and none could — §9.2's manual-effect-polling rule turns on
+exactly that.
+
 What the probe supplies is a waker and a poll, and nothing else. It
-polls the production driving future directly; it scripts nothing
+polls that future directly; it scripts nothing
 inside the kernel, adds no branch, and is neither a third runtime
 seam nor a second driver. Its surface reports what RFC 0014 §7.2 says
 the probe observes: whether the loop parks (a `poll` returning
@@ -1777,13 +1809,24 @@ other series is pass-unit driven.
 
 ### 9.8 Determinism, scoped
 
-A **script** is three things together: the application-side inputs
-and readiness (§9.2), the arbitration choices (one `WakeSource` per
-`step_pass`), and the grants. For a deterministic application, one
-script yields one observation sequence across repeated runs, because
-the driver introduces no nondeterminism of its own (INV-RC14). As in
-INV-T4, the claim scopes to what the mechanism contributes: an
-application whose own reduction is nondeterministic is outside it.
+A **script** is the ordered sequence of driving calls — each
+`step_pass`'s `WakeSource`, and the positions of `grant`, `confirm`,
+and `settle` among them — together with the application-side inputs
+and readiness (§9.2). That is an instantiation of RFC 0014 §7.2's
+triple rather than a widening of it: the arbitration choices are the
+`step_pass` arguments, the grants are the `grant`/`confirm` pairs,
+and inputs and readiness are unchanged. `settle` is in the sequence
+because this section adds it as a driving call and its position is
+observable — it can carry a run to an exit that a later
+`step_pass(WakeSource::ProducerExit)` then has something to reflect —
+even though it contributes no entry to the guaranteed sequence
+(§9.6).
+
+For a deterministic application, one script yields one observation
+sequence across repeated runs, because the driver introduces no
+nondeterminism of its own (INV-RC14). As in INV-T4, the claim scopes
+to what the mechanism contributes: an application whose own reduction
+is nondeterministic is outside it.
 
 Two bounds on that claim, both RFC 0014 §7.2's and neither weakened
 here:
@@ -1906,7 +1949,7 @@ of §9.3's block maps to one of them, walked in order:
 
 - `TestDriver::new` and §9.2's absent constructors → INV-RC13, whose
   declared structural half is exactly this API-surface review; the
-  driving methods' `&mut self` receivers and the driver's sole
+  driving methods' uniform `&mut self` receivers and the driver's sole
   ownership of its kernel instance additionally hold RFC 0011
   INV-LC9's exclusivity property, which that RFC's §6 requires any
   step-style surface to preserve.
@@ -1918,8 +1961,9 @@ of §9.3's block maps to one of them, walked in order:
   INV-RC14, whose structural half is that the raw-grant shape is
   unrepresentable — which is what the driver-wide outstanding rule
   delivers (§9.6). `Confirmed` maps to INV-RC14 through both arms: it
-  reports which terminal state a released send reached, and only the
-  committing one appends to the gate-scoped sequence. It maps to
+  reports which of the two states a grant ended in, and only the one
+  that got a send into the lane appends to the gate-scoped sequence.
+  It maps to
   INV-RC5 through *neither* — strict revocation is a delivery-side
   property, so neither ledger witnesses it. Its behavioral rows
   observe that `update` never runs for the revoked item, which the
@@ -1987,14 +2031,18 @@ of §9.3's block maps to one of them, walked in order:
   entries during any of them, and the only thing claimed of `settle`
   is that it initiates no append to the guaranteed sequence.
 - *Unresolvable grant* — a surface whose grant clears only on a
-  commit leaves the driver permanently unusable whenever a released
-  send is reclaimed instead: `confirm` exhausting its budget,
-  `settle` barred, every later `grant` refused, with no test-author
-  error anywhere. Excluded by §9.6's two terminal states, which
-  partition what can become of a released send and clear the grant on
-  either; a budget exhausted before either arrives still fails the
-  test, and the stranded token stays a dead end because it *is* a
-  test-author error.
+  commit leaves the driver permanently unusable in two reachable
+  cases, neither of them a test-author error: a released send that
+  ends without getting into the lane, and a grant armed at an origin
+  that exits before presenting a send at all — the second reachable
+  by granting at a run whose exit `settle` has induced but no pass
+  has yet reflected. Either way `confirm` would exhaust its budget,
+  `settle` would stay barred, and every later `grant` would be
+  refused. Excluded by §9.6's two states, which are stated over the
+  *grant* rather than over a send and so cover both; a budget
+  exhausted before either arrives still fails the test, and the
+  stranded token stays a dead end because it *is* a test-author
+  error.
 - *Acceptance read as delivery* — reading an entry in `accepted` as
   proof that `update` saw the item. A revoked run's send can commit
   and be recorded, and is then dequeued with no `update` work at all
@@ -2013,7 +2061,16 @@ kernel's own revocation and termination contract (RFC 0014 §3.1,
 RFC 0011 §4.4) and a store-style pending set does not exist here; no
 correspondence between `started`'s order and a command's declaration
 order is claimed, that lowering order being RFC 0014 §3.4's to state;
-and no bounded-lane determinism claim is made (§9.8). Two elements
+and no bounded-lane determinism claim is made (§9.8). **No
+render-observation surface is offered either**: the driver owns its
+terminal and never hands it back, and `StepReport` carries `started`
+and `terminated` and nothing about frames, so no call here reports
+that a render happened or what it drew. Render evidence is
+application-side, where a `view` under test can record its own calls,
+and that is where INV-RC10's redraw row is read. This is deliberate
+negative space rather than an omission — a frame observation on the
+driver would be a third thing the surface reports about a pass,
+beside the two seams RFC 0014 §7.2 confines it to. Two elements
 were suspected of redundancy and kept, neither implied by its
 suspected survivor. `confirm` against `step_pass`, which also drives
 the executor: stepping runs a whole pass, so confirming an acceptance
