@@ -29,10 +29,17 @@
 //! Every wait this layer performs is a bounded number of executor turns:
 //! nothing here sleeps, arms a timer, or reads a wall clock, and exhausting
 //! a bound fails the test with a diagnostic rather than waiting longer
-//! (RFC 0008 §9.3). Where the bound is the driver's own its value is
-//! mechanism ([`TURN_BUDGET`]); [`TestDriver::settle`]'s is the caller's and
-//! is part of the script. Application-supplied effects sit outside that
+//! (RFC 0008 §9.3). Both waiting calls — [`TestDriver::settle`] and
+//! [`TestDriver::confirm`] — take their budget from the caller, so both
+//! budgets are elements of the script; the one bound that stays the
+//! driver's own is the terminated kernel's settle drain ([`TURN_BUDGET`]),
+//! which no script reaches. Application-supplied effects sit outside that
 //! quantifier — an effect that sleeps times its own test.
+//!
+//! A **turn** is defined by construction (RFC 0008 §9.6): the driving task
+//! spawns a fresh no-op task onto its own executor and awaits that task's
+//! completion. Nothing but public primitives — a spawn and a join — and no
+//! scheduler instrumentation, which RFC 0014 §7.2 forbids outright.
 
 // The driver's callers are the conformance series, which land after it: only
 // this module's own tests exercise the surface today.
@@ -42,7 +49,7 @@
 )]
 
 use std::collections::HashMap;
-use std::future::Future;
+use std::future::{Future, ready};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -51,7 +58,6 @@ use std::task::{Context, Poll, Wake, Waker};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::runtime::{Builder, Runtime as Executor};
-use tokio::task::yield_now;
 
 use crate::command::CommandId;
 use crate::kernel::Kernel;
@@ -65,16 +71,37 @@ use crate::subscription::SubscriptionId;
 pub use crate::kernel::arbiter::WakeSource;
 pub use crate::kernel::lane::{GrantOutstanding, Lane};
 
-/// The bound on the waits this layer chooses for itself, in executor turns.
+/// The bound on the one wait this layer still chooses for itself, in
+/// executor turns: the terminated kernel's settle drain.
 ///
-/// Its value is mechanism: a grant resolves or it does not, and any two
-/// bounds agree on every execution where the resolution arrives — a longer
-/// one is only more patient — so the bound here is a guard against a test
-/// that hangs. What is contract is that every wait is finite, counted in
-/// turns rather than in elapsed time, and fails the test on its bound
-/// (RFC 0008 §9.3, §9.6). The one bound that is *not* the driver's is
-/// [`TestDriver::settle`]'s, which is semantic and therefore the caller's.
+/// Its value is mechanism, because its completion condition is not the
+/// caller's — the join set drains or it does not, and any two bounds agree
+/// on every execution where it does. What is contract is that the wait is
+/// finite, counted in turns rather than in elapsed time, and fails the test
+/// on its bound (RFC 0008 §9.3). The two waits a *script* reaches —
+/// [`TestDriver::settle`] and [`TestDriver::confirm`] — take their budgets
+/// from the caller instead (RFC 0008 §9.6).
 const TURN_BUDGET: usize = 1024;
+
+/// One executor turn, by construction (RFC 0008 §9.6).
+///
+/// The driving task spawns a fresh no-op task onto its own executor and
+/// awaits that task's completion. The definition is a construction rather
+/// than a property because the property one would rather state — that every
+/// task ready at the yield gets the executor first — is not something the
+/// executor's public contract offers, and the only way to *assert* it would
+/// be to instrument the scheduler. Spawning one ordinary task is not
+/// instrumentation: it adds no hook and reads no scheduler state.
+///
+/// # Panics
+///
+/// Panics when the no-op task did not complete, which a task that neither
+/// panics nor is aborted cannot do.
+async fn executor_turn() {
+    tokio::spawn(ready(()))
+        .await
+        .expect("a no-op task neither panics nor is aborted");
+}
 
 /// One send at the gate, in the kernel's own vocabulary.
 ///
@@ -447,10 +474,6 @@ pub struct TestDriver<P: Program, B: Backend> {
 }
 
 #[expect(
-    clippy::panic,
-    reason = "assertion failures in a test harness are panics by design"
-)]
-#[expect(
     clippy::needless_pass_by_ref_mut,
     reason = "RFC 0008 §9.3's receivers are normative rather than a spelling: every driving call \
               takes `&mut self`, which is what carries RFC 0011 INV-LC9's exclusivity and makes a \
@@ -536,7 +559,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
                     Ok(report) => (Ok(()), report.producers),
                     Err(error) => (Err(error), kernel.take_started()),
                 };
-                yield_now().await;
+                executor_turn().await;
                 stepped
             })
         };
@@ -579,7 +602,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
                 if !kernel.wake_source_ready(woken_by) {
                     return None;
                 }
-                yield_now().await;
+                executor_turn().await;
                 let outcome = kernel.pass_cycle(terminal);
                 Some((outcome, kernel.take_started()))
             })
@@ -624,8 +647,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         Ok(GrantToken { sequence, run })
     }
 
-    /// Consumes `token`, driving the executor — beginning no pass — until
-    /// the grant resolves, and reports how (RFC 0008 §9.6).
+    /// Consumes `token`, driving the executor — beginning no pass — for at
+    /// most `max_turns` turns, until the grant resolves, and reports how
+    /// (RFC 0008 §9.6).
     ///
     /// A grant ends in one of exactly two states, and the two facts that
     /// establish the second are read from different places. The gate holds
@@ -635,6 +659,16 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// released no send at all, so nothing is left that could arrive. The
     /// gate cannot see that one, so this call reads the bookkeeping and
     /// clears the grant on it.
+    ///
+    /// **The budget is the caller's**, as [`settle`](Self::settle)'s is, and
+    /// for the same reason: a producer granted a release may take several
+    /// turns to reach its send, so a bound of one can report exhaustion
+    /// where a bound of three reports [`Confirmed::Accepted`] on the same
+    /// finite execution. A driver-chosen bound would make conformance depend
+    /// on a mechanism, so the number is named at the call site and is an
+    /// element of the script (RFC 0008 §9.8). What is *not* the caller's is
+    /// the completion condition: that one is the gate's — the grant
+    /// resolving one way or the other.
     ///
     /// The disjunction is this call's *completion* condition, not a promise
     /// that one of its arms arrives inside the budget. Two of the ways a
@@ -646,16 +680,16 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// # Panics
     ///
-    /// Panics when the budget is exhausted with the grant unresolved, and
-    /// outside the running state.
+    /// Panics when `max_turns` is spent with the grant unresolved, reporting
+    /// how many turns were consumed, and outside the running state.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the call consumes the token by contract: a token that survived its resolution \
                   would name a grant the gate no longer holds (RFC 0008 §9.6)"
     )]
-    pub fn confirm(&mut self, token: GrantToken) -> Confirmed {
+    pub fn confirm(&mut self, max_turns: usize, token: GrantToken) -> Confirmed {
         self.assert_running("confirm");
-        for _ in 0..TURN_BUDGET {
+        for turns in 0..=max_turns {
             if let Some(outcome) = self.kernel.gate().take_resolution(token.sequence) {
                 return outcome;
             }
@@ -667,15 +701,17 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             if !self.holds(&token.run) && self.kernel.gate().reclaim_untaken(token.sequence) {
                 return Confirmed::Reclaimed;
             }
+            assert!(
+                turns < max_turns,
+                "bounded `confirm` exhausted: the grant at {:?} was still unresolved after \
+                 {turns} executor turns — a send waiting on lane capacity needs the `step_pass` \
+                 that drains the lane, and a run's exit reaches the bookkeeping only at a pass's \
+                 first stage, so step first and confirm after (RFC 0008 §9.6)",
+                token.run.kind
+            );
             self.turn();
         }
-        panic!(
-            "bounded `confirm` exhausted after {TURN_BUDGET} executor turns with the grant at \
-             {:?} unresolved: a send waiting on lane capacity needs the `step_pass` that drains \
-             the lane, and a run's exit reaches the bookkeeping only at a pass's first stage — \
-             step first and confirm after (RFC 0008 §9.6)",
-            token.run.kind
-        );
+        unreachable!("the budget assertion above ends the loop");
     }
 
     /// Drives the executor — beginning no pass and releasing no send-intent
@@ -699,14 +735,15 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// run's exit as the driver knows it, which reaches the driver only at a
     /// pass's first stage.
     ///
-    /// A **turn** is the driving task yielding control to the executor once,
-    /// under this condition: every task ready at that yield gets the
-    /// executor before the predicate is evaluated again. A turn is a unit of
-    /// opportunity, not of progress — it says nothing about how far any task
-    /// runs, in what order they are picked, or whether one completes. The
-    /// current-thread executor this driver owns satisfies it through its
-    /// FIFO ready queue, which is the scope the determinism claim is
-    /// verified over (RFC 0008 §9.8).
+    /// A **turn** is [`executor_turn`]'s construction: the driving task
+    /// spawns a fresh no-op task onto this driver's executor and awaits it.
+    /// A turn is a unit of opportunity, not of progress — it says nothing
+    /// about how far any task runs, in what order tasks are picked, or
+    /// whether one completes. Informatively, on the current-thread executor
+    /// this driver owns, a FIFO ready queue means the tasks ready at the
+    /// spawn do in practice run before the join resolves; that is an
+    /// observation about that executor rather than a promise (RFC 0008
+    /// §9.6, §9.8).
     ///
     /// This call initiates no append to the guaranteed sequence, and that
     /// holds structurally rather than by intent: it is misuse while a grant
@@ -876,7 +913,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
                 if let Poll::Ready(report) = futures::poll!(settle.as_mut()) {
                     return Some(report);
                 }
-                yield_now().await;
+                executor_turn().await;
             }
             None
         });
@@ -887,14 +924,13 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         );
     }
 
-    /// Hands the executor one turn: the driving task yields, and every task
-    /// ready at that point runs before this returns.
+    /// Hands the executor one turn (RFC 0008 §9.6's construction).
     ///
     /// A turn advances whatever is runnable rather than a run the caller has
     /// in mind: turns are not selective, which is a class fact about every
     /// driving call that supplies them (RFC 0008 §9.3).
     fn turn(&self) {
-        self.executor.block_on(yield_now());
+        self.executor.block_on(executor_turn());
     }
 }
 
@@ -984,6 +1020,7 @@ mod tests {
     use ratatui::Frame;
     use ratatui::backend::TestBackend;
     use tokio::sync::Notify;
+    use tokio::task::yield_now;
 
     use crate::command::Command;
     use crate::kernel::lane::SendGate;
@@ -1264,7 +1301,7 @@ mod tests {
         let first = driver.boot().started[0].clone();
 
         let token = driver.grant(first.clone()).expect("no other grant");
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
         let successor = driver
             .step_pass(WakeSource::Data)
             .expect("the granted send is in the lane")
@@ -1356,7 +1393,7 @@ mod tests {
         let run = driver.boot().started[0].clone();
 
         let token = driver.grant(run.clone()).expect("no other grant");
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
 
         let accepted = driver.accepted();
         assert_eq!(accepted.len(), 1, "one send passed the gate");
@@ -1393,7 +1430,7 @@ mod tests {
         );
 
         let token = driver.grant(run.clone()).expect("no other grant");
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
 
         let accepted = driver.accepted();
         assert_eq!(
@@ -1432,11 +1469,11 @@ mod tests {
             "and so is one at another run"
         );
 
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
         let next = driver
             .grant(second.clone())
             .expect("the resolved grant admits the next");
-        assert_eq!(driver.confirm(next), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, next), Confirmed::Accepted);
 
         let accepted = driver.accepted();
         let order: Vec<&RunName> = accepted.iter().map(SendRecord::run).collect();
@@ -1519,7 +1556,7 @@ mod tests {
 
         // The lane takes the worker's first message and is then full.
         let token = driver.grant(worker.clone()).expect("no other grant");
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
         assert_eq!(
             driver.intents().len(),
             2,
@@ -1536,7 +1573,7 @@ mod tests {
             .expect("the marking run's exit is observable");
 
         assert_eq!(journal.reduced(), vec![1], "the drained message ran update");
-        assert_eq!(driver.confirm(blocked), Confirmed::Reclaimed);
+        assert_eq!(driver.confirm(TEST_TURNS, blocked), Confirmed::Reclaimed);
         assert_eq!(
             driver.accepted().len(),
             1,
@@ -1573,7 +1610,7 @@ mod tests {
         assert!(reflected.terminated.is_none(), "an exit is not a quit");
 
         assert_eq!(
-            driver.confirm(token),
+            driver.confirm(TEST_TURNS, token),
             Confirmed::Reclaimed,
             "the grant will never put anything into the lane"
         );
@@ -1630,7 +1667,7 @@ mod tests {
         let run = driver.boot().started[0].clone();
 
         let token = driver.grant(run).expect("no other grant");
-        assert_eq!(driver.confirm(token), Confirmed::Accepted);
+        assert_eq!(driver.confirm(TEST_TURNS, token), Confirmed::Accepted);
         let report = driver
             .step_pass(WakeSource::Data)
             .expect("the granted send is in the lane");
