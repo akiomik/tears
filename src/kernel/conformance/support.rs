@@ -24,7 +24,8 @@ use std::future::{Future, pending, ready};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::thread::Result as ThreadResult;
@@ -33,6 +34,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::{Frame, Terminal};
 use tokio::sync::Notify;
+use tokio::task::yield_now;
 
 use crate::command::{Action, Command};
 use crate::kernel::Kernel;
@@ -58,6 +60,21 @@ use crate::testing::driver::{Confirmed, ParkProbe, RunName, TestDriver};
 /// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
 /// [`TestDriver::confirm`]: crate::testing::driver::TestDriver::confirm
 pub const TEST_TURNS: usize = 16;
+
+/// The turn budget the multi-worker series hand [`TestDriver::confirm`].
+///
+/// Larger than [`TEST_TURNS`] and for a different reason. On the
+/// current-thread executor a turn drains the ready queue, so a tight budget
+/// catches a script that never releases what it granted. Beside worker
+/// threads a turn is a rendezvous with another thread instead, and how many
+/// of them pass before a worker picks a granted producer up is the
+/// operating system's business — so the budget here is a hang guard whose
+/// value is mechanism, and nothing these series claim rests on it. What
+/// they claim rests on the handshake ([`MidBatchHandshake`]), which no
+/// number of turns can reorder.
+///
+/// [`TestDriver::confirm`]: crate::testing::driver::TestDriver::confirm
+pub const THREADED_TURNS: usize = 4096;
 
 /// How many turns a park witness hands the executor before re-asserting that
 /// nothing has woken the loop.
@@ -146,6 +163,14 @@ pub enum Call {
     View,
     /// `subscriptions` ran — one re-evaluation.
     Subscriptions,
+    /// The mid-batch handshake observed the gated producer's commit, from
+    /// inside the `update` that opened it (see [`MidBatchHandshake`]).
+    ///
+    /// Recorded on the driving thread by the reducer, between the `Reduce`
+    /// that opened the gate and the next one, which is what makes "the
+    /// arrival landed inside the batch" a literal reading of the journal
+    /// rather than an inference.
+    Committed,
 }
 
 /// The application's own record of what the kernel asked it to do.
@@ -169,7 +194,7 @@ impl Journal {
             .into_iter()
             .filter_map(|call| match call {
                 Call::Reduce(message) => Some(message),
-                Call::Init | Call::View | Call::Subscriptions => None,
+                Call::Init | Call::View | Call::Subscriptions | Call::Committed => None,
             })
             .collect()
     }
@@ -286,6 +311,77 @@ impl SubscriptionSource for ProbeSource {
     }
 }
 
+/// The mid-batch commit handshake: it lets a producer's send commit
+/// **during** an in-progress input batch, deterministically.
+///
+/// A pass is a synchronous region — RFC 0014 §3.5's four stages run without
+/// the driving task yielding — so the only way a producer commits inside one
+/// is for the producer to run on a thread the pass is not occupying. That is
+/// what [`threaded_driver_with`] supplies, and it is the whole of what the
+/// worker threads are for: **the determinism is this handshake's, never the
+/// scheduler's.**
+///
+/// The two halves rendezvous like this. The reducer, running on the driving
+/// thread inside the batch, calls [`open_and_await_commit`] — it opens the
+/// gate and then blocks until the producer reports its commit. The producer,
+/// running on a worker thread, busy-yields on the gate flag, and once it
+/// opens performs its real send and signals. No waker is involved on the
+/// producer's side, so no scheduling order is load-bearing; neither side can
+/// pass the other.
+///
+/// One wait here is unbounded, and it is the only one in this suite: the
+/// reducer's `recv`. It is an untimed block rather than a timed one — a
+/// deadline would be a clock read, which RFC 0014 §6.3 and this crate's
+/// disallowed-method list both rule out — so a producer that never commits
+/// hangs this test instead of failing it. That is the price of the window,
+/// and it is paid on the test's side rather than the kernel's.
+///
+/// [`open_and_await_commit`]: MidBatchHandshake::open_and_await_commit
+pub struct MidBatchHandshake {
+    open: Arc<AtomicBool>,
+    committed: Receiver<()>,
+}
+
+/// The producer half of a [`MidBatchHandshake`], handed to the effect that
+/// commits inside the batch.
+pub struct MidBatchGate {
+    open: Arc<AtomicBool>,
+    committed: Sender<()>,
+}
+
+impl MidBatchHandshake {
+    /// A fresh handshake and the gate its producer holds.
+    pub fn new() -> (Self, MidBatchGate) {
+        let open = Arc::new(AtomicBool::new(false));
+        let (committed, received) = mpsc::channel();
+        (
+            Self {
+                open: Arc::clone(&open),
+                committed: received,
+            },
+            MidBatchGate { open, committed },
+        )
+    }
+
+    /// Reducer side: open the producer's gate, then wait for its commit.
+    ///
+    /// Returns only once the producer's send has returned, so everything the
+    /// reducer does after this — including the command it returns — is
+    /// strictly after the commit, and everything the batch does before it is
+    /// strictly before.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the producer's half is gone without a signal, which means
+    /// the run ended before reaching its send.
+    pub fn open_and_await_commit(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        self.committed
+            .recv()
+            .expect("the gated producer commits while the batch is in progress");
+    }
+}
+
 /// A named, state-gated subscription declaration.
 ///
 /// The scripted program declares a feed exactly while its name is in the
@@ -344,6 +440,9 @@ pub struct Script {
     redeclare: HashMap<u8, Vec<&'static str>>,
     /// The message whose `update` panics — the driving-task panic class.
     panic_on: Option<u8>,
+    /// The message whose `update` runs the mid-batch handshake, and the
+    /// handshake it runs.
+    handshake: Option<(u8, MidBatchHandshake)>,
 }
 
 impl Script {
@@ -358,6 +457,7 @@ impl Script {
             wanted: Vec::new(),
             redeclare: HashMap::new(),
             panic_on: None,
+            handshake: None,
         }
     }
 
@@ -409,6 +509,15 @@ impl Script {
         self.panic_on = Some(message);
         self
     }
+
+    /// Runs `handshake` from the `update` for `message`, so a gated
+    /// producer's send commits between that message and the batch's next
+    /// one.
+    #[must_use]
+    pub fn handshaking_on(mut self, message: u8, handshake: MidBatchHandshake) -> Self {
+        self.handshake = Some((message, handshake));
+        self
+    }
 }
 
 /// The scripted program's state: the script, minus what `init` consumed.
@@ -419,6 +528,7 @@ pub struct State {
     wanted: Vec<&'static str>,
     redeclare: HashMap<u8, Vec<&'static str>>,
     panic_on: Option<u8>,
+    handshake: Option<(u8, MidBatchHandshake)>,
 }
 
 /// A program that replies from its script and records every call the kernel
@@ -439,6 +549,14 @@ impl Reducer for Scripted {
         );
         if let Some(wanted) = state.redeclare.get(&message) {
             state.wanted.clone_from(wanted);
+        }
+        // Before the reply is taken, so the command this `update` returns —
+        // a teardown, say — applies strictly after the gated commit.
+        if let Some((gated, handshake)) = state.handshake.as_ref()
+            && *gated == message
+        {
+            handshake.open_and_await_commit();
+            self.journal.record(Call::Committed);
         }
         state.replies.pop_front().unwrap_or_else(Command::none)
     }
@@ -473,6 +591,7 @@ impl Program for Scripted {
             wanted,
             redeclare,
             panic_on,
+            handshake,
         } = flags;
         (
             State {
@@ -482,6 +601,7 @@ impl Program for Scripted {
                 wanted,
                 redeclare,
                 panic_on,
+                handshake,
             },
             init,
         )
@@ -526,6 +646,30 @@ pub fn driver_with(
     };
     (
         TestDriver::new(program, script, config, terminal()),
+        journal,
+    )
+}
+
+/// A driver on a multi-worker executor, for the series whose producer has
+/// to commit while a pass is running.
+///
+/// Two workers beside the driving thread, which is what the mid-batch
+/// handshake needs: the driving thread blocks inside `update` while the
+/// gated producer runs. The executor is the only difference — same
+/// production construction path, same two seams, same pass-unit stepping —
+/// and the determinism of these series is the handshake's, not the
+/// scheduler's, so they cite no part of INV-RC14's scripted-determinism
+/// claim (RFC 0008 §9.8's verified range is current-thread).
+pub fn threaded_driver_with(
+    script: Script,
+    config: RuntimeConfig,
+) -> (TestDriver<Scripted, TestBackend>, Journal) {
+    let journal = Journal::default();
+    let program = Scripted {
+        journal: journal.clone(),
+    };
+    (
+        TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
         journal,
     )
 }
@@ -577,9 +721,19 @@ pub fn park_kernel(script: Script) -> (Kernel<Scripted>, Journal) {
 /// guaranteed sequence, `confirm` reports the commit, and only then is a
 /// further grant admitted anywhere on the driver.
 pub fn accept<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, run: RunName) {
+    accept_within(driver, run, TEST_TURNS);
+}
+
+/// [`accept`] under a stated budget, for the multi-worker series
+/// ([`THREADED_TURNS`]).
+pub fn accept_within<P: Program, B: Backend>(
+    driver: &mut TestDriver<P, B>,
+    run: RunName,
+    max_turns: usize,
+) {
     let token = driver.grant(run).expect("no other grant is outstanding");
     assert_eq!(
-        driver.confirm(TEST_TURNS, token),
+        driver.confirm(max_turns, token),
         Confirmed::Accepted,
         "the released send committed into its lane"
     );
@@ -665,6 +819,36 @@ pub fn finishing_effect(messages: Vec<u8>, done: Beacon) -> Command<u8> {
 /// and then ends (RFC 0014 §3.3).
 pub fn quitting_effect() -> Command<u8> {
     Command::actions(stream::once(async { Action::Quit }))
+}
+
+/// An effect that sends each of `messages`, then holds at `gate` until the
+/// reducer opens it, then commits one producer-originated quit, signals the
+/// handshake, and parks forever.
+///
+/// The hold is a busy-yield rather than a waker wait, so nothing about the
+/// executor's wake ordering is load-bearing: the producer proceeds exactly
+/// when the flag says so. The signal is emitted from the poll *after* the
+/// quit's send returned, so it reports a commit rather than an intent — the
+/// reducer that is blocked on it resumes only once the quit is in the
+/// control lane.
+pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> Command<u8> {
+    let MidBatchGate { open, committed } = gate;
+    Command::actions(
+        stream::iter(messages.into_iter().map(Action::Message))
+            .chain(stream::once(async move {
+                while !open.load(Ordering::SeqCst) {
+                    yield_now().await;
+                }
+                Action::Quit
+            }))
+            .chain(stream::once(async move {
+                // A closed receiver means the reducer that opened this gate
+                // is gone, which is the test failing elsewhere; there is
+                // nothing useful to do about it from a producer task.
+                let _sent = committed.send(());
+                pending().await
+            })),
+    )
 }
 
 /// A producer-originated quit whose run then parks forever, so the quit's

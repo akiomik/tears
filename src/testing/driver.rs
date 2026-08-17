@@ -50,6 +50,8 @@
 
 use std::collections::HashMap;
 use std::future::{Future, ready};
+#[cfg(test)]
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -495,16 +497,73 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// driver owns the executor it turns, and a driving call inside another
     /// runtime cannot turn it.
     #[must_use]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "RFC 0008 §9.3's constructor takes the production entry point's own inputs by \
-                  value, config included"
-    )]
     pub fn new(program: P, flags: P::Flags, config: RuntimeConfig, terminal: Terminal<B>) -> Self {
         let executor = Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a current-thread executor for the driven kernel");
+        Self::on(executor, program, flags, config, terminal)
+    }
+
+    /// The same construction on a multi-worker executor, for the series that
+    /// need a producer to commit while a pass is running.
+    ///
+    /// **This is harness plumbing, not a second seam.** The executor a
+    /// driver turns is mechanism: RFC 0008 §9.3's block fixes what exists on
+    /// the surface, and §9.8 scopes INV-RC14's determinism *claim* to a
+    /// current-thread executor — the verified range — rather than fixing the
+    /// driver's own construction. Nothing else differs: the same production
+    /// construction path, the same two seams, the same pass-unit stepping.
+    ///
+    /// What it buys is the one window a single-threaded executor does not
+    /// have. A pass is a synchronous region — RFC 0014 §3.5's four stages
+    /// run without the driving task yielding — so on one thread no producer
+    /// can commit inside a pass, and INV-RC9's mid-batch and
+    /// cancel-beats-quit rows have nothing to observe. With worker threads
+    /// beside the driving thread they do, and the series that use this
+    /// **carry their own determinism**: the commit is synchronized to a
+    /// stage boundary by an application-side handshake, never by the
+    /// scheduler, and those series cite no part of INV-RC14.
+    ///
+    /// Crate-visible and test-only. Whether the driving contract should
+    /// carry a public form of it is the executor-independence question
+    /// RFC 0014 §13.3 leaves open, and this is an input to it rather than an
+    /// answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the multi-worker executor cannot be built.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn on_worker_threads(
+        program: P,
+        flags: P::Flags,
+        config: RuntimeConfig,
+        terminal: Terminal<B>,
+        workers: NonZeroUsize,
+    ) -> Self {
+        let executor = Builder::new_multi_thread()
+            .worker_threads(workers.get())
+            .enable_all()
+            .build()
+            .expect("a multi-worker executor for the driven kernel");
+        Self::on(executor, program, flags, config, terminal)
+    }
+
+    /// The one construction body both entry points share, so the executor is
+    /// the only thing that differs between them.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "RFC 0008 §9.3's constructor takes the production entry point's own inputs by \
+                  value, config included, and this body is where both entry points hand them over"
+    )]
+    fn on(
+        executor: Executor,
+        program: P,
+        flags: P::Flags,
+        config: RuntimeConfig,
+        terminal: Terminal<B>,
+    ) -> Self {
         Self {
             kernel: Kernel::new(
                 program,
