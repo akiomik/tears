@@ -80,7 +80,7 @@
 //! | `parked control-quit wake` | [`park`] | INV-RC16 |
 //! | `parked subscription-quiescence wake` | [`park`] | INV-RC16 |
 //!
-//! Five neighbours sit beside the twelve, in the same files and under the
+//! Six neighbours sit beside the twelve, in the same files and under the
 //! same rules: [`delivery`] carries INV-RC10's flood rows (FIFO prefix,
 //! backlog-proportional passes, a render between batches); [`teardown`]
 //! carries RFC 0013 §7.1's kernel rows — INV-ST1, INV-ST3, INV-ST5, INV-ST6,
@@ -90,10 +90,11 @@
 //! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup kind;
 //! [`combinator`] carries INV-RC2, INV-RC3, and INV-RC4's rows as the kernel
 //! applies them, over a program that is a closed combinator stack rather
-//! than the scripted reducer; and [`admission`] carries RFC 0012's
-//! admission suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and
-//! INV-SE4's mandated supersession sequence — which is INV-RC12's first
-//! clause.
+//! than the scripted reducer; [`admission`] carries RFC 0012's admission
+//! suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and INV-SE4's
+//! mandated supersession sequence — which is INV-RC12's first clause; and
+//! [`observability`] carries the batch event's kernel reading and INV-RC15's
+//! behavioural neighbour (RFC 0014 §9 row 9).
 //!
 //! [`lifecycle`] additionally carries the rows of RFC 0011's suite that the
 //! four series above do not, which is the rest of INV-RC11; its own module
@@ -102,11 +103,17 @@
 //! # What this surface does not reach
 //!
 //! The behavioral rows above are §13.1's twelve series and their named
-//! neighbours. What stays open is the observability vocabulary (INV-RC15's
-//! behavioral neighbour), and beside it the structural halves that no
+//! neighbours. What stays outside them is the structural halves that no
 //! finite script can carry — INV-RC16's arming, §3.5's unbiased pass
 //! initiation, INV-RC12 (c), INV-ST7's absence half, and INV-RC8's
 //! no-output clause, each of which is structural by its own statement.
+//!
+//! One production surface is read here rather than driven: the
+//! `tears::runtime::load` events, which [`observability`] and two rows in
+//! [`quit`] and `kernel` assert on through a `tracing` recorder. That is the
+//! schema's own surface (RFC 0006 §4.4, INV-L13) and no part of the driver's
+//! evidence surface, which is why those rows read it directly instead of
+//! through a ledger.
 //!
 //! One clause of INV-RC12 (a) is unreachable for a different reason, and it
 //! is a construction limit rather than an open row: outside termination
@@ -131,6 +138,7 @@ pub mod cleanup;
 pub mod combinator;
 pub mod delivery;
 pub mod lifecycle;
+pub mod observability;
 pub mod park;
 pub mod quit;
 pub mod support;
