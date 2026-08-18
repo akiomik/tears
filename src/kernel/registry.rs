@@ -48,6 +48,15 @@ pub enum RunKind {
     /// barrier and only its quiescence can mark subscriptions dirty
     /// (RFC 0014 §5.1, §5.2).
     Sub(SubscriptionId),
+    /// A cleanup finalizer started by a teardown's application point.
+    ///
+    /// Runtime-owned like every other run — one entry, one join set, one
+    /// abort, one settle — and excluded from four things by its kind: it
+    /// counts toward no gauge (RFC 0006 §5.2's successor note), joins no
+    /// admission barrier and defers nothing (RFC 0014 INV-RC12 (a)), marks
+    /// no subscription dirt (§5.2), and is not selected by a later teardown
+    /// (RFC 0013 §3.1: a cleanup run already started is not selected).
+    Cleanup,
 }
 
 /// Lifecycle phase.
@@ -172,12 +181,25 @@ const fn stop_effect(exited: bool, phase: Phase) -> StopEffect {
 ///
 /// A complete-prefix comparison from the path root over structural segment
 /// equality: a path equal to the prefix is selected, and shorter, reordered,
-/// subset, and deeper-position paths are not. The run's *kind* and its local
-/// key are not arguments, which is how "uniform across every run kind" and
-/// "local keys never participate in selection" are structural here rather
-/// than asserted per kind.
+/// subset, and deeper-position paths are not. The run's local key is not an
+/// argument, which is how "local keys never participate in selection" is
+/// structural here rather than asserted per kind.
 fn selected_by(scope: &ScopePath, prefix: &ScopePath) -> bool {
     scope.starts_with(prefix)
+}
+
+/// Whether a run of this kind is a teardown *subject* at all.
+///
+/// The three producer kinds are, uniformly — that is INV-ST1's "across every
+/// run kind", and it is why the path predicate above takes no kind. A
+/// cleanup run that has already started is not: RFC 0013 §3.1 excludes it by
+/// name, and the reason is that a finalizer started by a teardown is itself a
+/// run under that very prefix, so a selection that read the kind out would
+/// have the application point stopping the work it had just begun — and a
+/// *second* application would stop a first application's still-running
+/// finalizer, which is exactly the re-entrance INV-ST5's idempotence denies.
+const fn selectable_by_teardown(kind: &RunKind) -> bool {
+    !matches!(kind, RunKind::Cleanup)
 }
 
 /// One run's authoritative record.
@@ -330,10 +352,13 @@ impl ScopeRegistry {
     ///
     /// Tombstones are selected like any other entry: a run that finished
     /// with output still queued is exactly the case INV-ST4 names, and
-    /// revoking it is what retracts that output.
+    /// revoking it is what retracts that output. Cleanup runs are the one
+    /// exclusion, and it is by kind rather than by path
+    /// ([`selectable_by_teardown`]).
     pub fn select_prefix(&self, prefix: &ScopePath) -> Vec<RunToken> {
         self.entries
             .values()
+            .filter(|entry| selectable_by_teardown(&entry.kind))
             .filter(|entry| selected_by(&entry.scope, prefix))
             .map(|entry| entry.token)
             .collect()
@@ -522,6 +547,9 @@ mod tests {
 
     use std::hash::{Hash, Hasher};
 
+    use crate::subscription::Subscription;
+    use crate::subscription::mock::MockSource;
+
     fn path(segments: &[&'static str]) -> ScopePath {
         // Root-first storage: the *last* `prefixed` call names the outermost
         // segment, so the slice reads root-first when applied in reverse.
@@ -685,6 +713,23 @@ mod tests {
         assert!(
             !selected_by(&first, &second),
             "selection compares structural values, not hashes"
+        );
+    }
+
+    // RFC 0013 §3.1's one exclusion by kind: the three producer kinds are
+    // teardown subjects uniformly, a started cleanup run is not.
+    #[test]
+    fn every_producer_kind_is_a_teardown_subject_and_a_cleanup_run_is_not() {
+        assert!(selectable_by_teardown(&RunKind::Keyed(CommandId::new(
+            "worker"
+        ))));
+        assert!(selectable_by_teardown(&RunKind::Anon));
+        assert!(selectable_by_teardown(&RunKind::Sub(
+            Subscription::new(MockSource::<u8>::new()).id().clone()
+        )));
+        assert!(
+            !selectable_by_teardown(&RunKind::Cleanup),
+            "a finalizer a teardown started is a run under that very prefix"
         );
     }
 

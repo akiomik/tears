@@ -1,10 +1,16 @@
 //! Producer task bodies and the policy every runtime-owned run shares.
 //!
-//! One harness for every kind — keyed command, anonymous command,
+//! One harness for every producer kind — keyed command, anonymous command,
 //! subscription forwarder — so task ownership, panic containment, gauge
 //! accounting, and the send-stop policy have a single implementation and no
 //! per-kind variant for a contract to slip through (RFC 0014 INV-RC1's
 //! "effect-task ownership and bookkeeping" and "task body policy" rows).
+//!
+//! Cleanup runs take [`CleanupHarness`] instead, and the split is deliberate
+//! rather than incidental: they share the task-body policy through
+//! [`spawn_contained`] and differ in exactly one thing — the cleanup
+//! construction site is handed **no lane sender and no ingress**, which is
+//! the structural half of INV-RC8's no-output clause.
 //!
 //! Policy, stated once:
 //!
@@ -29,7 +35,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use tokio::task::{Id as TaskId, JoinSet};
+use tokio::task::{AbortHandle, Id as TaskId, JoinSet};
 
 use crate::command::Action;
 use crate::panic::contained_producer;
@@ -123,12 +129,65 @@ pub fn subscription_body<Msg: Send + 'static>(stream: BoxStream<'static, Msg>) -
 /// membership mutation point, because a keyed entry's lifetime is the
 /// runtime's rather than its task's — a draining entry outlives its task, so
 /// no task-scoped guard could carry it.
+///
+/// Cleanup runs contribute to none at all, and that is contract rather than
+/// an omission: the schema's producer gauges count the three producer kinds,
+/// and a cleanup run is none of them (RFC 0006 §5.2's successor note,
+/// RFC 0014 §9 row 9). What still accounts for it is the settle drain, which
+/// is total over the join set.
 fn gauge_guard(observer: &LoadObserver, kind: &RunKind) -> Option<GaugeGuard> {
     match kind {
-        RunKind::Keyed(_) => None,
+        RunKind::Keyed(_) | RunKind::Cleanup => None,
         RunKind::Anon => Some(observer.track_unkeyed_command()),
         RunKind::Sub(_) => Some(observer.track_subscription()),
     }
+}
+
+/// Spawns one runtime-owned task under the policy every run kind shares:
+/// panic containment, the one join set, the task index, and a gauge guard
+/// dropped on every exit path.
+///
+/// A free function rather than a method so that both harnesses below reach
+/// exactly the same body — there is one task-body policy for every
+/// runtime-owned run, cleanup runs included (RFC 0014 INV-RC1's "task body
+/// policy" row).
+fn spawn_contained(
+    join_set: &mut JoinSet<()>,
+    task_index: &mut HashMap<TaskId, RunToken>,
+    token: RunToken,
+    gauge: Option<GaugeGuard>,
+    run: BoxFuture<'static, ()>,
+) -> AbortHandle {
+    let abort = join_set.spawn(async move {
+        // Held for the whole body and dropped on every exit path —
+        // completion, abort, and panic unwind alike (RFC 0006 §4.4).
+        let _gauge = gauge;
+        // `contained_producer` marks the poll so the panic hook skips
+        // restoring the terminal of an application that keeps running
+        // (RFC 0011 INV-LC8). The catch is what discharges the one
+        // diagnostic obligation the successor still carries — RFC 0003
+        // §7.3's keyed-panic log event, which RFC 0011 §5.1 carves out
+        // of its diagnostic negative space — for every producer kind
+        // rather than per kind.
+        let outcome = AssertUnwindSafe(contained_producer(run))
+            .catch_unwind()
+            .await;
+        if let Err(payload) = outcome {
+            tracing::error!(
+                target: "tears::kernel",
+                panic = ?payload,
+                "producer task panicked"
+            );
+            // Re-raised so the exit still reaches the join set as a
+            // panic rather than as an ordinary completion, which is what
+            // the pass's exit reflection reads. `resume_unwind` does not
+            // run the panic hook again, so the report above stays the
+            // only one.
+            resume_unwind(payload);
+        }
+    });
+    task_index.insert(abort.id(), token);
+    abort
 }
 
 /// The spawn-side policy every runtime-owned producer run shares.
@@ -195,36 +254,7 @@ impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
         );
         let gauge = gauge_guard(self.observer, &kind);
         let run = body(EffectCtx { handle });
-
-        let abort = self.join_set.spawn(async move {
-            // Held for the whole body and dropped on every exit path —
-            // completion, abort, and panic unwind alike (RFC 0006 §4.4).
-            let _gauge = gauge;
-            // `contained_producer` marks the poll so the panic hook skips
-            // restoring the terminal of an application that keeps running
-            // (RFC 0011 INV-LC8). The catch is what discharges the one
-            // diagnostic obligation the successor still carries — RFC 0003
-            // §7.3's keyed-panic log event, which RFC 0011 §5.1 carves out
-            // of its diagnostic negative space — for every producer kind
-            // rather than per kind.
-            let outcome = AssertUnwindSafe(contained_producer(run))
-                .catch_unwind()
-                .await;
-            if let Err(payload) = outcome {
-                tracing::error!(
-                    target: "tears::kernel",
-                    panic = ?payload,
-                    "producer task panicked"
-                );
-                // Re-raised so the exit still reaches the join set as a
-                // panic rather than as an ordinary completion, which is what
-                // the pass's exit reflection reads. `resume_unwind` does not
-                // run the panic hook again, so the report above stays the
-                // only one.
-                resume_unwind(payload);
-            }
-        });
-        self.task_index.insert(abort.id(), token);
+        let abort = spawn_contained(self.join_set, self.task_index, token, gauge, run);
 
         RunEntry {
             token,
@@ -235,6 +265,78 @@ impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
             exited: false,
             counter,
             gate,
+            abort,
+        }
+    }
+}
+
+/// The spawn-side policy a **cleanup** run takes.
+///
+/// A separate type from [`ProducerHarness`], and the separation is where
+/// INV-RC8's no-output clause is enforced: these fields are the whole of
+/// what a cleanup run's construction can reach, and no lane sender is among
+/// them — no [`DataSender`], no [`ControlSender`], no [`IngressHandle`] to
+/// carry one, and no directive path. A cleanup run therefore has no route
+/// back into the runtime *by construction* rather than by its body's
+/// discipline: it cannot deliver a message, cannot originate a quit, and
+/// cannot mark redraw or subscription dirt, because there is nothing here to
+/// hand it that would.
+///
+/// That clause is structural-primary for the reason RFC 0014 INV-RC8 states:
+/// no cleanup run that *attempts* an output exists for a test to observe
+/// failing, so a review of this construction site is the evidence and a
+/// behavioral row over an ordinary finalizer is its regression neighbour.
+///
+/// Everything else is shared with the producer harness through
+/// [`spawn_contained`]: the same join set, the same task index, the same
+/// panic containment, the same abort handle. A cleanup run is
+/// runtime-**owned** exactly like the rest, which is what makes termination
+/// cancel it and the settle drain account for it.
+pub struct CleanupHarness<'a> {
+    /// The single join set every runtime-owned run is spawned into.
+    pub join_set: &'a mut JoinSet<()>,
+    /// Task-id to run-token index, so an exit observation names its run.
+    pub task_index: &'a mut HashMap<TaskId, RunToken>,
+    /// The kernel's send gate.
+    ///
+    /// Carried only to fill the registry entry's field, which every run has.
+    /// Nothing ever waits on it for a cleanup run: waiting happens in
+    /// [`IngressHandle`], and this harness constructs none — so this is
+    /// bookkeeping, not a seam the finalizer can reach.
+    pub gate: &'a Arc<SendGate>,
+}
+
+impl CleanupHarness<'_> {
+    /// Starts one finalizer as a runtime-owned cleanup run and returns its
+    /// registry entry.
+    ///
+    /// `scope` is the registration's anchor, kept on the entry like any
+    /// other run's placement. It is not a selection subject — a started
+    /// cleanup run is excluded from teardown selection by kind (RFC 0013
+    /// §3.1) — but it is what a diagnostic reads and what keeps the entry
+    /// uniform with the rest.
+    ///
+    /// The counter is fresh and stays at zero: a reservation is taken on a
+    /// send, and there is no send path here, so the entry's removal
+    /// condition reduces to "its exit was observed" (the accounting's rule 5
+    /// with `pending == 0` by construction).
+    pub fn start(
+        &mut self,
+        token: RunToken,
+        scope: ScopePath,
+        finalizer: BoxFuture<'static, ()>,
+    ) -> RunEntry {
+        let abort = spawn_contained(self.join_set, self.task_index, token, None, finalizer);
+
+        RunEntry {
+            token,
+            kind: RunKind::Cleanup,
+            scope,
+            phase: Phase::Running,
+            revoked: false,
+            exited: false,
+            counter: Arc::new(PendingCounter::default()),
+            gate: Arc::clone(self.gate),
             abort,
         }
     }
@@ -294,6 +396,18 @@ mod tests {
             gauge_trace(&RunKind::Keyed(CommandId::new("load"))).is_empty(),
             "the keyed gauge is count-based and published by the registry, so \
              starting a keyed run emits nothing here"
+        );
+    }
+
+    // INV-RC8's accounting half: a cleanup run counts toward no gauge at
+    // all — not the subscription one, not the unkeyed-command one, and not
+    // the registry's keyed count, which it never enters because its kind is
+    // not `Keyed`.
+    #[test]
+    fn a_cleanup_run_counts_toward_no_gauge() {
+        assert!(
+            gauge_trace(&RunKind::Cleanup).is_empty(),
+            "a cleanup run is none of the three producer kinds the schema counts"
         );
     }
 }

@@ -16,6 +16,7 @@ use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
 use super::cancellation::{CancelPolicy, CancellableCommand, CommandCancellation, CommandId};
+use super::cleanup::CleanupRegistration;
 use super::effect::Effect;
 use super::retry::{self, RetryContext, RetryError, RetryPolicy};
 use super::runtime_directives::RuntimeDirectives;
@@ -51,6 +52,10 @@ pub struct Command<Msg: Send + 'static> {
     // beside `cancellation` rather than as an effect leaf (RFC 0013 §3.3,
     // RFC 0014 §3.4).
     teardowns: Vec<ScopePath>,
+    // Cleanup finalizers to arm. A carrier for the same reason teardown is
+    // one, on the other side of the phase order: a registration applies in
+    // the spawn phase and starts nothing there (RFC 0014 §3.4, §4.4).
+    cleanups: Vec<CleanupRegistration>,
 }
 
 impl<Msg: Send + 'static> Command<Msg> {
@@ -63,6 +68,7 @@ impl<Msg: Send + 'static> Command<Msg> {
                 cancels: Vec::new(),
             },
             teardowns: Vec::new(),
+            cleanups: Vec::new(),
         }
     }
 
@@ -144,6 +150,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             self.effect.into_leaves(),
             self.cancellation,
             self.teardowns,
+            self.cleanups,
         )
     }
 
@@ -295,6 +302,12 @@ impl<Msg: Send + 'static> Command<Msg> {
             .map(|prefix| prefix.prefixed_key(segment.clone()))
             .collect();
 
+        self.cleanups = self
+            .cleanups
+            .into_iter()
+            .map(|registration| registration.scoped_with(segment.clone()))
+            .collect();
+
         // Per-carrier keys and scopes. The key half reaches a batched
         // child's own key; the scope half is what an *unkeyed* carrier
         // gets, so a prefix teardown can select it (RFC 0014 INV-RC7).
@@ -344,6 +357,84 @@ impl<Msg: Send + 'static> Command<Msg> {
     {
         Self {
             teardowns: vec![ScopePath::empty().prefixed(scope)],
+            ..Self::none()
+        }
+    }
+
+    /// Takes `other`'s teardown prefixes onto this command and **nothing
+    /// else** — not its effect, not its directives, not its cancellation
+    /// metadata, not its cleanup registrations.
+    ///
+    /// This is aggregation of an already-originated teardown, which RFC 0013
+    /// §7.2's origination review names as a free transformation: the entry
+    /// still comes from a [`Command::teardown`] call, and there is no route
+    /// here from a raw prefix. A `debug_assert` holds `other` to that shape
+    /// so this cannot quietly become a general-purpose merge.
+    ///
+    /// The one caller is a combinator's journal drain, which has to put a
+    /// removal's teardown on a command the application returned.
+    /// [`Command::batch`] would be wrong there twice over: it folds the
+    /// redraw directive across its children, so an update that returned
+    /// [`Command::without_redraw`] would silently regain its redraw, and it
+    /// warns about a child spawn key for a command the boundary is only
+    /// passing through. A boundary adds identity carriers and nothing else
+    /// (RFC 0014 §2.5).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only through the kernel's own consumers, which no non-test build can \
+                      construct until the entry point is switched over"
+        )
+    )]
+    pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
+        debug_assert!(
+            other.is_none()
+                && other.directives == RuntimeDirectives::DEFAULT
+                && other.cleanups.is_empty()
+                && other.cancellation.key.is_none()
+                && other.cancellation.cancels.is_empty(),
+            "merging_teardowns aggregates teardown entries only; an effect, a redraw directive, a \
+             cleanup registration, a spawn key, or an explicit cancel on `other` would be dropped \
+             silently"
+        );
+        self.teardowns.extend(other.teardowns);
+        self
+    }
+
+    /// Registers `finalizer` to run when a teardown selects the structural
+    /// scope at this call boundary.
+    ///
+    /// The finalizer is an ordinary future under this type's existing effect
+    /// bounds, with `Output = ()` rather than a message because a cleanup
+    /// run produces none (RFC 0014 §4.4). It runs **at most once**, started
+    /// at the application point of the teardown that consumes it, and is not
+    /// re-fired by a later teardown of the same prefix. Termination is not a
+    /// teardown: it discards whatever is still unfired and cancels whatever
+    /// is running.
+    ///
+    /// Like [`Command::teardown`] this carries no effect stream, so
+    /// [`Command::is_none`] stays `true`, and it composes through
+    /// [`Command::scoped`] exactly as a teardown prefix does (RFC 0013
+    /// INV-ST2, RFC 0005 INV-18's coverage). Its external side effects are
+    /// its whole purpose and are not restricted; what is closed is the path
+    /// back into the runtime.
+    ///
+    /// Crate-private for now, for the reason [`Command::teardown`] is: the
+    /// runtime that starts a finalizer is the kernel of RFC 0014, and a
+    /// public constructor the current runtime would accept and ignore is the
+    /// silent mismatch RFC 0007 INV-C5 prohibits.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel that starts a registered finalizer is here, but no non-test build \
+                      can reach it until the entry point is switched over to it"
+        )
+    )]
+    pub(crate) fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self {
+            cleanups: vec![CleanupRegistration::new(finalizer)],
             ..Self::none()
         }
     }
@@ -567,6 +658,7 @@ impl<Msg: Send + 'static> Command<Msg> {
         let mut effects = Vec::new();
         let mut cancels = Vec::new();
         let mut teardowns = Vec::new();
+        let mut cleanups = Vec::new();
 
         for mut cmd in commands {
             any_child = true;
@@ -593,6 +685,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             }
             cancels.extend(cmd.cancellation.cancels);
             teardowns.extend(cmd.teardowns);
+            cleanups.extend(cmd.cleanups);
             effects.push(cmd.effect);
         }
 
@@ -602,6 +695,7 @@ impl<Msg: Send + 'static> Command<Msg> {
                 directives,
                 cancellation: CommandCancellation { key: None, cancels },
                 teardowns,
+                cleanups,
             }
         } else {
             Self::none()
@@ -700,6 +794,10 @@ impl<Msg: Send + 'static> Command<Msg> {
         let directives = self.directives;
         let cancellation = self.cancellation;
         let teardowns = self.teardowns;
+        // Carried across the message-type change untouched: a registration
+        // holds no message type to map, its finalizer's `Output` being `()`
+        // (RFC 0014 §4.4).
+        let cleanups = self.cleanups;
         let effect = self.effect.map(f);
 
         Command {
@@ -707,6 +805,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             directives,
             cancellation,
             teardowns,
+            cleanups,
         }
     }
 }

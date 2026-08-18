@@ -7,7 +7,7 @@
 //! execution 3-tuple, and the kernel takes the buckets below, which name the
 //! phases RFC 0014 §3.4 orders — a cancel phase (`cancels`, `teardowns`)
 //! that precedes every spawn of the same command, then a spawn phase
-//! (`spawns`) in declaration order.
+//! (`spawns` in declaration order, and `cleanups`).
 
 // The kernel that reads these buckets is still being scaffolded, so outside
 // the command layer's own tests nothing consumes them yet.
@@ -26,6 +26,7 @@ use crate::structural_key::ScopePath;
 
 use super::Action;
 use super::cancellation::{CancellableCommand, CommandId};
+use super::cleanup::CleanupRegistration;
 
 /// One command, read as the kernel's phase buckets.
 pub struct KernelParts<Msg: Send + 'static> {
@@ -40,6 +41,11 @@ pub struct KernelParts<Msg: Send + 'static> {
     /// Scope prefixes to tear down, applied in the cancel phase alongside
     /// `cancels`, with which teardown commutes (RFC 0013 §3.3).
     pub teardowns: Vec<ScopePath>,
+    /// Cleanup finalizers to arm, applied in the spawn phase — after the
+    /// same command's cancel phase, so a teardown-and-reregister command
+    /// consumes the old occupant's hooks and leaves the new registration
+    /// armed (RFC 0014 §3.4, §4.4).
+    pub cleanups: Vec<CleanupRegistration>,
     /// Producer runs to start, in the command's flattened declaration order
     /// (RFC 0008 §4.1).
     pub spawns: Vec<SpawnEntry<Msg>>,
