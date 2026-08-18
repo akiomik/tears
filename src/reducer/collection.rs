@@ -32,6 +32,17 @@
 //! (RFC 0014 §2.5). Insertion into an absent key and presentation into an
 //! empty slot record nothing — there was no instance to remove.
 //!
+//! **Four shapes is the whole surface, and that is deliberate.** There is no
+//! `retain`, no `clear`, no `drain`, no `IndexMut`, and no `&mut` iterator:
+//! removing several rows is several [`Keyed::remove`] calls, which is the
+//! only thing that keeps INV-RC3's "every removal shape" exhaustive by
+//! construction rather than by review. Any bulk operation added later
+//! **must record one journal entry per instance it removes** — a `retain`
+//! that quietly kept the surviving rows and dropped the rest would leak
+//! every dropped row's runs, which is §11's diff-based adversary arriving
+//! through a convenience method. The same goes for any accessor that hands
+//! out mutable access to the backing sequence.
+//!
 //! Draining is the combinator's, not the application's: the two `drain_*`
 //! methods are crate-private, so an application can neither consume a
 //! pending removal before the boundary sees it nor manufacture one.
@@ -66,9 +77,13 @@ use std::mem;
 ///
 /// The blanket implementation below is the whole of it: nothing opts in, and
 /// no type that satisfies the bound can be excluded.
-pub trait ScopeValue: PartialEq + Eq + Hash + Clone + Send + Sync + 'static {}
+///
+/// RFC 0014 §2.5's block writes `PartialEq + Eq + …`, which `Eq: PartialEq`
+/// makes redundant; the bound is written here without it, and the RFC's
+/// wording is synced when §2.5's surface is made public at the switch.
+pub trait ScopeValue: Eq + Hash + Clone + Send + Sync + 'static {}
 
-impl<T> ScopeValue for T where T: PartialEq + Eq + Hash + Clone + Send + Sync + 'static {}
+impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 
 /// A keyed collection of child states, with a removal journal.
 ///

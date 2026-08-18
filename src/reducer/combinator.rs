@@ -20,6 +20,26 @@
 //!   (INV-RC3). Only [`ForEach`] and [`Presented`] have a journal to drain;
 //!   [`Scoped`] has none, because it composes a single child in place and
 //!   there is no collection at its boundary for an instance to leave.
+//!
+//! # A boundary drains only when its own `reduce` runs
+//!
+//! In a stack, a message an *outer* boundary claims is routed to that
+//! boundary's child, and the boundaries below it — its parent chain — do not
+//! run at all. Their journals are therefore not drained by that message.
+//!
+//! For an entry a boundary recorded **itself**, this is invisible: only a
+//! boundary's parent branch can record (a child is handed a projection and
+//! cannot reach the collection), and that branch is the one that drains, in
+//! the same call. It is observable only for an entry recorded outside a
+//! `reduce`, which the [`collection`](super::collection) module's note tells
+//! an application not to do. Such an entry stays owed until the next message
+//! that reaches its boundary, and is paid in full then — nothing is lost,
+//! but the teardown is deferred.
+//!
+//! `an_outer_claim_leaves_an_inner_boundary_s_pending_removal_undrained` is
+//! the row, and it is the wall a future INV-RC3 extension would meet: making
+//! the timing unconditional means draining every boundary in the stack per
+//! message, which is a different contract from the one §2.5 states.
 //! - **Routes typed messages**: `extract` either claims a message for the
 //!   child or hands it back to the parent, and a message addressed to a key
 //!   or slot with no instance is routed to nothing and discarded.
@@ -82,6 +102,8 @@
     clippy::type_complexity,
     reason = "RFC 0014 §2.5 fixes these signatures verbatim; an alias would hide the contract"
 )]
+
+use std::iter;
 
 use ratatui::Frame;
 
@@ -231,7 +253,7 @@ impl<R: Reducer + Sized> ReducerExt for R {}
 /// by INV-ST5's idempotence, and the alternative — collapsing them — would
 /// make the merge depend on a comparison of prefixes the boundary has no
 /// reason to perform.
-fn merge<Msg, Seg>(command: Command<Msg>, removed: Vec<Seg>) -> Command<Msg>
+fn merge<Msg, Seg>(command: Command<Msg>, removed: impl IntoIterator<Item = Seg>) -> Command<Msg>
 where
     Msg: Send + 'static,
     Seg: ScopeValue,
@@ -323,16 +345,21 @@ where
 
     /// Routes the message to its row, then drains the journal.
     ///
-    /// The drain runs on **both** branches, because either can remove a row:
-    /// the parent's `update` is where an application closes a pane, and a
-    /// row's own update could in principle reach the collection through the
-    /// state it was handed. Draining once per reduce is what makes the
-    /// journal complete rather than dependent on which branch ran.
+    /// **Only the parent branch can record**, and the drain still runs on
+    /// both. A row is handed the projected `&mut C::State` and nothing else,
+    /// so a child cannot reach the collection its state lives in; the
+    /// parent's `update` is the only place a row is removed *during* a
+    /// reduce, and that branch drains what it just recorded. What the drain
+    /// on the child branch is for is an entry recorded **before** this
+    /// reduce — by a mutation outside one, which the module note on
+    /// [`collection`](super::collection) discourages but nothing prevents.
+    /// Such an entry is owed its teardown whichever branch the next message
+    /// takes, and draining once per reduce is what pays it.
     ///
     /// A message addressed to a key the collection does not hold reaches no
     /// reducer and is discarded (RFC 0014 §2.5's routing boundary). The
-    /// journal is still drained: a removal recorded by an earlier operation
-    /// is owed its teardown whatever this message turned out to address.
+    /// journal is drained on that path too, for the same reason —
+    /// `a_pending_removal_survives_a_discarded_message` is its row.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         let command = match (self.extract)(message) {
             Ok((key, claimed)) => {
@@ -399,10 +426,16 @@ where
     /// a message for an absent key is.
     ///
     /// The drain runs on both branches, as [`ForEach`]'s does and for the
-    /// same reason. What differs is the segment: a dismissed occupant has no
-    /// key of its own, so each recorded dismissal yields a teardown of this
-    /// boundary's own `seg` — which is exactly where the occupant's runs
-    /// were placed.
+    /// same reason: only the parent branch can record — an occupant is
+    /// handed the projected `&mut C::State` and cannot reach the slot it
+    /// sits in — while an entry recorded before this reduce is owed its
+    /// teardown on whichever branch the next message takes.
+    ///
+    /// What differs is the segment: a dismissed occupant has no key of its
+    /// own, so each recorded dismissal yields a teardown of this boundary's
+    /// own `seg` — which is exactly where the occupant's runs were placed.
+    /// The segment is cloned per recorded dismissal and not at all when
+    /// there are none, which is what the lazy repetition below is for.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         let command = match (self.extract)(message) {
             Ok(claimed) => {
@@ -419,7 +452,10 @@ where
             Err(unclaimed) => self.parent.reduce(state, unclaimed),
         };
         let dismissals = (self.slot_mut)(state).drain_dismissals();
-        merge(command, vec![self.seg.clone(); dismissals])
+        merge(
+            command,
+            iter::repeat_with(|| self.seg.clone()).take(dismissals),
+        )
     }
 
     /// The parent's declarations, then the occupant's if there is one.
@@ -1053,6 +1089,45 @@ mod tests {
         let parts = lowered(&stack, &mut state, Message::Modal(ChildMessage::Carriers));
 
         assert!(parts.spawns.is_empty());
+    }
+
+    // A boundary drains only when its own `reduce` runs, and in a stack an
+    // outer boundary that claims a message routes it to its child — so the
+    // boundaries in its parent chain do not run and do not drain. Here the
+    // outermost boundary is the `presented` slot and the `for_each` sits
+    // below it: a `Modal(..)` message is claimed by the slot and never
+    // reaches the collection's boundary.
+    //
+    // Only an entry recorded *outside* a `reduce` can be observed this way,
+    // because an entry a boundary recorded itself was recorded on its parent
+    // branch, which is the branch that drains. Nothing is lost — the next
+    // message that reaches the boundary pays it in full — and that deferral
+    // is the wall a future INV-RC3 extension would meet.
+    #[test]
+    fn an_outer_claim_leaves_an_inner_boundary_s_pending_removal_undrained() {
+        let stack = stack();
+        let mut state = RootState::new();
+        state.modal.present(ChildState::new(true));
+        state.rows.insert("row-a", ChildState::new(true));
+        // The mutation the collection module tells an application not to
+        // make outside a `reduce`, which is the only way to have an entry
+        // pending when a reduce begins.
+        state.rows.remove(&"row-a");
+
+        let claimed_by_the_slot = lowered(&stack, &mut state, Message::Modal(ChildMessage::Quiet));
+
+        assert!(
+            claimed_by_the_slot.teardowns.is_empty(),
+            "the collection's boundary did not run, so it drained nothing"
+        );
+
+        let reaching_the_collection = lowered(&stack, &mut state, Message::Idle);
+
+        assert_eq!(
+            reaching_the_collection.teardowns,
+            vec![path(&["row-a"])],
+            "and the first message that reaches it pays the entry in full"
+        );
     }
 
     // A removal recorded before a message addressed to a *different*,

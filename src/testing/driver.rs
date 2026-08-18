@@ -1096,6 +1096,15 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         sends
             .into_iter()
             .map(|send| SendRecord {
+                // Total because the two sets coincide: every run that can
+                // reach a ledger is a run this driver named. `mint` names
+                // the three producer kinds and returns `None` for the
+                // fourth, and the fourth cannot record — a cleanup run is
+                // constructed with no lane sender and no ingress at all
+                // (`kernel::producer::CleanupHarness`), which is also
+                // INV-RC8's no-output clause. Widening that harness — giving
+                // a cleanup run any send path — breaks this lookup, so the
+                // two have to move together.
                 run: self
                     .names
                     .get(&send.origin)
