@@ -47,6 +47,7 @@ pub mod accounting;
 #[cfg(all(feature = "loom-core", test))]
 pub mod accounting_core;
 pub mod arbiter;
+pub mod cleanup;
 #[cfg(test)]
 pub mod conformance;
 pub mod lane;
@@ -65,7 +66,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
-use crate::command::{Command, CommandId, SpawnEntry};
+use crate::command::{CleanupRegistration, Command, CommandId, SpawnEntry};
 use crate::reducer::Program;
 use crate::runtime::channel::channel_observed;
 use crate::runtime::config::RuntimeConfig;
@@ -73,6 +74,7 @@ use crate::runtime::load::{Channel, LoadObserver};
 use crate::structural_key::ScopePath;
 use crate::testing::driver::{AcceptanceRecorder, IntentRecorder};
 
+use cleanup::CleanupLedger;
 use lane::{
     ControlReceiver, ControlSender, DataReceiver, DataSender, Envelope, GateMode, RunToken,
     SendGate, control_lane,
@@ -165,6 +167,14 @@ pub struct Kernel<P: Program> {
     flags: Option<P::Flags>,
     state: Option<P::State>,
     registry: ScopeRegistry,
+    /// Armed, not-yet-fired cleanup finalizers (RFC 0014 §4.4).
+    ///
+    /// Beside the registry rather than in it: a registration is not a run —
+    /// nothing is executing, nothing is deliverable, nothing can exit — and
+    /// the two are only related by a teardown's application point, which
+    /// stops the runs under its prefix and consumes the registrations under
+    /// it in the same step.
+    cleanups: CleanupLedger,
     join_set: JoinSet<()>,
     task_index: HashMap<TaskId, RunToken>,
     // The receivers are dropped at the immediate postcondition, which is
@@ -230,6 +240,7 @@ impl<P: Program> Kernel<P> {
             flags: Some(flags),
             state: None,
             registry: ScopeRegistry::new(observer.clone()),
+            cleanups: CleanupLedger::new(),
             join_set: JoinSet::new(),
             task_index: HashMap::new(),
             data_rx: Some(data_rx),
@@ -397,6 +408,7 @@ impl<P: Program> Kernel<P> {
                 DispatchStep::Cancel(id) => self.apply_cancel(&id),
                 DispatchStep::Teardown(prefix) => self.apply_teardown(&prefix),
                 DispatchStep::Spawn(spawn) => self.apply_spawn(spawn),
+                DispatchStep::Cleanup(registration) => self.cleanups.register(registration),
                 DispatchStep::Quit => self.apply_quit(ExitReason::Quit),
             }
         }
@@ -463,6 +475,37 @@ impl<P: Program> Kernel<P> {
         token
     }
 
+    /// Starts one consumed cleanup registration as a runtime-owned run.
+    ///
+    /// Two things separate it from [`Kernel::spawn_producer`], and both are
+    /// contract:
+    ///
+    /// - it goes through [`producer::CleanupHarness`], whose fields hold no
+    ///   lane sender, so the run has no route back into the runtime by
+    ///   construction (INV-RC8's no-output clause, structural);
+    /// - it is **not** appended to `started`. That list exists to mint a
+    ///   [`RunName`], whose kind is one of the three producer kinds and
+    ///   whose only uses are naming a run to `grant` and tagging ledger
+    ///   records (RFC 0008 §9.4). A cleanup run presents no send-intent and
+    ///   makes no ledger record, so there is nothing for a name to do; how a
+    ///   test observes one is the application-side instrumentation and the
+    ///   bounded settle RFC 0008 §9.6 names.
+    ///
+    /// [`RunName`]: crate::testing::driver::RunName
+    fn start_cleanup(&mut self, registration: CleanupRegistration) -> RunToken {
+        let token = self.next_token;
+        self.next_token += 1;
+        let CleanupRegistration { scope, finalizer } = registration;
+        let entry = producer::CleanupHarness {
+            join_set: &mut self.join_set,
+            task_index: &mut self.task_index,
+            gate: &self.gate,
+        }
+        .start(token, scope, finalizer);
+        self.registry.insert(entry);
+        token
+    }
+
     /// Controlled termination: the phase transition plus the immediate
     /// postcondition, shared by every cause (RFC 0011 §4.4).
     ///
@@ -488,11 +531,19 @@ impl<P: Program> Kernel<P> {
     /// what makes the "no output undelivered at termination is ever
     /// delivered late" half hold for envelopes the park already took off a
     /// lane (RFC 0011 §4.4).
+    ///
+    /// The cleanup ledger is discarded here and fires nothing: termination
+    /// is not a teardown (RFC 0014 INV-RC8's last clause). Cleanup runs a
+    /// teardown already started are aborted by `abort_all` along with every
+    /// other runtime-owned run — the same call, the same transition, no
+    /// grace window (RFC 0011 §4.4's zero-grace frame applies to cleanup
+    /// itself).
     fn immediate_postcondition(&mut self) {
         self.data_rx = None;
         self.data_buf.clear();
         self.control_rx = None;
         self.control_buf.clear();
+        self.cleanups.discard_all();
         self.registry.abort_all();
     }
 

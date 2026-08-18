@@ -1061,6 +1061,17 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             EntryKind::Keyed(id) => RunKind::Keyed(id),
             EntryKind::Sub(id) => RunKind::Subscription(id),
             EntryKind::Anon => RunKind::Anonymous,
+            // A cleanup run is none of the three kinds a name carries, and
+            // the kernel never reports one here: `started` is appended by
+            // the producer spawn path only, and a finalizer takes the
+            // cleanup path beside it (RFC 0008 §9.4, RFC 0014 §4.4). A test
+            // observes a finalizer through its own instrumentation and a
+            // bounded settle, which is what §9.6 says a run presenting no
+            // send-intent is observed by.
+            EntryKind::Cleanup => unreachable!(
+                "a cleanup run is not reported as started: it presents no send-intent and makes \
+                 no ledger record, so there is nothing for a RunName to name (RFC 0008 §9.4)"
+            ),
         };
         let name = RunName {
             driver: self.id,

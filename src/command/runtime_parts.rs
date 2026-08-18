@@ -13,6 +13,7 @@ use crate::structural_key::ScopePath;
 
 use super::Action;
 use super::cancellation::CommandCancellation;
+use super::cleanup::CleanupRegistration;
 use super::effect::{Leaf, LeafKind};
 use super::kernel_parts::{KernelParts, SpawnEntry};
 use super::runtime_directives::RuntimeDirectives;
@@ -34,8 +35,8 @@ use super::{CancellableCommand, CommandId};
 /// the store's, [`into_kernel_parts`](Self::into_kernel_parts) the kernel's.
 /// The execution reading returns streams only, so the metadata the kernel
 /// reading needs — per-leaf spawn keys and scopes, leaf kinds, teardown
-/// prefixes — is not merely unused by the older consumers but structurally
-/// out of their reach.
+/// prefixes, cleanup registrations — is not merely unused by the older
+/// consumers but structurally out of their reach.
 ///
 /// [`Command::batch`]: super::Command::batch
 #[must_use = "Runtime command parts may contain side effects and directives that must be handled by the runtime."]
@@ -45,6 +46,7 @@ pub struct RuntimeCommandParts<Msg: Send + 'static> {
     cancels: Vec<CommandId>,
     key: Option<CancellableCommand>,
     teardowns: Vec<ScopePath>,
+    cleanups: Vec<CleanupRegistration>,
 }
 
 impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
@@ -53,6 +55,7 @@ impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
         leaves: Vec<Leaf<Msg>>,
         cancellation: CommandCancellation,
         teardowns: Vec<ScopePath>,
+        cleanups: Vec<CleanupRegistration>,
     ) -> Self {
         Self {
             directives,
@@ -60,6 +63,7 @@ impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
             cancels: cancellation.cancels,
             key: cancellation.key,
             teardowns,
+            cleanups,
         }
     }
 
@@ -76,9 +80,9 @@ impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
     /// the command-level spawn key, and the leaf streams in declaration
     /// order.
     ///
-    /// Leaf metadata and teardown prefixes are not returned, so the
-    /// consumers of this reading cannot observe them — including an
-    /// immediate-quit leaf, which comes back as the ordinary
+    /// Leaf metadata, teardown prefixes, and cleanup registrations are not
+    /// returned, so the consumers of this reading cannot observe them —
+    /// including an immediate-quit leaf, which comes back as the ordinary
     /// single-`Action::Quit` stream it has always been.
     pub(crate) fn into_execution_parts(
         self,
@@ -129,6 +133,7 @@ impl<Msg: Send + 'static> RuntimeCommandParts<Msg> {
             quit_now,
             cancels: self.cancels,
             teardowns: self.teardowns,
+            cleanups: self.cleanups,
             spawns,
         }
     }

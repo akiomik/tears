@@ -25,6 +25,7 @@
 //! ```
 
 mod cancellation;
+mod cleanup;
 pub(crate) mod core;
 mod effect;
 mod kernel_parts;
@@ -34,6 +35,7 @@ mod runtime_parts;
 
 pub(crate) use cancellation::CancellableCommand;
 pub use cancellation::{CancelPolicy, CommandId};
+pub(crate) use cleanup::CleanupRegistration;
 pub(crate) use core::Command;
 pub(crate) use kernel_parts::{KernelParts, SpawnEntry};
 pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};

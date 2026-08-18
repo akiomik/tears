@@ -36,7 +36,8 @@
 //! [`RuntimeCommandParts::into_kernel_parts`]: crate::command::RuntimeCommandParts::into_kernel_parts
 
 use crate::command::{
-    CancelPolicy, CancellableCommand, CommandId, KernelParts, RuntimeCommandParts, SpawnEntry,
+    CancelPolicy, CancellableCommand, CleanupRegistration, CommandId, KernelParts,
+    RuntimeCommandParts, SpawnEntry,
 };
 use crate::structural_key::ScopePath;
 
@@ -89,6 +90,12 @@ pub enum DispatchStep<Msg: Send + 'static> {
     Teardown(ScopePath),
     /// Spawn phase: start one producer run.
     Spawn(SpawnEntry<Msg>),
+    /// Spawn phase: arm one cleanup finalizer against its scope.
+    ///
+    /// It starts nothing here — arming is the whole of what a registration
+    /// does at its own dispatch, and a later teardown whose prefix covers
+    /// its scope is what starts it (RFC 0014 §4.4).
+    Cleanup(CleanupRegistration),
     /// The dispatch's completion: apply the `update`-returned quit.
     Quit,
 }
@@ -101,13 +108,6 @@ pub struct DispatchPlan<Msg: Send + 'static> {
     /// a position in the dispatch.
     pub redraw: bool,
     /// Every step the command carries, in application order.
-    ///
-    /// One kind of entry is not here yet: cleanup registrations, which
-    /// RFC 0014 §3.4 places in the spawn phase — after the same command's
-    /// cancel phase, so a teardown-and-reregister command consumes the old
-    /// hooks and leaves the new registration armed. They land with the
-    /// cleanup run kind, as a variant of [`DispatchStep`] ordered with the
-    /// spawns.
     pub steps: Vec<DispatchStep<Msg>>,
 }
 
@@ -119,20 +119,29 @@ pub struct DispatchPlan<Msg: Send + 'static> {
 ///    children included (RFC 0013 INV-ST3);
 /// 2. the **spawn phase**, in the command's flattened declaration order, so
 ///    two same-key spawns in one batch apply as two consecutive dispatches
-///    and the second is a replacement under its own policy;
+///    and the second is a replacement under its own policy, plus the
+///    command's cleanup registrations — which the phase order places here
+///    and not in the cancel phase, so a teardown-and-reregister command
+///    consumes the *old* occupant's hooks and leaves the new registration
+///    armed (RFC 0014 §4.4; §11's *cancel-phase cleanup registration*
+///    adversary is what that excludes);
 /// 3. the **quit**, if the command carried one, at the dispatch's
 ///    *completion* — siblings this same command spawned exist by then and
 ///    are torn down by termination rather than skipped (RFC 0014 §3.3).
 ///
 /// Cancels and teardowns commute, so their relative order carries no
 /// meaning: both are strict, idempotent revocations, and a prefix covering
-/// an explicitly cancelled id applies the same removal twice.
+/// an explicitly cancelled id applies the same removal twice. Spawns and
+/// cleanup registrations commute for a different reason: a spawn neither
+/// reads nor writes the cleanup ledger, and arming a registration starts
+/// nothing, so no observation separates the two orders.
 pub fn dispatch_plan<Msg: Send + 'static>(parts: KernelParts<Msg>) -> DispatchPlan<Msg> {
     let KernelParts {
         redraw,
         quit_now,
         cancels,
         teardowns,
+        cleanups,
         spawns,
     } = parts;
 
@@ -141,6 +150,7 @@ pub fn dispatch_plan<Msg: Send + 'static>(parts: KernelParts<Msg>) -> DispatchPl
         .map(DispatchStep::Cancel)
         .chain(teardowns.into_iter().map(DispatchStep::Teardown))
         .chain(spawns.into_iter().map(DispatchStep::Spawn))
+        .chain(cleanups.into_iter().map(DispatchStep::Cleanup))
         .chain(quit_now.then_some(DispatchStep::Quit))
         .collect();
 
@@ -206,6 +216,7 @@ mod tests {
                 DispatchStep::Cancel(_) => "cancel",
                 DispatchStep::Teardown(_) => "teardown",
                 DispatchStep::Spawn(_) => "spawn",
+                DispatchStep::Cleanup(_) => "cleanup",
                 DispatchStep::Quit => "quit",
             })
             .collect()
@@ -414,6 +425,53 @@ mod tests {
     #[test]
     fn a_command_with_nothing_to_apply_plans_no_steps() {
         assert!(planned(Command::none()).is_empty());
+    }
+
+    // RFC 0014 §3.4: a registration applies in the **spawn** phase, after
+    // this same command's cancel phase. §11's *cancel-phase cleanup
+    // registration* adversary is the plan that puts it first — a
+    // teardown-and-reregister command would then consume the registration it
+    // had just armed, and the new occupant would leave no hook behind.
+    #[test]
+    fn a_teardown_and_reregister_command_arms_the_new_hook_after_the_teardown() {
+        let steps = planned(Command::batch([
+            Command::on_teardown(async {}),
+            Command::teardown("pane-1"),
+        ]));
+
+        assert_eq!(
+            steps,
+            vec!["teardown", "cleanup"],
+            "the teardown consumes the old occupant's hooks, and the new registration is armed \
+             after it"
+        );
+    }
+
+    #[test]
+    fn a_registration_lowers_to_a_spawn_phase_entry_and_no_run() {
+        let parts = lowered(Command::on_teardown(async {}));
+
+        assert_eq!(parts.cleanups.len(), 1);
+        assert!(
+            parts.spawns.is_empty(),
+            "arming a registration starts nothing"
+        );
+        assert!(parts.teardowns.is_empty());
+    }
+
+    // The registration's own dispatch never precedes the quit either: a quit
+    // applies at the dispatch's completion, and a registration armed by that
+    // same command is discarded by the termination it causes rather than
+    // outliving it.
+    #[test]
+    fn the_quit_still_completes_a_command_that_also_arms_a_hook() {
+        let steps = planned(Command::batch([
+            Command::quit(),
+            Command::on_teardown(async {}),
+            Command::message(1),
+        ]));
+
+        assert_eq!(steps, vec!["spawn", "cleanup", "quit"]);
     }
 
     // The keyed slot policy, and its correspondence with the pure state
