@@ -23,7 +23,18 @@
 //! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's drain, as the kernel applies it |
 //! | [`dismissing_the_slot_tears_down_its_occupant_s_runs`] | INV-RC3's dismissal shape, likewise |
 //! | [`a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`] | INV-RC3's no-diff adversary and INV-RC4's batch remove-and-reinsert |
-//! | [`a_message_for_a_closed_row_starts_nothing`] | §2.5's routing boundary, INV-ST8 |
+//! | [`a_key_addressed_message_after_a_reinsert_reaches_the_new_instance`] | INV-ST8's positive half, §2.5's third routing clause |
+//! | [`a_message_for_a_closed_row_starts_nothing`] | §2.5's routing boundary, INV-ST8's negative half |
+//!
+//! # The one row a mutation was run against
+//!
+//! The no-diff adversary is the only row here whose subject an unrelated
+//! mechanism could satisfy, so it is the one that was checked by mutation
+//! rather than by reading. Replacing the drain with a state-diff-equivalent
+//! one — returning only the keys absent from the collection when the drain
+//! runs — leaves every other row in this file passing and fails that row on
+//! its unkeyed-run assertion. The row's own comment records why the
+//! assertion is on the unkeyed run and not the keyed one.
 //!
 //! [`ReducerExt::into_program`]: crate::reducer::combinator::ReducerExt::into_program
 
@@ -58,25 +69,53 @@ enum PaneMsg {
     Anon,
 }
 
-/// One pane instance: the runs it starts hold `reclaimed`, and it declares
-/// `declares` when it has one.
+/// One pane instance.
+///
+/// The two run beacons are separate on purpose. A keyed run can be reclaimed
+/// by two different things — a prefix teardown, or a same-identity
+/// supersession — while an **unkeyed** run has no identity to supersede, so
+/// only a teardown reaches it. A row that wants to witness the journal's
+/// teardown and nothing else asserts on `anon`.
 struct PaneState {
-    reclaimed: Beacon,
+    /// Marked when the run `PaneMsg::Work` starts is reclaimed.
+    keyed: Beacon,
+    /// Marked when the run `PaneMsg::Anon` starts is reclaimed.
+    anon: Beacon,
+    /// Marked every time *this instance's* state is reduced — how a row
+    /// tells the predecessor's state from the successor's.
+    seen: Beacon,
+    /// The source this instance declares, when it declares one.
     declares: Option<ProbeSource>,
 }
 
 impl PaneState {
-    const fn new(reclaimed: Beacon) -> Self {
+    /// Both runs marking one beacon, for rows that do not need them apart.
+    fn new(reclaimed: Beacon) -> Self {
+        Self::with_runs(reclaimed.clone(), reclaimed)
+    }
+
+    /// The keyed run and the unkeyed run marking their own beacons.
+    fn with_runs(keyed: Beacon, anon: Beacon) -> Self {
         Self {
-            reclaimed,
+            keyed,
+            anon,
+            seen: Beacon::default(),
             declares: None,
+        }
+    }
+
+    /// An instance whose *reductions* are what the row watches.
+    fn watching(seen: Beacon) -> Self {
+        Self {
+            seen,
+            ..Self::new(Beacon::default())
         }
     }
 
     fn declaring(reclaimed: Beacon, source: ProbeSource) -> Self {
         Self {
-            reclaimed,
             declares: Some(source),
+            ..Self::new(reclaimed)
         }
     }
 }
@@ -89,12 +128,14 @@ impl Reducer for Pane {
     type Message = PaneMsg;
 
     fn reduce(&self, state: &mut PaneState, message: PaneMsg) -> Command<PaneMsg> {
+        state.seen.mark();
         // Parks forever holding a drop-marking guard, so the run's
         // reclamation is what the row reads.
-        let effect = holding_effect(state.reclaimed.clone()).map(|_| PaneMsg::Work);
         match message {
-            PaneMsg::Work => effect.cancellable(CommandId::new("work")),
-            PaneMsg::Anon => effect,
+            PaneMsg::Work => holding_effect(state.keyed.clone())
+                .map(|_| PaneMsg::Work)
+                .cancellable(CommandId::new("work")),
+            PaneMsg::Anon => holding_effect(state.anon.clone()).map(|_| PaneMsg::Work),
         }
     }
 
@@ -154,7 +195,7 @@ impl Reducer for Root {
                     .successors
                     .pop_front()
                     .expect("the script supplies one successor per recreate");
-                let reclaimed = successor.reclaimed.clone();
+                let reclaimed = successor.keyed.clone();
                 state.panes.remove(&key);
                 state.panes.insert(key, successor);
                 // Placed under the same segment the boundary uses, so the
@@ -255,17 +296,17 @@ fn init(setup: Setup) -> (RootState, Command<Msg>) {
         successors,
         trigger,
     } = setup;
+    // Built rather than mutated: `from_iter` records no removal at all, and
+    // a first presentation into an empty slot records none either, so
+    // bootstrap leaves the journals clean. Reaching for `insert` here would
+    // owe a teardown to the first message that arrives — the rule the
+    // collection module states for mutating outside a `reduce`.
     let mut state = RootState {
-        panes: Keyed::new(),
+        panes: panes.into_iter().collect(),
         modal: Slot::empty(),
         acts,
         successors,
     };
-    // First insertions and a first presentation, so neither records a
-    // removal: bootstrap opens instances rather than replacing any.
-    for (key, pane) in panes {
-        state.panes.insert(key, pane);
-    }
     if let Some(occupant) = modal {
         state.modal.present(occupant);
     }
@@ -473,30 +514,108 @@ fn dismissing_the_slot_tears_down_its_occupant_s_runs() {
 // nothing; and the command it returns carries both the journal's teardown
 // **and** the successor's keyed spawn, under one prefix and one identity.
 // The cancel phase precedes every spawn of the same command, so the old
-// instance's run is reclaimed and the successor starts fresh rather than
+// instance's runs are reclaimed and the successor starts fresh rather than
 // being replaced or suppressed by what it succeeded.
+//
+// **The load-bearing assertion is the *anonymous* run's reclamation.** The
+// old instance holds one keyed run and one unkeyed one. The successor's
+// spawn carries the same qualified identity as the old keyed run, so a
+// kernel with no journal at all would still reclaim *that* one by
+// `CancelInFlight` supersession — asserting on it would let a diff-based
+// journal pass. The unkeyed run has no identity to supersede: a prefix
+// teardown is the only thing that reaches it, and the journal is the only
+// thing that emits one here. Verified by mutation: with the drain filtered
+// to keys absent at drain time (a state-diff-equivalent journal), this row
+// fails on `old_anon` while every other row in this file still passes.
 #[test]
 fn a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh() {
-    let (old, new) = (Beacon::default(), Beacon::default());
+    let (old_keyed, old_anon, new) = (Beacon::default(), Beacon::default(), Beacon::default());
     let mut driver = driver(
-        Setup::new(vec![Msg::Row(1, PaneMsg::Work), Msg::Act(1)])
-            .opening(vec![(1, PaneState::new(old.clone()))])
-            .acting(1, Act::Recreate(1))
-            .succeeding(PaneState::new(new.clone())),
+        Setup::new(vec![
+            Msg::Row(1, PaneMsg::Work),
+            Msg::Row(1, PaneMsg::Anon),
+            Msg::Act(1),
+        ])
+        .opening(vec![(
+            1,
+            PaneState::with_runs(old_keyed.clone(), old_anon.clone()),
+        )])
+        .acting(1, Act::Recreate(1))
+        .succeeding(PaneState::new(new.clone())),
     );
     let trigger = driver.boot().started[0].clone();
 
-    deliver(&mut driver, &trigger);
+    let started = deliver(&mut driver, &trigger);
+    assert!(matches!(started.as_slice(), [RunKind::Keyed(_)]));
+    let started = deliver(&mut driver, &trigger);
+    assert!(
+        matches!(started.as_slice(), [RunKind::Anonymous]),
+        "the old instance also holds a run no identity can supersede: {started:?}"
+    );
+
     let started = deliver(&mut driver, &trigger);
 
     assert!(
         matches!(started.as_slice(), [RunKind::Keyed(_)]),
         "the same command's spawn phase started the successor: {started:?}"
     );
-    driver.settle(TEST_TURNS, || old.marked());
+    driver.settle(TEST_TURNS, || old_anon.marked());
+    assert!(
+        old_keyed.marked(),
+        "the old keyed run went with it, by teardown and supersession alike"
+    );
     assert!(
         !new.marked(),
         "and the successor is the run that survives the application point"
+    );
+}
+
+// RFC 0013 INV-ST8's positive half, and RFC 0014 §2.5's third routing
+// clause: key-addressed external input arriving after a same-key
+// remove-and-reinsert reaches the **new** instance. Input carries no run
+// origin — only producer output does — so the key is the whole of the
+// routing, and the key now names the successor. The row reads it from the
+// two instances' own reduction counts, so "reached the new instance" is the
+// successor's *state* having been reduced rather than an inference from a
+// command.
+#[test]
+fn a_key_addressed_message_after_a_reinsert_reaches_the_new_instance() {
+    let (predecessor, successor) = (Beacon::default(), Beacon::default());
+    let mut driver = driver(
+        Setup::new(vec![
+            Msg::Row(1, PaneMsg::Work),
+            Msg::Act(1),
+            Msg::Row(1, PaneMsg::Work),
+        ])
+        .opening(vec![(1, PaneState::watching(predecessor.clone()))])
+        .acting(1, Act::Recreate(1))
+        .succeeding(PaneState::watching(successor.clone())),
+    );
+    let trigger = driver.boot().started[0].clone();
+
+    deliver(&mut driver, &trigger);
+    assert_eq!(
+        (predecessor.marks(), successor.marks()),
+        (1, 0),
+        "the first message reached the instance that was open then"
+    );
+
+    deliver(&mut driver, &trigger);
+    let started = deliver(&mut driver, &trigger);
+
+    assert_eq!(
+        successor.marks(),
+        1,
+        "the message after the reinsert was reduced against the successor's own state"
+    );
+    assert_eq!(
+        predecessor.marks(),
+        1,
+        "and the predecessor's state saw nothing further"
+    );
+    assert!(
+        matches!(started.as_slice(), [RunKind::Keyed(_)]),
+        "the successor answered it with its own run: {started:?}"
     );
 }
 

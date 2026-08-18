@@ -12,8 +12,15 @@
 //! | started at the application point | [`a_teardown_starts_the_prefix_s_registration_at_its_application_point`] |
 //! | at most once, consumed not re-run | [`a_repeated_teardown_starts_no_consumed_hook_again`] |
 //! | no runtime-visible output | [`an_ordinary_cleanup_run_is_invisible_to_the_application`] (regression neighbour — see below) |
-//! | termination discards unfired hooks | [`termination_discards_an_unfired_registration`] |
+//! | termination discards unfired hooks | [`termination_discards_an_unfired_registration`], [`a_final_update_that_tears_down_and_quits_fires_no_hook_from_termination`] |
 //! | termination cancels running ones | [`termination_cancels_a_running_cleanup_run`] |
+//!
+//! RFC 0013 §7.2's own two cleanup rows are
+//! [`a_teardown_starts_the_prefix_s_registration_at_its_application_point`]
+//! and
+//! [`a_teardown_and_reregister_command_consumes_the_old_hook_and_arms_the_new_one`];
+//! its final-update row is the one named above, which returns the teardown
+//! and the quit from **one** update.
 //!
 //! # The no-output clause is structural-primary
 //!
@@ -48,7 +55,7 @@ use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
     Beacon, DropMark, Feed, ProbeSource, Script, TEST_TURNS, accept, cap, config, driver_with,
-    marking_effect, parking_effect,
+    holding_effect, marking_effect, parking_effect,
 };
 
 /// A finalizer that marks `ran` and ends.
@@ -412,15 +419,26 @@ fn a_teardown_and_reregister_command_consumes_the_old_hook_and_arms_the_new_one(
 // The cleanup window's placement (RFC 0013 §1.2, §5): a finalizer starts at
 // the head of the stop-requested→quiesced interval and runs *concurrently*
 // with the quiescence of the runs the same application point stopped —
-// nothing waits for anything. Both the torn-down run's reclamation and the
-// finalizer's completion are reached by the same bounded settle.
+// nothing waits for anything.
+//
+// **What is constructible here, and what is not.** The clause claims
+// concurrency, not an order, and the constructible content is two facts.
+// First, the start does not *follow* quiescence: a pass is a synchronous
+// region, so when `step_pass` returns — the teardown having applied inside
+// it — the torn-down run has not been dismantled yet, and the finalizer was
+// already spawned. Second, neither blocked on the other: one bounded settle
+// reaches both. A *strict* interleaving — the finalizer's own progress
+// before the quiescence — is not constructible and is not claimed: the
+// abort is issued before the cleanup spawn, so this executor dismantles the
+// aborted task first, and a row asserting the reverse would be asserting
+// against the contract rather than for it.
 #[test]
-fn a_finalizer_runs_concurrently_with_the_quiescence_it_accompanies() {
+fn a_finalizer_starts_before_the_quiescence_it_accompanies_and_waits_for_none_of_it() {
     let (ran, reclaimed) = (Beacon::default(), Beacon::default());
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
             parking_effect([1]),
-            super::support::holding_effect(reclaimed.clone()).scoped("pane"),
+            holding_effect(reclaimed.clone()).scoped("pane"),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane")]),
@@ -433,5 +451,65 @@ fn a_finalizer_runs_concurrently_with_the_quiescence_it_accompanies() {
         .step_pass(WakeSource::Data)
         .expect("the teardown trigger is in the lane");
 
+    assert!(
+        !reclaimed.marked(),
+        "the pass returned with the torn-down run not yet quiesced, so the finalizer this pass \
+         started did not begin after that quiescence"
+    );
     driver.settle(TEST_TURNS, || ran.marked() && reclaimed.marked());
+}
+
+// RFC 0013 §7.2's final-update row: a teardown and a quit returned by the
+// **same** update. The teardown applies in the cancel phase and the quit at
+// the dispatch's completion, so this is the one command in which both
+// halves of §6 meet.
+//
+// What the row pins is that termination fires no hook. The registration the
+// teardown covered was consumed and started by the teardown — that is the
+// teardown's doing, not termination's — and the registration under a prefix
+// the teardown does *not* cover is discarded unfired. Meanwhile RFC 0011
+// §4.4's two postconditions hold unchanged: the step reports the
+// termination, and the settle that follows it has reclaimed every
+// runtime-owned task, the cleanup run this same command started included.
+#[test]
+fn a_final_update_that_tears_down_and_quits_fires_no_hook_from_termination() {
+    let (cleanup_reclaimed, elsewhere, occupant) =
+        (Beacon::default(), Beacon::default(), Beacon::default());
+    let (mut driver, _journal) = driver_with(
+        Script::new(Command::batch([
+            parking_effect([1]),
+            holding_effect(occupant.clone()).scoped("pane"),
+            // Its own start is not the subject here — termination may
+            // cancel it before its first poll — so only the guard it holds
+            // is read.
+            parked_finalizer(Beacon::default(), cleanup_reclaimed.clone()).scoped("pane"),
+            finalizer(elsewhere.clone()).scoped("other-pane"),
+        ]))
+        .replying([Command::batch([Command::teardown("pane"), Command::quit()])]),
+        config().batch_max_messages(cap(1)),
+    );
+    let trigger = driver.boot().started[0].clone();
+
+    accept(&mut driver, trigger);
+    let stepped = driver
+        .step_pass(WakeSource::Data)
+        .expect("the trigger is in the lane");
+
+    assert!(
+        stepped.terminated.is_some(),
+        "the quit applied at the completion of the update that also tore down"
+    );
+    assert!(
+        !elsewhere.marked(),
+        "termination is not a teardown: the registration outside the torn-down prefix was \
+         discarded rather than fired"
+    );
+    assert!(
+        occupant.marked(),
+        "the quiescent postcondition reclaimed the torn-down run"
+    );
+    assert!(
+        cleanup_reclaimed.marked(),
+        "and the cleanup run the teardown had just started, with no grace window"
+    );
 }
