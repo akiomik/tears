@@ -52,6 +52,7 @@ pub mod cleanup;
 pub mod conformance;
 pub mod lane;
 pub mod lowering;
+pub mod observability;
 pub mod pass;
 pub mod producer;
 pub mod registry;
