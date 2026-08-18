@@ -36,6 +36,18 @@
 //! it no more proves the absence of the capability than a finite scenario
 //! proves a pool's absence.
 //!
+//! # The mutation run against the spawn-phase rows
+//!
+//! §11's *cancel-phase cleanup registration* adversary is a plan that
+//! satisfies every other row here, so the rows that exclude it were checked
+//! by mutation. Moving the registration entries into the cancel phase —
+//! chained with the explicit cancels, ahead of the teardowns — leaves 180
+//! rows passing and fails exactly three: this module's
+//! [`a_teardown_and_reregister_command_consumes_the_old_hook_and_arms_the_new_one`],
+//! and the two plan-level rows beside the lowering,
+//! `kernel::lowering::tests::a_teardown_and_reregister_command_arms_the_new_hook_after_the_teardown`
+//! and `kernel::lowering::tests::the_quit_still_completes_a_command_that_also_arms_a_hook`.
+//!
 //! # Where a claim is read
 //!
 //! A finalizer's own progress is application-side, in a [`Beacon`] it marks

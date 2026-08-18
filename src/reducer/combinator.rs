@@ -56,6 +56,20 @@
 //! [`Command::merging_teardowns`]'s aggregation, the lowering to runtime
 //! parts — is transformation and stays free.
 //!
+//! # The mutation run against the merge rows
+//!
+//! "A boundary adds nothing but identity carriers" is a claim about what is
+//! *absent* from the returned command, so the rows that hold it were checked
+//! by mutation rather than by reading. Restoring the fold to a
+//! [`Command::batch`] — the shape this module used before — leaves 53 rows
+//! passing and fails exactly two:
+//! `a_removing_boundary_preserves_the_update_s_redraw_directive` (the
+//! batch's directive fold hands a `without_redraw` update a redraw back) and
+//! `a_removing_boundary_reports_no_discarded_child_key` (the batch warns
+//! about a spawn key the boundary merely passed through). Nothing else
+//! moves, which is the record that those two rows are what stands between
+//! this contract and its regression.
+//!
 //! [`Subscription::scoped`]: crate::subscription::Subscription::scoped
 
 // The projection and mapping parameters are written exactly as RFC 0014

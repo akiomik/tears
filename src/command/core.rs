@@ -383,17 +383,20 @@ impl<Msg: Send + 'static> Command<Msg> {
         not(test),
         expect(
             dead_code,
-            reason = "the combinators whose journal drain aggregates a teardown land after this carrier"
+            reason = "reached only through the kernel's own consumers, which no non-test build can \
+                      construct until the entry point is switched over"
         )
     )]
     pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
         debug_assert!(
             other.is_none()
+                && other.directives == RuntimeDirectives::DEFAULT
                 && other.cleanups.is_empty()
                 && other.cancellation.key.is_none()
                 && other.cancellation.cancels.is_empty(),
-            "merging_teardowns aggregates teardown entries only; everything else on `other` \
-             would be dropped silently"
+            "merging_teardowns aggregates teardown entries only; an effect, a redraw directive, a \
+             cleanup registration, a spawn key, or an explicit cancel on `other` would be dropped \
+             silently"
         );
         self.teardowns.extend(other.teardowns);
         self
@@ -425,7 +428,8 @@ impl<Msg: Send + 'static> Command<Msg> {
         not(test),
         expect(
             dead_code,
-            reason = "the kernel that starts a registered finalizer lands after this carrier"
+            reason = "the kernel that starts a registered finalizer is here, but no non-test build \
+                      can reach it until the entry point is switched over to it"
         )
     )]
     pub(crate) fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {

@@ -41,12 +41,16 @@
 //! A journal entry is drained by the next `reduce` the boundary runs, so a
 //! mutation made *outside* one is still owed its teardown — and will get it
 //! at the first message that reaches the boundary. That is right for a
-//! removal and wrong for construction, where no instance ever ran. Build
-//! initial state with [`Keyed::from_iter`] (or a collected literal) and with
-//! [`Slot::present`] into an empty slot, both of which record nothing;
-//! reserve `insert` over an occupied key, `remove`, `present` over an
-//! occupied slot, and `dismiss` for `reduce`, where the boundary drains what
-//! they record in the same update.
+//! removal and wrong for construction, where no instance ever ran.
+//!
+//! Only the four removal shapes record anything, so only they are affected.
+//! [`Keyed::from_iter`], a collected literal, [`Keyed::insert`] into an
+//! absent key, and [`Slot::present`] into an empty slot record nothing and
+//! are as safe outside a `reduce` as inside one — growing a collection
+//! during `Program::init` is fine. What belongs inside a `reduce` is the
+//! four that do record: `insert` over an occupied key, `present` over an
+//! occupied slot, `remove`, and `dismiss`, whose entries the boundary drains
+//! in the same update.
 
 use std::hash::Hash;
 use std::mem;
@@ -185,9 +189,10 @@ impl<K: ScopeValue, V> FromIterator<(K, V)> for Keyed<K, V> {
     /// existed as an entry in this iterator never ran anything: nothing was
     /// spawned under its key, nothing declared, nothing to tear down. A
     /// teardown emitted for it would name a prefix no run was ever placed
-    /// under. This is why building initial state is a `from_iter` or a
-    /// literal rather than a sequence of `insert` calls — see the type's
-    /// note on mutation outside `reduce`.
+    /// under. That makes this — and a sequence of [`insert`](Keyed::insert)
+    /// calls into absent keys, which record nothing either — the ways to
+    /// build initial state; see the module note on mutating outside a
+    /// `reduce`.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
         let mut collection = Self::new();
         for (key, value) in pairs {
