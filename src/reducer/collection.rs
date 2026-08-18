@@ -35,6 +35,18 @@
 //! Draining is the combinator's, not the application's: the two `drain_*`
 //! methods are crate-private, so an application can neither consume a
 //! pending removal before the boundary sees it nor manufacture one.
+//!
+//! # Mutating outside a `reduce`
+//!
+//! A journal entry is drained by the next `reduce` the boundary runs, so a
+//! mutation made *outside* one is still owed its teardown — and will get it
+//! at the first message that reaches the boundary. That is right for a
+//! removal and wrong for construction, where no instance ever ran. Build
+//! initial state with [`Keyed::from_iter`] (or a collected literal) and with
+//! [`Slot::present`] into an empty slot, both of which record nothing;
+//! reserve `insert` over an occupied key, `remove`, `present` over an
+//! occupied slot, and `dismiss` for `reduce`, where the boundary drains what
+//! they record in the same update.
 
 use std::hash::Hash;
 use std::mem;
@@ -165,13 +177,25 @@ impl<K: ScopeValue, V> Default for Keyed<K, V> {
 }
 
 impl<K: ScopeValue, V> FromIterator<(K, V)> for Keyed<K, V> {
-    /// Builds a collection from `(key, value)` pairs, recording a removal for
-    /// each duplicate key the input replaces — the same rule
-    /// [`insert`](Keyed::insert) applies, because it is the same operation.
+    /// Builds a collection from `(key, value)` pairs, recording **no**
+    /// removal — a duplicate key in the input included.
+    ///
+    /// Construction is not replacement. What the journal records is that an
+    /// *instance* left the collection, and an instance that only ever
+    /// existed as an entry in this iterator never ran anything: nothing was
+    /// spawned under its key, nothing declared, nothing to tear down. A
+    /// teardown emitted for it would name a prefix no run was ever placed
+    /// under. This is why building initial state is a `from_iter` or a
+    /// literal rather than a sequence of `insert` calls — see the type's
+    /// note on mutation outside `reduce`.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
         let mut collection = Self::new();
         for (key, value) in pairs {
-            collection.insert(key, value);
+            if let Some(row) = collection.rows.iter_mut().find(|(held, _)| *held == key) {
+                row.1 = value;
+            } else {
+                collection.rows.push((key, value));
+            }
         }
         collection
     }
@@ -426,13 +450,19 @@ mod tests {
         assert!(!rows.contains_key(&"b"));
     }
 
+    // Construction is not replacement: an instance that only ever existed as
+    // an entry in the input iterator never ran anything, so a teardown for
+    // it would name a prefix no run was placed under.
     #[test]
-    fn collecting_duplicate_keys_records_each_replacement() {
+    fn collecting_duplicate_keys_records_no_removal() {
         let mut rows: Keyed<&str, u8> = [("a", 1), ("b", 2), ("a", 3)].into_iter().collect();
 
         assert_eq!(rows.get(&"a"), Some(&3));
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows.drain_removals(), vec!["a"]);
+        assert!(
+            rows.drain_removals().is_empty(),
+            "nothing had run under the key the later pair replaced"
+        );
     }
 
     #[test]
