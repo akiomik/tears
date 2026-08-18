@@ -80,28 +80,33 @@
 //! | `parked control-quit wake` | [`park`] | INV-RC16 |
 //! | `parked subscription-quiescence wake` | [`park`] | INV-RC16 |
 //!
-//! Four neighbours sit beside the twelve, in the same files and under the
+//! Five neighbours sit beside the twelve, in the same files and under the
 //! same rules: [`delivery`] carries INV-RC10's flood rows (FIFO prefix,
 //! backlog-proportional passes, a render between batches); [`teardown`]
 //! carries RFC 0013 §7.1's kernel rows — INV-ST1, INV-ST3, INV-ST5, INV-ST6,
 //! and INV-ST7's observable half, with the kernel carriers INV-RC6 and
 //! INV-RC7, plus the divergent composition where a run's placement prefix
 //! and its key's scope disagree and both still reach it; [`cleanup`] carries
-//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup kind; and
+//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup kind;
 //! [`combinator`] carries INV-RC2, INV-RC3, and INV-RC4's rows as the kernel
 //! applies them, over a program that is a closed combinator stack rather
-//! than the scripted reducer.
+//! than the scripted reducer; and [`admission`] carries RFC 0012's
+//! admission suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and
+//! INV-SE4's mandated supersession sequence — which is INV-RC12's first
+//! clause.
+//!
+//! [`lifecycle`] additionally carries the rows of RFC 0011's suite that the
+//! four series above do not, which is the rest of INV-RC11; its own module
+//! documentation maps every INV-LC row to where it is held.
 //!
 //! # What this surface does not reach
 //!
 //! The behavioral rows above are §13.1's twelve series and their named
-//! neighbours. What stays open is the implementation-acceptance tier
-//! RFC 0014 §13.1 lists rather than anything this harness cannot build: the
-//! observability vocabulary (INV-RC15's behavioral neighbour), and the
-//! structural halves that no finite script can carry — INV-RC16's arming,
-//! §3.5's unbiased pass initiation, INV-RC12 (c), INV-ST7's absence half,
-//! and INV-RC8's no-output clause, each of which is structural by its own
-//! statement.
+//! neighbours. What stays open is the observability vocabulary (INV-RC15's
+//! behavioral neighbour), and beside it the structural halves that no
+//! finite script can carry — INV-RC16's arming, §3.5's unbiased pass
+//! initiation, INV-RC12 (c), INV-ST7's absence half, and INV-RC8's
+//! no-output clause, each of which is structural by its own statement.
 //!
 //! One clause of INV-RC12 (a) is unreachable for a different reason, and it
 //! is a construction limit rather than an open row: outside termination
@@ -120,6 +125,7 @@
 //! [`lifecycle`]). INV-RC12 (c) records the same limit from the invariant's
 //! side and takes the structural class for it.
 
+pub mod admission;
 pub mod bounded;
 pub mod cleanup;
 pub mod combinator;
