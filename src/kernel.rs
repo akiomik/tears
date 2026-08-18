@@ -492,7 +492,7 @@ impl<P: Program> Kernel<P> {
     ///   bounded settle RFC 0008 §9.6 names.
     ///
     /// [`RunName`]: crate::testing::driver::RunName
-    fn start_cleanup(&mut self, registration: CleanupRegistration) -> RunToken {
+    fn start_cleanup(&mut self, registration: CleanupRegistration) {
         let token = self.next_token;
         self.next_token += 1;
         let CleanupRegistration { scope, finalizer } = registration;
@@ -503,7 +503,6 @@ impl<P: Program> Kernel<P> {
         }
         .start(token, scope, finalizer);
         self.registry.insert(entry);
-        token
     }
 
     /// Controlled termination: the phase transition plus the immediate

@@ -1028,7 +1028,15 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         outcome: Result<(), B::Error>,
         started: Vec<StartedRun>,
     ) -> StepReport<B::Error> {
-        let started = started.into_iter().map(|run| self.mint(run)).collect();
+        // `filter_map`, because a run the driver has no name for is one it
+        // does not report: naming is per producer kind (RFC 0008 §9.4), and
+        // a cleanup run is none of them. Filtering here rather than
+        // asserting inside `mint` keeps a future routing mistake a missing
+        // entry rather than a panic.
+        let started = started
+            .into_iter()
+            .filter_map(|run| self.mint(run))
+            .collect();
         let terminated = match outcome {
             Err(error) => Some(Err(error)),
             Ok(()) if self.kernel.terminating() => Some(Ok(Exit::Quit)),
@@ -1047,31 +1055,31 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     }
 
     /// Mints the name for one run a step started, from the kind the kernel
-    /// recorded at the start rather than from bookkeeping read back after.
+    /// recorded at the start rather than from bookkeeping read back after —
+    /// or `None` for a run there is no name for.
     ///
-    /// Reading it back would be a lookup that can fail for a reason the test
-    /// has no part in: a run whose exit a pass has already reflected has no
-    /// entry left, and bootstrap can reach exactly that state for an init
-    /// effect that finishes before its continuation pass. Nothing about the
-    /// name is chosen here either way — the kind is still the kernel's, just
-    /// taken at the moment it was true.
-    fn mint(&mut self, started: StartedRun) -> RunName {
+    /// Reading the kind back would be a lookup that can fail for a reason
+    /// the test has no part in: a run whose exit a pass has already
+    /// reflected has no entry left, and bootstrap can reach exactly that
+    /// state for an init effect that finishes before its continuation pass.
+    /// Nothing about the name is chosen here either way — the kind is still
+    /// the kernel's, just taken at the moment it was true.
+    ///
+    /// A cleanup run is the `None`: it is none of the three kinds a
+    /// [`RunName`] carries (RFC 0008 §9.4), it presents no send-intent to
+    /// grant and makes no ledger record to tag, so there is nothing for a
+    /// name to do. How a test observes one is its own instrumentation and a
+    /// bounded [`settle`](Self::settle), which is what §9.6 says a run
+    /// presenting no send-intent is observed by. Returning `None` rather
+    /// than asserting keeps the mapping total: a kind this driver has no
+    /// name for is one it does not report.
+    fn mint(&mut self, started: StartedRun) -> Option<RunName> {
         let StartedRun { token, kind } = started;
         let kind = match kind {
             EntryKind::Keyed(id) => RunKind::Keyed(id),
             EntryKind::Sub(id) => RunKind::Subscription(id),
             EntryKind::Anon => RunKind::Anonymous,
-            // A cleanup run is none of the three kinds a name carries, and
-            // the kernel never reports one here: `started` is appended by
-            // the producer spawn path only, and a finalizer takes the
-            // cleanup path beside it (RFC 0008 §9.4, RFC 0014 §4.4). A test
-            // observes a finalizer through its own instrumentation and a
-            // bounded settle, which is what §9.6 says a run presenting no
-            // send-intent is observed by.
-            EntryKind::Cleanup => unreachable!(
-                "a cleanup run is not reported as started: it presents no send-intent and makes \
-                 no ledger record, so there is nothing for a RunName to name (RFC 0008 §9.4)"
-            ),
+            EntryKind::Cleanup => return None,
         };
         let name = RunName {
             driver: self.id,
@@ -1079,7 +1087,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
             kind,
         };
         self.names.insert(token, name.clone());
-        name
+        Some(name)
     }
 
     /// Resolves the kernel-side records of a ledger to the names a test
@@ -1769,7 +1777,9 @@ mod tests {
             "and the bookkeeping no longer does: a mint that read it back would find nothing"
         );
 
-        let name = driver.mint(started.into_iter().next().expect("the one entry"));
+        let name = driver
+            .mint(started.into_iter().next().expect("the one entry"))
+            .expect("an anonymous run is one of the three kinds a name carries");
         assert_eq!(
             name.kind(),
             RunKind::Anonymous,
