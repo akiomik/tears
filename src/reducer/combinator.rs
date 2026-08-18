@@ -17,10 +17,19 @@
 //!   `.scoped(...)` and can neither omit nor double-apply one (INV-RC2).
 //! - **Drains its removal journal** after the reduce it ran, merging one
 //!   [`Command::teardown`] per recorded removal into the returned command
-//!   (INV-RC3).
+//!   (INV-RC3). Only [`ForEach`] and [`Presented`] have a journal to drain;
+//!   [`Scoped`] has none, because it composes a single child in place and
+//!   there is no collection at its boundary for an instance to leave.
 //! - **Routes typed messages**: `extract` either claims a message for the
 //!   child or hands it back to the parent, and a message addressed to a key
 //!   or slot with no instance is routed to nothing and discarded.
+//!
+//! A boundary adds **identity carriers and nothing else**. It does not
+//! touch the returned command's runtime directives — a `without_redraw`
+//! update stays a `without_redraw` update through a boundary that removed a
+//! row — and it adds no effect, no cancel id, and no registration of its
+//! own. [`merge`] is where that is enforced, and its doc says why the fold
+//! is not a [`Command::batch`].
 //!
 //! # Read/write projection pairs
 //!
@@ -38,13 +47,14 @@
 //! # One teardown surface (RFC 0013 R8)
 //!
 //! Every teardown this module produces is a call to the public
-//! [`Command::teardown`] constructor, in exactly one place —
-//! [`teardowns_for`], which the three journal drains share. There is no
-//! internal twin that builds a teardown entry from a raw prefix, and no
-//! other route below the public surface originates one. What the boundaries
-//! do to an *already-originated* teardown — `scoped`'s prefix
-//! qualification, `batch`'s aggregation, the lowering to runtime parts — is
-//! transformation and stays free.
+//! [`Command::teardown`] constructor, in exactly one place — [`merge`],
+//! which the **two** journal drains share ([`ForEach`] and [`Presented`];
+//! [`Scoped`] has no journal). There is no internal twin that builds a
+//! teardown entry from a raw prefix, and no other route below the public
+//! surface originates one. What the boundaries do to an
+//! *already-originated* teardown — `scoped`'s prefix qualification,
+//! [`Command::merging_teardowns`]'s aggregation, the lowering to runtime
+//! parts — is transformation and stays free.
 //!
 //! [`Subscription::scoped`]: crate::subscription::Subscription::scoped
 
@@ -58,8 +68,6 @@
     clippy::type_complexity,
     reason = "RFC 0014 §2.5 fixes these signatures verbatim; an alias would hide the contract"
 )]
-
-use std::iter;
 
 use ratatui::Frame;
 
@@ -176,14 +184,32 @@ pub trait ReducerExt: Reducer + Sized {
 
 impl<R: Reducer + Sized> ReducerExt for R {}
 
-/// One teardown per recorded removal, as the merge a journal drain returns.
+/// Merges one teardown per recorded removal into the command a boundary's
+/// reduce produced.
 ///
 /// **The one origination site in this module** (RFC 0013 R8): every teardown
 /// a combinator produces is built here, by a call to the public
 /// [`Command::teardown`] constructor, from a segment value the application
 /// itself supplied as a key or as the boundary's `seg`. No raw prefix path
 /// is constructed anywhere in this module, and no other function here builds
-/// a teardown.
+/// a teardown. What happens to an originated teardown afterwards —
+/// [`Command::merging_teardowns`] folding its entry onto the returned
+/// command — is aggregation, which §7.2's review leaves free.
+///
+/// **The fold is not a [`Command::batch`]**, and that is a contract point
+/// rather than a shortcut. A boundary adds identity carriers to what its
+/// child or its parent returned and nothing else (RFC 0014 §2.5); batching
+/// would add two things more. It folds the redraw directive across
+/// children, so an update that returned [`Command::without_redraw`] would
+/// silently regain its redraw the moment a row was removed in it. And it
+/// warns about a child spawn key — a diagnostic addressed to an application
+/// that keyed a batch, fired here for a command the boundary is only
+/// passing through. Both are observable differences a boundary is not
+/// entitled to make.
+///
+/// The phase order does not depend on the fold: the lowering applies every
+/// cancel-phase entry of a command before every spawn of it, however the
+/// entries got onto it (RFC 0014 §3.4).
 ///
 /// One entry, one teardown — so a remove-and-reinsert-and-remove within a
 /// single update yields two, which is what "one teardown for the removed
@@ -191,33 +217,15 @@ impl<R: Reducer + Sized> ReducerExt for R {}
 /// by INV-ST5's idempotence, and the alternative — collapsing them — would
 /// make the merge depend on a comparison of prefixes the boundary has no
 /// reason to perform.
-fn teardowns_for<Msg, Seg>(removed: Vec<Seg>) -> impl Iterator<Item = Command<Msg>>
-where
-    Msg: Send + 'static,
-    Seg: ScopeValue,
-{
-    removed.into_iter().map(Command::teardown)
-}
-
-/// Merges a boundary's teardowns into the command its reduce produced.
-///
-/// The teardowns come first, which reads as "the removals apply, then this
-/// update's own work" — though the phase order does not depend on it: the
-/// lowering applies every cancel-phase entry of a command before every spawn
-/// of it, whatever order the batch put them in (RFC 0014 §3.4).
-///
-/// With nothing removed the command is returned untouched rather than
-/// wrapped in a one-child batch, so a boundary that removed nothing is not
-/// observable in the command it returns.
 fn merge<Msg, Seg>(command: Command<Msg>, removed: Vec<Seg>) -> Command<Msg>
 where
     Msg: Send + 'static,
     Seg: ScopeValue,
 {
-    if removed.is_empty() {
-        return command;
-    }
-    Command::batch(teardowns_for(removed).chain(iter::once(command)))
+    removed
+        .into_iter()
+        .map(Command::teardown)
+        .fold(command, Command::merging_teardowns)
 }
 
 /// One child under a fixed segment ([`ReducerExt::scope`]).
@@ -245,6 +253,14 @@ where
     /// A message the child does not claim goes to the parent, whose command
     /// is *not* qualified: it is the parent's own command at the parent's
     /// own level, and this boundary is not one it crossed.
+    ///
+    /// **No journal drain here, and none is missing.** A journal records
+    /// that an *instance* left a collection, and this boundary has no
+    /// collection: it composes one child in place, whose state is a
+    /// projection of the parent's that is always there. There is no removal
+    /// for it to observe and therefore no teardown for it to originate — the
+    /// two boundaries that do hold collections ([`ForEach`], [`Presented`])
+    /// are where INV-RC3 lives.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         match (self.extract)(message) {
             Ok(claimed) => {
@@ -367,6 +383,12 @@ where
     ///
     /// A claimed message reaching an empty slot is discarded, for the reason
     /// a message for an absent key is.
+    ///
+    /// The drain runs on both branches, as [`ForEach`]'s does and for the
+    /// same reason. What differs is the segment: a dismissed occupant has no
+    /// key of its own, so each recorded dismissal yields a teardown of this
+    /// boundary's own `seg` — which is exactly where the occupant's runs
+    /// were placed.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         let command = match (self.extract)(message) {
             Ok(claimed) => {
@@ -450,6 +472,7 @@ mod tests {
     use crate::command::{CommandId, KernelParts};
     use crate::structural_key::ScopePath;
     use crate::subscription::mock::MockSource;
+    use crate::test_support::TraceRecorder;
 
     // A child that answers each of its messages with a command carrying one
     // of every identity-bearing carrier, so a boundary's qualification can
@@ -531,6 +554,9 @@ mod tests {
         Present,
         /// Handled by the root, returning its own keyed command.
         RootWork,
+        /// Handled by the root, returning a command that opts out of the
+        /// redraw.
+        Silent,
         /// Handled by the root, returning nothing.
         Idle,
     }
@@ -585,6 +611,7 @@ mod tests {
                 Message::RootWork => {
                     Command::stream(stream::pending()).cancellable(CommandId::new("root"))
                 }
+                Message::Silent => Command::none().without_redraw(),
                 _ => Command::none(),
             }
         }
@@ -655,6 +682,65 @@ mod tests {
             |state: &mut RootState| &mut state.modal,
             modal_extract,
             Message::Modal,
+        )
+    }
+
+    /// A reducer one level above [`stack`]: its state holds the whole inner
+    /// state and its message wraps the inner message, so `scope` can compose
+    /// the entire combinator stack as one child.
+    struct Outer;
+
+    struct OuterState {
+        inner: RootState,
+    }
+
+    impl OuterState {
+        fn new() -> Self {
+            Self {
+                inner: RootState::new(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum OuterMessage {
+        /// Claimed by the outer boundary and handed to the inner stack.
+        Inner(Message),
+        /// Handled by `Outer` itself, so the outer `extract` has both
+        /// answers to give.
+        Own,
+    }
+
+    impl Reducer for Outer {
+        type State = OuterState;
+        type Message = OuterMessage;
+
+        fn reduce(&self, _state: &mut OuterState, message: OuterMessage) -> Command<OuterMessage> {
+            assert_eq!(
+                message,
+                OuterMessage::Own,
+                "the outer boundary claims everything else before it gets here"
+            );
+            Command::none()
+        }
+    }
+
+    fn outer_extract(message: OuterMessage) -> Result<Message, OuterMessage> {
+        match message {
+            OuterMessage::Inner(inner) => Ok(inner),
+            other @ OuterMessage::Own => Err(other),
+        }
+    }
+
+    /// The whole of [`stack`] composed as the child of one more boundary.
+    fn nested() -> impl Reducer<State = OuterState, Message = OuterMessage> {
+        Outer.scope(
+            stack(),
+            "outer",
+            |state: &OuterState| &state.inner,
+            |state: &mut OuterState| &mut state.inner,
+            outer_extract,
+            OuterMessage::Inner,
         )
     }
 
@@ -774,10 +860,11 @@ mod tests {
         assert_eq!(spawn_scopes(&right), vec![path(&["right"]); 2]);
     }
 
-    // INV-RC2 through a *nested* stack: a `for_each` row's child is reached
+    // INV-RC2 at a collection boundary: a `for_each` row's child is reached
     // under the row key, and a teardown the child itself returned is
-    // qualified by that key too — so the qualification composes rather than
-    // stopping at the outermost boundary.
+    // qualified by that key too — so a carrier the child had already
+    // scoped is re-anchored rather than left alone. (Two boundaries stacked
+    // over one another are the separate row below.)
     #[test]
     fn a_row_s_child_is_qualified_by_its_key() {
         let stack = stack();
@@ -1039,6 +1126,132 @@ mod tests {
         state.left.subscribed = false;
 
         assert_eq!(stack.subscriptions(&state).len(), 2);
+    }
+
+    // A boundary adds identity carriers and **nothing else**. Two rows, one
+    // per thing merging through `Command::batch` used to add.
+
+    // The child-key diagnostic is the application's, addressed to code that
+    // keyed a batch. A boundary merging a removal into a keyed command is
+    // not that code, and must not make it look like it is. The second half
+    // is the control: the same recorder still sees an application's own
+    // keyed batch child, so the zero above is this path's silence rather
+    // than a silenced diagnostic.
+    #[test]
+    fn a_removing_boundary_reports_no_discarded_child_key() {
+        let recorder = TraceRecorder::new().with_target("tears::command");
+        let _guard = recorder.set_default();
+        let stack = stack();
+        let mut state = RootState::new();
+        state.rows.insert("row-a", ChildState::new(true));
+        state.rows.remove(&"row-a");
+
+        let before = recorder.event_count();
+        let parts = lowered(&stack, &mut state, Message::RootWork);
+        let after_boundary = recorder.event_count();
+        drop(Command::batch([
+            Command::message(Message::Idle).cancellable(CommandId::new("child"))
+        ]));
+
+        assert_eq!(
+            parts.teardowns,
+            vec![path(&["row-a"])],
+            "the removal was merged into the update's own keyed command"
+        );
+        assert_eq!(
+            after_boundary - before,
+            0,
+            "and merging it warned about nothing"
+        );
+        assert_eq!(
+            recorder.event_count() - after_boundary,
+            1,
+            "while an application's own keyed batch child still reports"
+        );
+    }
+
+    // The redraw directive is the update's own (RFC 0002's separation). A
+    // boundary that merged through `batch` would fold it against a
+    // teardown's default and hand a `without_redraw` update a redraw it
+    // declined.
+    #[test]
+    fn a_removing_boundary_preserves_the_update_s_redraw_directive() {
+        let stack = stack();
+        let mut state = RootState::new();
+        state.rows.insert("row-a", ChildState::new(true));
+        state.rows.remove(&"row-a");
+
+        let parts = lowered(&stack, &mut state, Message::Silent);
+
+        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert!(
+            !parts.redraw,
+            "the update opted out, and removing a row is not a boundary's licence to opt back in"
+        );
+    }
+
+    #[test]
+    fn a_removing_boundary_leaves_an_ordinary_update_redrawing() {
+        let stack = stack();
+        let mut state = RootState::new();
+        state.rows.insert("row-a", ChildState::new(true));
+
+        let parts = lowered(&stack, &mut state, Message::Close("row-a"));
+
+        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert!(parts.redraw, "the update's own default is untouched too");
+    }
+
+    // Two boundaries stacked over one another: the outer `scope` composes a
+    // whole `for_each` stack as its child. Every carrier the inner boundary
+    // qualified with a row key is re-anchored under the outer segment, so a
+    // run lands at `["outer", "row-b"]` and the inner stack's own journal
+    // teardown at `["outer", "row-a"]` — the qualification composes down the
+    // stack rather than stopping at the boundary that applied it.
+    #[test]
+    fn two_stacked_boundaries_compose_their_segments() {
+        let nested = nested();
+        let mut state = OuterState::new();
+        state.inner.rows.insert("row-a", ChildState::new(true));
+        state.inner.rows.insert("row-b", ChildState::new(true));
+
+        let parts = nested
+            .reduce(
+                &mut state,
+                OuterMessage::Inner(Message::Row("row-b", ChildMessage::Carriers)),
+            )
+            .into_runtime_parts()
+            .into_kernel_parts();
+
+        assert_eq!(
+            parts
+                .spawns
+                .iter()
+                .map(|spawn| spawn.scope.clone())
+                .collect::<Vec<_>>(),
+            vec![path(&["outer", "row-b"]); 2],
+            "the inner boundary placed the runs under the row key, the outer under its segment"
+        );
+        assert_eq!(parts.teardowns, vec![path(&["outer", "row-b", "inner"])]);
+        assert_eq!(
+            parts
+                .cleanups
+                .iter()
+                .map(|registration| registration.scope.clone())
+                .collect::<Vec<_>>(),
+            vec![path(&["outer", "row-b"])]
+        );
+
+        let parts = nested
+            .reduce(&mut state, OuterMessage::Inner(Message::Close("row-a")))
+            .into_runtime_parts()
+            .into_kernel_parts();
+
+        assert_eq!(
+            parts.teardowns,
+            vec![path(&["outer", "row-a"])],
+            "the inner stack's journal teardown is re-anchored by the outer boundary too"
+        );
     }
 
     // `into_program` closes the stack, and the closed value's reducer half

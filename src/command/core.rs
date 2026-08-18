@@ -361,6 +361,44 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
+    /// Takes `other`'s teardown prefixes onto this command and **nothing
+    /// else** — not its effect, not its directives, not its cancellation
+    /// metadata, not its cleanup registrations.
+    ///
+    /// This is aggregation of an already-originated teardown, which RFC 0013
+    /// §7.2's origination review names as a free transformation: the entry
+    /// still comes from a [`Command::teardown`] call, and there is no route
+    /// here from a raw prefix. A `debug_assert` holds `other` to that shape
+    /// so this cannot quietly become a general-purpose merge.
+    ///
+    /// The one caller is a combinator's journal drain, which has to put a
+    /// removal's teardown on a command the application returned.
+    /// [`Command::batch`] would be wrong there twice over: it folds the
+    /// redraw directive across its children, so an update that returned
+    /// [`Command::without_redraw`] would silently regain its redraw, and it
+    /// warns about a child spawn key for a command the boundary is only
+    /// passing through. A boundary adds identity carriers and nothing else
+    /// (RFC 0014 §2.5).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the combinators whose journal drain aggregates a teardown land after this carrier"
+        )
+    )]
+    pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
+        debug_assert!(
+            other.is_none()
+                && other.cleanups.is_empty()
+                && other.cancellation.key.is_none()
+                && other.cancellation.cancels.is_empty(),
+            "merging_teardowns aggregates teardown entries only; everything else on `other` \
+             would be dropped silently"
+        );
+        self.teardowns.extend(other.teardowns);
+        self
+    }
+
     /// Registers `finalizer` to run when a teardown selects the structural
     /// scope at this call boundary.
     ///
