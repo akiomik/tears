@@ -25,6 +25,7 @@
 
 pub mod adapter;
 pub mod collection;
+pub mod combinator;
 
 use ratatui::Frame;
 
