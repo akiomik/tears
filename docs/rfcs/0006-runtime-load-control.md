@@ -1888,12 +1888,75 @@ depth 0 where a single-message batch has no remainder to wait behind;
 session 2 re-checks that the span stays flat rather than growing with
 depth.
 
-**Session 2 results.** *This run has not been recorded yet.* When it
-is, each row's measured p99, its B(row), and the margin between them
-belong here, together with the delivery-half span. A row that fails
-its B(row) is a finding about the calibration or the kernel, and is
-reported as one — the constants above are not re-fitted to make it
-pass.
+**The acceptance rows are the eight quit rows of each route.** The
+`decomp_*` rows vary the batch cap and the render cost in order to
+separate the bound's terms, which is what makes them calibration
+instruments; they are informative and carry no criterion. Their
+session-2 figures are recorded with the measurements, not here.
+
+**Session 2 results, producer route.** Fresh trials under the pinned
+parameters, 200 valid per row, on the reference machine. B(row) uses
+each row's remainder — 119 for every row whose quit arrives at input
+5,000 under a 1024 cap, 0 for the idle rows, whose batch holds one
+message — and the row's own measured depth:
+
+| Row | B(row) | measured p99 | margin |
+| --- | ---: | ---: | ---: |
+| `quit_idle_control` | 0.961 | 0.547 | +0.414 |
+| `quit_idle_bounded_control` | 0.961 | 0.545 | +0.416 |
+| `quit_blocked_1_control` | 4.691 | 3.902 | +0.789 |
+| `quit_blocked_64_control` | 4.691 | 3.951 | +0.740 |
+| `quit_overload_bounded_control` | 4.691 | 3.950 | +0.741 |
+| `quit_overload_control` | 4.763 | 3.990 | +0.773 |
+| `quit_backlog_50k_control` | 5.205 | 4.025 | +1.180 |
+| `quit_backlog_300k_control` | 7.830 | 6.315 | +1.515 |
+
+All eight pass, in milliseconds, with the narrowest margin at
+`quit_blocked_64_control`. The delivery-half check passes with them:
+excluding the idle rows, the derived delivery span is 3.41–3.58 ms
+from depth 1,024 through 299,997, flat rather than growing with
+depth, which is INV-L4's property on the successor route.
+
+One row-definition observation, recorded rather than gated:
+`quit_overload_control`'s depth distribution widened between the
+sessions — p50 7,799 → 7,898 and max 7,999 → 10,596 — under a row
+that produces at 100,000/s against a slower consumer, so where in the
+overload the quit lands varies more than the other rows' does. The
+gate above reads that row's measured values as they stand, and it
+passes; what the spread bears on is how tightly the row pins its own
+depth, which is a question about the row rather than about the
+kernel.
+
+**Session 2 results, synchronous route.** Same run, same discipline.
+The gate is 2.5 × the predicted p50 at each row's depth:
+
+| Row | predicted p50 | gate | measured p99 | ratio | |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `quit_idle_sync` | 0.019 | 0.048 | 0.011 | 0.58 | pass |
+| `quit_idle_bounded_sync` | 0.019 | 0.048 | 0.028 | 1.47 | pass |
+| `quit_blocked_1_sync` | 0.028 | 0.069 | 0.030 | 1.09 | pass |
+| `quit_overload_bounded_sync` | 0.028 | 0.069 | 0.029 | 1.05 | pass |
+| `quit_blocked_64_sync` | 0.028 | 0.070 | **0.111** | **3.94** | **fail** |
+| `quit_overload_sync` | 0.085 | 0.211 | 0.094 | 1.11 | pass |
+| `quit_backlog_50k_sync` | 0.439 | 1.098 | 0.507 | 1.15 | pass |
+| `quit_backlog_300k_sync` | 2.539 | 6.348 | 2.899 | 1.14 | pass |
+
+**Seven of eight pass; `quit_blocked_64_sync` does not, and this
+section does not move to accommodate it.** The gate and every
+constant above were fixed in calibration precisely so that a row
+landing outside them would be visible as a finding rather than
+absorbed, and this is that case: the row was already the widest in
+calibration at 1.92, and session 2 puts it at 3.94.
+
+What the failure is *about* is open. The predictor this route is
+gated on carries a depth term and nothing else, while this row is the
+only one that varies a second quantity — it runs 64 blocked producers
+where every other row runs one — so a residual model with no
+producer-count term is one candidate explanation and the kernel's own
+behaviour under 64 blocked producers is another. This section states
+the failure and does not choose between them; the acceptance for this
+route stays open until that is settled, and the seven passing rows
+are recorded above as passing rather than as an acceptance.
 
 **Acceptance conditions, synchronous route.** This route performs no
 send and waits behind no batch, so its cost is the postcondition
