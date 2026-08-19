@@ -99,6 +99,23 @@ const BURST: u64 = 0;
 /// column compares against the old harness's.
 const DATA_LANE_CAPACITY: usize = 1024;
 
+/// The `batch_max_messages` every acceptance row states, pinned here rather
+/// than inherited.
+///
+/// Equal to the kernel's own `DEFAULT_BATCH_MAX_MESSAGES` today, so stating
+/// it moves no measured number. What it buys is that it *stays* a stated
+/// parameter of the acceptance matrix: leaving the rows unset would let a
+/// later change to that default silently re-run the matrix under a different
+/// batch bound, and the batch bound is one of the two terms the `decomp_*`
+/// rows separate out by varying it.
+const BATCH_MAX_MESSAGES: usize = 1024;
+
+/// The per-frame render cost every acceptance row spends, pinned for the
+/// same reason as [`BATCH_MAX_MESSAGES`]: it is the other term the
+/// `decomp_*` rows vary — those set it to zero to remove the frame's spin —
+/// so it is a parameter of the matrix rather than an incidental literal.
+const RENDER_COST: Duration = Duration::from_micros(500);
+
 /// Trials per quit row — RFC 0006 INV-L4's "≥ 200 trials per scenario".
 const QUIT_TRIALS: u32 = 200;
 
@@ -165,21 +182,23 @@ struct Cfg {
     quit_route: QuitRoute,
     producers: u32,
     mode: Mode,
-    /// `batch_max_messages`; `None` leaves the kernel's own finite default
-    /// (`DEFAULT_BATCH_MAX_MESSAGES`, 1024). Only the decomposition rows set
-    /// it, to shrink the in-progress batch's remainder to nothing.
-    batch_cap: Option<usize>,
+    /// `batch_max_messages`, stated by every row rather than inherited from
+    /// the kernel's default ([`BATCH_MAX_MESSAGES`], which is that default's
+    /// current value). The decomposition rows depart from it, shrinking the
+    /// in-progress batch's remainder to nothing.
+    batch_cap: usize,
     max_wall: Duration,
 }
 
-/// The configuration a row runs under: the lane mode plus an optional batch
-/// cap.
+/// The configuration a row runs under: the lane mode plus the batch cap.
+///
+/// The cap is not optional here, and that is the point — the acceptance
+/// matrix has no unset-parameter state for a kernel default to fill in
+/// later.
 fn config_for(cfg: &Cfg) -> RuntimeConfig {
-    let config = cfg.mode.config();
-    match cfg.batch_cap {
-        None => config,
-        Some(cap) => config.batch_max_messages(NonZeroUsize::new(cap).expect("non-zero cap")),
-    }
+    cfg.mode
+        .config()
+        .batch_max_messages(NonZeroUsize::new(cfg.batch_cap).expect("non-zero cap"))
 }
 
 /// The valid-trial predicate a bounded quit row checks at the quit instant
@@ -216,12 +235,12 @@ fn load_scenarios() -> Vec<Cfg> {
         rate: BURST,
         total: 0,
         update_cost: Duration::from_micros(25),
-        render_cost: Duration::from_micros(500),
+        render_cost: RENDER_COST,
         quit_at_seq: None,
         quit_route: QuitRoute::Sync,
         producers: 1,
         mode: Mode::Unbounded,
-        batch_cap: None,
+        batch_cap: BATCH_MAX_MESSAGES,
         max_wall: Duration::from_secs(60),
     };
     vec![
@@ -290,12 +309,12 @@ fn quit_scenarios() -> Vec<QuitCfg> {
         rate: BURST,
         total: 0,
         update_cost: Duration::from_micros(25),
-        render_cost: Duration::from_micros(500),
+        render_cost: RENDER_COST,
         quit_at_seq: Some(5_000),
         quit_route: QuitRoute::Sync,
         producers: 1,
         mode: Mode::Unbounded,
-        batch_cap: None,
+        batch_cap: BATCH_MAX_MESSAGES,
         max_wall: Duration::from_secs(30),
     };
     let mut rows = Vec::new();
@@ -383,24 +402,9 @@ fn quit_scenarios() -> Vec<QuitCfg> {
     // the depth-scaling term and the two fixed terms are separated by
     // measurement rather than by inference.
     for (name, total, batch_cap, render_cost) in [
-        (
-            "decomp_50k_batch1",
-            55_000_u64,
-            Some(1_usize),
-            Duration::from_micros(500),
-        ),
-        (
-            "decomp_50k_batch1_norender",
-            55_000,
-            Some(1),
-            Duration::ZERO,
-        ),
-        (
-            "decomp_300k_batch1_norender",
-            305_000,
-            Some(1),
-            Duration::ZERO,
-        ),
+        ("decomp_50k_batch1", 55_000_u64, 1_usize, RENDER_COST),
+        ("decomp_50k_batch1_norender", 55_000, 1, Duration::ZERO),
+        ("decomp_300k_batch1_norender", 305_000, 1, Duration::ZERO),
     ] {
         rows.push(QuitCfg {
             base: Cfg {
