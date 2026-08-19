@@ -153,6 +153,10 @@ fn a_keyed_producer_panic_is_contained_and_delivery_continues() {
 // which unwinds on the driving task and is fail-fast — the difference is
 // which task holds the panic, and it is the whole of what separates the two
 // classes.
+//
+// The script removes the declaration at message 20 so exactly one panic
+// happens, which is what keeps this row about containment; the restart the
+// declaration would otherwise get is the row after it.
 #[test]
 fn a_subscription_forwarder_panic_is_contained_and_delivery_continues() {
     let exploding = ProbeSource::exploding("boom");
@@ -166,12 +170,29 @@ fn a_subscription_forwarder_panic_is_contained_and_delivery_continues() {
         assert_eq!(exploding.admissions(), 1, "boot admitted the source");
 
         driver.settle(TEST_TURNS, || exploding.quiescences() > 0);
+        let evaluations = journal.evaluations();
         let stepped = driver
             .step_pass(WakeSource::ProducerExit)
             .expect("the panicking forwarder's exit is observable");
         assert!(
             stepped.terminated.is_none(),
             "containment: a forwarder panic is not a termination cause"
+        );
+        // The exit pass re-admits nothing, and the reason is RFC 0014 §5.2
+        // rather than the declaration: a panicked run's quiescence is a
+        // *finish*, not the quiescence of a stopped run, so it marks no dirt
+        // and that pass re-evaluates nothing. RFC 0005 INV-13 places the
+        // restart at the next re-evaluation, which is exactly what the two
+        // readings below say happened — and did not happen — here.
+        assert_eq!(
+            journal.evaluations(),
+            evaluations,
+            "a panic finish marks no dirt, so the pass that reflects it re-evaluates nothing"
+        );
+        assert_eq!(
+            exploding.admissions(),
+            1,
+            "and with no re-evaluation there is no site for a restart to happen at"
         );
 
         accept(&mut driver, healthy);
@@ -182,6 +203,72 @@ fn a_subscription_forwarder_panic_is_contained_and_delivery_continues() {
             journal.reduced(),
             vec![20],
             "the loop kept running and the surviving producer's output arrived"
+        );
+        assert_eq!(
+            exploding.admissions(),
+            1,
+            "and that message's re-evaluation dropped the declaration, so nothing restarted"
+        );
+    })
+    .expect("the test body itself does not unwind");
+}
+
+// The other side of the same coin, and the reason the row above has to
+// remove its declaration to stay a containment row: a forwarder panic is a
+// **finish**, so a source that stays declared restarts at the next
+// re-evaluation exactly as a naturally finished one does (RFC 0005 INV-13),
+// and the restarted run panics again — contained again (RFC 0011 INV-LC8).
+//
+// Nothing here is a defect: the kernel has no notion of a run that panicked
+// "too recently to retry", and inventing one would be a policy this crate
+// has not specified. What the row pins is that the two contracts compose in
+// the only way they can — the loop keeps running across both panics, and the
+// surviving producer's output is delivered across them.
+#[test]
+fn a_still_declared_source_restarts_after_its_forwarder_panicked() {
+    let exploding = ProbeSource::exploding("boom");
+    silently(|| {
+        let (mut driver, journal) =
+            driver(Script::new(parking_effect([20])).feeding([Feed::new(exploding.clone())]));
+        let healthy = driver.boot().started[0].clone();
+        assert_eq!(exploding.admissions(), 1, "boot admitted the source");
+
+        driver.settle(TEST_TURNS, || exploding.quiescences() > 0);
+        driver
+            .step_pass(WakeSource::ProducerExit)
+            .expect("the panicking forwarder's exit is observable");
+
+        // The next re-evaluation is this message's, and the declaration is
+        // still there to be honoured.
+        accept(&mut driver, healthy);
+        let stepped = driver
+            .step_pass(WakeSource::Data)
+            .expect("the healthy producer's send is in the lane");
+        assert!(
+            stepped.terminated.is_none(),
+            "the restart is not a termination cause either"
+        );
+        assert_eq!(
+            exploding.admissions(),
+            2,
+            "the still-declared source restarted at the next re-evaluation (INV-13)"
+        );
+        assert_eq!(
+            journal.reduced(),
+            vec![20],
+            "and the surviving producer's output was delivered in that same pass"
+        );
+
+        driver.settle(TEST_TURNS, || exploding.quiescences() > 1);
+        assert_eq!(
+            exploding.quiescences(),
+            2,
+            "the restarted run panicked in its turn, and was contained in its turn"
+        );
+        assert_eq!(
+            exploding.admissions(),
+            2,
+            "with no re-evaluation since, nothing has restarted it a third time"
         );
     })
     .expect("the test body itself does not unwind");
