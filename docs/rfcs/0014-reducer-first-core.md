@@ -1017,10 +1017,13 @@ contract; its API body lands in that amendment. Contract:
   (§3.5 pins the policy, not the occasion).
 - **Scope of the determinism claim.** The handshake's acceptance
   confirmation is the post-send acknowledgement, which is the form an
-  executor-independent or bounded-lane extension requires; the
-  *claim* this RFC makes is nevertheless scoped to a current-thread
-  executor and unbounded lanes, the verified range. A bounded
-  extension additionally requires **driver progress** (the driver
+  executor-independent or bounded-lane extension requires. The
+  *claim* this RFC makes is scoped to a current-thread executor; it
+  covered unbounded lanes alone until the bounded extension had its
+  verification pass, which it now has (RFC 0008 §9.12), so the
+  verified range is that executor on either lane mode and executor
+  independence is what remains open (§13.3). A bounded
+  extension requires **driver progress** (the driver
   stays steppable while a grant's acceptance is outstanding, so a
   capacity-blocked send cannot deadlock the handshake) and **ack
   correlation** (at most one outstanding grant per origin, or an
@@ -1326,30 +1329,31 @@ tiers remain the regression suite afterward.
   and §6.3's premise substitution. Behavioral: RFC 0011's own test
   rows re-run against the kernel, plus the init-quit row.
 - **INV-RC12 — barrier scope, defer, and dirt sources.** RFC 0012's
-  admission suite passes; additionally (a) a stop-requested command or
-  cleanup run defers no subscription admission, (b) dirt is marked
-  only by §5.2's two sources — the quiescence of a naturally finished
-  subscription run, of a command run, or of a cleanup run marks
-  none — and (c) a stop-issuing re-evaluation admits zero in its own
-  pass, even when the stop quiesces while that pass is still running.
-  Enforcement splits by what a check can construct, and (a) splits
-  inside itself. Its **command** half and all of (b) are
-  **behavioral** at the reconcile seam, one row per non-participating
-  run kind and one per non-dirt source. Its **cleanup** half divides
-  again: a cleanup run *in flight* defers nothing, which is
-  behavioral there like the rest, but a **stop-requested** cleanup
-  run is not constructible outside termination — a teardown excludes
-  the kind, a cancel and a supersession address keyed slots, a
-  re-evaluation addresses subscription runs — and at termination no
-  admission site is left for one to defer. That clause is therefore
-  **structural**, at the barrier predicate, which reads subscription
-  runs only and so can never see a cleanup run
-  (`src/kernel/conformance/cleanup.rs` records the enumeration beside
-  the reachable row). (c) is **structural** at the reconcile seam —
-  the reconcile path takes no second admission attempt after issuing
-  its stops, so a quiescence observed while the pass runs has no site
-  to admit into — because a mid-pass quiescence is not constructible
-  on the single-threaded executor those behavioral rows use. RFC 0012
+  admission suite passes; additionally (a) a stop-requested command
+  or cleanup run defers no subscription admission, (b) dirt is
+  marked only by §5.2's two sources — the quiescence of a naturally
+  finished subscription run, of a command run, or of a cleanup run
+  marks none — and (c) a stop-issuing re-evaluation admits zero in
+  its own pass, even when the stop quiesces while that pass is still
+  running. Enforcement splits by what a check can construct, and (a)
+  splits inside itself. Its **command** half and all of (b) are
+  **behavioral** at the reconcile seam, one row per
+  non-participating run kind and one per non-dirt source. Its
+  **cleanup** half is structural, because the clause is about a
+  **stop-requested** cleanup run and one is not constructible
+  outside termination — a teardown excludes the kind, a cancel and a
+  supersession address keyed slots, a re-evaluation addresses
+  subscription runs — and at termination no admission site is left
+  for one to defer. That clause is therefore carried at the barrier
+  predicate, which reads subscription runs only and so can never see
+  one. A cleanup run *in flight* is the behavioral neighbour rather
+  than part of this clause, and has its own row
+  (`src/kernel/conformance/cleanup.rs` records the enumeration
+  beside it). (c) is **structural** at the reconcile seam — the
+  reconcile path takes no second admission attempt after issuing its
+  stops, so a quiescence observed while the pass runs has no site to
+  admit into — because a mid-pass quiescence is not constructible on
+  the single-threaded executor those behavioral rows use. RFC 0012
   §4.2 states the same split from the owner side.
 - **INV-RC13 — driver topology.** The driver constructs through the
   production path and shares bookkeeping, producer execution, lanes,
@@ -1363,7 +1367,9 @@ tiers remain the regression suite afterward.
   evidence surface).
 - **INV-RC14 — scripted determinism.** One script yields one
   observation sequence across repeated runs (deterministic
-  application premise; current-thread executor, unbounded lanes);
+  application premise; current-thread executor, either lane mode —
+  the bounded half verified at RFC 0008 §9.12, executor independence
+  open at §13.3);
   enqueue-order guarantees exist only through the
   grant-then-acceptance handshake; pre-gate records are excluded from
   the guaranteed sequence. Behavioral: repeat-stability over the

@@ -1656,14 +1656,18 @@ own.
   `shared_pending` reads as the data lane's residual occupancy at batch
   end; `channel` becomes single-valued, carrying `"data"` for the one
   bounded lane in place of today's `"shared"`/`"keyed"` pair; and the
-  gauge kind counts map onto the
-  kernel's run kinds — `unkeyed_commands` counts anonymous runs,
-  `keyed_commands` counts keyed runs, `subscriptions` counts subscription
-  runs. Levels, targets, required fields, `runtime_id`, `seq`, the
-  per-instance current-value rule, and every firing condition are
-  unchanged (RFC 0014 §9 row 9). The kernel's cleanup runs (RFC 0014
-  §4.4) are a producer kind no gauge field counts; row 9 adds none, and
-  this schema stays as stated.
+  gauge kind counts map onto the kernel's run kinds — `unkeyed_commands`
+  counts anonymous runs, `keyed_commands` counts keyed runs,
+  `subscriptions` counts subscription runs. Levels, targets, required
+  fields, `runtime_id`, `seq`, the per-instance current-value rule, and
+  every firing condition are unchanged (RFC 0014 §9 row 9). One firing
+  *reaches* less far without the rule changing: an `update`-returned
+  quit no longer travels a channel, so a batch it ends emits no event
+  where the superseded route's did. The condition is the same condition;
+  what changed is the route, and that change belongs to RFC 0014 §3.3
+  and row 4. The kernel's cleanup runs (RFC 0014 §4.4) are a producer
+  kind no gauge field counts; row 9 adds none, and this schema stays as
+  stated.
 - **INV-L14's object goes with INV-14.** What it narrows is the
   incidental strength INV-14 lends in unbounded mode; with shared-first
   pull superseded (row 2) the recorded loss is the general one
@@ -1786,6 +1790,35 @@ conservative direction: a row accepted on the upper bound is accepted
 on the delivery instant it bounds. The residual term is measured
 separately below rather than left inside the number.
 
+**Pinned parameters.** Section 5.1's first reproducibility rule — the
+run's configuration is fixed before the implementation PR, not chosen
+at implementation time — applies here, so the successor's acceptance
+rows carry their parameters explicitly rather than inheriting a
+kernel default that could later move under them:
+
+| Parameter | Acceptance rows | Decomposition rows |
+| --- | --- | --- |
+| `data_lane_capacity` | unset (unbounded) and set, per row | unset |
+| `batch_max_messages` | **1024**, stated by every row | 1 |
+| render cost | **500 µs** | 500 µs and 0 |
+| trials | ≥ 200 valid per row | ≥ 200 valid per row |
+
+Both pinned values equal what the rows measured before they were
+stated, so no figure in this section moves with the pinning. The two
+the decomposition rows vary are varied *because* the upper bound is
+decomposed by varying them, which is the point of those rows and the
+reason both belong in the matrix rather than only the first.
+
+What section 5.1's rule assigns to RFC 0007 §6 — fixing the bounded
+run's configuration under test — is **deferred to the switch-over**
+for one of its three fields: `app_channel_capacity` and
+`keyed_channel_capacity` are the superseded topology's controls, and
+the successor's single control is `data_lane_capacity`, which is that
+rename's own landing (section 5.2; RFC 0014 §9 row 2). The obligation
+is unchanged, and RFC 0007 restates it against the field that exists
+once the field exists. `batch_max_messages` needs no deferral — it
+survives the rename and is pinned above.
+
 **Producer-originated route — the INV-L4 successor.** The criterion is
 no longer one absolute threshold. RFC 0014 §3.3 gives this route a
 *constructive* bound, and acceptance quantifies over that bound's
@@ -1823,12 +1856,29 @@ not constructive.
 
 **Acceptance conditions, synchronous route.** This route performs no
 send and waits behind no batch, so its cost is the postcondition
-alone. The criterion is that measured p99 fits the postcondition's
-linear form at the row's residual depth: intercept ≈ 0.019 ms, slope
-**8.4 ns per residual envelope**, measured across depths 0 / 1,024 /
-7,799 / 49,999 / 299,999. At depth 0 the measured p99 is 0.006 ms
-unbounded and 0.005 ms bounded — the synchronous application itself
-is below the measurement's resolution.
+alone, and the criterion is two conditions rather than one, because a
+linear fit and a tail bound are different claims.
+
+- **Shape, on p50.** Median cost is linear in the row's residual
+  depth: intercept ≈ 0.019 ms, slope **8.4 ns per residual
+  envelope**, fitted across depths 0 / 1,024 / 7,799 / 49,999 /
+  299,999. The fit is asserted on p50 because that is the statistic
+  it was derived from; a slope read off tails would be a different
+  quantity claimed under the same name.
+- **Tail, one-sided.** For each row, measured p99 does not exceed
+  **2.5 × the p50 the shape condition predicts at that row's
+  depth**. The margin is one-sided — a faster tail never fails — and
+  the factor is read off the measurement rather than chosen: against
+  the predicted p50, the eight rows' p99 ratios are 0.26, 0.32, 1.08,
+  1.09, 1.12, 1.16, 1.21, and 1.92, so 2.5 clears the worst
+  (`quit_blocked_64_sync`, where 64 blocked producers put the tail at
+  roughly twice the median) with room that does not reach the next
+  row down. The two ratios below 1 are the depth-0 rows, where the
+  intercept dominates a cost at the measurement's resolution.
+
+Stating the direction plainly: both conditions bound the route from
+above only. A synchronous quit that got faster passes them, and is
+expected to — the route travels no channel at all.
 
 **What the numbers say about the old threshold, stated plainly.** The
 superseded criterion was p99 ≤ 1 ms at every measured depth, and it
@@ -1839,7 +1889,7 @@ superseded path (p99 0.006 ms against 0.603 ms), since it travels no
 channel. At backlog the control route is slower than 1 ms (4.0 ms at
 50k, 6.3 ms at 300k), because its bound is now the in-progress
 batch's remainder, which scales with the configured cap — exactly
-what RFC 0014 §3.3 contracts and §3.5's finite cap bounds. Neither
+what RFC 0014 §3.3 contracts and RFC 0014 §3.5's finite cap bounds. Neither
 movement is a regression against a contract; carrying the old number
 across would have measured the successor against a topology it does
 not have.
@@ -1852,6 +1902,23 @@ same accounting section 5.1 fixes. Every successor row is lossless
 row has no successor and is not re-measured: with the per-command
 channels gone there is nothing to isolate, which section 5.2 already
 records as a property loss.
+
+**Informative: the kernel's per-dispatch linear scans.** The successor
+replaces per-command channels with one run registry, and several of
+its bookkeeping operations walk that registry. Measured on the same
+machine and profile, each is linear in the number of live entries,
+with per-entry slopes of ~4.8 ns (keyed-occupant lookup, per explicit
+cancel or keyed spawn), ~2.9 ns (subscription-running lookup, per
+declaration per re-evaluation), ~1.7 ns (any-stopping-subscription,
+per re-evaluation), and ~7.8–10.0 ns (teardown prefix selection, per
+teardown); the cleanup ledger's prefix partition runs ~6.3 ns per
+registration, or ~61 ns when the selected registrations are also
+dropped, which production does not do — it starts them. Worst case
+for one re-evaluation at 64 declarations against 512 live runs is
+about 97 µs. These figures are recorded, not gated: no invariant here
+quantifies over scan cost, and they are stated so a later change to
+the registry's structure — which RFC 0013 §3.7 leaves as
+mechanism — has a before value to be measured against.
 
 **Recorded, not gated: render count.** Removing configured frame
 pacing (RFC 0014 §6.3) changes how often the frame stage runs —
