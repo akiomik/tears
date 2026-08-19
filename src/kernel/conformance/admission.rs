@@ -293,6 +293,11 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // The window opens: A's dismantling has begun on a worker and is held
     // there, so the stop is outstanding and the quiescence has not happened.
     driver.settle(THREADED_TURNS, || gate.entered());
+    assert!(
+        !gate.exhausted(),
+        "the hold ran out its budget instead of being released, so the window below was never \
+         open — this row's premise failed, not the kernel"
+    );
     assert_eq!(
         first.quiescences(),
         0,
@@ -320,6 +325,11 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
         newest.admissions(),
         0,
         "and C waits behind the outstanding stop rather than admitting beside it"
+    );
+    assert!(
+        !gate.exhausted(),
+        "the hold was still holding across that pass, so the two readings above are the \
+         barrier's answer and not a released run's"
     );
 
     // The window closes: A quiesces, and the pass its notification begins

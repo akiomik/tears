@@ -161,6 +161,7 @@ impl Drop for DropMark {
 pub struct QuiescenceGate {
     open: Arc<AtomicBool>,
     entered: Beacon,
+    exhausted: Arc<AtomicBool>,
 }
 
 impl QuiescenceGate {
@@ -175,6 +176,18 @@ impl QuiescenceGate {
     /// window's second half.
     pub fn entered(&self) -> bool {
         self.entered.marked()
+    }
+
+    /// Whether a hold ran out its budget instead of being released.
+    ///
+    /// The hold cannot report its own exhaustion by panicking — that would
+    /// abort the process from a drop rather than fail a test — so it records
+    /// it here and the script reads it beside the window assertions. Without
+    /// this, an exhausted hold looks exactly like a run that quiesced early,
+    /// and the row fails on a downstream admission count that names neither
+    /// the cause nor the file it happened in.
+    pub fn exhausted(&self) -> bool {
+        self.exhausted.load(Ordering::SeqCst)
     }
 }
 
@@ -205,17 +218,25 @@ impl Drop for GatedQuiescence {
     /// Held with a counted busy-yield rather than a waker or a deadline: a
     /// drop cannot await, and a deadline would be a clock read. The bound is
     /// a hang guard whose value is mechanism, in the style of
-    /// [`MidBatchHandshake`]'s — an exhausted bound means the script never
-    /// opened the gate, and reporting it by panicking inside a drop would
-    /// abort the process rather than fail the test, so the hold simply ends
-    /// and the script's own assertions report it.
+    /// [`MidBatchHandshake`]'s.
+    ///
+    /// Panicking inside a drop would abort the process rather than fail the
+    /// test, so an exhausted bound is *recorded* instead
+    /// ([`QuiescenceGate::exhausted`]) and the script reads it where it can
+    /// name it. The hold then ends, which is the only other option: staying
+    /// in the drop forever would hang the suite.
     fn drop(&mut self) {
         self.gate.entered.mark();
+        let mut released = false;
         for _ in 0..HANDSHAKE_YIELDS {
             if self.gate.open.load(Ordering::SeqCst) {
+                released = true;
                 break;
             }
             thread::yield_now();
+        }
+        if !released {
+            self.gate.exhausted.store(true, Ordering::SeqCst);
         }
         self.quiesced.mark();
     }
