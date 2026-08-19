@@ -44,14 +44,24 @@ use super::Kernel;
 impl<P: Program> Kernel<P> {
     /// Emits the batch event for one completed input batch (RFC 0006 §4.4).
     ///
-    /// The firing condition is unchanged, which row 9 requires and which the
-    /// two guards here are: the old loop's batch *began* with an input, so a
-    /// batch with nothing pulled had no existence to report, and a
-    /// quit-terminated batch left through the loop's exit without emitting.
-    /// The kernel's stage 3 runs on every pass instead — including passes an
-    /// exit or a control arrival began — so a pass that pulled nothing is
-    /// exactly the case the old shape could not produce, and emitting for it
-    /// would widen the event's meaning under an unchanged name.
+    /// Row 9 leaves the firing condition unchanged, and the two guards here
+    /// are what keep it so. The old loop's batch *began* with an input, so a
+    /// batch with nothing pulled had no existence to report, and a batch a
+    /// quit cut short left through the loop's exit without emitting. The
+    /// kernel runs stage 3 on every pass instead — including passes an exit
+    /// or a control arrival began — so a pass that pulled nothing is a case
+    /// the old shape could not produce, and emitting for it would widen the
+    /// event's meaning under an unchanged name.
+    ///
+    /// The *rule* is therefore preserved; its **reach** narrows, and the
+    /// narrowing is not this module's doing. The old loop exited early only
+    /// for a quit that arrived as an **input** — a keyed command's — while
+    /// an `update`-returned `Command::quit()` was an ordinary dispatch
+    /// there, so its batch ran on and reported. RFC 0014 §3.3 applies that
+    /// quit synchronously at its dispatch, so the batch carrying it now ends
+    /// without an event, and a producer quit reaches the control drain a
+    /// stage before the batch rather than mid-way through one. Both follow
+    /// from the quit routes that row supersedes.
     pub(super) fn report_batch(&self, pulled: usize, updated: usize) {
         if pulled == 0 || self.terminating() {
             return;
