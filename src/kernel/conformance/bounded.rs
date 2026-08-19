@@ -2,20 +2,31 @@
 //! handshake rows it rests on.
 //!
 //! **Scope, stated before the rows.** This file runs INV-RC5's bounded-lane
-//! half over the single data lane. It scripts the bounded lane through the
-//! grant handshake **for enqueue order only** and claims no bounded-lane
-//! determinism beyond that: the general claim needs its own verification
-//! pass and the two protocol conditions RFC 0014 §13.3 names, and until that
-//! lands the evidence here is evidence for revocation under a bounded lane
-//! and nothing more.
+//! half over the single data lane, and it carries the verification pass
+//! RFC 0014 §13.3 gates the bounded extension of the scripted-determinism
+//! claim on. That pass has run — the replay row below is it — and the
+//! driving contract's bounded resolution records the outcome on the owner
+//! side: for a deterministic application on a current-thread executor, one
+//! script yields one observation sequence with the data lane bounded —
+//! word for word what INV-RC14 already claimed for the unbounded case, now
+//! reaching one lane mode further. What that resolution does **not** extend
+//! is executor independence, §13.3's other half, which stays open; nothing
+//! here is evidence for it.
 //!
-//! Both of those conditions are exercised here all the same, because a full
-//! lane cannot be scripted without them. **Driver progress**: the driver
-//! stays steppable while a grant's acceptance is outstanding, so the test
-//! holds a token across the `step_pass` that drains the lane the send waits
-//! on — which the token's detachment is for. **Ack correlation**: at most one
-//! grant is outstanding driver-wide, so no acceptance can be some other
-//! release's.
+//! Both of §13.3's protocol conditions are met by execution rather than by
+//! shape, and a full lane cannot be scripted without them. **Driver
+//! progress**: the driver stays steppable while a grant's acceptance is
+//! outstanding, so a row holds a token across the `step_pass` that drains
+//! the lane the send waits on — which the token's detachment is for. **Ack
+//! correlation**: at most one grant is outstanding driver-wide, so no
+//! acceptance can be some other release's.
+//!
+//! **The replay row's determinism is the claim's own, not a fixture's.** It
+//! uses the current-thread executor and the scripted gate and nothing else —
+//! no application-side handshake, which the multi-worker series need
+//! precisely because they sit *outside* this claim's verified range
+//! (RFC 0008 §9.8). A row that had to import an ordering device would be
+//! evidence for that device rather than for the claim.
 //!
 //! **Each capacity claim here is a pair of rows, and it needs both.** A
 //! positive row shows a release committing after a pass drained the lane; on
@@ -27,9 +38,40 @@
 
 use crate::command::{Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
-use crate::testing::driver::Confirmed;
+use crate::kernel::lane::Lane;
+use crate::test_support::TraceRecorder;
+use crate::testing::driver::{Confirmed, RunKind};
 
-use super::support::{Script, TEST_TURNS, accept, cap, config, driver_with, parking_effect};
+use super::support::{Call, Script, TEST_TURNS, accept, cap, config, driver_with, parking_effect};
+
+/// How many times a determinism row replays its script.
+///
+/// The number is mechanism. What the row claims is that *one* script yields
+/// one observation sequence, so a single differing replay falsifies it and
+/// no number of agreeing ones proves it; the count only widens the window in
+/// which a scheduler-dependent implementation is caught.
+const REPLAYS: usize = 8;
+
+/// One replay's whole observation, in every place a script can be read.
+///
+/// `accepted` is the guaranteed sequence (RFC 0008 §9.6), projected onto
+/// what a replay can compare: a [`RunName`] carries the identity of the
+/// driver that minted it, and each replay builds its own driver, so the
+/// comparable facts are the run's kind and the lane its send took.
+///
+/// `waits` is the capacity-wait events the blocked sends fired. It is in
+/// here rather than beside it because it is what makes the comparison cover
+/// the *blocking*: without it a replay in which nothing ever waited would
+/// compare equal to one in which everything did.
+///
+/// [`RunName`]: crate::testing::driver::RunName
+#[derive(Debug, Eq, PartialEq)]
+struct Replay {
+    accepted: Vec<(RunKind, Lane)>,
+    delivered: Vec<u8>,
+    calls: Vec<Call>,
+    waits: Vec<String>,
+}
 
 // The series proper. A two-slot lane is exactly full with a revoked run's
 // item still in it, and the revocation frees no capacity: what frees it is
@@ -136,6 +178,113 @@ fn a_bounded_lane_with_headroom_keeps_the_handshake_deterministic() {
         vec![200, 100],
         "and reversing it reverses delivery"
     );
+}
+
+// **The verification pass RFC 0014 §13.3 gates the bounded extension on.**
+// The headroom row above replays a script whose sends never wait, which is
+// the unbounded claim over a lane that merely happens to be bounded. This
+// one replays a script in which every send but the first *does* wait, and
+// each wait is resolved by the pass that drains the item ahead of it — so
+// the capacity mechanism is inside the replayed region rather than beside
+// it.
+//
+// Two producers interleave through the one lane, alternating with every
+// grant, so the sequence is not one producer's own order surviving: the
+// script's order and the delivery order are the same order, and reversing
+// the script reverses both. The two faces are what make that a claim rather
+// than a description — a run that ignored the handshake and drained in
+// arrival order would produce the same sequence for both.
+#[test]
+fn a_full_bounded_lane_replays_one_script_to_one_observation_sequence() {
+    let forward = blocking_face(0, 1);
+    for _ in 1..REPLAYS {
+        assert_eq!(blocking_face(0, 1), forward, "one script, one sequence");
+    }
+    let reversed = blocking_face(1, 0);
+    for _ in 1..REPLAYS {
+        assert_eq!(blocking_face(1, 0), reversed, "and so for the other");
+    }
+
+    assert_eq!(
+        forward.delivered,
+        vec![1, 10, 2, 20],
+        "the scripted grant order is the delivery order, across three capacity waits"
+    );
+    assert_eq!(
+        reversed.delivered,
+        vec![10, 1, 20, 2],
+        "and reversing the script reverses it"
+    );
+}
+
+/// One run of the blocking face: a one-slot lane, two keyed producers, and
+/// three sends that each find the lane full and wait.
+///
+/// Every grant after the first is issued onto a full lane and acknowledged
+/// only after the `step_pass` that drains the item ahead of it — the token
+/// held across that step is §13.3's driver progress, and its being the only
+/// grant outstanding anywhere on the driver is the ack correlation. The
+/// `try_confirm` between the two is what separates "the dequeue freed the
+/// slot" from "the dequeue committed the send": without it a release that
+/// would have committed anyway reads the same as one the dequeue released.
+fn blocking_face(first: usize, second: usize) -> Replay {
+    let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+    let _subscriber = recorder.set_default();
+    let (mut driver, journal) = driver_with(
+        Script::new(Command::batch([
+            parking_effect([1, 2]).cancellable(CommandId::new("alpha")),
+            parking_effect([10, 20]).cancellable(CommandId::new("beta")),
+        ])),
+        config()
+            .app_channel_capacity(cap(1))
+            .batch_max_messages(cap(1)),
+    );
+    let report = driver.boot();
+    let (first, second) = (
+        report.started[first].clone(),
+        report.started[second].clone(),
+    );
+
+    // The one send that does not wait: the lane is empty exactly once.
+    accept(&mut driver, first.clone());
+
+    for run in [second.clone(), first, second] {
+        let waiting = driver.grant(run).expect("the previous grant resolved");
+        driver
+            .step_pass(WakeSource::Data)
+            .expect("the committed item ahead of it is in the lane");
+        assert_eq!(
+            driver.try_confirm(&waiting),
+            None,
+            "the dequeue freed the slot but did not itself commit the waiting send"
+        );
+        assert_eq!(
+            driver.confirm(TEST_TURNS, waiting),
+            Confirmed::Accepted,
+            "and only then did the waiting send commit"
+        );
+    }
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the last committed item is in the lane");
+
+    let waits = recorder.str_values("channel");
+    assert_eq!(
+        waits.len(),
+        3,
+        "every release after the first found the lane full and waited: {waits:?}"
+    );
+
+    Replay {
+        accepted: driver
+            .accepted()
+            .iter()
+            .map(|record| (record.run().kind(), record.lane()))
+            .collect(),
+        delivered: journal.reduced(),
+        calls: journal.calls(),
+        waits,
+    }
 }
 
 /// One run of the headroom face, on a lane wide enough that no send waits.
