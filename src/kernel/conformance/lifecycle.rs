@@ -27,7 +27,7 @@
 //! | INV-LC4 (bootstrap intake; first render eligible unconditionally) | `kernel`'s intake row, plus this file's `without_redraw` init row |
 //! | INV-LC5 (controlled causes, with the return classification) | `termination under owned work`, above |
 //! | INV-LC6 (abrupt causes, one row per cause and call site) | `both panic classes` and `termination under owned work`, above, plus this file's `view`, `subscriptions` (both call sites), lazy-constructor, and never-run rows |
-//! | INV-LC7 (two-stage postcondition, bounded settle, gauges zero) | `kernel`'s settle row, at the gauge surface |
+//! | INV-LC7 (two-stage postcondition, bounded settle, gauges zero) | `kernel`'s settle row, at the gauge surface — a narrowing: one row reads the invariant's three clauses at their common observable, the post-settle gauge state, rather than one row per clause |
 //! | INV-LC8 (containment, one row per producer kind) | `both panic classes`, above, plus this file's keyed and subscription-forwarder rows |
 //! | INV-LC9 (one driver at a time) | structural: every driving call takes `&mut self`, `boot` runs once, and the production entry consumes its kernel — a reentrant path is unrepresentable rather than untested |
 //!

@@ -589,10 +589,12 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// stage boundary by an application-side handshake, never by the
     /// scheduler, and those series cite no part of INV-RC14.
     ///
-    /// Crate-visible and test-only. Whether the driving contract should
-    /// carry a public form of it is the executor-independence question
-    /// RFC 0014 §13.3 leaves open, and this is an input to it rather than an
-    /// answer.
+    /// The driving contract carries this constructor: RFC 0008 §9.3's
+    /// block states it, on the footing §9.12 gives it — it drives what
+    /// the determinism claim's verified range excludes, and cites no
+    /// part of that claim. What stays open is the executor-independence
+    /// question itself (RFC 0014 §13.3), to which these runs are an
+    /// input rather than an answer.
     ///
     /// # Panics
     ///
@@ -855,9 +857,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// committed yet" and then go on driving has nothing to assert with —
     /// and a row that instead reads the acceptance ledger asserts nothing at
     /// all, since a grant that has not been taken leaves the ledger
-    /// unchanged for reasons that have nothing to do with the lane. Whether
-    /// the driving contract should carry a public form of it belongs to the
-    /// bounded-lane work RFC 0014 §13.3 leaves open.
+    /// unchanged for reasons that have nothing to do with the lane. The
+    /// driving contract carries it for that reason: RFC 0008 §9.3's block
+    /// states it, and §9.12 records the bounded-lane verification pass it
+    /// made witnessable.
     ///
     /// It reports the terminal the *gate* holds. A grant that released no
     /// send has none, so this is `None` there — the second reclaiming fact
