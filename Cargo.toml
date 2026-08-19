@@ -94,6 +94,19 @@ name = "gauge"
 harness = false
 required-features = ["bench-internals"]
 
+# The kernel's load-acceptance re-derivation (RFC 0014 §13.5). Reaches the
+# kernel through the `bench-internals` handles; `benches/runtime_load.rs` is
+# the superseded topology's harness and stays as the before column.
+[[bench]]
+name = "kernel_load"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "kernel_scan"
+harness = false
+required-features = ["bench-internals"]
+
 [[example]]
 name = "websocket"
 required-features = ["ws", "rustls"]

@@ -9,8 +9,12 @@ doc-valid-idents = ["TanStack", ".."]
 # are §3.1's banned-entry-point inventory — `std` calls that read the current
 # time, block on its passage, or configure a timed block. Pure arithmetic on
 # existing time values and untimed blocking stay allowed. The one sanctioned
-# exception is `benches/runtime_load.rs`'s wall-clock measurement sites,
-# which carry explicit `#[allow(clippy::disallowed_methods)]`.
+# exception is the load harnesses' wall-clock measurement sites —
+# `benches/runtime_load.rs` (the superseded topology) and
+# `benches/kernel_load.rs` (the kernel's re-derivation, RFC 0014 §13.5) —
+# which carry explicit per-site `#[expect(clippy::disallowed_methods)]`.
+# RFC 0006's acceptance criteria are defined on real time, so the harnesses
+# that measure them cannot read the virtualizable clock.
 disallowed-methods = [
     # Now-reads
     { path = "std::time::Instant::now", reason = "time reads go through tokio::time (RFC 0009 §3.1)" },

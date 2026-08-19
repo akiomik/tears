@@ -52,10 +52,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
-        # only, in the `bench` job below) since `runtime_load`'s custom
-        # harness ignores `cargo test`'s `--test` flag and always runs its
-        # full scenarios; matrixing that across every OS/toolchain makes
-        # Windows CI disproportionately slow for no additional coverage.
+        # only, in the `bench` job below) since the load harnesses'
+        # (`runtime_load`, `kernel_load`) custom mains ignore `cargo test`'s
+        # `--test` flag and always run their full scenarios; matrixing that
+        # across every OS/toolchain makes Windows CI disproportionately slow
+        # for no additional coverage.
         run: cargo test --lib --bins --tests --examples --all-features
 
   bench:
