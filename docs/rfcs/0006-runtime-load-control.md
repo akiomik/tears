@@ -1840,19 +1840,60 @@ remainder is 119 items, and 119 × 25 µs = 2.975 ms against 2.961 ms
 measured — **within 0.5%**. That agreement is what makes a
 component-wise criterion checkable rather than decorative.
 
-**Acceptance conditions, producer route.** For each quit row, on the
-reference machine, at ≥ 200 valid trials: (i) measured p99 does not
-exceed the constructive bound evaluated with the row's own
-`batch_max_messages`, its measured per-item update cost, one render
-at the configured cost, and the residual term at the row's depth; and
-(ii) **backlog independence holds on the delivery half** — with the
-postcondition term subtracted, delivery does not scale with depth.
-Measured: 3.47–3.59 ms from depth 1,024 through 299,999, and
-0.51–0.53 ms at depth 0, where a single-message batch has no
-remainder to wait behind. Condition (ii) is INV-L4's property,
-carried onto the successor; condition (i) replaces the absolute
-threshold the superseded topology could state because its bound was
-not constructive.
+**Two measurement sessions, and which one may judge.** The
+decomposition above is a *calibration*: it is where the bound's
+constants come from, so it cannot also be where the bound is tested
+— a criterion fitted to a run and then checked against that same run
+reports nothing about the next one. The figures quoted so far are all
+session 1, the calibration run. Acceptance is decided on **session
+2**, a separate run of fresh trials under the pinned parameters
+above, and the criteria below are fixed before it. This separation is
+stated rather than assumed because the first formulation of this
+section did not have it, and read as a threshold when it was a
+description of the data it came from.
+
+**Calibrated constants (session 1).** The constructive bound's terms,
+each fixed here as a number rather than as "the measured value":
+
+| Term | Value | Source |
+| --- | ---: | --- |
+| per-item update cost `c` | **25 µs** | the row's configured update cost; session 1 measured 24.88 µs at p50 over the 119-item remainder |
+| render term `R` | **0.50 ms** | the configured render cost; session 1 measured 0.461 ms |
+| hop allowance `H` | **0.25 ms** | one-sided; session 1 measured 0.049 ms at depth 49,999 and 0.216 ms at 299,999 |
+| residual term | **0.019 ms + 8.4 ns × depth** | the synchronous route's fit, which is the same postcondition |
+| tail allowance `k` | **1.25** | one-sided; session 1's control-route p99/p50 ratios span 1.016–1.100 |
+
+`H` and `k` are one-sided allowances, not estimates: `H` covers the
+hop at both measured depths with the larger doubled, and `k` covers
+the widest p99/p50 spread session 1 showed with room above it. Both
+are stated as numbers so session 2 cannot move them.
+
+**Acceptance condition, producer route.** For each quit row of
+session 2, on the reference machine, at ≥ 200 valid trials:
+
+> measured p99 ≤ **B(row)** = ( remainder(row) × `c` + `R` + `H` +
+> residual(depth) ) × `k`
+
+where remainder(row) is the in-progress batch's remaining items at
+the quit's arrival, computed from that row's `batch_max_messages` and
+its quit position — the quantity RFC 0014 §3.3 bounds. The measured
+side is the upper-bound instrument, so the comparison is conservative
+on both ends. It is one-sided: a row that comes in faster passes.
+
+A second condition carries INV-L4's own property: **backlog
+independence on the delivery half** — with the residual term
+subtracted, delivery does not scale with depth. Session 1 showed
+3.47–3.59 ms from depth 1,024 through 299,999, and 0.51–0.53 ms at
+depth 0 where a single-message batch has no remainder to wait behind;
+session 2 re-checks that the span stays flat rather than growing with
+depth.
+
+**Session 2 results.** *This run has not been recorded yet.* When it
+is, each row's measured p99, its B(row), and the margin between them
+belong here, together with the delivery-half span. A row that fails
+its B(row) is a finding about the calibration or the kernel, and is
+reported as one — the constants above are not re-fitted to make it
+pass.
 
 **Acceptance conditions, synchronous route.** This route performs no
 send and waits behind no batch, so its cost is the postcondition
@@ -1866,21 +1907,27 @@ alone. One condition gates it, over a predictor stated first.
   measurement's resolution, so a tolerance around it would be
   arithmetic on noise; what the fit is for is giving the condition
   below something to quantify over.
-- **The condition: tail, one-sided.** For each row, measured p99 does
-  not exceed
-  **2.5 × the p50 the shape condition predicts at that row's
-  depth**. The margin is one-sided — a faster tail never fails — and
-  the factor is read off the measurement rather than chosen: against
-  the predicted p50, the eight rows' p99 ratios are 0.26, 0.32, 1.08,
-  1.09, 1.12, 1.16, 1.21, and 1.92, so 2.5 clears the worst
-  (`quit_blocked_64_sync`, where 64 blocked producers put the tail at
-  roughly twice the median) with room that does not reach the next
-  row down. The two ratios below 1 are the depth-0 rows, where the
-  intercept dominates a cost at the measurement's resolution.
+- **The condition: tail, one-sided.** For each row of session 2,
+  measured p99 does not exceed **2.5 × the p50 the predictor gives at
+  that row's depth**. The margin is one-sided — a faster tail never fails
+  — and the factor was fixed in calibration rather than read off the run
+  it judges: against session 1's predicted p50, that session's eight rows
+  sat at 0.26, 0.32, 1.08, 1.09, 1.12, 1.16, 1.21, and 1.92, and 2.5
+  clears the widest of them (`quit_blocked_64_sync`, where 64 blocked
+  producers put the tail at roughly twice the median) with room above.
+  The two ratios below 1 are the depth-0 rows, where the intercept
+  dominates a cost at the measurement's resolution.
 
-Stating the direction plainly: both conditions bound the route from
-above only. A synchronous quit that got faster passes them, and is
-expected to — the route travels no channel at all.
+Both the predictor and the 2.5 come from session 1, so session 1
+cannot also be this route's acceptance run — the same separation the
+producer route makes above. **Session 2 results:** *not recorded
+yet.* Each row's measured p99, the predicted p50 at its depth, and
+the margin belong here when that run lands, under the gate as fixed
+above.
+
+Stating the direction plainly: the gate bounds the route from above
+only. A synchronous quit that got faster passes it, and is expected
+to — the route travels no channel at all.
 
 **What the numbers say about the old threshold, stated plainly.** The
 superseded criterion was p99 ≤ 1 ms at every measured depth, and it
