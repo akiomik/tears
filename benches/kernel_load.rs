@@ -33,6 +33,21 @@
 //!   Whether the successor's acceptance instrument stays this bound or gains a
 //!   delivery-instant event is a contract question for RFC 0006, not a
 //!   harness choice — this file only reports what it can see.
+//! - **Where each row's quit state is sampled.** A quit row reports three
+//!   things about the request — the instant, the data lane's residual
+//!   occupancy, and the `blocked` producer gauge — and all three are taken
+//!   together, at the requesting route's own site, because the two routes
+//!   request from different threads. On the **sync** route that site is the
+//!   end of the `update` returning `Command::quit()`, the dispatch whose
+//!   completion applies it; the depth is re-read there rather than reused
+//!   from the top of `update`, so it is not stale by that update's own
+//!   cost. On the **control** route it is the producer task's poll that
+//!   yields the quit, immediately before it enters the lane — not the
+//!   `update` that returned the run, which merely asks for it and then goes
+//!   on batching while the producer is scheduled. The distinction is
+//!   load-bearing twice over: `quit->applied` is read against the depth,
+//!   and the `blocked` reading decides whether a bounded trial counts
+//!   toward its row at all.
 //! - **INV-L9 has no counterpart.** The `keyed_isolation` scenario quantifies
 //!   over the per-`CommandId` private channels the kernel removes (RFC 0006
 //!   §5.2 records the property loss), so it is absent here rather than
@@ -753,7 +768,8 @@ struct Metrics {
     max_depth: AtomicU64,
     /// Nanoseconds from `start` at which the quit was requested — inside
     /// `update` for the sync route, on the producer task for the control
-    /// route, in both cases as the last act before the quit leaves.
+    /// route, in both cases as the last act before the quit leaves
+    /// ([`Metrics::snapshot_quit_state`]).
     quit_requested_ns: AtomicU64,
     /// Data-lane residue at the quit request (`produced - processed`).
     depth_at_quit: AtomicU64,
@@ -809,6 +825,34 @@ impl Metrics {
     )]
     fn elapsed_ns(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Records the state the quit was requested in — the lane's residual
+    /// occupancy, the `blocked` producer gauge, and the instant — as one
+    /// act, so the three describe one moment.
+    ///
+    /// **Called at the requesting route's own instant, and that is the
+    /// whole point of it being one call.** The two routes request a quit in
+    /// different places on different threads (RFC 0014 §3.3), so a snapshot
+    /// taken anywhere but the route's own request site describes a moment
+    /// the row is not measuring: for the control route the request happens
+    /// on a producer task, and between the reducer deciding to ask for one
+    /// and the producer reaching its send, the driving thread carries on
+    /// with its batch and the gauges move with it. The depth and the
+    /// `blocked` reading are what `quit->applied` is interpreted against,
+    /// and `blocked` additionally decides whether the trial counts at all
+    /// ([`ValidTrial::BlockedEq`]), so a stale pair is not a cosmetic
+    /// inaccuracy — it selects a different sample.
+    ///
+    /// The instant is stamped last, after the two readings, so it is the
+    /// nearest of the three to the quit actually leaving.
+    fn snapshot_quit_state(&self) {
+        self.depth_at_quit
+            .store(self.queue_depth(), Ordering::Relaxed);
+        self.blocked_at_quit
+            .store(self.blocked_live.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.quit_requested_ns
+            .store(self.elapsed_ns(), Ordering::Relaxed);
     }
 
     #[expect(
@@ -922,28 +966,26 @@ impl Application for LoadApp {
         if !request_quit {
             return Command::none();
         }
-        self.metrics.depth_at_quit.store(depth, Ordering::Relaxed);
-        self.metrics.blocked_at_quit.store(
-            self.metrics.blocked_live.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
         match self.cfg.quit_route {
             QuitRoute::Sync => {
-                // Stamped last, so it is the instant the synchronous route is
-                // requested; lowering applies it at this dispatch's completion.
-                self.metrics
-                    .quit_requested_ns
-                    .store(self.metrics.elapsed_ns(), Ordering::Relaxed);
+                // Taken here, at the end of the `update` that asks for the
+                // quit: the synchronous route's request instant is this
+                // dispatch's completion, which is the next thing to happen
+                // (RFC 0014 §3.3). Deliberately after `spin(update_cost)`
+                // rather than beside the `depth` read above, so the depth
+                // and the instant describe the same moment.
+                self.metrics.snapshot_quit_state();
                 Command::quit()
             }
             QuitRoute::Control => {
-                // Stamped on the producer task, in the poll that yields the
-                // quit — immediately before it enters the control lane.
+                // Taken on the producer task, in the poll that yields the
+                // quit — immediately before it enters the control lane, and
+                // *not* here. The reducer only asks for the run; the request
+                // happens when that run reaches its send, and the driving
+                // thread keeps batching in between.
                 let metrics = Arc::clone(&self.metrics);
                 producer_quit(move || {
-                    metrics
-                        .quit_requested_ns
-                        .store(metrics.elapsed_ns(), Ordering::Relaxed);
+                    metrics.snapshot_quit_state();
                 })
             }
         }
