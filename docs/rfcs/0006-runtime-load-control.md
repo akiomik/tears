@@ -1801,7 +1801,7 @@ kernel default that could later move under them:
 | `data_lane_capacity` | unset (unbounded) and set, per row | unset |
 | `batch_max_messages` | **1024**, stated by every row | 1 |
 | render cost | **500 µs** | 500 µs and 0 |
-| trials | ≥ 200 valid per row | ≥ 200 valid per row |
+| trials | ≥ 200 valid per quit row; the load depth rows are single-run | ≥ 200 valid per row |
 
 Both pinned values equal what the rows measured before they were
 stated, so no figure in this section moves with the pinning. The two
@@ -1811,7 +1811,7 @@ reason both belong in the matrix rather than only the first.
 
 What section 5.1's rule assigns to RFC 0007 §6 — fixing the bounded
 run's configuration under test — is **deferred to the switch-over**
-for one of its three fields: `app_channel_capacity` and
+for two of its three fields: `app_channel_capacity` and
 `keyed_channel_capacity` are the superseded topology's controls, and
 the successor's single control is `data_lane_capacity`, which is that
 rename's own landing (section 5.2; RFC 0014 §9 row 2). The obligation
@@ -1856,16 +1856,18 @@ not constructive.
 
 **Acceptance conditions, synchronous route.** This route performs no
 send and waits behind no batch, so its cost is the postcondition
-alone, and the criterion is two conditions rather than one, because a
-linear fit and a tail bound are different claims.
+alone. One condition gates it, over a predictor stated first.
 
-- **Shape, on p50.** Median cost is linear in the row's residual
-  depth: intercept ≈ 0.019 ms, slope **8.4 ns per residual
-  envelope**, fitted across depths 0 / 1,024 / 7,799 / 49,999 /
-  299,999. The fit is asserted on p50 because that is the statistic
-  it was derived from; a slope read off tails would be a different
-  quantity claimed under the same name.
-- **Tail, one-sided.** For each row, measured p99 does not exceed
+- **The predictor** (not itself a condition). Median cost is linear
+  in the row's residual depth: intercept ≈ 0.019 ms, slope **8.4 ns
+  per residual envelope**, fitted on p50 across depths 0 / 1,024 /
+  7,799 / 49,999 / 299,999. It is a predictor rather than a gate
+  because at depth 0 the quantity it predicts is below the
+  measurement's resolution, so a tolerance around it would be
+  arithmetic on noise; what the fit is for is giving the condition
+  below something to quantify over.
+- **The condition: tail, one-sided.** For each row, measured p99 does
+  not exceed
   **2.5 × the p50 the shape condition predicts at that row's
   depth**. The margin is one-sided — a faster tail never fails — and
   the factor is read off the measurement rather than chosen: against
