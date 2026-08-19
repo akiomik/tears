@@ -1,6 +1,8 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Implemented (section 5.1 records the bounded acceptance results)
+- Status: Implemented (section 5.1 records the bounded acceptance
+  results; section 5.3 re-derives INV-L4's acceptance on the
+  reducer-first successor topology, which lands with that kernel)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
   at 0.11.0 (a schema change, hence a contract change under INV-L13 —
@@ -1601,21 +1603,20 @@ own.
   cancellation contract reads over that decision's revocation set:
   explicit cancel, supersession, scope teardown, and termination
   (RFC 0014 §3.1).
-- **INV-L4's property is preserved; its acceptance conditions are a
-  named prerequisite.** Backlog independence survives on the control
-  lane (R4 above). The conditions — the four `quit_*` scenarios, the
-  trial counts, the p99 threshold, and the reference-machine scoping —
-  are stated over this topology and over RFC 0011 §7's unbiased-select
-  premise, and neither the scenario set nor the premise survives
-  unchanged. Re-deriving the formulation and the bounded-mode scenario
-  set on the successor topology, under this section's reference-machine
-  and reproducibility discipline, is owned by this RFC and tracked as
-  RFC 0014 §13.5; the successor's acceptance run waits on it, and no
-  numeric threshold is claimed for the successor before it lands. What
-  holds meanwhile is RFC 0014 §3.3's latency statement with INV-RC9's
-  constructive bounds. The formulation-(a) fallback INV-L4 records is
-  moot there: the control drain is a fixed pass stage, not a select
-  branch that could be biased.
+- **INV-L4's property is preserved; its acceptance conditions are
+  re-derived in section 5.3.** Backlog independence survives on the
+  control lane (R4 above). The conditions — the four `quit_*`
+  scenarios, the trial counts, the p99 threshold, and the
+  reference-machine scoping — were stated over this topology and over
+  RFC 0011 §7's unbiased-select premise, and neither the scenario set
+  nor the premise survives unchanged: the row set doubles because the
+  two quit routes are two contract objects, and the absolute threshold
+  gives way to a criterion quantified over RFC 0014 §3.3's
+  constructive bound. Section 5.3 states both, under this section's
+  reference-machine and reproducibility discipline, and RFC 0014 §13.5
+  points at it. The formulation-(a) fallback INV-L4 records is moot
+  there: the control drain is a fixed pass stage, not a select branch
+  that could be biased.
 - **INV-L6 splits.** Its `None`-path claim survives as the unbounded
   lane mode's selection — an unset `data_lane_capacity` selects
   unbounded delivery, not a large bound. Its batching half does not:
@@ -1748,6 +1749,119 @@ own.
   and remain the regression baseline for it; the successor's numbers come
   from INV-L4's named prerequisite above, never by carrying these cells
   over.
+
+### 5.3 Successor acceptance: INV-L4 re-derived
+
+Section 5.2 records INV-L4's acceptance conditions as a named
+prerequisite, owed on the successor topology. This section discharges
+it. Everything below was measured on the section 2 reference machine
+(Apple M1 Max, 10 cores, rustc 1.97.0) on 2026-08-19, at 200 valid
+trials per row, with the superseded topology's rows re-run on the same
+machine on the same day so the two columns are comparable; section
+5.1's reproducibility rules are unchanged and apply here as written.
+
+**The row set doubles, because one contract object became two.** The
+superseded topology routed every `Command::quit()` through the
+dedicated quit channel, and INV-L4 quantified over that channel. On
+the successor an `update`-returned quit is applied synchronously and
+travels no lane at all, while a producer-originated quit takes the
+control lane (RFC 0014 §3.3). Only the second inherits INV-L4's
+property, so acceptance is stated per route and every quit row is run
+twice — once returning the quit from `update`, once emitting it from
+a spawned run. Section 5.2's INV-L10/INV-L11 supersession is what
+split them; acceptance follows the split rather than averaging over
+it.
+
+**The instrument is an upper bound, deliberately.** The superseded
+harness timestamped a delivery-instant tracing event, which INV-L4's
+text calls out as "the delivery instant itself … not a proxy". The
+kernel's control drain emits no such event, and none is added here:
+RFC 0014 §9 row 9 fixes that schema by re-reading its fields rather
+than extending them, and a delivery-instant event would be an
+extension. The successor's terminus is instead the driving loop's
+return — the quit's application *plus* its immediate postcondition,
+which includes releasing the data lane's residual envelopes. That
+overstates delivery by the residual term, and overstating is the
+conservative direction: a row accepted on the upper bound is accepted
+on the delivery instant it bounds. The residual term is measured
+separately below rather than left inside the number.
+
+**Producer-originated route — the INV-L4 successor.** The criterion is
+no longer one absolute threshold. RFC 0014 §3.3 gives this route a
+*constructive* bound, and acceptance quantifies over that bound's
+components: a quit arriving mid-batch is preceded by the in-progress
+batch's remainder and nothing else, then the pass's frame stage, then
+a hop, then the postcondition's residual release. Measured
+decomposition at 50k backlog, control route, unbounded lane:
+
+| Component | Measured (p50) | What bounds it |
+| --- | ---: | --- |
+| in-progress batch remainder | 2.961 ms | `batch_max_messages` × per-item update cost |
+| frame stage | 0.461 ms | one render at the configured cost |
+| hop | ≈ 0.049 ms | fixed |
+| residual release | 0.437 ms | linear in residual depth |
+
+The batch-remainder term is the one the contract names, and it
+predicts: at cap 1024 with the quit arriving at input 5000, the
+remainder is 119 items, and 119 × 25 µs = 2.975 ms against 2.961 ms
+measured — **within 0.5%**. That agreement is what makes a
+component-wise criterion checkable rather than decorative.
+
+**Acceptance conditions, producer route.** For each quit row, on the
+reference machine, at ≥ 200 valid trials: (i) measured p99 does not
+exceed the constructive bound evaluated with the row's own
+`batch_max_messages`, its measured per-item update cost, one render
+at the configured cost, and the residual term at the row's depth; and
+(ii) **backlog independence holds on the delivery half** — with the
+postcondition term subtracted, delivery does not scale with depth.
+Measured: 3.47–3.59 ms from depth 1,024 through 299,999, and
+0.51–0.53 ms at depth 0, where a single-message batch has no
+remainder to wait behind. Condition (ii) is INV-L4's property,
+carried onto the successor; condition (i) replaces the absolute
+threshold the superseded topology could state because its bound was
+not constructive.
+
+**Acceptance conditions, synchronous route.** This route performs no
+send and waits behind no batch, so its cost is the postcondition
+alone. The criterion is that measured p99 fits the postcondition's
+linear form at the row's residual depth: intercept ≈ 0.019 ms, slope
+**8.4 ns per residual envelope**, measured across depths 0 / 1,024 /
+7,799 / 49,999 / 299,999. At depth 0 the measured p99 is 0.006 ms
+unbounded and 0.005 ms bounded — the synchronous application itself
+is below the measurement's resolution.
+
+**What the numbers say about the old threshold, stated plainly.** The
+superseded criterion was p99 ≤ 1 ms at every measured depth, and it
+does not carry over as a number, because on the successor the two
+routes moved in opposite directions and for contracted reasons. At
+idle the synchronous route is roughly a hundred times faster than the
+superseded path (p99 0.006 ms against 0.603 ms), since it travels no
+channel. At backlog the control route is slower than 1 ms (4.0 ms at
+50k, 6.3 ms at 300k), because its bound is now the in-progress
+batch's remainder, which scales with the configured cap — exactly
+what RFC 0014 §3.3 contracts and §3.5's finite cap bounds. Neither
+movement is a regression against a contract; carrying the old number
+across would have measured the successor against a topology it does
+not have.
+
+**Bounded mode.** The depth accounting is unchanged and holds:
+`overload_bounded` and `burst_200k_bounded` both cap at **1,025** =
+`data_lane_capacity + concurrent producers`, the same value and the
+same accounting section 5.1 fixes. Every successor row is lossless
+(`produced == processed`) and in-order. INV-L9's `keyed_isolation`
+row has no successor and is not re-measured: with the per-command
+channels gone there is nothing to isolate, which section 5.2 already
+records as a property loss.
+
+**Recorded, not gated: render count.** Removing configured frame
+pacing (RFC 0014 §6.3) changes how often the frame stage runs —
+`steady_20k` renders 300 times on the superseded topology and 3,859
+on the successor. This is the measurable face of RFC 0014 §9 row 4's
+supersession, recorded here because a reader comparing the two
+columns will see it, and deliberately **not** an acceptance
+condition: no requirement in this document constrains render count,
+and the user-visible cadence change is carried by the implementation
+release's CHANGELOG.
 
 ## 6. Open questions (all resolved)
 
