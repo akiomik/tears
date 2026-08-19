@@ -50,11 +50,28 @@
 //! - **`quit_*`** — INV-L4's statistical rows, both routes and both modes,
 //!   `QUIT_TRIALS` trials each.
 //!
-//! Run all rows, or name a subset:
+//! # The two run modes, and which one produces numbers
+//!
+//! **The full run is the only one whose numbers mean anything.** Every figure
+//! this file reports — the percentiles, the depths, the decomposition — comes
+//! from a full run at the stated row counts, on a quiet machine, and it is
+//! those numbers RFC 0006 §5.2 consumes.
+//!
+//! **`--smoke` is a regression detector, not a measurement.** It runs a
+//! reduced set of rows with the message counts and trial counts cut down, so
+//! it finishes in CI time; it asserts *completion and integrity* — the
+//! draining rows deliver their exact scripted sequence, the quit rows collect
+//! their trials — and asserts **no latency at all**. Its percentiles are
+//! printed for the operator's eye and are not comparable with a full run's:
+//! shorter rows mean shallower backlogs, and the depth term is precisely what
+//! the `quit->applied` bound scales with. Reading a smoke number as an
+//! acceptance number would be reading a different measurement.
 //!
 //! ```bash
 //! cargo bench --bench kernel_load --features bench-internals
 //! cargo bench --bench kernel_load --features bench-internals -- overload
+//! cargo bench --bench kernel_load --features bench-internals -- --smoke
+//! # or, for both harnesses' smoke profiles at once: just bench-smoke
 //! ```
 
 // Metric reporting converts counters and nanosecond values to floating point
@@ -118,6 +135,13 @@ const RENDER_COST: Duration = Duration::from_micros(500);
 
 /// Trials per quit row — RFC 0006 INV-L4's "≥ 200 trials per scenario".
 const QUIT_TRIALS: u32 = 200;
+
+/// Trials per quit row in the smoke profile.
+///
+/// Far below INV-L4's minimum, and deliberately: the smoke profile makes no
+/// statistical claim, so what this number has to be large enough for is
+/// "the trial loop runs and terminates", not "the sample is a sample".
+const SMOKE_TRIALS: u32 = 5;
 
 /// Attempts a quit row may spend collecting `QUIT_TRIALS` valid trials.
 const QUIT_ATTEMPT_CAP: u32 = 4 * QUIT_TRIALS;
@@ -420,6 +444,127 @@ fn quit_scenarios() -> Vec<QuitCfg> {
         });
     }
     rows
+}
+
+/// Looks up a row of the canonical [`load_scenarios`] table by name so a
+/// smoke row can derive from it with `..` struct update.
+///
+/// Panics if the name is absent: a rename in the canonical table must update
+/// the smoke profile too, and a silent fallback would let the profile drift
+/// back to a stale literal while still reporting success.
+fn row_named(name: &str) -> Cfg {
+    load_scenarios()
+        .into_iter()
+        .find(|cfg| cfg.name == name)
+        .expect("row name present in the canonical load table")
+}
+
+/// Looks up a row of the canonical [`quit_scenarios`] table by name; see
+/// [`row_named`].
+fn quit_row_named(name: &str) -> QuitCfg {
+    quit_scenarios()
+        .into_iter()
+        .find(|row| row.base.name == name)
+        .expect("row name present in the canonical quit table")
+}
+
+/// The smoke profile's draining rows: `steady_20k` shortened to ~0.5s of
+/// load, and a bounded burst cut to a tenth.
+///
+/// Derived from the canonical table by name lookup plus struct update, so a
+/// retune of the shared fields — costs, mode, capacity — carries over
+/// automatically and only the shortened field is stated here. The bounded row
+/// takes its own name because its `total` differs from the row it derives
+/// from, and a name that reported a different configuration under the full
+/// row's name would be worse than a new one.
+fn smoke_load_rows() -> Vec<Cfg> {
+    vec![
+        Cfg {
+            total: 10_000,
+            ..row_named("steady_20k")
+        },
+        Cfg {
+            name: "burst_20k_bounded",
+            total: 20_000,
+            ..row_named("burst_200k_bounded")
+        },
+    ]
+}
+
+/// The smoke profile's quit rows: one per **route**, at 5 valid trials each.
+///
+/// Both routes are here because the route split is what distinguishes this
+/// harness from the old one (see the header): a smoke that exercised only the
+/// synchronous route would leave the control lane — the route INV-L4's
+/// property actually carries to — uncompiled and undriven. The bounded blocked
+/// row keeps its `BlockedEq(1)` validity predicate, so the profile also drives
+/// the gauge-reading path that decides whether a trial counts.
+fn smoke_quit_rows() -> Vec<QuitCfg> {
+    vec![
+        QuitCfg {
+            trials: SMOKE_TRIALS,
+            ..quit_row_named("quit_idle_bounded_sync")
+        },
+        QuitCfg {
+            trials: SMOKE_TRIALS,
+            base: Cfg {
+                total: 50_000,
+                ..quit_row_named("quit_blocked_1_control").base
+            },
+            ..quit_row_named("quit_blocked_1_control")
+        },
+    ]
+}
+
+/// Runs the smoke profile; reports whether it passed.
+///
+/// The gates are completion and integrity, never latency. A draining row must
+/// finish and deliver the exact scripted sequence `0..total` — a total-only
+/// check would pass a drop paired with a duplicate — and a quit row must
+/// collect its valid trials inside the attempt cap. Nothing here compares a
+/// percentile against anything, because a shortened row's percentiles are not
+/// the quantity the acceptance matrix is stated over.
+fn run_smoke(executor: &TokioRuntime) -> bool {
+    println!("# tears kernel load harness — smoke profile\n");
+    println!(
+        "Completion and integrity only; the percentiles below are shortened rows' and are not \
+         acceptance numbers (RFC 0014 §13.5).\n"
+    );
+    let mut ok = true;
+
+    for cfg in smoke_load_rows() {
+        let report = executor.block_on(run_load_scenario(cfg));
+        print_load_report(&report);
+        if report.timed_out {
+            eprintln!("smoke: draining row `{}` timed out", report.cfg.name);
+            ok = false;
+        }
+        if report.seq_broken || report.processed != report.cfg.total {
+            eprintln!(
+                "smoke: draining row `{}` did not deliver the exact sequence 0..{} \
+                 (processed={}, seq_broken={})",
+                report.cfg.name, report.cfg.total, report.processed, report.seq_broken,
+            );
+            ok = false;
+        }
+    }
+
+    for row in smoke_quit_rows() {
+        let report = executor.block_on(run_quit_scenario(&row));
+        print_quit_report(&report);
+        // Completion only: at this harness's observation point a legal
+        // shutdown discard is indistinguishable from an illegal drop, so
+        // there is no sequence to gate a quit row on.
+        if report.incomplete() {
+            eprintln!(
+                "smoke: quit row `{}` did not collect its trials",
+                report.cfg.name
+            );
+            ok = false;
+        }
+    }
+
+    ok
 }
 
 /// Row names are `&'static str` for the same reason the old harness's are —
@@ -1062,8 +1207,13 @@ fn print_quit_report(report: &QuitReport) {
 }
 
 fn main() -> ExitCode {
-    let selected: Vec<String> = env::args()
-        .skip(1)
+    // `--smoke` runs the reduced CI profile; otherwise positional arguments
+    // select full rows by name (other flags, cargo's `--bench` among them,
+    // are ignored).
+    let args: Vec<String> = env::args().skip(1).collect();
+    let smoke = args.iter().any(|arg| arg == "--smoke");
+    let selected: Vec<String> = args
+        .into_iter()
         .filter(|arg| !arg.starts_with('-'))
         .collect();
 
@@ -1073,6 +1223,15 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .expect("tokio runtime");
+
+    if smoke {
+        return if run_smoke(&executor) {
+            ExitCode::SUCCESS
+        } else {
+            eprintln!("error: smoke profile failed");
+            ExitCode::FAILURE
+        };
+    }
 
     let matches = |name: &str| selected.is_empty() || selected.iter().any(|arg| arg == name);
     let load_rows: Vec<Cfg> = load_scenarios()
