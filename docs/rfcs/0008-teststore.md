@@ -1150,10 +1150,11 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   rows are conditioned on the delivery. The crate's own
   types in §9.3 divide in three, and no statement here asserts that
   anything in the first or third division exists in the crate today.
-  The partition covers those and nothing else: `Backend` and
-  `ratatui::Terminal` belong to the host UI library, and `Future`,
-  `Pin`, `Poll`, and `NonZeroUsize` to `std`, so neither group is
-  this crate's to place.
+  The partition covers those and nothing else. Two groups of names
+  appear in this section without belonging to it: `Backend` and
+  `ratatui::Terminal`, which are the host UI library's, and `Future`,
+  `Pin`, `Poll`, and `NonZeroUsize`, which are `std`'s. Neither group
+  is this crate's to place.
   - **Introduced here**, arriving with that landing: `TestDriver`,
     `ParkProbe`, `WakeSource`, `RunName`, `RunKind`, `SendRecord`,
     `Lane`, `StepReport`, `GrantToken`, `Confirmed`, `GrantOutstanding`,
