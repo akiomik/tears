@@ -15,6 +15,19 @@
 //! | INV-SE3 | RFC 0012 §8 | a re-evaluation with no outstanding stop admits immediately |
 //! | INV-SE4 | RFC 0012 §8 | the mandated `{A}` → `{B}` → `{C}` sequence: C is admitted and B's spawner is never invoked |
 //!
+//! **INV-SE4 has two rows, and only one of them is the mandated sequence.**
+//! The owner's sequence turns on a middle state — `{C}` installed while A's
+//! stop is still outstanding — and that state is not constructible on a
+//! current-thread executor, where a stop resolves within one turn. The
+//! collapsed face runs there and witnesses the supersession without the
+//! window; the mandated face runs on the multi-worker driver and constructs
+//! the window by holding A's *dismantling* at a script-controlled gate, so
+//! the un-quiesced interval is the application's own and not a race. That
+//! second row therefore sits with the other multi-worker rows in its
+//! evidence standing: pass-unit driven like the rest, but citing no part of
+//! INV-RC14's determinism claim, whose verified range is the current-thread
+//! executor (RFC 0008 §9.8).
+//!
 //! Three of the suite's rows are carried elsewhere and are not repeated
 //! here: INV-SE3's deferral half and INV-SE5's wake requirement are the
 //! `stop/restart safe window` and `parked subscription-quiescence wake`
@@ -34,7 +47,8 @@
 use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
-    Feed, ProbeSource, Script, TEST_TURNS, accept, cap, config, driver, driver_with, parking_effect,
+    Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
+    cap, config, driver, driver_with, parking_effect, step_when_ready, threaded_driver_with,
 };
 
 // INV-SE1: one spawner invocation per admitted run, made at the admission
@@ -153,8 +167,16 @@ fn a_pure_addition_is_admitted_in_the_pass_that_declares_it() {
 // stage reads the newest desired set. A superseded generation therefore has
 // no pending spawner to discard: there is nothing between the deferral and
 // the next re-evaluation for one to sit in.
+//
+// **What this face does not construct**, and the row below does: the
+// sequence's middle state, where `{C}` is installed while A's stop is still
+// outstanding. Here A quiesces before `{C}` is installed, because on the
+// current-thread executor a stop resolves within one turn and the driver's
+// own waiting is what advances it — so this is the collapsed form of the
+// sequence, and it is worth having as its own row because it is the shape
+// production reaches whenever a stopped source dismantles promptly.
 #[test]
-fn a_superseded_generation_s_spawner_is_never_invoked() {
+fn a_supersession_that_lands_after_the_stop_quiesced_never_invokes_the_superseded_spawner() {
     let first = ProbeSource::silent("a");
     let superseded = ProbeSource::silent("b");
     let newest = ProbeSource::silent("c");
@@ -199,6 +221,112 @@ fn a_superseded_generation_s_spawner_is_never_invoked() {
     driver
         .step_pass(WakeSource::Data)
         .expect("the second trigger is in the lane");
+
+    assert_eq!(
+        newest.admissions(),
+        1,
+        "the re-evaluation ran against the newest desired set and admitted C"
+    );
+    assert_eq!(
+        superseded.admissions(),
+        0,
+        "and B's spawner was never invoked at any point in the sequence"
+    );
+    assert_eq!(first.admissions(), 1, "A was never restarted either");
+}
+
+// INV-SE4's sequence with its middle state actually constructed: `{C}` is
+// installed **while A's stop is still outstanding**, which is the state the
+// owner's mandated sequence turns on and the row above cannot reach.
+//
+// The window is opened by holding A's *dismantling*, not by racing it. A's
+// source carries a guard whose drop blocks at a gate the script controls,
+// and the abort drops that guard on a worker thread, so the driving thread
+// stays steppable throughout while A sits stop-requested and un-quiesced for
+// as long as the script wants. The determinism is that gate's, not the
+// scheduler's: `entered` says the dismantling began and `quiesced` says it
+// finished, and neither side can pass the other. Like the other multi-worker
+// rows, this one cites no part of INV-RC14's determinism claim, whose
+// verified range is the current-thread executor (RFC 0008 §9.8).
+//
+// The middle pass is where the barrier does its work: a re-evaluation runs,
+// reads `{C}`, and admits **nothing** — not C, because A has not quiesced,
+// and not B, because B is no longer declared by the time an admission site
+// is reached. That B's spawner is never invoked is the invariant's own
+// claim, and here it holds across a window in which B *was* the declared set
+// when the stop was issued.
+#[test]
+fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
+    let gate = QuiescenceGate::default();
+    let first = ProbeSource::gated("a", gate.clone());
+    let superseded = ProbeSource::silent("b");
+    let newest = ProbeSource::silent("c");
+    let (mut driver, journal) = threaded_driver_with(
+        Script::new(parking_effect([1, 2]))
+            .feeding([
+                Feed::new(first.clone()),
+                Feed::new(superseded.clone()),
+                Feed::new(newest.clone()),
+            ])
+            .wanting(["a"])
+            .redeclaring(1, ["b"])
+            .redeclaring(2, ["c"]),
+        config().batch_max_messages(cap(1)),
+    );
+    let trigger = driver.boot().started[0].clone();
+    assert_eq!(first.admissions(), 1, "boot admitted A");
+
+    accept_within(&mut driver, trigger.clone(), THREADED_TURNS);
+    accept_within(&mut driver, trigger, THREADED_TURNS);
+
+    // `{A}` → `{B}`: the re-evaluation stops A and defers its own
+    // admissions.
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the first trigger is in the lane");
+    assert_eq!(
+        superseded.admissions(),
+        0,
+        "the stopping pass admitted nothing, B included"
+    );
+
+    // The window opens: A's dismantling has begun on a worker and is held
+    // there, so the stop is outstanding and the quiescence has not happened.
+    driver.settle(THREADED_TURNS, || gate.entered());
+    assert_eq!(
+        first.quiescences(),
+        0,
+        "A is stop-requested and has not quiesced, which is the state the sequence needs"
+    );
+
+    // `{B}` → `{C}` inside that window. The barrier defers this
+    // re-evaluation's admissions too, so the generation that was declared
+    // when the stop was issued passes without ever being admitted.
+    let evaluations = journal.evaluations();
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the second trigger is in the lane");
+    assert!(
+        journal.evaluations() > evaluations,
+        "a re-evaluation did run in that pass, so the two counts below are a deferral rather \
+         than an absent admission site"
+    );
+    assert_eq!(
+        superseded.admissions(),
+        0,
+        "B was the declared set across the stop and was still never admitted"
+    );
+    assert_eq!(
+        newest.admissions(),
+        0,
+        "and C waits behind the outstanding stop rather than admitting beside it"
+    );
+
+    // The window closes: A quiesces, and the pass its notification begins
+    // re-evaluates against the then-current state.
+    gate.open();
+    driver.settle(THREADED_TURNS, || first.quiescences() > 0);
+    step_when_ready(&mut driver, WakeSource::ProducerExit, THREADED_TURNS);
 
     assert_eq!(
         newest.admissions(),

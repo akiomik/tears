@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
+use std::mem;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
@@ -39,6 +40,7 @@ use tokio::task::yield_now;
 
 use crate::command::{Action, Command};
 use crate::kernel::Kernel;
+use crate::kernel::arbiter::WakeSource;
 use crate::kernel::lane::GateMode;
 use crate::reducer::{Exit, Program, Reducer};
 use crate::runtime::config::RuntimeConfig;
@@ -47,7 +49,7 @@ use crate::runtime::load::LoadObserver;
 use crate::subscription::mock::MockSource;
 use crate::subscription::{Subscription, SubscriptionSource};
 use crate::test_support::{FailingBackend, hook_guard};
-use crate::testing::driver::{Confirmed, ParkProbe, RunName, TestDriver};
+use crate::testing::driver::{Confirmed, ParkProbe, RunName, StepReport, TestDriver};
 
 /// The turn budget the series hand [`TestDriver::settle`] and
 /// [`TestDriver::confirm`].
@@ -136,6 +138,86 @@ impl DropMark {
 impl Drop for DropMark {
     fn drop(&mut self) {
         self.0.mark();
+    }
+}
+
+/// A gate a stopped subscription run's **quiescence** holds at, so a script
+/// can keep a run stop-requested and not-yet-quiesced across a whole pass.
+///
+/// Why this exists: a stop's abort resolves within one executor turn on the
+/// current-thread executor, so there the only pass in which a stopped run is
+/// still unquiesced is the pass that issued the stop — the window RFC 0012
+/// INV-SE4's mandated sequence needs is not constructible. Holding the
+/// *dismantling* itself is what opens that window, and it is only safe to
+/// hold beside worker threads: the abort drops the run's stream on a worker,
+/// so blocking there costs the driving thread nothing and the driver stays
+/// steppable throughout.
+///
+/// Like [`MidBatchHandshake`], the ordering this establishes is the
+/// application's own, not the scheduler's, and a series using it cites no
+/// part of INV-RC14's determinism claim (RFC 0008 §9.8's verified range is
+/// current-thread).
+#[derive(Clone, Debug, Default)]
+pub struct QuiescenceGate {
+    open: Arc<AtomicBool>,
+    entered: Beacon,
+}
+
+impl QuiescenceGate {
+    /// Releases the held run, which then quiesces.
+    pub fn open(&self) {
+        self.open.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the held run's dismantling has begun — the abort has landed
+    /// on a worker and the run is now stop-requested with its quiescence
+    /// pending, which is the state a script waits for before opening the
+    /// window's second half.
+    pub fn entered(&self) -> bool {
+        self.entered.marked()
+    }
+}
+
+/// The guard a probe source's stream holds, whose drop is that run's
+/// quiescence as the application sees it.
+///
+/// Two shapes because two windows: the ordinary one reports the quiescence
+/// and returns, and the gated one holds the dismantling open until the
+/// script releases it.
+#[derive(Debug)]
+enum Quiescence {
+    Immediate(DropMark),
+    Gated(GatedQuiescence),
+}
+
+/// The guard whose drop is a gated run's quiescence.
+///
+/// The two marks are made either side of the hold, and that is the whole
+/// point: `entered` says the dismantling started, `quiesced` says it
+/// finished, and between them the run is in the state the window needs.
+#[derive(Debug)]
+struct GatedQuiescence {
+    gate: QuiescenceGate,
+    quiesced: Beacon,
+}
+
+impl Drop for GatedQuiescence {
+    /// Held with a counted busy-yield rather than a waker or a deadline: a
+    /// drop cannot await, and a deadline would be a clock read. The bound is
+    /// a hang guard whose value is mechanism, in the style of
+    /// [`MidBatchHandshake`]'s — an exhausted bound means the script never
+    /// opened the gate, and reporting it by panicking inside a drop would
+    /// abort the process rather than fail the test, so the hold simply ends
+    /// and the script's own assertions report it.
+    fn drop(&mut self) {
+        self.gate.entered.mark();
+        for _ in 0..HANDSHAKE_YIELDS {
+            if self.gate.open.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::yield_now();
+        }
+        self.quiesced.mark();
     }
 }
 
@@ -275,6 +357,9 @@ pub struct ProbeSource {
     values: Vec<u8>,
     ends: bool,
     fault: Option<Fault>,
+    /// Where this source's quiescence is held, for the one series that needs
+    /// a stopped run to stay unquiesced across a pass.
+    gate: Option<QuiescenceGate>,
     admissions: Beacon,
     quiescences: Beacon,
 }
@@ -300,8 +385,19 @@ impl ProbeSource {
             values: Vec::new(),
             ends: false,
             fault: None,
+            gate: None,
             admissions: Beacon::default(),
             quiescences: Beacon::default(),
+        }
+    }
+
+    /// A silent source whose run's **quiescence** holds at `gate` once
+    /// something stops it, so a script can drive a whole pass while the stop
+    /// is outstanding (RFC 0012 INV-SE4's mandated window).
+    pub fn gated(key: &'static str, gate: QuiescenceGate) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::silent(key)
         }
     }
 
@@ -380,11 +476,16 @@ impl SubscriptionSource for ProbeSource {
                 panic!("subscription forwarder panic under the containment class")
             }));
         }
-        let state = (
-            self.values.clone().into_iter(),
-            DropMark::new(self.quiescences.clone()),
-            self.ends,
+        let guard = self.gate.clone().map_or_else(
+            || Quiescence::Immediate(DropMark::new(self.quiescences.clone())),
+            |gate| {
+                Quiescence::Gated(GatedQuiescence {
+                    gate,
+                    quiesced: self.quiescences.clone(),
+                })
+            },
         );
+        let state = (self.values.clone().into_iter(), guard, self.ends);
         Box::pin(stream::unfold(
             state,
             |(mut values, guard, ends)| async move {
@@ -934,6 +1035,49 @@ pub fn park_kernel(script: Script) -> (Kernel<Scripted>, Journal) {
 /// further grant admitted anywhere on the driver.
 pub fn accept<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, run: RunName) {
     accept_within(driver, run, TEST_TURNS);
+}
+
+/// Steps a pass begun by `source`, spending turns while that source is not
+/// yet ready, on a stated budget.
+///
+/// **For the multi-worker series only, and it weakens nothing.** Each
+/// attempt is a whole pass in the fixed stage order or nothing at all — a
+/// refused `step_pass` drives the kernel not at all — so this is pass-unit
+/// driving with a bounded wait in front of it, not a stage probe. What makes
+/// it necessary is a fact about worker threads rather than about the kernel:
+/// a run's exit becomes observable when a worker finishes reaping its task,
+/// and no application-side signal can be ordered against that, so the
+/// current-thread series' pattern — settle on the application's own mark,
+/// then step — has a gap there that no script can close.
+///
+/// The turn between attempts is spent through [`TestDriver::settle`], the
+/// driver's own budgeted waiting primitive, so nothing here reaches past the
+/// published surface.
+///
+/// # Panics
+///
+/// Panics when `max_turns` is spent with the source still not ready.
+///
+/// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
+#[expect(
+    clippy::panic,
+    reason = "an exhausted bound fails the test, which is what a panic is here"
+)]
+pub fn step_when_ready<P: Program, B: Backend>(
+    driver: &mut TestDriver<P, B>,
+    source: WakeSource,
+    max_turns: usize,
+) -> StepReport<B::Error> {
+    for _ in 0..max_turns {
+        if let Ok(stepped) = driver.step_pass(source) {
+            return stepped;
+        }
+        // Exactly one turn: the predicate is false on its first reading and
+        // true on the one after the turn.
+        let mut spent = false;
+        driver.settle(1, || mem::replace(&mut spent, true));
+    }
+    panic!("bounded step exhausted: {source:?} was still not ready after {max_turns} turns");
 }
 
 /// [`accept`] under a stated budget, for the multi-worker series
