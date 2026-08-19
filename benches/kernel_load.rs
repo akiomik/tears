@@ -143,9 +143,6 @@ const QUIT_TRIALS: u32 = 200;
 /// "the trial loop runs and terminates", not "the sample is a sample".
 const SMOKE_TRIALS: u32 = 5;
 
-/// Attempts a quit row may spend collecting `QUIT_TRIALS` valid trials.
-const QUIT_ATTEMPT_CAP: u32 = 4 * QUIT_TRIALS;
-
 /// Terminal size every row renders into.
 const SCREEN: (u16, u16) = (80, 24);
 
@@ -1104,12 +1101,24 @@ impl QuitReport {
 }
 
 async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
+    // Ten attempts per requested trial — the form RFC 0007 §6 states
+    // normatively, and stated per row rather than per harness so that a
+    // reduced row's cap reduces with it: the smoke profile's 5-trial rows
+    // fail after 50 attempts instead of spending a full row's budget before
+    // anyone hears about it.
+    //
+    // Unlike the old harness, this cap binds an `Always` row too. That
+    // predicate never misses, but an attempt can still yield no sample — a
+    // trial whose kernel timed out, or one whose quit instant was never
+    // recorded — and those are exactly the failures that would otherwise
+    // retry forever instead of ending the row.
+    let attempt_cap = scenario.trials.saturating_mul(10);
     let mut applied = Vec::new();
     let mut exit = Vec::new();
     let mut depths = Vec::new();
     let mut attempts = 0;
     let mut failures = 0;
-    while (applied.len() as u32) < scenario.trials && attempts < QUIT_ATTEMPT_CAP {
+    while (applied.len() as u32) < scenario.trials && attempts < attempt_cap {
         attempts += 1;
         match run_quit_trial(scenario.base.clone(), scenario.valid_trial).await {
             Some(sample) if sample.valid => {
