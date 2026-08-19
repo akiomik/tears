@@ -734,7 +734,8 @@ scripted-sequence gate on its draining rows, completion alone on its
 quit rows — no latency assertion anywhere, and the same attempt cap
 scaled to the row's own trial count. Two things differ, and both follow
 from the successor topology rather than from the profile: its quit rows
-run once per quit route, the two RFC 0014 §3.3 separates, and its
+run one row per quit route rather than each row twice, the two routes
+RFC 0014 §3.3 separates, and its
 attempt cap binds every row rather than the predicate rows alone,
 because an attempt there can end with no sample when no predicate has
 missed. The rest of this section is stated over one harness and reads
