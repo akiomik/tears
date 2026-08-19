@@ -1339,7 +1339,8 @@ tiers remain the regression suite afterward.
   after issuing its stops, so a quiescence observed while the pass
   runs has no site to admit into — because a mid-pass quiescence is
   not constructible on the single-threaded executor those behavioral
-  rows use. RFC 0012 §4.2 states the same split from the owner side.
+  rows use. RFC 0012 §4.2 states the same split from the
+  owner side.
 - **INV-RC13 — driver topology.** The driver constructs through the
   production path and shares bookkeeping, producer execution, lanes,
   and termination with production; the five prohibited shapes are not
@@ -1476,8 +1477,15 @@ previous acceptance). Until then the claim keeps its verified scope:
 exactly the two conditions above and witnesses INV-RC5 there, which is
 what that invariant's both-lane-modes check consumes — it is evidence
 for revocation under a bounded lane, never for a general bounded-lane
-determinism claim. Resolves as an amendment to the driving contract in
-the RFC 0008 amendment.
+determinism claim.
+
+**Resolved in part, at RFC 0008 §9.12.** The bounded-lane extension
+has had its verification pass and the determinism claim now reaches
+bounded lanes on a current-thread executor, both conditions above met
+by execution. The executor-independent extension has not and stays
+open at the verified range. That section also fixes how this
+condition's trailing clause reads for a grant that resolves with no
+commit, which §7.2 closes by citing this question.
 
 ### 13.4 External driving surface
 
@@ -1488,9 +1496,11 @@ pacing responsibilities, park/wake integration. Future RFC.
 
 RFC 0006's statistical acceptance (INV-L4 formulation and the
 bounded-mode scenario set) re-measured on the new topology, with the
-same reference-environment discipline. Implementation-stage work under
-RFC 0006's ownership; until it lands, §3.3's latency statements are
-the contract and no numeric threshold is claimed here.
+same reference-environment discipline. **Resolved at RFC 0006 §5.3**,
+which states the successor's conditions per quit route and quantifies
+the producer route's over §3.3's constructive bound. That ownership is
+unchanged and no numeric threshold is claimed here; §3.3's latency
+statements remain this RFC's contract.
 
 ## 14. References
 
