@@ -449,6 +449,16 @@ static GAUGE_PARTITION_SEEN: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::ne
 
 /// Waits for the previous kernel's producers to quiesce before the next row
 /// starts, so a straggler gauge event cannot land in the next row's slot.
+///
+/// Then drops the previous partitions' high-water marks. Every trial builds
+/// its own observer and so its own `runtime_id`, and the quit rows run
+/// hundreds of trials each, so keeping them would grow the map for the whole
+/// process with nothing ever reading an old entry again. Here is the one
+/// point where dropping them is sound: the observer that could emit for
+/// those partitions went with the kernel that owned it, its producers have
+/// been joined by that kernel's settle, and the gauge sum reaching zero is
+/// that partition's own last event — so no `runtime_id` in the map can
+/// produce another event, and the monotone guard has nothing left to guard.
 async fn await_quiescence() {
     let quiesced = timeout(Duration::from_secs(5), async {
         while LIVE_PRODUCERS.load(Ordering::Relaxed) != 0 {
@@ -460,6 +470,10 @@ async fn await_quiescence() {
         quiesced.is_ok(),
         "producers did not quiesce within 5s; a later row's gauge slot would be corrupted"
     );
+    GAUGE_PARTITION_SEEN
+        .lock()
+        .expect("gauge partition high-water mark poisoned")
+        .clear();
 }
 
 /// Reads the `blocked` producer gauge and the data-lane capacity-wait events
