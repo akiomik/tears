@@ -151,14 +151,15 @@ fn a_pass_that_pulls_nothing_fires_no_batch_event() {
 // nothing was processed, it is the schema's own rule that such a batch has
 // no batch event.
 //
-// **The rule is the old one; the set of batches it removes is smaller.**
-// The old loop exited early only for a quit that arrived as an *input* — a
-// keyed command's — and an `update`-returned `Command::quit()` was an
-// ordinary dispatch there, so the batch below would have run on and
-// reported. RFC 0014 §3.3 applies that quit synchronously at its dispatch
-// instead, which is what ends this batch. The narrowing is the quit
-// synchronization's, recorded where that supersession is; what this row
-// pins is that the kernel obeys the rule on the route it now has.
+// **The rule is the old one; the batches it removes move in two directions,
+// and neither set contains the other.** The old loop exited early for a quit
+// that arrived as an *input* — a keyed command's — and the successor does
+// not, so those batches report where they did not. An `update`-returned
+// `Command::quit()` was an ordinary dispatch there, so the batch below would
+// have run on and reported; RFC 0014 §3.3 applies that quit synchronously at
+// its dispatch instead, which is what ends this batch. Both shifts belong to
+// the quit routes that supersession carries; what this row pins is that the
+// kernel obeys the rule on the route it now has.
 #[test]
 fn a_quit_terminated_batch_fires_no_batch_event() {
     let recorder = TraceRecorder::new().with_target(TARGET);

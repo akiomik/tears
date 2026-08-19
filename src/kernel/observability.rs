@@ -53,15 +53,16 @@ impl<P: Program> Kernel<P> {
     /// the old shape could not produce, and emitting for it would widen the
     /// event's meaning under an unchanged name.
     ///
-    /// The *rule* is therefore preserved; its **reach** narrows, and the
-    /// narrowing is not this module's doing. The old loop exited early only
-    /// for a quit that arrived as an **input** — a keyed command's — while
-    /// an `update`-returned `Command::quit()` was an ordinary dispatch
-    /// there, so its batch ran on and reported. RFC 0014 §3.3 applies that
-    /// quit synchronously at its dispatch, so the batch carrying it now ends
-    /// without an event, and a producer quit reaches the control drain a
-    /// stage before the batch rather than mid-way through one. Both follow
-    /// from the quit routes that row supersedes.
+    /// The *rule* is therefore preserved; what it **reaches** moves in two
+    /// directions at once, and neither set contains the other. The old loop
+    /// exited early for a quit that arrived as an **input** — a keyed
+    /// command's — and the successor does not, so those batches now report
+    /// where they did not. An `update`-returned `Command::quit()` was an
+    /// ordinary dispatch there and its batch ran on and reported, while
+    /// RFC 0014 §3.3 applies that quit synchronously at its dispatch, so
+    /// that batch now ends without an event. A producer quit reaches the
+    /// control drain a stage before the batch rather than mid-way through
+    /// one. All of it follows from the quit routes that row supersedes.
     pub(super) fn report_batch(&self, pulled: usize, updated: usize) {
         if pulled == 0 || self.terminating() {
             return;

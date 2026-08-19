@@ -17,7 +17,7 @@
 //!   between them; it adds no loop, no branch, and no stage of its own, which
 //!   is what keeps the numbers a measurement *of production* rather than of a
 //!   bench-shaped imitation.
-//! - [`RegistryScan`] holds a populated [`ScopeRegistry`] and exposes the four
+//! - [`RegistryScan`] holds a populated `ScopeRegistry` and exposes the four
 //!   linear walks a dispatch performs over it — `keyed_occupant`,
 //!   `sub_running`, `any_stopping_sub`, and `select_prefix`. Their cost in the
 //!   number of live runs is mechanism (RFC 0013 §3.7) that
@@ -145,7 +145,7 @@ fn run_scope(index: usize) -> ScopePath {
     ScopePath::empty().prefixed(index).prefixed("pane")
 }
 
-/// A populated [`ScopeRegistry`] and the four linear walks over it.
+/// A populated `ScopeRegistry` and the four linear walks over it.
 ///
 /// The runs are real entries with real abort handles: the join set below owns
 /// one parked task per entry, because `RunEntry::abort` has no constructible
@@ -285,7 +285,7 @@ impl RegistryScan {
     }
 }
 
-/// A populated [`CleanupLedger`] and its one selecting operation.
+/// A populated `CleanupLedger` and its one selecting operation.
 pub struct CleanupLedgerScan {
     ledger: CleanupLedger,
     armed: usize,
