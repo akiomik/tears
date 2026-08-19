@@ -87,7 +87,7 @@
 //! and INV-ST7's observable half, with the kernel carriers INV-RC6 and
 //! INV-RC7, plus the divergent composition where a run's placement prefix
 //! and its key's scope disagree and both still reach it; [`cleanup`] carries
-//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup kind;
+//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup neighbour;
 //! [`combinator`] carries INV-RC2, INV-RC3, and INV-RC4's rows as the kernel
 //! applies them, over a program that is a closed combinator stack rather
 //! than the scripted reducer; [`admission`] carries RFC 0012's admission
@@ -115,14 +115,18 @@
 //! evidence surface, which is why those rows read it directly instead of
 //! through a ledger.
 //!
-//! One clause of INV-RC12 (a) is unreachable for a different reason, and it
-//! is a construction limit rather than an open row: outside termination
-//! nothing stop-requests a *cleanup* run — a teardown excludes the kind, a
-//! cancel and a supersession address keyed slots, a re-evaluation addresses
+//! INV-RC12 (a)'s cleanup half divides, and the two pieces are held in
+//! different classes. The clause proper is about a **stop-requested**
+//! cleanup run, and no row can construct one: outside termination nothing
+//! stop-requests a cleanup run — a teardown excludes the kind, a cancel and
+//! a supersession address keyed slots, a re-evaluation addresses
 //! subscription runs — and at termination there is no admission site left
-//! for one to defer. [`cleanup`] carries the reachable half (an in-flight
-//! cleanup run defers nothing) and the registry's barrier predicate, which
-//! reads subscription runs only, is the structural carrier for the rest.
+//! for one to defer. That clause is therefore **structural**, carried by the
+//! registry's barrier predicate, which reads subscription runs only and so
+//! can never see a cleanup run. Its **behavioral neighbour** is a different
+//! statement and is reachable: a cleanup run *in flight* defers no
+//! admission, which [`cleanup`] witnesses beside the enumeration of the
+//! stop-request sites.
 //!
 //! One behavioral limit is worth naming because a script runs into it: the
 //! uniform barrier's deferral of a *later* pass's admissions. A stop

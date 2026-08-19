@@ -332,14 +332,18 @@ fn termination_cancels_a_running_cleanup_run() {
     );
 }
 
-// INV-RC12 (a), the cleanup kind: a cleanup run in flight defers no
-// subscription admission. The barrier's predicate reads subscription runs
-// only, which is where the invariant's other half — a *stop-requested*
-// cleanup run — lives: outside termination nothing stop-requests a cleanup
-// run (a teardown excludes the kind, a cancel and a supersession address
-// keyed slots, a re-evaluation addresses subscription runs), and at
-// termination there is no admission site left for anything to defer. The
-// reachable half is the one below.
+// INV-RC12 (a)'s cleanup **neighbour**, which is the reachable statement: a
+// cleanup run *in flight* defers no subscription admission.
+//
+// The clause itself says something else and has no row anywhere, by
+// construction rather than by omission. It is about a **stop-requested**
+// cleanup run, and outside termination nothing stop-requests one — a
+// teardown excludes the kind, a cancel and a supersession address keyed
+// slots, a re-evaluation addresses subscription runs — while at termination
+// no admission site is left for one to defer. Its carrier is structural: the
+// barrier's predicate reads subscription runs only, so it can never see a
+// cleanup run whatever the run's phase. The row below is the neighbour, not
+// a weaker form of the clause.
 #[test]
 fn an_in_flight_cleanup_run_defers_no_subscription_admission() {
     let (started, reclaimed) = (Beacon::default(), Beacon::default());
