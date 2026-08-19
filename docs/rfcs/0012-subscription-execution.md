@@ -236,12 +236,15 @@ interference on top.
   admits immediately — the current synchronous behavior remains
   conforming there. The two halves are checked differently, and
   RFC 0014 INV-RC12 states the same split from the kernel side:
-  non-participation by command and cleanup runs is behavioral at the
-  reconcile seam, one row per run kind, while the same-pass clause is
-  structural at the same seam — the reconcile path takes no second
-  admission attempt after issuing its stops — because a mid-pass
-  quiescence is not constructible on the single-threaded executor
-  those behavioral rows use.
+  non-participation is behavioral at the reconcile seam for a command
+  run and for a cleanup run in flight, one row per run kind, while a
+  *stop-requested* cleanup run is structural at the barrier predicate
+  — nothing stop-requests one outside termination, where no admission
+  site is left for it to defer — and the same-pass clause is
+  structural at the reconcile seam, the reconcile path taking no
+  second admission attempt after issuing its stops, because a
+  mid-pass quiescence is not constructible on the single-threaded
+  executor those behavioral rows use.
 - **INV-SE4 — a newer re-evaluation supersedes pending admissions.**
   When a new re-evaluation arrives while admissions are pending on the
   barrier, the older generation's pending desired set and its
@@ -516,8 +519,16 @@ Enforcement classes follow the pre-review checklist's definitions.
   constructible on the executor the behavioral rows use (INV-SE5
   forbids an await between a reconcile's stop requests and its return).
   The non-subject half — a stop-requested command or cleanup run defers
-  no admission — is behavioral at the reconcile seam under RFC 0014
-  INV-RC12, where those run kinds exist.
+  no admission — is enforced under RFC 0014 INV-RC12, where those run
+  kinds exist, and it divides there: behavioral at the reconcile seam
+  for the command kind, and structural at the barrier predicate for a
+  stop-requested cleanup run, which no path constructs outside
+  termination (a teardown excludes the kind, a cancel and a
+  supersession address keyed slots, a re-evaluation addresses
+  subscription runs) and which termination leaves no admission site
+  for. The predicate reading subscription runs only is what carries
+  it; a cleanup run *in flight* is the reachable neighbour and stays
+  behavioral.
 - **INV-SE4**: only the newest desired set is admitted; a superseded
   generation's pending spawners are discarded un-invoked. Behavioral
   at the manager layer — the mandated sequence: `{A}` → `{B}` (stop

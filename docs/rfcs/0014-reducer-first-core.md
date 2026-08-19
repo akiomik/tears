@@ -1332,15 +1332,25 @@ tiers remain the regression suite afterward.
   subscription run, of a command run, or of a cleanup run marks
   none — and (c) a stop-issuing re-evaluation admits zero in its own
   pass, even when the stop quiesces while that pass is still running.
-  Enforcement splits by what a check can construct: (a) and (b) are
+  Enforcement splits by what a check can construct, and (a) splits
+  inside itself. Its **command** half and all of (b) are
   **behavioral** at the reconcile seam, one row per non-participating
-  run kind and one per non-dirt source; (c) is **structural** at the
-  same seam — the reconcile path takes no second admission attempt
-  after issuing its stops, so a quiescence observed while the pass
-  runs has no site to admit into — because a mid-pass quiescence is
-  not constructible on the single-threaded executor those behavioral
-  rows use. RFC 0012 §4.2 states the same split from the
-  owner side.
+  run kind and one per non-dirt source. Its **cleanup** half divides
+  again: a cleanup run *in flight* defers nothing, which is
+  behavioral there like the rest, but a **stop-requested** cleanup
+  run is not constructible outside termination — a teardown excludes
+  the kind, a cancel and a supersession address keyed slots, a
+  re-evaluation addresses subscription runs — and at termination no
+  admission site is left for one to defer. That clause is therefore
+  **structural**, at the barrier predicate, which reads subscription
+  runs only and so can never see a cleanup run
+  (`src/kernel/conformance/cleanup.rs` records the enumeration beside
+  the reachable row). (c) is **structural** at the reconcile seam —
+  the reconcile path takes no second admission attempt after issuing
+  its stops, so a quiescence observed while the pass runs has no site
+  to admit into — because a mid-pass quiescence is not constructible
+  on the single-threaded executor those behavioral rows use. RFC 0012
+  §4.2 states the same split from the owner side.
 - **INV-RC13 — driver topology.** The driver constructs through the
   production path and shares bookkeeping, producer execution, lanes,
   and termination with production; the five prohibited shapes are not
