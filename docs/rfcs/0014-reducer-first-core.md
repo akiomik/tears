@@ -116,7 +116,8 @@ Eight decisions:
    `TestDriver` drives the production kernel itself — same
    construction, same task bookkeeping, same lanes, same termination —
    with the driving differential confined to two seams (pass-initiation
-   arbitration, send-intent grants) plus application-side inputs.
+   arbitration, send-intent grants), one recorded pre-pass executor
+   turn, and application-side inputs.
 
 Mechanism — the kernel's registries, counters, and seam types — is
 informative (§10). The kernel exists today as the prototype §13.1's
@@ -954,17 +955,24 @@ contract; its API body lands in that amendment. Contract:
   manual run retention, reimplemented reconciliation, a mirrored quit
   route, manual effect polling, direct kernel injection — are not
   constructible through its API.
-- **The driving differential is two seams plus inputs.** What differs
-  from production, exhaustively: (i) pass-initiation arbitration —
+- **The driving differential is two seams, one recorded turn, and
+  inputs.** What differs from production, exhaustively: (i)
+  pass-initiation arbitration —
   which ready wake source begins the next pass (§3.5) — is scripted
   instead of unbiased; (ii)
   producer send grants — a producer's send-intent is released by
   script instead of immediately; (iii) inputs and readiness are
   supplied by the application side (mock sources satisfying RFC 0012
   §6.1's template, test-controlled gates inside application-supplied
-  effects). The production implementations of both seams are inert
-  (unbiased selection, immediate grant) and observably equivalent to
-  the seamless kernel; production scheduling stays uninstrumented.
+  effects); and (iv) a driver step takes one executor turn before the
+  pass, where production takes its at the park it is woken from. The
+  production implementations of both seams are inert (unbiased
+  selection, immediate grant) and observably equivalent to the
+  seamless kernel; production scheduling stays uninstrumented. The
+  turn is no seam and is recorded rather than removed: it gates
+  nothing — readiness is read before it — and changes no branch
+  inside the pass, which is why the stage sharing stays verbatim
+  (RFC 0008 §9.2).
 - **Determinism, scoped (INV-RC14).** The driver guarantees scripted
   reproducibility: one script yields one observation sequence, for a
   deterministic application — the driver introduces no nondeterminism

@@ -3,13 +3,17 @@
 //! [`TestDriver`] drives the very same [`Kernel`] production does: the same
 //! construction path, the same runtime-owned tasks on the same join set, the
 //! same lanes, the same pass implementation, the same termination. The
-//! driving differential is confined to **two seams** plus application-side
-//! inputs (RFC 0014 §7.2, INV-RC13):
+//! driving differential is confined to **two seams**, one recorded turn,
+//! and application-side inputs (RFC 0014 §7.2, INV-RC13):
 //!
 //! 1. **pass initiation** — the driver names which armed source begins a
 //!    pass, instead of a park choosing among the ready ones (§9.5);
 //! 2. **the send gate** — the driver releases producer sends one at a time,
-//!    instead of every send being ready on its first poll (§9.6).
+//!    instead of every send being ready on its first poll (§9.6);
+//! 3. **one pre-pass executor turn**, taken unconditionally where
+//!    production takes its at the park it is woken from. It is no seam —
+//!    it gates nothing and changes no branch inside the pass — and is
+//!    recorded rather than removed (RFC 0008 §9.2).
 //!
 //! Readiness is not part of the differential and cannot be fabricated:
 //! [`TestDriver::step_pass`] reads the named source from the real lanes and

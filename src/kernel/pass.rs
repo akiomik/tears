@@ -24,7 +24,9 @@
 //!
 //! [`Kernel::pass_cycle`] is a single implementation shared verbatim by the
 //! production loop and by the driver's pass-unit stepping, which is what
-//! makes the driving differential the two seams and nothing else.
+//! keeps the driving differential out of the pass entirely: the two seams
+//! sit outside it, and the driver's one pre-pass executor turn is taken
+//! before this function is entered (RFC 0008 §9.2).
 //!
 //! **No wall clock.** Nothing in this module reads a clock, arms a timer, or
 //! sleeps: the batch is count-bounded, the frame is pass-bounded, and the

@@ -140,7 +140,8 @@ production kernel itself. Its contract is pinned by RFC 0014 §7.2 —
 construction through the production path, with the production task
 bookkeeping, lanes, phase machine, and termination shared rather than
 re-implemented; a driving differential confined, exhaustively, to two
-seams — pass-initiation arbitration and producer send grants — plus what
+seams — pass-initiation arbitration and producer send grants — plus one
+recorded pre-pass executor turn that is no seam (§9.2), plus what
 the application side supplies, which is **inputs and readiness** (mock
 sources satisfying RFC 0012 §6.1's template, and test-controlled gates
 inside application-supplied effects); scripted determinism over the whole
@@ -2368,9 +2369,9 @@ own calls, and that is where INV-RC10's redraw row is read — its own
 enforcement line calls for "a scripted flood with an interposed probe and
 a pending redraw", and the interposed probe is that application-side
 instrument, not a driver method. This is deliberate negative space rather
-than an omission: a frame observation on the driver would be a third
-thing the surface reports about a pass, beside the two seams RFC 0014
-§7.2 confines it to.
+than an omission: a frame observation on the driver would be one more
+thing the surface reports about a pass, beside the differential
+RFC 0014 §7.2 confines it to.
 
 Two elements were suspected of redundancy and kept, neither implied
 by its suspected survivor. `confirm` against `step_pass`, which also drives
