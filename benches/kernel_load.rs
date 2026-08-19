@@ -82,11 +82,24 @@
 //! the `quit->applied` bound scales with. Reading a smoke number as an
 //! acceptance number would be reading a different measurement.
 //!
+//! **The blocked-producer sweep is neither.** `probe_blocked_*` varies the
+//! producer count at a held lane capacity and backlog, to see what the
+//! reclamation of N blocked producers costs. It is **informative** — no
+//! acceptance row, no threshold, fewer trials than INV-L4 asks for — and it
+//! is reachable only by naming its rows, so a bare run cannot grow to
+//! include it. Every quit row additionally reports `applied->exit`, the
+//! quiescent postcondition on its own, which is where that reclamation's
+//! join drain lands (the abort requests are already inside `quit->applied`;
+//! RFC 0011 §4.4's two stages sit either side of that boundary).
+//!
 //! ```bash
 //! cargo bench --bench kernel_load --features bench-internals
 //! cargo bench --bench kernel_load --features bench-internals -- overload
 //! cargo bench --bench kernel_load --features bench-internals -- --smoke
 //! # or, for both harnesses' smoke profiles at once: just bench-smoke
+//! cargo bench --bench kernel_load --features bench-internals -- \
+//!   probe_blocked_1_sync probe_blocked_8_sync probe_blocked_16_sync \
+//!   probe_blocked_32_sync probe_blocked_64_sync probe_blocked_128_sync
 //! ```
 
 // Metric reporting converts counters and nanosecond values to floating point
@@ -456,6 +469,49 @@ fn quit_scenarios() -> Vec<QuitCfg> {
         });
     }
     rows
+}
+
+/// The blocked-producer counts the probe series sweeps.
+const PROBE_PRODUCERS: [u32; 6] = [1, 8, 16, 32, 64, 128];
+
+/// Valid trials per probe row.
+///
+/// Below INV-L4's 200 because the probe makes no acceptance claim; what it
+/// has to be large enough for is a readable tail, not a statistical one.
+const PROBE_TRIALS: u32 = 100;
+
+/// The blocked-producer sweep — **informative, and no part of the
+/// acceptance matrix**.
+///
+/// Every row is `quit_blocked_1_sync` with the producer count varied, so
+/// the lane capacity, the backlog, the update cost, the quit position and
+/// the route are all held and `producers` is the only input that moves.
+/// Each row keeps a `BlockedEq(N)` predicate, so a counted trial is one
+/// where all N producers were in fact blocked at the quit instant — which
+/// is what makes N the number of producers termination has to reclaim
+/// rather than the number that merely exist.
+///
+/// The depth at quit is not perfectly held: bounded depth is
+/// `capacity + producers`, so it moves 1,025 → 1,152 across the sweep. That
+/// spread is reported beside the latencies rather than argued away.
+///
+/// **Opt-in by name**, and that is what keeps it out of the acceptance
+/// matrix: a bare run reports the acceptance rows and nothing else, so this
+/// series cannot drift into a table that is read as acceptance.
+fn probe_scenarios() -> Vec<QuitCfg> {
+    let template = quit_row_named("quit_blocked_1_sync");
+    PROBE_PRODUCERS
+        .into_iter()
+        .map(|producers| QuitCfg {
+            base: Cfg {
+                name: leak_name(&format!("probe_blocked_{producers}"), QuitRoute::Sync),
+                producers,
+                ..template.base.clone()
+            },
+            trials: PROBE_TRIALS,
+            valid_trial: ValidTrial::BlockedEq(u64::from(producers)),
+        })
+        .collect()
 }
 
 /// Looks up a row of the canonical [`load_scenarios`] table by name so a
@@ -1133,6 +1189,16 @@ struct QuitReport {
     failures: u32,
     applied: Vec<u64>,
     exit: Vec<u64>,
+    /// Per trial, `exit - applied`: the quiescent postcondition alone.
+    ///
+    /// Kept as its own per-trial series rather than derived from the two
+    /// percentile sets, because `p50(exit) - p50(applied)` pairs values from
+    /// different trials and says nothing about either. This one is the
+    /// interval between `Kernel::drive` returning and `Kernel::settle`
+    /// finishing — that is, the join drain, with the abort requests already
+    /// behind it in `applied` (RFC 0011 §4.4's two stages, one on each side
+    /// of the boundary).
+    settle: Vec<u64>,
     depths: Vec<u64>,
 }
 
@@ -1157,6 +1223,7 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
     let attempt_cap = scenario.trials.saturating_mul(10);
     let mut applied = Vec::new();
     let mut exit = Vec::new();
+    let mut settle = Vec::new();
     let mut depths = Vec::new();
     let mut attempts = 0;
     let mut failures = 0;
@@ -1166,6 +1233,7 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
             Some(sample) if sample.valid => {
                 applied.push(sample.applied_ns);
                 exit.push(sample.exit_ns);
+                settle.push(sample.exit_ns.saturating_sub(sample.applied_ns));
                 depths.push(sample.depth_at_quit);
             }
             Some(_) => {}
@@ -1174,6 +1242,7 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
     }
     applied.sort_unstable();
     exit.sort_unstable();
+    settle.sort_unstable();
     depths.sort_unstable();
     QuitReport {
         cfg: scenario.base.clone(),
@@ -1182,6 +1251,7 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
         failures,
         applied,
         exit,
+        settle,
         depths,
     }
 }
@@ -1245,6 +1315,7 @@ fn print_quit_report(report: &QuitReport) {
     );
     println!("  quit->applied     {}", format_ms(&report.applied));
     println!("  quit->exit        {}", format_ms(&report.exit));
+    println!("  applied->exit     {}", format_ms(&report.settle));
     if report.depths.is_empty() {
         println!("  depth at quit     n/a");
     } else {
@@ -1293,11 +1364,22 @@ fn main() -> ExitCode {
         .into_iter()
         .filter(|row| matches(row.base.name))
         .collect();
-    if load_rows.is_empty() && quit_rows.is_empty() {
+    // Named only. A bare run is the acceptance matrix and nothing else, so
+    // the informative sweep never joins it by default (`probe_scenarios`).
+    let probe_rows: Vec<QuitCfg> = if selected.is_empty() {
+        Vec::new()
+    } else {
+        probe_scenarios()
+            .into_iter()
+            .filter(|row| selected.iter().any(|arg| *arg == row.base.name))
+            .collect()
+    };
+    if load_rows.is_empty() && quit_rows.is_empty() && probe_rows.is_empty() {
         let names: Vec<&str> = load_scenarios()
             .into_iter()
             .map(|cfg| cfg.name)
             .chain(quit_scenarios().into_iter().map(|row| row.base.name))
+            .chain(probe_scenarios().into_iter().map(|row| row.base.name))
             .collect();
         println!("no matching row; available: {}", names.join(", "));
         return ExitCode::FAILURE;
@@ -1314,6 +1396,14 @@ fn main() -> ExitCode {
         let report = executor.block_on(run_quit_scenario(&row));
         incomplete |= report.incomplete();
         print_quit_report(&report);
+    }
+    if !probe_rows.is_empty() {
+        println!("# blocked-producer sweep (informative; not acceptance rows)\n");
+        for row in probe_rows {
+            let report = executor.block_on(run_quit_scenario(&row));
+            incomplete |= report.incomplete();
+            print_quit_report(&report);
+        }
     }
     // A row that could not collect its sample is not a measurement, so it
     // fails the run rather than being reported as one.
