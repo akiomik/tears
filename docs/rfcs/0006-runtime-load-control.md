@@ -2040,25 +2040,57 @@ depth with the three deepest rows the three lowest. Because these
 three sessions are what the two constants were read off, none of them
 can also decide the condition.
 
-| Condition | Rows | Oracle | Verdict |
-| --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *session 4 not yet run* |
+**Session 4 validates it, and both conditions hold.** A separate run
+of all sixteen rows from the commit that pinned these two constants,
+with the same worktree and the same binary session 3 measured — the
+commits between them touch `docs/` only, so the two sessions measure
+identical executable code:
 
-Session 4 validates it, under section 5.1's environment rule and with
-these constants fixed beforehand. The per-row p99 gates are not
-reopened by this — they were decided on session 3 above — and the
-discipline is the same one those gates carry: a session 4 that misses
-either number is a finding, reported rather than accommodated.
+| Condition | Oracle | Measured | Margin |
+| --- | ---: | ---: | ---: |
+| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.0101** | 0.510 |
+| span (max − min) | ≤ 0.6 ms | **0.110** | 0.490 |
 
-**`quit_blocked_64_sync` passes on the floor, and its tail is real.**
-Stated plainly because the two facts are easy to conflate: this row's
-p99 of 0.113 ms reproduces session 2's 0.111 ms under isolation, so
-the reservation section 5.1's environment rule places on session 2's
-tails does *not* explain this row — the tail is a property of the
-configuration, not of a noisy window. It passes because `F` is above
-it, not because it is small: its 0.113 ms exceeds the multiplicative
-term's 0.070 ms and clears the floor by 0.037 ms. `F` was not fitted
-to it. The floor's binding value came from the blocked-producer probe
+Both pass, over the same six non-idle rows, the slope again negative.
+**INV-L4's backlog independence is therefore established on the
+successor topology**, on a criterion fixed before the run that
+decided it.
+
+**Session 4 is a median measurement, not a second acceptance run, and
+the difference matters here.** It began at a load average of 8.23
+against session 3's 2.70, so it does not satisfy section 5.1's
+requirement that an acceptance run be the machine's only substantial
+load. That rule's own distinction is what makes the run usable
+anyway: this oracle reads p50, and p50 held — `quit→applied` medians
+moved by at most 0.190 ms across all sixteen rows and mostly within
+±0.05 ms, and the delivery-half span came out *narrower* than session
+3's, 0.110 against 0.266. The tails did not hold, and the section
+says so rather than filing it quietly: several rows' `applied→exit`
+p99 rose by more than an order of magnitude, and
+`quit_overload_control`'s `quit→applied` p99 reached 4.995 ms, which
+would miss its 4.763 ms bound. **That row's acceptance is not
+reopened by this** — the p99 gates were decided on session 3, whose
+isolation this run does not match, and a run that fails section 5.1's
+environment rule cannot retract an acceptance any more than it could
+grant one. What session 4 demonstrates about the tails is the rule
+itself: they are not a stable quantity on a machine doing other work,
+which is why the environment requirement exists and why the
+median-derived oracle was worth stating separately.
+
+**`quit_blocked_64_sync` passes on the floor, and what its tail shows
+is worth stating carefully.** The row has now been measured three
+times: 0.111 ms with other work on the machine, 0.113 ms under
+isolation, and 0.092 ms under the heaviest load of the four sessions.
+The value recurs, and it does not track load — but three samples
+moving non-monotonically against one condition establish that this
+row's tail *was observed again*, not that it is independent of the
+environment, and the earlier reading of it as reproduction under
+isolation claimed the stronger thing. What matters for the gate is
+unchanged and does not depend on which reading is right: the row
+passes because `F` is above it, not because it is small. Its
+acceptance figure of 0.113 ms exceeds the multiplicative term's
+0.070 ms and clears the floor by 0.037 ms, and `F` was not fitted to
+it. The floor's binding value came from the blocked-producer probe
 at 128 producers (95 µs); this row's own quiet figure sat in the
 calibration pool at 54 µs and did not set the maximum. What the floor
 asserts is that below a certain latency this environment's tail is
