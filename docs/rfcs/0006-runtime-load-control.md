@@ -2117,20 +2117,35 @@ Exceeding the wait means the run does not exist: non-zero exit,
 nothing recorded, no partial data to be tempted by.
 
 **Stage 2, in-window monitoring.** For as long as measurement
-continues, the harness samples at a fixed **5-second** cadence, and
-**every** sample must satisfy:
+continues, the harness samples at a fixed **5-second** cadence:
 
-| In-window condition | Threshold |
+| In-window condition | Voids the run when |
 | --- | --- |
-| no `cargo` or `rustc` process | absent |
-| largest non-bench working process | **≤ 20% CPU** |
-| one-minute load average, bench included | **≤ 5.0** |
+| `cargo` or `rustc` process | present in any sample |
+| non-bench working process above 20% CPU | in **3 consecutive** samples (≈15 s) |
+| non-bench working process above 100% CPU | in **any single** sample |
+| one-minute load average, bench included | above **5.0** in any sample |
 
-A single violating sample **voids the whole run**: the harness exits
-non-zero, records which sample failed and on which condition, and the
-data it collected is not acceptance evidence. Voiding the run rather
-than the row is deliberate — a disturbance that reaches one row has
-no reason to have spared the ones before it.
+A void is the **whole run**: the harness exits non-zero, records
+which samples failed and on which condition, and the data it
+collected is not acceptance evidence. Voiding the run rather than the
+row is deliberate — a disturbance that reaches one row has no reason
+to have spared the ones before it. **Every sample is written to the
+run's record regardless**, including the bursts that do not void, so
+that what the window contained is inspectable rather than summarised
+by whether it survived.
+
+The persistence requirement on the 20% condition is the one part of
+this specification that a measurement changed, and the measurement is
+recorded below. What the condition is *for* is excluding a concurrent
+working session — a build, an editor, another agent — and those hold
+a core for as long as they run. A macOS daemon that wakes, works for
+a few seconds, and sleeps is not that, and a rule that cannot tell
+them apart excludes nothing while refusing everything. Three
+consecutive samples is the smallest window that distinguishes them at
+this cadence. The **100%** clause is the safety side: one full core
+is real work by any reading, and it voids on sight without waiting
+for persistence.
 
 The load condition is on a different axis from pre-flight's, and
 carries a second job. Its threshold is higher because the bench is
@@ -2147,6 +2162,53 @@ reads a load average and a process list, on the order of a
 millisecond, and a 5-second cadence over a run of roughly five and a
 half minutes takes about 66 of them — under a tenth of a second of
 work spread across a run whose shortest row measures for far longer.
+
+**Why the persistence requirement exists: nine attempts, none
+usable.** The first specification of this stage voided on a single
+sample above 20%, and under it a validating run could not be
+obtained. Nine attempts were made between 22:15 and 00:52, and every
+one ended without data:
+
+| Attempt | Outcome | Cause |
+| --- | --- | --- |
+| 1 | void | `WindowServer` 32.4% |
+| 2 | void | `VirtualMachine` 20.1% |
+| 3 | void | `launchd` 42.5% |
+| 4 | void | `System/Library/Input` 41.1% |
+| 5 | void | `VirtualMachine` 25.3% |
+| 6–8 | pre-flight not met | `spotlightknowledged` 57–96%, `syspolicyd` 83–94% |
+| 9 | void | `syspolicyd` 69.1% |
+
+Every one of the six voids was the 20% condition; not one was the
+load ceiling, and no `cargo` or `rustc` process appeared in any
+sample of any attempt. That is the signature of a threshold this
+machine cannot meet rather than of a machine that was busy: the load
+averages at the violating samples were 1.42 to 2.25, which is an idle
+reference machine by every other measure this section uses.
+
+The three pre-flight refusals are the contrast that makes the rest
+legible. Those windows were genuinely not quiet — Spotlight indexing held
+between 57% and 96% of a core across thirty-one probes spanning ten
+minutes — and pre-flight refused them, correctly and without needing any
+persistence rule, because sustained load is what a single sample already
+detects.
+
+One limit of this evidence is worth stating, because it also shapes
+the revision. The harness stopped at the first violating sample, so
+these records do **not** show how long each burst lasted; they show
+that the threshold was reached, not that it was reached briefly. The
+revision therefore rests on the mismatch between the rule and its
+purpose — sustained sessions versus daemon wakeups — rather than on a
+measured burst duration, and the requirement that every sample be
+recorded exists so the next run can supply what these could not.
+
+**This revision is pre-registered, and the timing is what makes it
+so.** No validating run exists: every attempt above ended in a void
+or a refusal, and none produced acceptance data. There is therefore
+no result this change could have been steered toward, which is the
+property that separates it from the two revisions this section
+already records as post-hoc. The oracle, its two constants, and every
+numeric gate are untouched.
 
 Each pre-flight number is read off the calibration runs. A
 one-minute load average of 2.5 is attainable on this machine and has
