@@ -2032,11 +2032,14 @@ Three sessions calibrate it, and all three sit well inside:
 | --- | ---: | ---: |
 | 1 | −0.171 | 0.123 |
 | 2 | −0.440 | 0.166 |
-| 3 | −0.421 | 0.266 |
+| 3 | −0.426 | 0.266 |
 
-Every slope is *negative* — the delivery half shrinks slightly as
-depth grows — and in session 3 the largest value sits at the smallest
-depth with the three deepest rows the three lowest. Because these
+All three slopes are negative here, and in session 3 the largest
+value sits at the smallest depth with the three deepest rows the
+three lowest. That sign is not itself the property being bounded —
+later sessions put it either side of zero, as the verdict below
+records — which is why the oracle bounds the slope rather than
+requiring it to point one way. Because these
 three sessions are what the two constants were read off, none of them
 can also decide the condition.
 
@@ -2081,13 +2084,8 @@ describes the last minute; it cannot reach back and make the earlier
 part of the window quiet, and section 5.1 asks about the window, not
 its end. So the beginning of session 5 was measured against a machine
 under other load, and the condition is **not decided by it** either.
-Its oracle quantities join the calibration record beside the rest:
-
-| Session | slope (ns/envelope) | span (ms) |
-| --- | ---: | ---: |
-| 5 | −0.0806 | 0.113 |
-
-The constants remain those of sessions 1 through 3, not re-fitted.
+Its oracle quantities join the calibration record, tabulated with
+session 6's below.
 
 **Quiet has to hold for the window, and the harness has to enforce
 it.** Three runs have now been argued eligible after the fact and
@@ -2258,15 +2256,69 @@ clear of theirs. The ratios are not the useful comparison at this
 scale: a 3 µs gap on a 6 µs p99 reads as 1.5× and means the
 measurement resolved to a microsecond.
 
+**Session 7 held the window, and the record is the whole argument.**
+Pre-flight cleared on its first probe — load average **1.04**, largest
+working process **8.3%**, no `cargo` or `rustc` — and the sixty-three
+in-window samples that followed all satisfied every condition, with
+the load average staying between **1.04 and 1.83** for the duration.
+No sample voided. Two samples showed a process above 20% and are
+recorded as such: `launchd` at 40.8% and a virtualisation service at
+20.9%, each falling back under the threshold at the next sample, so
+neither reached the three-sample streak. Nothing here is inferred
+from what the run measured; it is what the harness observed about the
+machine while measuring.
+
+Those two bursts are also the revision doing its work. Under the
+single-sample rule each would have voided the run, exactly as the
+same processes did in three of the retired attempts. And the revision
+reached only the stage it was meant to: the two attempts before this
+one were **refused at pre-flight**, which the persistence requirement
+does not touch, so a genuinely occupied machine was still turned away
+while a daemon's two-sample burst no longer discards a good window.
+
+**Both conditions hold.**
+
+| Condition | Oracle | Measured | Margin |
+| --- | ---: | ---: | ---: |
+| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.1263** | 0.626 |
+| span (max − min) | ≤ 0.6 ms | **0.096** | 0.504 |
+
+Over the same six non-idle rows, with the oracle and both constants
+exactly as pinned before session 3 and never re-fitted. **INV-L4's
+backlog independence is established on the successor topology.** The
+span is the narrowest of the four sessions that produced one.
+
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **passes (session 7)** |
 
-The validating run is a fresh session that clears pre-flight and
-completes with no violating in-window sample, with the oracle and
-both constants unchanged. The discipline is the one every gate here
-carries: a run that misses either number is a finding, reported
-rather than accommodated.
+**The slope's sign is not a stable quantity, and the bound never
+depended on it.** Across the four sessions that produced one it ran
+−0.426, −0.081, +0.101, −0.126 — two changes of sign. Every
+magnitude is inside the bound, and the largest is a twentieth of the
+8.4 ns per envelope the residual term carries. A criterion stated as
+"the slope does not exceed +0.5" survives that; one stated as "the
+slope is negative" would have failed twice, which is why the oracle
+is signed and one-sided rather than directional.
+
+**Per-row confirmation, with the acceptance source unchanged.** This
+run was declared in advance to confirm the p99 bounds rather than
+decide them; session 3 remains their source. Fourteen of the sixteen
+row-and-route figures came in at or below session 3's — thirteen
+lower, one equal — and both that did not are well inside their own
+bounds: `quit_backlog_300k_control` at 6.452 ms against its 7.830 ms
+bound, and `quit_idle_control` at 0.527 against 0.961, an increase of
+two reporting units. The largest movement is downward,
+`quit_backlog_300k_sync` by 0.528 ms.
+
+The tails were the quietest of any session: the largest `applied→exit`
+maximum across all thirty-two series is **0.166 ms**, against 29.801
+in session 4 and 1.417 in session 5. Thirteen of those series show a
+maximum more than 1.3× their p99, up to 5.78×, and as before that
+ratio is not the useful reading at this scale — the 5.78× is a
+0.156 ms maximum over a 0.027 ms p99, both of them small enough that
+the ratio describes the measurement's resolution rather than the
+kernel's behaviour.
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
