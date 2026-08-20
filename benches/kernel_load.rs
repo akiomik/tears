@@ -116,7 +116,27 @@
 //!
 //! **Every sample is written to the record regardless**, including the
 //! bursts that do not void, so what the window contained is inspectable
-//! rather than summarised by whether it survived.
+//! rather than summarised by whether it survived. Each line carries every
+//! condition's input — load, build processes, top process — not only the one
+//! that decided it, so the record answers "was `cargo` running at sample 9?"
+//! from itself.
+//!
+//! Three properties of the implementation are load-bearing, and each is a
+//! fail-**open** if got wrong, so each has a negative case in `--self-test`:
+//!
+//! - **Order.** The three immediate conditions are settled before
+//!   persistence is consulted at all ([`decide`]), so a sample that has a
+//!   build running *and* a process on a short streak cannot come back
+//!   "elevated" and survive.
+//! - **Fail-closed reading.** An unreadable load average yields `INFINITY`,
+//!   never `NaN`: `NaN` compares false against every threshold and would
+//!   sail through as quiet. Not observable is not quiet.
+//! - **Sampling boundaries.** The first sample is taken at t=0 rather than
+//!   after a cadence, so a run shorter than one cadence cannot succeed with
+//!   zero samples; and the harness signals the monitor at the end, waits for
+//!   a final sample, and joins before reporting — so "the window held"
+//!   covers the whole measurement. A window with no samples is an error,
+//!   not an empty success.
 //!
 //! The persistence requirement on the 20% condition is what that condition
 //! is *for*: excluding a concurrent working session — a build, an editor,
@@ -618,40 +638,96 @@ impl MachineSample {
     /// `streak` is how many immediately preceding samples were already
     /// elevated; it is what turns a burst into a violation.
     fn in_window(&self, streak: u32) -> Verdict {
-        let mut void = Vec::new();
-        if !self.builders.is_empty() {
-            void.push(format!(
-                "build process present: {}",
-                self.builders.join(", ")
-            ));
-        }
-        if self.load1 > WINDOW_LOAD_MAX {
-            void.push(format!("load1 {:.2} > {WINDOW_LOAD_MAX:.1}", self.load1));
-        }
-        if self.top_cpu > PROCESS_CPU_HARD {
-            void.push(format!(
-                "working process {:.1}% > {PROCESS_CPU_HARD:.0}% ({}) — voids on sight",
-                self.top_cpu, self.top_comm
-            ));
-        } else if self.top_cpu > PROCESS_CPU_MAX {
-            let run = streak + 1;
-            if run >= PROCESS_CPU_PERSIST {
-                void.push(format!(
-                    "working process {:.1}% > {PROCESS_CPU_MAX:.0}% ({}) for {run} consecutive samples",
-                    self.top_cpu, self.top_comm
-                ));
-            } else {
-                return Verdict::Elevated(format!(
-                    "{:.1}% ({}) — elevated {run}/{PROCESS_CPU_PERSIST}",
-                    self.top_cpu, self.top_comm
-                ));
+        match decide(!self.builders.is_empty(), self.load1, self.top_cpu, streak) {
+            Decision::Quiet => Verdict::Quiet,
+            Decision::Elevated => Verdict::Elevated(format!(
+                "{:.1}% ({}) — elevated {}/{PROCESS_CPU_PERSIST}",
+                self.top_cpu,
+                self.top_comm,
+                streak + 1
+            )),
+            Decision::Void => {
+                let mut why = Vec::new();
+                if !self.builders.is_empty() {
+                    why.push(format!(
+                        "build process present: {}",
+                        self.builders.join(", ")
+                    ));
+                }
+                if self.load1 > WINDOW_LOAD_MAX {
+                    why.push(format!("load1 {:.2} > {WINDOW_LOAD_MAX:.1}", self.load1));
+                }
+                if self.top_cpu > PROCESS_CPU_HARD {
+                    why.push(format!(
+                        "working process {:.1}% > {PROCESS_CPU_HARD:.0}% ({}) — voids on sight",
+                        self.top_cpu, self.top_comm
+                    ));
+                } else if self.top_cpu > PROCESS_CPU_MAX {
+                    why.push(format!(
+                        "working process {:.1}% > {PROCESS_CPU_MAX:.0}% ({}) for {} consecutive samples",
+                        self.top_cpu,
+                        self.top_comm,
+                        streak + 1
+                    ));
+                }
+                Verdict::Void(why)
             }
         }
-        if void.is_empty() {
-            Verdict::Quiet
+    }
+
+    /// The line this sample contributes to the record.
+    ///
+    /// **Every condition's input is on the line, not only the one that
+    /// decided it.** A record that printed the load only when the load was
+    /// the problem could not answer "was `cargo` running at sample 9?" — and
+    /// that is a question an acceptance record has to answer from itself.
+    fn record_line(&self, n: u64, verdict: &Verdict) -> String {
+        let builders = if self.builders.is_empty() {
+            "none".to_owned()
         } else {
-            Verdict::Void(void)
+            self.builders.join(",")
+        };
+        let note = match verdict {
+            Verdict::Quiet => String::new(),
+            Verdict::Elevated(what) => format!("  ELEVATED {what}"),
+            Verdict::Void(what) => format!("  VOID {}", what.join("; ")),
+        };
+        format!(
+            "#  sample {n:>3} load1={:.2} cargo/rustc={builders} top={:.1}% ({}){note}",
+            self.load1, self.top_cpu, self.top_comm
+        )
+    }
+}
+
+/// The in-window decision, stripped of its diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Decision {
+    Quiet,
+    Elevated,
+    Void,
+}
+
+/// Decides one sample, **immediate conditions first**.
+///
+/// The ordering is the correctness property, not a matter of style. The three
+/// immediate conditions — a build process, the load ceiling, a process over
+/// the hard bound — are settled before persistence is consulted at all, so a
+/// sample that has `cargo` running *and* a 30% process cannot return
+/// "elevated" and survive on a short streak. Written as one function over
+/// plain values precisely so that ordering lives in a single place and a test
+/// can pin it (`--self-test`).
+fn decide(builders: bool, load1: f64, top_cpu: f64, streak: u32) -> Decision {
+    if builders || load1 > WINDOW_LOAD_MAX || top_cpu > PROCESS_CPU_HARD {
+        return Decision::Void;
+    }
+    if top_cpu > PROCESS_CPU_MAX {
+        if streak + 1 >= PROCESS_CPU_PERSIST {
+            Decision::Void
+        } else {
+            Decision::Elevated
         }
+    } else {
+        Decision::Quiet
     }
 }
 
@@ -661,7 +737,10 @@ fn load_average_1m() -> f64 {
     // SAFETY: `getloadavg` writes at most the requested number of doubles
     // into the caller's buffer, and the buffer holds exactly three.
     let read = unsafe { libc::getloadavg(avg.as_mut_ptr(), 3) };
-    if read >= 1 { avg[0] } else { f64::NAN }
+    // Fail **closed**. A `NaN` here would compare false against every
+    // threshold and sail through as quiet, which is the opposite of what an
+    // unreadable machine should mean: not observable is not quiet.
+    if read >= 1 { avg[0] } else { f64::INFINITY }
 }
 
 /// One `ps` snapshot: the largest non-excluded process's CPU share and name,
@@ -761,65 +840,173 @@ fn preflight() -> bool {
     }
 }
 
-/// Stage 2. Samples the window at a fixed cadence for as long as measurement
-/// continues.
-///
-/// A single violating sample voids the **whole run**, not the row it landed
-/// in: a disturbance that reached one row has no reason to have spared the
-/// ones before it. The thread reports the offending sample and exits the
-/// process non-zero, so no caller can mistake the partial output for
-/// acceptance evidence.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "samples real host state on a real cadence, not executor time (RFC 0009 §3.1)"
-)]
-#[expect(
-    clippy::exit,
-    reason = "a violated window voids the run at the instant it is observed; returning would let a caller mistake partial output for acceptance evidence (RFC 0006 §5.3)"
-)]
-fn spawn_window_monitor(samples: Arc<AtomicU64>, load_min: Arc<Mutex<(f64, f64)>>) {
-    let own_pid = id();
-    thread::spawn(move || {
-        let mut streak = 0_u32;
-        loop {
-            thread::sleep(WINDOW_CADENCE);
-            let sample = MachineSample::take(Some(own_pid));
-            let verdict = sample.in_window(streak);
-            let n = samples.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Ok(mut bounds) = load_min.lock() {
-                bounds.0 = bounds.0.min(sample.load1);
-                bounds.1 = bounds.1.max(sample.load1);
-            }
-            // Every sample is written, including the bursts that do not
-            // void, so what the window contained stays inspectable rather
-            // than summarised by whether it survived (RFC 0006 §5.3).
-            let note = match &verdict {
-                Verdict::Quiet => String::new(),
-                Verdict::Elevated(what) => format!("  ELEVATED {what}"),
-                Verdict::Void(what) => format!("  VOID {}", what.join("; ")),
-            };
-            println!(
-                "#  sample {n:>3} load1={:.2} top={:.1}% ({}){note}",
-                sample.load1, sample.top_cpu, sample.top_comm
-            );
-            flush_row();
-            match verdict {
-                Verdict::Quiet => streak = 0,
-                Verdict::Elevated(_) => streak += 1,
-                Verdict::Void(what) => {
-                    println!("\n# RUN VOID — in-window sample {n}: {}", what.join("; "));
-                    flush_row();
-                    eprintln!(
-                        "error: acceptance window violated at sample {n} ({}); the whole run \
-                         is void, not merely the row it landed in. Collected data is not \
-                         acceptance evidence.",
-                        what.join("; ")
-                    );
-                    exit(4);
+/// How finely the monitor checks for the stop signal while waiting out a
+/// cadence, so termination is answered promptly rather than up to a full
+/// cadence late.
+const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// The running in-window monitor, and the handle that ends it.
+struct WindowMonitor {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+    samples: Arc<AtomicU64>,
+    bounds: Arc<Mutex<(f64, f64)>>,
+}
+
+impl WindowMonitor {
+    /// Starts sampling. **The first sample is taken at t=0**, before any
+    /// wait: a run shorter than one cadence must not be able to succeed with
+    /// zero samples, which is what a leading sleep would allow.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "samples real host state on a real cadence, not executor time (RFC 0009 §3.1)"
+    )]
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let samples = Arc::new(AtomicU64::new(0));
+        let bounds = Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY)));
+        let (t_stop, t_samples, t_bounds) =
+            (Arc::clone(&stop), Arc::clone(&samples), Arc::clone(&bounds));
+        let own_pid = id();
+        let handle = thread::spawn(move || {
+            let mut streak = 0_u32;
+            loop {
+                let sample = MachineSample::take(Some(own_pid));
+                let verdict = sample.in_window(streak);
+                let n = t_samples.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut b) = t_bounds.lock() {
+                    b.0 = b.0.min(sample.load1);
+                    b.1 = b.1.max(sample.load1);
+                }
+                println!("{}", sample.record_line(n, &verdict));
+                flush_row();
+                match verdict {
+                    Verdict::Quiet => streak = 0,
+                    Verdict::Elevated(_) => streak += 1,
+                    Verdict::Void(why) => {
+                        println!("\n# RUN VOID — in-window sample {n}: {}", why.join("; "));
+                        flush_row();
+                        eprintln!(
+                            "error: acceptance window violated at sample {n} ({}); the whole \
+                             run is void, not merely the row it landed in. Collected data is \
+                             not acceptance evidence.",
+                            why.join("; ")
+                        );
+                        // Exits rather than returns: a violated window voids
+                        // the run at the instant it is observed, and letting
+                        // the measurement continue would leave partial output
+                        // a caller could mistake for acceptance evidence
+                        // (RFC 0006 §5.3).
+                        exit(4);
+                    }
+                }
+                // The stop flag is read *after* a sample, so the signal is
+                // always followed by one final observation before the thread
+                // leaves.
+                if t_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let mut waited = Duration::ZERO;
+                while waited < WINDOW_CADENCE && !t_stop.load(Ordering::Acquire) {
+                    thread::sleep(STOP_POLL);
+                    waited += STOP_POLL;
                 }
             }
+        });
+        Self {
+            stop,
+            handle,
+            samples,
+            bounds,
         }
-    });
+    }
+
+    /// Signals the monitor, waits for its final sample, and reports the
+    /// window.
+    ///
+    /// Joining before reporting is what makes "the window held" a statement
+    /// about the whole measurement rather than about whatever had been
+    /// sampled when the last row happened to finish. Zero samples is an
+    /// error, not an empty success.
+    fn finish(self) -> Result<(u64, f64, f64), String> {
+        self.stop.store(true, Ordering::Release);
+        if self.handle.join().is_err() {
+            return Err("the in-window monitor panicked; the window is unverified".to_owned());
+        }
+        let n = self.samples.load(Ordering::Relaxed);
+        if n == 0 {
+            return Err("no in-window samples were taken; the window is unverified".to_owned());
+        }
+        let (lo, hi) = *self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok((n, lo, hi))
+    }
+}
+
+/// Negative tests for the isolation logic, run by `--self-test`.
+///
+/// These exist because each one is a fail-**open** that a passing run cannot
+/// reveal: a monitor that wrongly calls a disturbed window quiet produces a
+/// clean-looking record, so only a deliberately disturbed input distinguishes
+/// a working guard from a broken one. A bench with `harness = false` gets no
+/// `cargo test` harness, hence a flag rather than `#[test]`.
+///
+/// # Panics
+///
+/// Panics on the first case that does not hold; that is the report.
+fn self_test() {
+    // P1-1, the ordering bug this replaced: a build process present **and** a
+    // process between the two CPU bounds, on a fresh streak. Persistence-first
+    // returned Elevated and the run survived with `cargo` running.
+    assert_eq!(
+        decide(true, 1.0, 30.0, 0),
+        Decision::Void,
+        "a build process must void even when the streak is short"
+    );
+    assert_eq!(
+        decide(false, WINDOW_LOAD_MAX + 0.1, 30.0, 0),
+        Decision::Void,
+        "an over-ceiling load must void even when the streak is short"
+    );
+    assert_eq!(
+        decide(false, 1.0, PROCESS_CPU_HARD + 0.1, 0),
+        Decision::Void,
+        "a process over the hard bound voids on sight"
+    );
+    // P2-1: an unreadable load average must not read as quiet.
+    assert_eq!(
+        decide(false, f64::INFINITY, 1.0, 0),
+        Decision::Void,
+        "an unobservable load average must fail closed"
+    );
+    assert!(
+        !f64::NAN.gt(&WINDOW_LOAD_MAX),
+        "NaN compares false against every threshold — which is why the reader returns INFINITY"
+    );
+    // The persistence rule itself, both sides.
+    assert_eq!(decide(false, 1.0, 30.0, 0), Decision::Elevated, "burst 1/3");
+    assert_eq!(decide(false, 1.0, 30.0, 1), Decision::Elevated, "burst 2/3");
+    assert_eq!(
+        decide(false, 1.0, 30.0, PROCESS_CPU_PERSIST - 1),
+        Decision::Void,
+        "three consecutive elevated samples void"
+    );
+    assert_eq!(
+        decide(false, 1.0, 1.0, 0),
+        Decision::Quiet,
+        "quiet is quiet"
+    );
+    // P1-2: a window that took no sample is an error, never an empty success.
+    let empty = WindowMonitor {
+        stop: Arc::new(AtomicBool::new(true)),
+        handle: thread::spawn(|| {}),
+        samples: Arc::new(AtomicU64::new(0)),
+        bounds: Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY))),
+    };
+    assert!(
+        empty.finish().is_err(),
+        "a zero-sample window must not report as held"
+    );
+    println!("self-test: all isolation negative cases hold");
 }
 
 /// The blocked-producer counts the probe series sweeps.
@@ -1709,6 +1896,10 @@ fn main() -> ExitCode {
     // Independent of `--smoke`: this one decides whether the run is guarded,
     // not which rows it runs. CI passes only `--smoke` and is unaffected.
     let acceptance = args.iter().any(|arg| arg == "--acceptance");
+    if args.iter().any(|arg| arg == "--self-test") {
+        self_test();
+        return ExitCode::SUCCESS;
+    }
     let selected: Vec<String> = args
         .into_iter()
         .filter(|arg| !arg.starts_with('-'))
@@ -1718,14 +1909,14 @@ fn main() -> ExitCode {
 
     // Stage 1 before anything is measured, stage 2 for as long as measuring
     // continues (RFC 0006 §5.3). Both are the harness's own.
-    let window = Arc::new(AtomicU64::new(0));
-    let load_bounds = Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY)));
-    if acceptance {
+    let monitor = if acceptance {
         if !preflight() {
             return ExitCode::from(3);
         }
-        spawn_window_monitor(Arc::clone(&window), Arc::clone(&load_bounds));
-    }
+        Some(WindowMonitor::start())
+    } else {
+        None
+    };
 
     let executor: TokioRuntime = Builder::new_multi_thread()
         .enable_all()
@@ -1793,15 +1984,17 @@ fn main() -> ExitCode {
     }
     // The window held for every sample taken — the monitor exits the process
     // itself on the first one that does not, so reaching here is the proof.
-    if acceptance {
-        let (lo, hi) = *load_bounds.lock().unwrap_or_else(PoisonError::into_inner);
-        println!(
-            "# acceptance window held: {} samples at {}s cadence, load1 {:.2}..{:.2}",
-            window.load(Ordering::Relaxed),
-            WINDOW_CADENCE.as_secs(),
-            lo,
-            hi
-        );
+    if let Some(monitor) = monitor {
+        match monitor.finish() {
+            Ok((n, lo, hi)) => println!(
+                "# acceptance window held: {n} samples at {}s cadence, load1 {lo:.2}..{hi:.2}",
+                WINDOW_CADENCE.as_secs()
+            ),
+            Err(why) => {
+                eprintln!("error: {why}");
+                return ExitCode::from(5);
+            }
+        }
         flush_row();
     }
     // A row that could not collect its sample is not a measurement, so it

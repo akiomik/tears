@@ -54,6 +54,7 @@ bench:
 # Acceptance numbers come from the full runs only, never from these.
 bench-smoke:
     cargo bench --bench runtime_load -- --smoke
+    cargo bench --bench kernel_load --features bench-internals -- --self-test
     cargo bench --bench kernel_load --features bench-internals -- --smoke
 
 # Build the library
