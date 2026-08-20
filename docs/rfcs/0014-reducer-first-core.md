@@ -1524,12 +1524,13 @@ same reference-environment discipline. **Resolved at RFC 0006 §5.3**,
 which states the successor's conditions per quit route, quantifying
 the producer route's over §3.3's constructive bound. The per-row
 bounds are met: all sixteen acceptance rows pass at 200 valid trials
-each, on the reference machine, under an isolated run whose criteria
-were pinned before it executed. Backlog independence carries its own
-numeric oracle and its own validating run, pending there. Ownership is
-unchanged and no numeric threshold is claimed here; §3.3's latency
-statements remain this RFC's contract, and RFC 0006 §5.3 is where the
-numbers that satisfy them live.
+each, on the reference machine, under a run whose criteria were pinned
+before it executed and whose isolation is recorded. Backlog
+independence carries its own numeric oracle, met by a later run that a
+machine-checked quiet barrier admitted before it recorded anything.
+Both conditions hold. Ownership is unchanged and no numeric threshold
+is claimed here; §3.3's latency statements remain this RFC's contract,
+and RFC 0006 §5.3 is where the numbers that satisfy them live.
 
 ## 14. References
 

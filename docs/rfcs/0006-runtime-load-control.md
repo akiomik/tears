@@ -2131,14 +2131,64 @@ evidence about a run that preceded it. A reader comparing the numbers
 should know that run opened at a one-minute average of 2.70, above
 the threshold now required of new ones.
 
+**Session 6 cleared the barrier, and there is no eligibility argument
+to make.** The harness determined the three conditions itself and
+recorded what it saw when they held together: no `cargo`, `rustc`, or
+bench process; a one-minute load average of **2.28** against the 2.5
+threshold; a largest working process at **17.9%** against the 20%
+bound. Recording began at that moment. Nothing about the run's
+admissibility rests on reading its output, because the check that
+admitted it ran before any output existed.
+
+The barrier also did what it was for, which is worth recording since
+its whole point is refusing runs. Reaching a clean session took three
+attempts. The first met the barrier but could not start recording at
+all, for a reason outside it — the launcher's terminal capture failed
+under detached start — and was fixed at the source rather than worked
+around: the harness now flushes each finished row itself, so
+incremental output is its own property instead of a property of how
+it was launched. The second **did not meet** the barrier: it spent
+its ten-minute budget across 31 probes, the load still at 7.55, and
+exited non-zero having measured nothing. That run does not exist, and
+there is no partial data from it to be tempted by. The third met the
+barrier at its ninth probe, 162 seconds in, and ran to completion.
+
+**Both conditions hold.**
+
+| Condition | Oracle | Measured | Margin |
+| --- | ---: | ---: | ---: |
+| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **+0.1013** | 0.399 |
+| span (max − min) | ≤ 0.6 ms | **0.102** | 0.498 |
+
+Over the same six non-idle rows, with the oracle and both constants
+exactly as pinned before session 3 and never re-fitted. **INV-L4's
+backlog independence is established on the successor topology.**
+
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **passes (session 6)** |
 
-The validating run is a fresh session that clears the barrier above,
-with the oracle and both constants unchanged. The discipline is the
-one every gate here carries: a run that misses either number is a
-finding, reported rather than accommodated.
+**The slope is positive here for the first time**, where the
+calibration sessions ran −0.426 and −0.081. That is recorded rather
+than explained: the bound is signed, +0.1013 sits inside it, and the
+magnitude is about a *eighty-third* of the 8.4 ns per envelope the
+residual term carries — small enough that the sign is a fact about
+which side of zero the noise fell on rather than about a trend. The
+span, 0.102 ms, is the narrowest of the three.
+
+**Per-row confirmation, with the acceptance source unchanged.** This
+run was declared in advance to be a confirmation of the p99 bounds
+and not a second acceptance of them; session 3 remains their source.
+Fourteen of the sixteen row-and-route figures come in at or below
+session 3's, and the two that do not are both well inside their own
+bounds: `quit_idle_control` at 0.526 against 0.525 — an 0.001 ms
+difference, which is the reporting resolution — and
+`quit_backlog_50k_sync` at 0.541 against 0.515, still less than half
+its 1.097 ms gate. The largest movements are downward:
+`quit_backlog_300k_sync` by 0.384 ms and `quit_blocked_64_sync` by
+0.057 ms. No row shows a single-trial outlier: every maximum sits
+within 1.3× its p99, where sessions 4 and 5 had maxima orders of
+magnitude above.
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
@@ -2152,23 +2202,23 @@ both directions. It is recorded because a reader comparing the
 sessions will see it, and because it is a second illustration of why
 section 5.1 requires the environment it does.
 
-**`quit_blocked_64_sync` passes on the floor, and what its tail shows
-now reads the other way.** The row has been measured four times, and
-ordering the samples by how quiet the window was is what makes them
-legible: 0.111 ms with other work on the machine, then 0.113, 0.092,
-and **0.084 ms** as the closing load fell from 4.01 to 2.72 to 1.73.
-Those four came from runs whose conditions were observed but not
-controlled, so what they support is a record rather than a mechanism:
-**the value varies across runs by a factor of about 1.35, and the
-acceptance figure of 0.113 ms is the largest of the four rather than
-a representative one.** The ordering above is suggestive and no more
-— establishing that the environment *causes* the variation would take
-a controlled experiment, varying the load deliberately with everything
-else held, and none of these four was that. What can be said without
-one is that two samples happening to agree establish nothing about
-this quantity's stability, which is the claim earlier drawn from a
-pair of them. None of this reaches the gate: the row passes because
-`F` is above it, not because its tail is small or steady. Its
+**`quit_blocked_64_sync` passes on the floor, and what its tail
+shows is a record rather than a mechanism.** The row has been
+measured five times, and ordering the samples by how quiet the window
+was makes them legible: 0.111 ms with other work on the machine, then
+0.113, 0.092, 0.084, and **0.056 ms**, the last under the
+machine-checked barrier. So **the value varies across runs by a
+factor of about two, and the acceptance figure of 0.113 ms is the
+largest of the five rather than a representative one.** The ordering
+is suggestive and no more — establishing that the environment
+*causes* the variation would take a controlled experiment, varying
+the load deliberately with everything else held, and none of the five
+was that. What the spread does establish is narrower and worth
+keeping: two samples of this quantity that happen to agree say
+nothing about its stability.
+
+None of this reaches the gate: the row passes because `F` is above
+it, not because its tail is small or steady. Its
 acceptance figure of 0.113 ms exceeds the multiplicative term's
 0.070 ms and clears the floor by 0.037 ms, and `F` was not fitted to
 it. The floor's binding value came from the blocked-producer probe
