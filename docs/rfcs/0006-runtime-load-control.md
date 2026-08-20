@@ -2040,42 +2040,54 @@ depth with the three deepest rows the three lowest. Because these
 three sessions are what the two constants were read off, none of them
 can also decide the condition.
 
-**Session 4 validates it, and both conditions hold.** A separate run
-of all sixteen rows from the commit that pinned these two constants,
-with the same worktree and the same binary session 3 measured — the
-commits between them touch `docs/` only, so the two sessions measure
-identical executable code:
+**Session 4 is calibration, not the validation, and this section
+already said which it would be.** The pre-registration above names
+the validating run as one made *under section 5.1's environment
+rule*. Session 4 began at a load average of 8.23 against session 3's
+2.70, so it does not meet that rule, and the criterion it was meant
+to decide is therefore **not decided by it**. This section briefly
+said otherwise — it recorded the condition as established, on the
+ground that the oracle reads p50 and p50 had held in that run — and
+that reasoning was an exception carved out of the environment rule
+using observations from the very run the rule excluded, after the
+results were seen. An evidence class fixed before a run cannot be
+widened by that run's own output; the pre-registration meant what it
+said, and the condition goes back to pending.
 
-| Condition | Oracle | Measured | Margin |
-| --- | ---: | ---: | ---: |
-| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.0101** | 0.510 |
-| span (max − min) | ≤ 0.6 ms | **0.110** | 0.490 |
+What session 4 *is* good for is calibration, on the same footing as
+the three sessions that set the constants. Its oracle quantities, for
+the record and beside them:
 
-Both pass, over the same six non-idle rows, the slope again negative.
-**INV-L4's backlog independence is therefore established on the
-successor topology**, on a criterion fixed before the run that
-decided it.
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 4 | −0.0101 | 0.110 |
 
-**Session 4 is a median measurement, not a second acceptance run, and
-the difference matters here.** It began at a load average of 8.23
-against session 3's 2.70, so it does not satisfy section 5.1's
-requirement that an acceptance run be the machine's only substantial
-load. That rule's own distinction is what makes the run usable
-anyway: this oracle reads p50, and p50 held — `quit→applied` medians
-moved by at most 0.190 ms across all sixteen rows and mostly within
-±0.05 ms, and the delivery-half span came out *narrower* than session
-3's, 0.110 against 0.266. The tails did not hold, and the section
-says so rather than filing it quietly: several rows' `applied→exit`
-p99 rose by more than an order of magnitude, and
-`quit_overload_control`'s `quit→applied` p99 reached 4.995 ms, which
-would miss its 4.763 ms bound. **That row's acceptance is not
-reopened by this** — the p99 gates were decided on session 3, whose
-isolation this run does not match, and a run that fails section 5.1's
-environment rule cannot retract an acceptance any more than it could
-grant one. What session 4 demonstrates about the tails is the rule
-itself: they are not a stable quantity on a machine doing other work,
-which is why the environment requirement exists and why the
-median-derived oracle was worth stating separately.
+The two constants are **not re-fitted** to include it. They were
+derived from sessions 1 through 3 and pinned before session 3 ran;
+adding a fourth sample to their basis now would repeat the mistake
+this paragraph is correcting, in the other direction.
+
+| Condition | Rows | Oracle | Verdict |
+| --- | ---: | --- | --- |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
+
+The validating run is a fresh session that satisfies section 5.1's
+environment rule, with these constants unchanged. The per-row p99
+gates are untouched by any of this — they were decided on session 3
+— and the discipline is the one they carry: a validating run that
+misses either number is a finding, reported rather than accommodated.
+
+**Recorded from session 4: medians held, tails did not.** Its
+`quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
+and mostly within ±0.05 ms, while several rows' `applied→exit` p99
+rose by more than an order of magnitude and
+`quit_overload_control`'s `quit→applied` p99 reached 4.995 ms against
+a 4.763 ms bound. Neither fact decides anything here: the run cannot
+grant the backlog-independence condition, and it equally cannot
+retract session 3's acceptance of that row, for the same reason in
+both directions. It is recorded because a reader comparing the
+sessions will see it, and because it is a second illustration of why
+section 5.1 requires the environment it does.
 
 **`quit_blocked_64_sync` passes on the floor, and what its tail shows
 is worth stating carefully.** The row has now been measured three
