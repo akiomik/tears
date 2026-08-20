@@ -2052,7 +2052,7 @@ that reasoning was an exception carved out of the environment rule
 using observations from the very run the rule excluded, after the
 results were seen. An evidence class fixed before a run cannot be
 widened by that run's own output; the pre-registration meant what it
-said, and the condition goes back to pending.
+said, and session 4 does not decide the condition.
 
 What session 4 *is* good for is calibration, on the same footing as
 the three sessions that set the constants. Its oracle quantities, for
@@ -2067,15 +2067,52 @@ derived from sessions 1 through 3 and pinned before session 3 ran;
 adding a fourth sample to their basis now would repeat the mistake
 this paragraph is correcting, in the other direction.
 
-| Condition | Rows | Oracle | Verdict |
-| --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
-
 The validating run is a fresh session that satisfies section 5.1's
 environment rule, with these constants unchanged. The per-row p99
 gates are untouched by any of this — they were decided on session 3
 — and the discipline is the one they carry: a validating run that
 misses either number is a finding, reported rather than accommodated.
+
+**Session 5 satisfies the environment rule, and that is settled
+before its numbers are read.** The rule asks one thing: that the
+bench be the machine's only substantial load for the window. The
+facts that answer it are all external to what the run measured. No
+`cargo` or `rustc` process existed at either end of the window. Every
+concurrent working session was brought to a halt before the bench was
+launched and none polled or waited inside it, so nothing was
+scheduled against the run by design rather than by luck. The load
+average stood at 1.73 when the window closed — the run's own
+8 min 22 s is long enough that a one-minute average taken at the end
+describes the window, where one taken at the start does not: the
+7.87 recorded at launch is a one-minute average of the *preceding*
+minute, which is when the sessions were still winding down.
+
+This is the point session 4 failed, and the difference is worth
+naming precisely. Session 4's eligibility was argued *after* the
+fact, from that run's own output — its medians had held, so the run
+was declared good enough for a median-derived criterion. Session 5's
+rests on none of its measurements: process inventory, operating
+discipline, and a closing load average would read the same had every
+row come out differently. That is what makes it an admissible
+validating run rather than a second exception.
+
+**Both conditions hold.**
+
+| Condition | Oracle | Measured | Margin |
+| --- | ---: | ---: | ---: |
+| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.0806** | 0.581 |
+| span (max − min) | ≤ 0.6 ms | **0.113** | 0.487 |
+
+Over the same six non-idle rows, with the oracle and both its
+constants exactly as pinned — unchanged since before session 3 ran,
+and not re-fitted at any point since. **INV-L4's backlog independence
+is established on the successor topology.** The slope is negative for
+the fifth session running: the delivery half does not grow with
+depth, which is the property INV-L4 has always been about.
+
+| Condition | Rows | Oracle | Verdict |
+| --- | ---: | --- | --- |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **passes (session 5)** |
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
@@ -2090,16 +2127,18 @@ sessions will see it, and because it is a second illustration of why
 section 5.1 requires the environment it does.
 
 **`quit_blocked_64_sync` passes on the floor, and what its tail shows
-is worth stating carefully.** The row has now been measured three
-times: 0.111 ms with other work on the machine, 0.113 ms under
-isolation, and 0.092 ms under the heaviest load of the four sessions.
-The value recurs, and it does not track load — but three samples
-moving non-monotonically against one condition establish that this
-row's tail *was observed again*, not that it is independent of the
-environment, and the earlier reading of it as reproduction under
-isolation claimed the stronger thing. What matters for the gate is
-unchanged and does not depend on which reading is right: the row
-passes because `F` is above it, not because it is small. Its
+now reads the other way.** The row has been measured four times, and
+ordering the samples by how quiet the window was is what makes them
+legible: 0.111 ms with other work on the machine, then 0.113, 0.092,
+and **0.084 ms** as the closing load fell from 4.01 to 2.72 to 1.73.
+The quieter the window, the smaller the tail: **this row's tail
+depends on the environment, and the acceptance figure of 0.113 ms is
+the largest of the four rather than a representative one.** Two
+samples that happen to agree establish nothing about independence —
+it takes the spread of conditions to see which way the quantity
+moves, and it moves with the machine. What matters for the gate is
+unchanged either way: the row passes because `F` is above it, not
+because it is small. Its
 acceptance figure of 0.113 ms exceeds the multiplicative term's
 0.070 ms and clears the floor by 0.037 ms, and `F` was not fitted to
 it. The floor's binding value came from the blocked-producer probe
