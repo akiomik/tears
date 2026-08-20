@@ -99,17 +99,38 @@
 //! observe around a measurement, and what has to be observed is the
 //! measurement:
 //!
-//! | Stage | When | Conditions | On failure |
-//! | --- | --- | --- | --- |
-//! | pre-flight | before any measurement exists | no `cargo`/`rustc`; load1 ≤ 2.5; largest working process ≤ 20% CPU | polls up to 10 min, then exits non-zero with **nothing recorded** — the run does not exist |
-//! | in-window | every 5 s while measuring | no `cargo`/`rustc`; largest **non-bench** process ≤ 20% CPU; load1 (bench included) ≤ 5.0 | **one violating sample voids the whole run**: exits non-zero naming the sample and the condition |
+//! **Stage 1, pre-flight**, before any measurement exists: polls until no
+//! `cargo`/`rustc` is running, load1 ≤ 2.5, and the largest working process
+//! is ≤ 20% CPU — all three together, up to 10 minutes. Exceeding that is
+//! not a degraded run but no run: non-zero exit, **nothing recorded**.
 //!
-//! The in-window load ceiling is higher because the bench is itself the load
-//! once measurement starts, and it is the *aggregate* guard the per-process
-//! bound cannot be — a machine busy with several processes at 15% each
-//! passes the per-process condition and is not quiet. Voiding the run rather
-//! than the row is deliberate: a disturbance that reached one row has no
-//! reason to have spared the ones before it.
+//! **Stage 2, in-window**, sampled every 5 s for as long as measuring
+//! continues:
+//!
+//! | In-window condition | Voids the run when |
+//! | --- | --- |
+//! | `cargo` or `rustc` process | present in any sample |
+//! | non-bench working process above 20% CPU | in **3 consecutive** samples (≈15 s) |
+//! | non-bench working process above 100% CPU | in **any single** sample |
+//! | one-minute load average, bench included | above **5.0** in any sample |
+//!
+//! **Every sample is written to the record regardless**, including the
+//! bursts that do not void, so what the window contained is inspectable
+//! rather than summarised by whether it survived.
+//!
+//! The persistence requirement on the 20% condition is what that condition
+//! is *for*: excluding a concurrent working session — a build, an editor,
+//! another agent — which holds a core for as long as it runs. A daemon that
+//! wakes, works for a few seconds and sleeps is not that, and three samples
+//! is the smallest window that tells them apart at this cadence. The 100%
+//! clause is the safety side: one full core is real work by any reading.
+//!
+//! The load ceiling is higher than pre-flight's because the bench is itself
+//! the load once measurement starts, and it is the *aggregate* guard the
+//! per-process bound cannot be — several processes at 15% each pass the
+//! per-process condition on a machine that is not quiet. Voiding the run
+//! rather than the row is deliberate: a disturbance that reached one row has
+//! no reason to have spared the ones before it.
 //!
 //! ```bash
 //! cargo bench --bench kernel_load --features bench-internals
@@ -505,6 +526,18 @@ fn quit_scenarios() -> Vec<QuitCfg> {
 const PREFLIGHT_LOAD_MAX: f64 = 2.5;
 /// Pre-flight and in-window: the largest single working process.
 const PROCESS_CPU_MAX: f64 = 20.0;
+/// In-window: a working process this far above the bound is real work by
+/// any reading, and voids on sight without waiting for persistence.
+const PROCESS_CPU_HARD: f64 = 100.0;
+/// In-window: how many *consecutive* samples above [`PROCESS_CPU_MAX`] void
+/// the run.
+///
+/// The 20% condition exists to exclude a concurrent working session — a
+/// build, an editor, another agent — and those hold a core for as long as
+/// they run. A daemon that wakes, works for a few seconds and sleeps is not
+/// that, and three samples is the smallest window that tells them apart at
+/// this cadence (≈15 s).
+const PROCESS_CPU_PERSIST: u32 = 3;
 /// In-window: the one-minute average **with the bench counted in**.
 ///
 /// Higher than pre-flight's on purpose — the bench is itself the load once
@@ -565,6 +598,60 @@ impl MachineSample {
             out.push(format!("load1 {:.2} > {load_max:.1}", self.load1));
         }
         out
+    }
+}
+
+/// What one in-window sample means for the run.
+enum Verdict {
+    /// Nothing wrong; any elevated streak is broken.
+    Quiet,
+    /// Above [`PROCESS_CPU_MAX`] but not yet persistent, and not above the
+    /// hard bound. Recorded, and counted toward the streak.
+    Elevated(String),
+    /// Voids the whole run.
+    Void(Vec<String>),
+}
+
+impl MachineSample {
+    /// Classifies this sample under the in-window rules (RFC 0006 §5.3).
+    ///
+    /// `streak` is how many immediately preceding samples were already
+    /// elevated; it is what turns a burst into a violation.
+    fn in_window(&self, streak: u32) -> Verdict {
+        let mut void = Vec::new();
+        if !self.builders.is_empty() {
+            void.push(format!(
+                "build process present: {}",
+                self.builders.join(", ")
+            ));
+        }
+        if self.load1 > WINDOW_LOAD_MAX {
+            void.push(format!("load1 {:.2} > {WINDOW_LOAD_MAX:.1}", self.load1));
+        }
+        if self.top_cpu > PROCESS_CPU_HARD {
+            void.push(format!(
+                "working process {:.1}% > {PROCESS_CPU_HARD:.0}% ({}) — voids on sight",
+                self.top_cpu, self.top_comm
+            ));
+        } else if self.top_cpu > PROCESS_CPU_MAX {
+            let run = streak + 1;
+            if run >= PROCESS_CPU_PERSIST {
+                void.push(format!(
+                    "working process {:.1}% > {PROCESS_CPU_MAX:.0}% ({}) for {run} consecutive samples",
+                    self.top_cpu, self.top_comm
+                ));
+            } else {
+                return Verdict::Elevated(format!(
+                    "{:.1}% ({}) — elevated {run}/{PROCESS_CPU_PERSIST}",
+                    self.top_cpu, self.top_comm
+                ));
+            }
+        }
+        if void.is_empty() {
+            Verdict::Quiet
+        } else {
+            Verdict::Void(void)
+        }
     }
 }
 
@@ -693,32 +780,43 @@ fn preflight() -> bool {
 fn spawn_window_monitor(samples: Arc<AtomicU64>, load_min: Arc<Mutex<(f64, f64)>>) {
     let own_pid = id();
     thread::spawn(move || {
+        let mut streak = 0_u32;
         loop {
             thread::sleep(WINDOW_CADENCE);
             let sample = MachineSample::take(Some(own_pid));
-            let failed = sample.violations(WINDOW_LOAD_MAX);
-            samples.fetch_add(1, Ordering::Relaxed);
+            let verdict = sample.in_window(streak);
+            let n = samples.fetch_add(1, Ordering::Relaxed) + 1;
             if let Ok(mut bounds) = load_min.lock() {
                 bounds.0 = bounds.0.min(sample.load1);
                 bounds.1 = bounds.1.max(sample.load1);
             }
-            if !failed.is_empty() {
-                println!(
-                    "\n# RUN VOID — in-window sample {} violated: {}",
-                    samples.load(Ordering::Relaxed),
-                    failed.join("; ")
-                );
-                println!(
-                    "#   observed load1={:.2} top={:.1}% ({})",
-                    sample.load1, sample.top_cpu, sample.top_comm
-                );
-                flush_row();
-                eprintln!(
-                    "error: acceptance window violated ({}); the whole run is void, \
-                     not merely the row it landed in. Collected data is not acceptance evidence.",
-                    failed.join("; ")
-                );
-                exit(4);
+            // Every sample is written, including the bursts that do not
+            // void, so what the window contained stays inspectable rather
+            // than summarised by whether it survived (RFC 0006 §5.3).
+            let note = match &verdict {
+                Verdict::Quiet => String::new(),
+                Verdict::Elevated(what) => format!("  ELEVATED {what}"),
+                Verdict::Void(what) => format!("  VOID {}", what.join("; ")),
+            };
+            println!(
+                "#  sample {n:>3} load1={:.2} top={:.1}% ({}){note}",
+                sample.load1, sample.top_cpu, sample.top_comm
+            );
+            flush_row();
+            match verdict {
+                Verdict::Quiet => streak = 0,
+                Verdict::Elevated(_) => streak += 1,
+                Verdict::Void(what) => {
+                    println!("\n# RUN VOID — in-window sample {n}: {}", what.join("; "));
+                    flush_row();
+                    eprintln!(
+                        "error: acceptance window violated at sample {n} ({}); the whole run \
+                         is void, not merely the row it landed in. Collected data is not \
+                         acceptance evidence.",
+                        what.join("; ")
+                    );
+                    exit(4);
+                }
             }
         }
     });
