@@ -2223,9 +2223,10 @@ shows is a record rather than a mechanism.** The row has been
 measured five times, and ordering the samples by how quiet the window
 was makes them legible: 0.111 ms with other work on the machine, then
 0.113, 0.092, 0.084, and **0.056 ms**, the last from a window that
-cleared a pre-flight quiet check at its start. So **the value varies across runs by a
-factor of about two, and the acceptance figure of 0.113 ms is the
-largest of the five rather than a representative one.** The ordering
+cleared a pre-flight quiet check at its start. So **the value varies
+across runs by a factor of about two, and the acceptance figure of
+0.113 ms is the largest of the five rather than a representative
+one.** The ordering
 is suggestive and no more — establishing that the environment
 *causes* the variation would take a controlled experiment, varying
 the load deliberately with everything else held, and none of the five
