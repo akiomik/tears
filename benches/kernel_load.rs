@@ -114,6 +114,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::Debug;
+use std::io::{self, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -1298,6 +1299,26 @@ fn print_load_report(report: &Report) {
         report.frames, report.joined
     );
     println!();
+    flush_row();
+}
+
+/// Pushes a finished row's report out of the process's stdout buffer.
+///
+/// Rust block-buffers stdout when it is not a terminal, so a harness whose
+/// output is redirected to a file holds finished rows in an 8 KiB buffer —
+/// which is most of a whole run. A run killed part-way then looks as though
+/// it produced nothing, when in fact it had measured most of its rows.
+///
+/// Flushing here rather than relying on a pty is what makes the incremental
+/// output a property of the harness instead of a property of how it happened
+/// to be invoked: `script(1)` cannot allocate a pty when stdin is a socket,
+/// which is exactly the case for a detached launcher.
+///
+/// It sits on the reporting path, after a row's sample is complete, so it is
+/// outside every measured interval. A failed flush is ignored because there
+/// is nowhere left to report it to.
+fn flush_row() {
+    let _ = io::stdout().flush();
 }
 
 fn print_quit_report(report: &QuitReport) {
@@ -1326,6 +1347,7 @@ fn print_quit_report(report: &QuitReport) {
         );
     }
     println!();
+    flush_row();
 }
 
 fn main() -> ExitCode {
