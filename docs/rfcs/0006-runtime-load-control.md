@@ -1767,10 +1767,11 @@ own.
 
 Section 5.2 records INV-L4's acceptance conditions as a named
 prerequisite, owed on the successor topology. This section discharges
-it. Everything below was measured on the section 2 reference machine
-(Apple M1 Max, 10 cores, rustc 1.97.0) on 2026-08-19, at 200 valid
-trials per row, with the superseded topology's rows re-run on the same
-machine on the same day so the two columns are comparable; section
+it. Every figure below was measured on the section 2 reference
+machine (Apple M1 Max, 10 cores, rustc 1.97.0) at 200 valid trials
+per row: the calibration sessions on **2026-08-19**, including the
+superseded topology's rows re-run that same day so the two columns
+are comparable, and the acceptance run on **2026-08-20**. Section
 5.1's reproducibility rules are unchanged and apply here as written.
 
 **The row set doubles, because one contract object became two.** The
@@ -1874,10 +1875,12 @@ each fixed here as a number rather than as "the measured value":
 | residual term | **0.019 ms + 8.4 ns × depth** | the synchronous route's fit, which is the same postcondition |
 | tail allowance `k` | **1.25** | one-sided; session 1's control-route p99/p50 ratios span 1.016–1.100 |
 
-`H` and `k` are one-sided allowances, not estimates: `H` covers the
-hop at both measured depths with the larger doubled, and `k` covers
-the widest p99/p50 spread session 1 showed with room above it. Both
-are stated as numbers so session 2 cannot move them.
+`H` and `k` are one-sided allowances, not estimates. `H` sits above
+the larger of the two measured hops — 0.216 ms at depth 299,999 — by
+about 1.16×, taken as a round figure rather than a computed multiple;
+`k` covers the widest p99/p50 spread the calibration showed, with
+room above it. Both are stated as numbers so that no later run can
+move them.
 
 **Acceptance condition, producer route.** For each quit row of the
 acceptance run, on the reference machine, at ≥ 200 valid trials:
@@ -1887,17 +1890,21 @@ acceptance run, on the reference machine, at ≥ 200 valid trials:
 
 where remainder(row) is the in-progress batch's remaining items at
 the quit's arrival, computed from that row's `batch_max_messages` and
-its quit position — the quantity RFC 0014 §3.3 bounds. The measured
+its quit position — the quantity RFC 0014 §3.3 bounds — and
+residual(depth) reads the row's **p50 depth**. That estimator is the
+one the numeric B values were computed from when this section pinned
+them, and naming it here records which statistic those numbers came
+from rather than choosing one after the fact. It makes no practical
+difference: the only row whose p50 and max depths differ enough to
+show is `quit_overload_control`, where B moves by 0.003 ms, three
+orders of magnitude inside that row's margin. The measured
 side is the upper-bound instrument, so the comparison is conservative
 on both ends. It is one-sided: a row that comes in faster passes.
 
 A second condition carries INV-L4's own property: **backlog
 independence on the delivery half** — with the residual term
-subtracted, delivery does not scale with depth. Session 1 showed
-3.47–3.59 ms from depth 1,024 through 299,999, and 0.51–0.53 ms at
-depth 0 where a single-message batch has no remainder to wait behind;
-the acceptance run re-checks that the span stays flat rather than
-growing with depth.
+subtracted, delivery does not scale with depth. It has its own
+numeric oracle and its own validation run, both below.
 
 **The acceptance rows are the eight quit rows of each route.** The
 `decomp_*` and `probe_*` rows vary the batch cap, the render cost, or
@@ -1970,16 +1977,16 @@ collected 200 valid trials with no failures.
 
 **Producer-originated route.** Gate `p99 ≤ B(row)`, milliseconds:
 
-| Row | B(row) | p99 | margin |
-| --- | ---: | ---: | ---: |
-| `quit_idle_control` | 0.961 | 0.525 | +0.436 |
-| `quit_idle_bounded_control` | 0.961 | 0.552 | +0.409 |
-| `quit_blocked_1_control` | 4.691 | 3.987 | +0.704 |
-| `quit_blocked_64_control` | 4.691 | 4.008 | +0.683 |
-| `quit_overload_bounded_control` | 4.691 | 3.994 | +0.697 |
-| `quit_overload_control` | 4.763 | 3.690 | +1.073 |
-| `quit_backlog_50k_control` | 5.205 | 4.040 | +1.165 |
-| `quit_backlog_300k_control` | 7.830 | 6.401 | +1.429 |
+| Row | depth (p50) | B(row) | p99 | margin |
+| --- | ---: | ---: | ---: | ---: |
+| `quit_idle_control` | 0 | 0.961 | 0.525 | +0.436 |
+| `quit_idle_bounded_control` | 0 | 0.961 | 0.552 | +0.409 |
+| `quit_blocked_1_control` | 1,024 | 4.691 | 3.987 | +0.704 |
+| `quit_blocked_64_control` | 1,087 | 4.691 | 4.008 | +0.683 |
+| `quit_overload_bounded_control` | 1,024 | 4.691 | 3.994 | +0.697 |
+| `quit_overload_control` | 7,897 | 4.763 | 3.690 | +1.073 |
+| `quit_backlog_50k_control` | 49,997 | 5.205 | 4.040 | +1.165 |
+| `quit_backlog_300k_control` | 299,997 | 7.830 | 6.401 | +1.429 |
 
 **Synchronous route.** Gate `p99 ≤ max(2.5 × predicted p50, F)`,
 milliseconds, with the term that binds each row named:
@@ -1999,15 +2006,49 @@ Sixteen of sixteen pass. **INV-L4's acceptance conditions are met on
 the successor topology**, at the trial counts and on the reference
 machine this section pins.
 
-**The delivery half is flat**, which is INV-L4's own property and the
-pre-registered second condition. Across the six non-idle rows it
-spans 3.487–3.753 ms over depths 1,024 through 299,997 — a 293-fold
-depth range for a 7.6% spread — and it does not grow with depth: the
-largest value sits at the *smallest* depth, and the three deepest
-rows are the three lowest. The two idle rows sit at 0.509–0.510 ms,
-where a single-message batch has no remainder to wait behind. Earlier
-sessions showed the same flatness (3.47–3.59 ms and 3.41–3.58 ms),
-and this statistic is a median, so all three agree.
+**Backlog independence needs an oracle, and here it is.** This is
+INV-L4's own property and the second condition, and until now it was
+stated as "flat", which is a judgement rather than a test — three
+runs were called flat after they were seen. The condition is now two
+numbers, over the **six non-idle rows** (the two idle rows are
+excluded because a single-message batch has no remainder to wait
+behind, so their delivery half measures something else — they sit
+near 0.51 ms in every session while the six sit near 3.5):
+
+> (i) the least-squares slope of delivery-half p50 against depth is
+> **≤ +0.5 ns per envelope**, and (ii) its **span (max − min) ≤ 0.6
+> ms**
+
+Both are one-sided: flatter passes, tighter passes. The slope bound
+is set against the term the model already carries — the residual
+slope is 8.4 ns per envelope, and +0.5 is under a sixteenth of it, so
+a delivery half creeping at that rate would be indistinguishable from
+flat beside the quantity depth is already known to move. The span
+bound is roughly 2.3× the widest span the calibration produced.
+
+Three sessions calibrate it, and all three sit well inside:
+
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 1 | −0.171 | 0.123 |
+| 2 | −0.440 | 0.166 |
+| 3 | −0.421 | 0.266 |
+
+Every slope is *negative* — the delivery half shrinks slightly as
+depth grows — and in session 3 the largest value sits at the smallest
+depth with the three deepest rows the three lowest. Because these
+three sessions are what the two constants were read off, none of them
+can also decide the condition.
+
+| Condition | Rows | Oracle | Verdict |
+| --- | ---: | --- | --- |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *session 4 not yet run* |
+
+Session 4 validates it, under section 5.1's environment rule and with
+these constants fixed beforehand. The per-row p99 gates are not
+reopened by this — they were decided on session 3 above — and the
+discipline is the same one those gates carry: a session 4 that misses
+either number is a finding, reported rather than accommodated.
 
 **`quit_blocked_64_sync` passes on the floor, and its tail is real.**
 Stated plainly because the two facts are easy to conflate: this row's
