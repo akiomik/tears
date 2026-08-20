@@ -92,10 +92,30 @@
 //! join drain lands (the abort requests are already inside `quit->applied`;
 //! RFC 0011 §4.4's two stages sit either side of that boundary).
 //!
+//! **`--acceptance` guards the run; it does not choose the rows.** It is
+//! independent of `--smoke` and of any row names. Under it the harness
+//! enforces RFC 0006 §5.3's two-stage isolation *itself*, rather than
+//! leaving it to whatever script starts the harness — a launcher can only
+//! observe around a measurement, and what has to be observed is the
+//! measurement:
+//!
+//! | Stage | When | Conditions | On failure |
+//! | --- | --- | --- | --- |
+//! | pre-flight | before any measurement exists | no `cargo`/`rustc`; load1 ≤ 2.5; largest working process ≤ 20% CPU | polls up to 10 min, then exits non-zero with **nothing recorded** — the run does not exist |
+//! | in-window | every 5 s while measuring | no `cargo`/`rustc`; largest **non-bench** process ≤ 20% CPU; load1 (bench included) ≤ 5.0 | **one violating sample voids the whole run**: exits non-zero naming the sample and the condition |
+//!
+//! The in-window load ceiling is higher because the bench is itself the load
+//! once measurement starts, and it is the *aggregate* guard the per-process
+//! bound cannot be — a machine busy with several processes at 15% each
+//! passes the per-process condition and is not quiet. Voiding the run rather
+//! than the row is deliberate: a disturbance that reached one row has no
+//! reason to have spared the ones before it.
+//!
 //! ```bash
 //! cargo bench --bench kernel_load --features bench-internals
 //! cargo bench --bench kernel_load --features bench-internals -- overload
 //! cargo bench --bench kernel_load --features bench-internals -- --smoke
+//! cargo bench --bench kernel_load --features bench-internals -- --acceptance
 //! # or, for both harnesses' smoke profiles at once: just bench-smoke
 //! cargo bench --bench kernel_load --features bench-internals -- \
 //!   probe_blocked_1_sync probe_blocked_8_sync probe_blocked_16_sync \
@@ -116,12 +136,12 @@ use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 use std::io::{self, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::process::ExitCode;
+use std::process::{Command as OsCommand, ExitCode, exit, id};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use std::{env, hint};
+use std::{env, hint, thread};
 
 use futures::stream::{self, StreamExt};
 use ratatui::Terminal;
@@ -470,6 +490,238 @@ fn quit_scenarios() -> Vec<QuitCfg> {
         });
     }
     rows
+}
+
+// ---- acceptance-mode isolation (RFC 0006 §5.3) -----------------------------
+//
+// Both stages live here rather than in whatever script starts the harness,
+// and that placement is the point of the requirement: a launcher can only
+// observe *around* a measurement, and what has to be observed is the
+// measurement. Four runs were argued eligible after the fact or checked
+// their conditions once at the start instant; a start instant says nothing
+// about the minutes that follow.
+
+/// Pre-flight: the machine must be idle before any measurement exists.
+const PREFLIGHT_LOAD_MAX: f64 = 2.5;
+/// Pre-flight and in-window: the largest single working process.
+const PROCESS_CPU_MAX: f64 = 20.0;
+/// In-window: the one-minute average **with the bench counted in**.
+///
+/// Higher than pre-flight's on purpose — the bench is itself the load once
+/// measurement starts — and it is the aggregate guard the per-process bound
+/// cannot be: a machine busy with several processes at 15% each passes the
+/// per-process condition and is not quiet.
+const WINDOW_LOAD_MAX: f64 = 5.0;
+/// How long pre-flight waits for all three conditions to hold together.
+const PREFLIGHT_BOUND: Duration = Duration::from_secs(600);
+/// Pre-flight poll interval.
+const PREFLIGHT_POLL: Duration = Duration::from_secs(20);
+/// In-window sampling cadence.
+///
+/// **Cost**: a sample reads a load average (`getloadavg`, no subprocess) and
+/// one `ps` snapshot — on the order of a millisecond. At this cadence a
+/// five-and-a-half-minute run takes about 66 of them, so under a tenth of a
+/// second of work spread across a run whose shortest row measures for far
+/// longer. Negligible against what it protects.
+const WINDOW_CADENCE: Duration = Duration::from_secs(5);
+
+/// One observation of the machine, shared by both stages.
+struct MachineSample {
+    load1: f64,
+    top_cpu: f64,
+    top_comm: String,
+    builders: Vec<String>,
+}
+
+impl MachineSample {
+    /// Takes a snapshot, optionally excluding one pid from the per-process
+    /// maximum (the bench itself, in window).
+    fn take(exclude: Option<u32>) -> Self {
+        let (top_cpu, top_comm, builders) = process_snapshot(exclude);
+        Self {
+            load1: load_average_1m(),
+            top_cpu,
+            top_comm,
+            builders,
+        }
+    }
+
+    /// Which conditions this sample fails, as human-readable clauses.
+    fn violations(&self, load_max: f64) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.builders.is_empty() {
+            out.push(format!(
+                "build process present: {}",
+                self.builders.join(", ")
+            ));
+        }
+        if self.top_cpu > PROCESS_CPU_MAX {
+            out.push(format!(
+                "working process {:.1}% > {PROCESS_CPU_MAX:.0}% ({})",
+                self.top_cpu, self.top_comm
+            ));
+        }
+        if self.load1 > load_max {
+            out.push(format!("load1 {:.2} > {load_max:.1}", self.load1));
+        }
+        out
+    }
+}
+
+/// The one-minute load average, without spawning anything.
+fn load_average_1m() -> f64 {
+    let mut avg = [0.0_f64; 3];
+    // SAFETY: `getloadavg` writes at most the requested number of doubles
+    // into the caller's buffer, and the buffer holds exactly three.
+    let read = unsafe { libc::getloadavg(avg.as_mut_ptr(), 3) };
+    if read >= 1 { avg[0] } else { f64::NAN }
+}
+
+/// One `ps` snapshot: the largest non-excluded process's CPU share and name,
+/// plus any `cargo`/`rustc` found.
+///
+/// Both facts come from the same snapshot rather than a second `pgrep`, so a
+/// sample costs one subprocess.
+fn process_snapshot(exclude: Option<u32>) -> (f64, String, Vec<String>) {
+    let Ok(out) = OsCommand::new("ps")
+        .args(["axo", "pid=,pcpu=,comm="])
+        .output()
+    else {
+        // A snapshot that cannot be taken is not a passing snapshot.
+        return (f64::INFINITY, "<ps unavailable>".to_owned(), Vec::new());
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (mut top_cpu, mut top_comm) = (0.0_f64, String::from("<none>"));
+    let mut builders = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(cpu)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let comm = parts.next().unwrap_or("");
+        let (Ok(pid), Ok(cpu)) = (pid.parse::<u32>(), cpu.parse::<f64>()) else {
+            continue;
+        };
+        let name = comm.rsplit('/').next().unwrap_or(comm);
+        if name == "cargo" || name == "rustc" {
+            builders.push(format!("{name}(pid {pid})"));
+        }
+        if exclude != Some(pid) && cpu > top_cpu {
+            top_cpu = cpu;
+            comm.clone_into(&mut top_comm);
+        }
+    }
+    (top_cpu, top_comm, builders)
+}
+
+/// Stage 1. Polls until all three conditions hold **together**, stamps the
+/// isolation record, and returns. Exceeding the bound means the run does not
+/// exist — the caller exits non-zero with nothing recorded.
+///
+/// Real wall-clock and a real sleep: the barrier waits for the *machine* to
+/// become quiet, which is a fact about the host rather than about this
+/// process's executor, so the virtualizable clock RFC 0009 §3.1 mandates has
+/// nothing to say about it — the same sanctioned exception the load
+/// harnesses' measurement sites take.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "waits on real host quiescence, not executor time; the sanctioned single-time-source exception (RFC 0009 §3.1)"
+)]
+fn preflight() -> bool {
+    println!("# acceptance mode: pre-flight barrier (RFC 0006 §5.3)");
+    let started = Instant::now();
+    let mut probe = 0_u32;
+    loop {
+        probe += 1;
+        let sample = MachineSample::take(None);
+        let failed = sample.violations(PREFLIGHT_LOAD_MAX);
+        println!(
+            "  probe {probe:>3} t+{:>4}s load1={:.2} top={:.1}% ({}) -> {}",
+            started.elapsed().as_secs(),
+            sample.load1,
+            sample.top_cpu,
+            sample.top_comm,
+            if failed.is_empty() {
+                "MET".to_owned()
+            } else {
+                failed.join("; ")
+            }
+        );
+        flush_row();
+        if failed.is_empty() {
+            println!(
+                "\n# barrier MET after {probe} probes / {}s\n#   load1 {:.2} (<= {PREFLIGHT_LOAD_MAX})\
+                 \n#   largest working process {:.1}% (<= {PROCESS_CPU_MAX:.0}%) {}\
+                 \n#   no cargo/rustc\n",
+                started.elapsed().as_secs(),
+                sample.load1,
+                sample.top_cpu,
+                sample.top_comm
+            );
+            flush_row();
+            return true;
+        }
+        if started.elapsed() >= PREFLIGHT_BOUND {
+            eprintln!(
+                "error: pre-flight barrier not met within {}s ({probe} probes); \
+                 last: {}. No measurement was started: this run does not exist.",
+                PREFLIGHT_BOUND.as_secs(),
+                failed.join("; ")
+            );
+            return false;
+        }
+        thread::sleep(PREFLIGHT_POLL);
+    }
+}
+
+/// Stage 2. Samples the window at a fixed cadence for as long as measurement
+/// continues.
+///
+/// A single violating sample voids the **whole run**, not the row it landed
+/// in: a disturbance that reached one row has no reason to have spared the
+/// ones before it. The thread reports the offending sample and exits the
+/// process non-zero, so no caller can mistake the partial output for
+/// acceptance evidence.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "samples real host state on a real cadence, not executor time (RFC 0009 §3.1)"
+)]
+#[expect(
+    clippy::exit,
+    reason = "a violated window voids the run at the instant it is observed; returning would let a caller mistake partial output for acceptance evidence (RFC 0006 §5.3)"
+)]
+fn spawn_window_monitor(samples: Arc<AtomicU64>, load_min: Arc<Mutex<(f64, f64)>>) {
+    let own_pid = id();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(WINDOW_CADENCE);
+            let sample = MachineSample::take(Some(own_pid));
+            let failed = sample.violations(WINDOW_LOAD_MAX);
+            samples.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut bounds) = load_min.lock() {
+                bounds.0 = bounds.0.min(sample.load1);
+                bounds.1 = bounds.1.max(sample.load1);
+            }
+            if !failed.is_empty() {
+                println!(
+                    "\n# RUN VOID — in-window sample {} violated: {}",
+                    samples.load(Ordering::Relaxed),
+                    failed.join("; ")
+                );
+                println!(
+                    "#   observed load1={:.2} top={:.1}% ({})",
+                    sample.load1, sample.top_cpu, sample.top_comm
+                );
+                flush_row();
+                eprintln!(
+                    "error: acceptance window violated ({}); the whole run is void, \
+                     not merely the row it landed in. Collected data is not acceptance evidence.",
+                    failed.join("; ")
+                );
+                exit(4);
+            }
+        }
+    });
 }
 
 /// The blocked-producer counts the probe series sweeps.
@@ -1356,12 +1608,26 @@ fn main() -> ExitCode {
     // are ignored).
     let args: Vec<String> = env::args().skip(1).collect();
     let smoke = args.iter().any(|arg| arg == "--smoke");
+    // Independent of `--smoke`: this one decides whether the run is guarded,
+    // not which rows it runs. CI passes only `--smoke` and is unaffected.
+    let acceptance = args.iter().any(|arg| arg == "--acceptance");
     let selected: Vec<String> = args
         .into_iter()
         .filter(|arg| !arg.starts_with('-'))
         .collect();
 
     set_global_default(LoadSubscriber).expect("no other global tracing subscriber is installed");
+
+    // Stage 1 before anything is measured, stage 2 for as long as measuring
+    // continues (RFC 0006 §5.3). Both are the harness's own.
+    let window = Arc::new(AtomicU64::new(0));
+    let load_bounds = Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY)));
+    if acceptance {
+        if !preflight() {
+            return ExitCode::from(3);
+        }
+        spawn_window_monitor(Arc::clone(&window), Arc::clone(&load_bounds));
+    }
 
     let executor: TokioRuntime = Builder::new_multi_thread()
         .enable_all()
@@ -1426,6 +1692,19 @@ fn main() -> ExitCode {
             incomplete |= report.incomplete();
             print_quit_report(&report);
         }
+    }
+    // The window held for every sample taken — the monitor exits the process
+    // itself on the first one that does not, so reaching here is the proof.
+    if acceptance {
+        let (lo, hi) = *load_bounds.lock().unwrap_or_else(PoisonError::into_inner);
+        println!(
+            "# acceptance window held: {} samples at {}s cadence, load1 {:.2}..{:.2}",
+            window.load(Ordering::Relaxed),
+            WINDOW_CADENCE.as_secs(),
+            lo,
+            hi
+        );
+        flush_row();
     }
     // A row that could not collect its sample is not a measurement, so it
     // fails the run rather than being reported as one.
