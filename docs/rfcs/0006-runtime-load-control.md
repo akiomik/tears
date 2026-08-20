@@ -2089,106 +2089,122 @@ Its oracle quantities join the calibration record beside the rest:
 
 The constants remain those of sessions 1 through 3, not re-fitted.
 
-**A recording-start barrier is what an acceptance run needs, and it
-is now part of the requirement.** Two runs have now been argued
-eligible after the fact and neither was; the fix is not a better
-argument but a check that runs before any measurement exists. An
-acceptance run **confirms quiet before it starts recording**, and the
-run itself performs the check rather than a person judging it
-afterwards:
+**Quiet has to hold for the window, and the harness has to enforce
+it.** Three runs have now been argued eligible after the fact and
+none was; a fourth checked its conditions once, at the instant
+recording began, and that is not the same claim either. A start
+instant says nothing about the minutes that follow — the second
+attempt at that run watched its own load climb from 2.37 to 6.95
+inside a ten-minute window, which is exactly the shape a start-only
+check cannot see. The requirement is therefore two-stage, and both
+stages belong to the **harness itself**, enabled by an
+acceptance-mode flag, rather than to whatever script launches it: a
+launcher can only observe around the measurement, and what has to be
+observed is the measurement.
+
+**Stage 1, pre-flight.** Before any measurement exists, the harness
+polls until all three hold together, then stamps its isolation record
+and starts:
 
 | Pre-flight condition | Threshold |
 | --- | --- |
 | no `cargo` or `rustc` process | absent |
 | one-minute load average | **≤ 2.5** |
 | largest single working process | **≤ 20% CPU** |
-| maximum time spent waiting for all three | **10 minutes** |
+| maximum wait for all three | **10 minutes** |
 
-The launch is deferred: the harness polls these three, and only once
-all hold together does it stamp its isolation record and begin
-recording. There are no discarded attempts before the barrier because
-nothing is measured before it. If the three do not hold together
-within the bound, the run **does not exist** — the harness exits
-non-zero having recorded nothing, rather than waiting indefinitely or
-measuring under conditions it was built to exclude.
+Exceeding the wait means the run does not exist: non-zero exit,
+nothing recorded, no partial data to be tempted by.
 
-Each number is read off what the calibration runs showed. A
+**Stage 2, in-window monitoring.** For as long as measurement
+continues, the harness samples at a fixed **5-second** cadence, and
+**every** sample must satisfy:
+
+| In-window condition | Threshold |
+| --- | --- |
+| no `cargo` or `rustc` process | absent |
+| largest non-bench working process | **≤ 20% CPU** |
+| one-minute load average, bench included | **≤ 5.0** |
+
+A single violating sample **voids the whole run**: the harness exits
+non-zero, records which sample failed and on which condition, and the
+data it collected is not acceptance evidence. Voiding the run rather
+than the row is deliberate — a disturbance that reaches one row has
+no reason to have spared the ones before it.
+
+The load condition is on a different axis from pre-flight's, and
+carries a second job. Its threshold is higher because the bench is
+itself the load once measurement starts: 5.0 sits above the 4.01
+that was the highest closing average any clean window produced, with
+margin, where pre-flight's 2.5 describes a machine that is supposed
+to be idle. It is also the **aggregate** guard. The per-process
+condition passes a machine busy with several processes at 15% each,
+which is not a quiet machine; a bench-inclusive load ceiling catches
+that case, which no per-process bound can.
+
+Monitoring cost is negligible against what it protects: a sample
+reads a load average and a process list, on the order of a
+millisecond, and a 5-second cadence over a run of roughly five and a
+half minutes takes about 66 of them — under a tenth of a second of
+work spread across a run whose shortest row measures for far longer.
+
+Each pre-flight number is read off the calibration runs. A
 one-minute load average of 2.5 is attainable on this machine and has
 been observed at 1.73 and 2.14 with the bench as the only substantial
 load, while the two windows that failed the environment rule opened
-at 7.87 and 8.23 — the threshold separates them with room. The 20%
-process bound is set just under the quietest observed maximum,
-`sysmond` at 19.5%, and comfortably under the 28.9% and 68.2% that
-accompanied the two failures. Ten minutes is the wait bound because
-the load decay actually observed — from 7.87 to 1.73 once concurrent
-work stopped — took under nine.
+at 7.87 and 8.23. The 20% process bound is set just under the
+quietest observed maximum, `sysmond` at 19.5%, and well under the
+28.9% and 68.2% that accompanied those failures. Ten minutes bounds a
+decay from 7.87 to 1.73 that took under nine.
 
-This barrier is a strengthening, and it applies to runs made under
-it. It does not reopen the per-row acceptance: those were decided on
-a run judged against section 5.1 as stated, whose isolation record
-shows no dominating process, and a rule tightened afterwards is not
-evidence about a run that preceded it. A reader comparing the numbers
-should know that run opened at a one-minute average of 2.70, above
-the threshold now required of new ones.
+This is a strengthening, and it applies to runs made under it. It
+does not reopen the per-row acceptance: that was decided on a run
+judged against section 5.1 as stated, whose isolation record shows no
+dominating process, and a rule tightened afterwards is not evidence
+about a run that preceded it. A reader comparing the numbers should
+know that run opened at a one-minute average of 2.70, above the
+pre-flight threshold now required of new ones.
 
-**Session 6 cleared the barrier, and there is no eligibility argument
-to make.** The harness determined the three conditions itself and
-recorded what it saw when they held together: no `cargo`, `rustc`, or
-bench process; a one-minute load average of **2.28** against the 2.5
-threshold; a largest working process at **17.9%** against the 20%
-bound. Recording began at that moment. Nothing about the run's
-admissibility rests on reading its output, because the check that
-admitted it ran before any output existed.
+**Sessions 5 and 6 are calibration.** Session 5's window opened with
+a single process holding 68.2% of the machine, which the pre-flight
+condition would have caught. Session 6 cleared a pre-flight check —
+load 2.28, largest process 17.9% — but nothing watched the window
+after that, so it cannot answer the requirement above either. Their
+oracle quantities join the calibration record; the two constants stay
+those of sessions 1 through 3 and are not re-fitted to include them:
 
-The barrier also did what it was for, which is worth recording since
-its whole point is refusing runs. Reaching a clean session took three
-attempts. The first met the barrier but could not start recording at
-all, for a reason outside it — the launcher's terminal capture failed
-under detached start — and was fixed at the source rather than worked
-around: the harness now flushes each finished row itself, so
-incremental output is its own property instead of a property of how
-it was launched. The second **did not meet** the barrier: it spent
-its ten-minute budget across 31 probes, the load still at 7.55, and
-exited non-zero having measured nothing. That run does not exist, and
-there is no partial data from it to be tempted by. The third met the
-barrier at its ninth probe, 162 seconds in, and ran to completion.
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 5 | −0.0806 | 0.113 |
+| 6 | +0.1013 | 0.102 |
 
-**Both conditions hold.**
+Session 6's slope is the first positive one, against −0.426 and
+−0.081 before it. Recorded rather than explained: its magnitude is
+about an eighty-third of the 8.4 ns per envelope the residual term
+carries, so the sign says which side of zero a small quantity fell on
+rather than anything about a trend.
 
-| Condition | Oracle | Measured | Margin |
-| --- | ---: | ---: | ---: |
-| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **+0.1013** | 0.399 |
-| span (max − min) | ≤ 0.6 ms | **0.102** | 0.498 |
-
-Over the same six non-idle rows, with the oracle and both constants
-exactly as pinned before session 3 and never re-fitted. **INV-L4's
-backlog independence is established on the successor topology.**
+Session 6 also carried per-row figures as confirmation, with session
+3 unchanged as the acceptance source. Fourteen of the sixteen
+row-and-route figures came in at or below session 3's, and the two
+that did not are inside their own bounds: `quit_backlog_50k_sync` at
+0.541 ms against a 1.097 ms gate, and `quit_idle_control` at 0.526
+against 0.525, a difference of one reporting unit. Its maxima sat
+close to its p99s in absolute terms — every row within 190 µs, and
+most within a few — where sessions 4 and 5 had maxima milliseconds
+clear of theirs. The ratios are not the useful comparison at this
+scale: a 3 µs gap on a 6 µs p99 reads as 1.5× and means the
+measurement resolved to a microsecond.
 
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **passes (session 6)** |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
 
-**The slope is positive here for the first time**, where the
-calibration sessions ran −0.426 and −0.081. That is recorded rather
-than explained: the bound is signed, +0.1013 sits inside it, and the
-magnitude is about a *eighty-third* of the 8.4 ns per envelope the
-residual term carries — small enough that the sign is a fact about
-which side of zero the noise fell on rather than about a trend. The
-span, 0.102 ms, is the narrowest of the three.
-
-**Per-row confirmation, with the acceptance source unchanged.** This
-run was declared in advance to be a confirmation of the p99 bounds
-and not a second acceptance of them; session 3 remains their source.
-Fourteen of the sixteen row-and-route figures come in at or below
-session 3's, and the two that do not are both well inside their own
-bounds: `quit_idle_control` at 0.526 against 0.525 — an 0.001 ms
-difference, which is the reporting resolution — and
-`quit_backlog_50k_sync` at 0.541 against 0.515, still less than half
-its 1.097 ms gate. The largest movements are downward:
-`quit_backlog_300k_sync` by 0.384 ms and `quit_blocked_64_sync` by
-0.057 ms. No row shows a single-trial outlier: every maximum sits
-within 1.3× its p99, where sessions 4 and 5 had maxima orders of
-magnitude above.
+The validating run is a fresh session that clears pre-flight and
+completes with no violating in-window sample, with the oracle and
+both constants unchanged. The discipline is the one every gate here
+carries: a run that misses either number is a finding, reported
+rather than accommodated.
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
@@ -2206,8 +2222,8 @@ section 5.1 requires the environment it does.
 shows is a record rather than a mechanism.** The row has been
 measured five times, and ordering the samples by how quiet the window
 was makes them legible: 0.111 ms with other work on the machine, then
-0.113, 0.092, 0.084, and **0.056 ms**, the last under the
-machine-checked barrier. So **the value varies across runs by a
+0.113, 0.092, 0.084, and **0.056 ms**, the last from a window that
+cleared a pre-flight quiet check at its start. So **the value varies across runs by a
 factor of about two, and the acceptance figure of 0.113 ms is the
 largest of the five rather than a representative one.** The ordering
 is suggestive and no more — establishing that the environment
