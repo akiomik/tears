@@ -1959,24 +1959,88 @@ property of N. No gate term is added for either: at 128 producers the
 inside `F`, so a producer-count term would change no verdict while
 adding a constant to maintain.
 
-**Session 3 is the acceptance source.** A fresh run of all sixteen
-acceptance rows under section 5.1's environment rule, with the
-producer gate unchanged and the synchronous gate as recalibrated
-above. Both gates and every constant in them are fixed by this
-section before that run, and the run does not revise them: a row that
-fails is a finding about the calibration or the kernel and is
-reported as one.
+**Session 3 is the acceptance source, and it passes.** A fresh run of
+all sixteen acceptance rows under section 5.1's environment rule,
+with both gates and every constant in them fixed by this section
+before it ran. The isolation is on the record: the run started from
+the commit that pre-registered these criteria with a clean worktree,
+launched a prebuilt binary directly, and held no `cargo` or `rustc`
+process at either end of a 5 min 50 s window; all sixteen rows
+collected 200 valid trials with no failures.
 
-| Route | Rows | Gate | Verdict |
-| --- | ---: | --- | --- |
-| producer-originated | 8 | p99 ≤ B(row) | *session 3 not yet run* |
-| synchronous | 8 | p99 ≤ max(2.5 × predicted p50, F) | *session 3 not yet run* |
+**Producer-originated route.** Gate `p99 ≤ B(row)`, milliseconds:
 
-Alongside the per-row verdicts, that run records the delivery-half
-span, which is INV-L4's own property: it must stay flat rather than
-grow with depth. Both earlier sessions showed it flat — 3.47–3.59 ms
-and 3.41–3.58 ms across depths 1,024 through ≈300,000 — and that
-statistic is a median, so neither session's value is in doubt.
+| Row | B(row) | p99 | margin |
+| --- | ---: | ---: | ---: |
+| `quit_idle_control` | 0.961 | 0.525 | +0.436 |
+| `quit_idle_bounded_control` | 0.961 | 0.552 | +0.409 |
+| `quit_blocked_1_control` | 4.691 | 3.987 | +0.704 |
+| `quit_blocked_64_control` | 4.691 | 4.008 | +0.683 |
+| `quit_overload_bounded_control` | 4.691 | 3.994 | +0.697 |
+| `quit_overload_control` | 4.763 | 3.690 | +1.073 |
+| `quit_backlog_50k_control` | 5.205 | 4.040 | +1.165 |
+| `quit_backlog_300k_control` | 7.830 | 6.401 | +1.429 |
+
+**Synchronous route.** Gate `p99 ≤ max(2.5 × predicted p50, F)`,
+milliseconds, with the term that binds each row named:
+
+| Row | 2.5 × predicted | gate | p99 | margin | binds |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `quit_idle_sync` | 0.048 | 0.150 | 0.008 | +0.142 | floor |
+| `quit_idle_bounded_sync` | 0.048 | 0.150 | 0.006 | +0.144 | floor |
+| `quit_blocked_1_sync` | 0.069 | 0.150 | 0.031 | +0.119 | floor |
+| `quit_overload_bounded_sync` | 0.069 | 0.150 | 0.037 | +0.113 | floor |
+| `quit_blocked_64_sync` | 0.070 | 0.150 | 0.113 | +0.037 | floor |
+| `quit_overload_sync` | 0.213 | 0.213 | 0.112 | +0.101 | multiplier |
+| `quit_backlog_50k_sync` | 1.097 | 1.097 | 0.515 | +0.582 | multiplier |
+| `quit_backlog_300k_sync` | 6.347 | 6.347 | 3.228 | +3.119 | multiplier |
+
+Sixteen of sixteen pass. **INV-L4's acceptance conditions are met on
+the successor topology**, at the trial counts and on the reference
+machine this section pins.
+
+**The delivery half is flat**, which is INV-L4's own property and the
+pre-registered second condition. Across the six non-idle rows it
+spans 3.487–3.753 ms over depths 1,024 through 299,997 — a 293-fold
+depth range for a 7.6% spread — and it does not grow with depth: the
+largest value sits at the *smallest* depth, and the three deepest
+rows are the three lowest. The two idle rows sit at 0.509–0.510 ms,
+where a single-message batch has no remainder to wait behind. Earlier
+sessions showed the same flatness (3.47–3.59 ms and 3.41–3.58 ms),
+and this statistic is a median, so all three agree.
+
+**`quit_blocked_64_sync` passes on the floor, and its tail is real.**
+Stated plainly because the two facts are easy to conflate: this row's
+p99 of 0.113 ms reproduces session 2's 0.111 ms under isolation, so
+the reservation section 5.1's environment rule places on session 2's
+tails does *not* explain this row — the tail is a property of the
+configuration, not of a noisy window. It passes because `F` is above
+it, not because it is small: its 0.113 ms exceeds the multiplicative
+term's 0.070 ms and clears the floor by 0.037 ms. `F` was not fitted
+to it. The floor's binding value came from the blocked-producer probe
+at 128 producers (95 µs); this row's own quiet figure sat in the
+calibration pool at 54 µs and did not set the maximum. What the floor
+asserts is that below a certain latency this environment's tail is
+not a measurable quantity, and this row sits under that line — so the
+gate admits it without claiming to have measured it.
+
+**Two single-trial outliers, recorded.** `quit_idle_bounded_control`
+reaches a max of 4.219 ms against a p99 of 0.552, and
+`quit_backlog_300k_sync` a max of 4.944 against a p99 of 3.228; both
+correspond to an `applied→exit` excursion in the same trial. Each
+row's p50 and p95 agree with its neighbours, so these are single
+trials in 200 rather than a shifted distribution. The criterion is
+p99, which holds for both, and this is the same treatment section 5.1
+already gives the superseded topology's blocked rows, where per-trial
+maxima exceeded 1 ms under a p99 criterion that held.
+
+**The join drain carries the blocked-producer cost, as measured.**
+`quit_blocked_64`'s `applied→exit` stands out from every other row —
+0.076 ms on the synchronous route and 0.068 ms on the control route,
+against 0.002–0.029 ms elsewhere — and that is the size the probe
+predicts: 1,070 ns per producer × 64 ≈ 68 µs. The two halves of
+RFC 0011 §4.4's postcondition split as that measurement described,
+with the abort requests cheap and the join drain carrying the term.
 
 **What the numbers say about the old threshold, stated plainly.** The
 superseded criterion was p99 ≤ 1 ms at every measured depth, and it

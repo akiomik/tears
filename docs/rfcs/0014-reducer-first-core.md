@@ -1521,10 +1521,14 @@ pacing responsibilities, park/wake integration. Future RFC.
 RFC 0006's statistical acceptance (INV-L4 formulation and the
 bounded-mode scenario set) re-measured on the new topology, with the
 same reference-environment discipline. **Resolved at RFC 0006 §5.3**,
-which states the successor's conditions per quit route and quantifies
-the producer route's over §3.3's constructive bound. That ownership is
-unchanged and no numeric threshold is claimed here; §3.3's latency
-statements remain this RFC's contract.
+which states the successor's conditions per quit route — quantifying
+the producer route's over §3.3's constructive bound — and records
+the run that met them: all sixteen acceptance rows pass, at 200 valid
+trials each, on the reference machine, under an isolated run whose
+criteria were pinned before it executed. Ownership is unchanged and
+no numeric threshold is claimed here; §3.3's latency statements
+remain this RFC's contract, and RFC 0006 §5.3 is where the numbers
+that satisfy them live.
 
 ## 14. References
 
