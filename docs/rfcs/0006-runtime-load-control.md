@@ -2288,27 +2288,57 @@ through 3, not re-fitted:
 | --- | ---: | ---: |
 | 7 | −0.1263 | 0.096 |
 
+**The validating run holds its window, and both conditions pass.** It
+ran on a monitor with both of those paths closed: the void-on-sight
+conditions are evaluated independently of the streak counter, and the
+window is declared held only after a final sample is taken and the
+monitor joined. Its record carries what the previous one could not.
+Pre-flight cleared on the first probe. Sixty-one in-window samples
+followed, none voided, and each records the input to every condition
+rather than only its verdict — including that no `cargo` or `rustc`
+process was present, which is the fact the swallowed-violation path
+had made unprovable. The end of the window is in the record too, in
+order: the last measured row, then the final sample, then the
+declaration.
+
+The monitor's revised clauses are not merely specified but exercised.
+Across the attempts that preceded this run every one of them fired in
+the field — a sample carrying more than one violated condition and
+reporting all of them, a process held above 20% for three consecutive
+samples, a single sample above 100%, and a pre-flight that never
+cleared. A rule that had refused nothing would have been worth
+doubting; these refused, and then admitted a window that met them.
+
+| Condition | Oracle | Measured | Margin |
+| --- | ---: | ---: | ---: |
+| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.1263** | 0.626 |
+| span (max − min) | ≤ 0.6 ms | **0.095** | 0.505 |
+
+Over the same six non-idle rows, with the oracle and both constants
+exactly as pinned before any of these runs and never re-fitted.
+
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **established** |
 
-The validating run is a fresh session on a monitor with both paths
-closed — the void-on-sight conditions checked independently of the
-streak counter, and a final sample taken and the monitor joined
-before any window is declared held — with the oracle and both
-constants unchanged. The discipline is the one every gate here
-carries: a run that misses either number is a finding, reported
-rather than accommodated.
+**INV-L4's backlog independence is established on the successor
+topology.**
 
-**The slope's sign is not a stable quantity, and the bound never
-depended on it.** Across the seven sessions that have produced one it
-ran −0.171, −0.440, −0.426, −0.010, −0.081, +0.101, −0.126 — two
-changes of sign. Every magnitude is inside the bound, and the largest
-is a nineteenth of the 8.4 ns per envelope the residual term carries.
-A criterion stated as "the slope does not exceed +0.5" survives that;
-one stated as "the slope is negative" would have failed, which is why
-the oracle is signed and one-sided rather than directional. The
-narrowest span of the seven is 0.096 ms.
+Per-row figures came with it as confirmation, the acceptance source
+unchanged: fourteen of the sixteen row-and-route p99s at or below the
+source run's, and the two above it higher by one to three reporting
+units, both far inside their own bounds. Those bounds were decided on
+the source run and are not reopened here.
+
+**The slope's sign is not a stable quantity, and the bound never depended
+on it.** Across the seven calibration runs that produced one it ran
+−0.171, −0.440, −0.426, −0.010, −0.081, +0.101, and −0.126 — two
+changes of sign. Every magnitude is inside the bound, and the largest is a
+nineteenth of the 8.4 ns per envelope the residual term carries. A
+criterion stated as "the slope does not exceed +0.5" survives that; one
+stated as "the slope is negative" would have failed, which is why the
+oracle is signed and one-sided rather than directional. The narrowest
+span of the seven is 0.096 ms.
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows

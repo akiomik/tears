@@ -1526,10 +1526,12 @@ the producer route's over §3.3's constructive bound. The per-row
 bounds are met: all sixteen acceptance rows pass at 200 valid trials
 each, on the reference machine, under a run whose criteria were pinned
 before it executed and whose isolation is recorded. Backlog
-independence carries its own numeric oracle and its own validating
-run, pending there. Ownership is unchanged and no numeric threshold is
-claimed here; §3.3's latency statements remain this RFC's contract,
-and RFC 0006 §5.3 is where the numbers that satisfy them live.
+independence carries its own numeric oracle, met by a validating run
+whose monitor recorded every condition's input across the whole
+measurement window. Both conditions hold. Ownership is unchanged and
+no numeric threshold is claimed here; §3.3's latency statements remain
+this RFC's contract, and RFC 0006 §5.3 is where the numbers that
+satisfy them live.
 
 ## 14. References
 
