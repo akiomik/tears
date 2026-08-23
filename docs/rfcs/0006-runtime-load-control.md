@@ -2288,41 +2288,57 @@ through 3, not re-fitted:
 | --- | ---: | ---: |
 | 7 | −0.1263 | 0.096 |
 
-**The validating run holds its window, and both conditions pass.** It
-ran on a monitor with both of those paths closed: the void-on-sight
-conditions are evaluated independently of the streak counter, and the
-window is declared held only after a final sample is taken and the
-monitor joined. Its record carries what the previous one could not.
-Pre-flight cleared on the first probe. Sixty-one in-window samples
-followed, none voided, and each records the input to every condition
-rather than only its verdict — including that no `cargo` or `rustc`
-process was present, which is the fact the swallowed-violation path
-had made unprovable. The end of the window is in the record too, in
-order: the last measured row, then the final sample, then the
-declaration.
+**The run made on the revised monitor is calibration too, because
+the window's opening is still unproven.** That monitor closed the two
+paths the previous one left open: the void-on-sight conditions are
+evaluated independently of the streak counter, and the window is
+declared held only after a final sample is taken and the monitor
+joined. Its record is correspondingly better — pre-flight cleared on
+the first probe, sixty-one in-window samples with none voided, each
+recording the input to every condition rather than only its verdict,
+and the window's end in order. What it still cannot establish is its
+beginning.
 
-The monitor's revised clauses are not merely specified but exercised.
-Across the attempts that preceded this run every one of them fired in
-the field — a sample carrying more than one violated condition and
-reporting all of them, a process held above 20% for three consecutive
-samples, a single sample above 100%, and a pre-flight that never
-cleared. A rule that had refused nothing would have been worth
-doubting; these refused, and then admitted a window that met them.
+The monitor is started without a handshake: the call that starts it
+returns once the sampler has been spawned, not once the first sample
+has been taken. The record shows the first sample preceding the first
+row report, which looks like the ordering the condition needs, but a
+row is reported only after its two hundred trials complete — so
+"before the first report" is a far weaker fact than "before
+measurement began", and the second does not follow from it. Under a
+scheduler that delays the sampler, measurement can begin before any
+sample exists, and the window would still be declared held with
+nothing observed about its opening.
 
-| Condition | Oracle | Measured | Margin |
-| --- | ---: | ---: | ---: |
-| slope of delivery-half p50 against depth | ≤ +0.5 ns/env | **−0.1263** | 0.626 |
-| span (max − min) | ≤ 0.6 ms | **0.095** | 0.505 |
+That is the same shape as the two demotions above: not a claim that
+the window was dirty, but that the record cannot say. Applying the
+standard symmetrically demotes this run as well. Its oracle
+quantities join the calibration record, and the constants stay those
+of the first three runs, not re-fitted:
 
-Over the same six non-idle rows, with the oracle and both constants
-exactly as pinned before any of these runs and never re-fitted.
+| Run | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| on the revised monitor | −0.1263 | 0.095 |
 
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **established** |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
 
-**INV-L4's backlog independence is established on the successor
-topology.**
+The validating run is a fresh session on a monitor whose start is
+synchronised — the call that starts it returning only once the first
+sample is complete, so that the window's opening is observed rather
+than assumed — with the oracle and both constants unchanged. The
+discipline is the one every gate here carries: a run that misses
+either number is a finding, reported rather than accommodated.
+
+One thing the attempts so far do establish is that the monitor's
+clauses bite. Every one of them has fired in the field: a sample
+carrying more than one violated condition and reporting all of them,
+a process held above 20% across three consecutive samples, a single
+sample above 100%, and a pre-flight that never cleared. A rule that
+had refused nothing would be worth doubting; these have refused
+repeatedly, which is why what remains at issue is the boundary of the
+window rather than the conditions inside it.
 
 Per-row figures came with it as confirmation, the acceptance source
 unchanged: fourteen of the sixteen row-and-route p99s at or below the
@@ -2330,15 +2346,15 @@ source run's, and the two above it higher by one to three reporting
 units, both far inside their own bounds. Those bounds were decided on
 the source run and are not reopened here.
 
-**The slope's sign is not a stable quantity, and the bound never depended
-on it.** Across the seven calibration runs that produced one it ran
-−0.171, −0.440, −0.426, −0.010, −0.081, +0.101, and −0.126 — two
-changes of sign. Every magnitude is inside the bound, and the largest is a
-nineteenth of the 8.4 ns per envelope the residual term carries. A
-criterion stated as "the slope does not exceed +0.5" survives that; one
-stated as "the slope is negative" would have failed, which is why the
-oracle is signed and one-sided rather than directional. The narrowest
-span of the seven is 0.096 ms.
+**The slope's sign is not a stable quantity, and the bound never
+depended on it.** Across the calibration runs that have produced one
+it has ranged from −0.440 to +0.101, changing sign twice. Every
+magnitude is inside the bound, and the largest is a nineteenth of the
+8.4 ns per envelope the residual term carries. A criterion stated as
+"the slope does not exceed +0.5" survives that; one stated as "the
+slope is negative" would have failed, which is why the oracle is
+signed and one-sided rather than directional. The narrowest span any
+of them produced is 0.095 ms.
 
 **Recorded from session 4: medians held, tails did not.** Its
 `quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
@@ -2354,21 +2370,21 @@ section 5.1 requires the environment it does.
 
 **`quit_blocked_64_sync` passes on the floor, and what its tail
 shows is a record rather than a mechanism.** The row has been
-measured seven times, across sessions whose conditions differed: in
-session order the applied p99 ran 0.054, 0.111, 0.113, 0.092, 0.084,
-0.056, and **0.055 ms**. So **the value varies across runs by a
+measured eight times, across runs whose conditions differed: in run
+order the applied p99 ran 0.054, 0.111, 0.113, 0.092, 0.084, 0.056,
+0.055, and **0.057 ms**. So **the value varies across runs by a
 factor of about two, and the acceptance figure of 0.113 ms is the
-largest of the seven rather than a representative one.** The ordering
+largest of the eight rather than a representative one.** The ordering
 is suggestive and no more — establishing that the environment
 *causes* the variation would take a controlled experiment, varying
 the load deliberately with everything else held, and none of the
-seven was that. What the spread does establish is narrower and worth
+eight was that. What the spread does establish is narrower and worth
 keeping: two samples of this quantity that happen to agree say
 nothing about its stability.
 
 None of this reaches the gate: the row passes because `F` is above
-it, not because its tail is small or steady. Its
-acceptance figure of 0.113 ms exceeds the multiplicative term's
+it, not because its tail is small or steady. Its acceptance figure of
+0.113 ms exceeds the multiplicative term's
 0.070 ms and clears the floor by 0.037 ms, and `F` was not fitted to
 it. The floor's binding value came from the blocked-producer probe
 at 128 producers (95 µs); this row's own quiet figure sat in the
