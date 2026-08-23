@@ -749,17 +749,38 @@ fn load_average_1m() -> f64 {
 /// Both facts come from the same snapshot rather than a second `pgrep`, so a
 /// sample costs one subprocess.
 fn process_snapshot(exclude: Option<u32>) -> (f64, String, Vec<String>) {
-    let Ok(out) = OsCommand::new("ps")
+    let observed = OsCommand::new("ps")
         .args(["axo", "pid=,pcpu=,comm="])
         .output()
-    else {
-        // A snapshot that cannot be taken is not a passing snapshot.
-        return (f64::INFINITY, "<ps unavailable>".to_owned(), Vec::new());
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
+        .ok()
+        .and_then(|out| {
+            parse_ps(
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                exclude,
+            )
+        });
+    // Fail **closed** on every way the observation can fail — `ps` not
+    // spawning, `ps` exiting non-zero, or output with no parsable row. The
+    // last two used to arrive here as "top process 0.0%, no builders",
+    // which is indistinguishable from a genuinely idle machine and is the
+    // most dangerous of the three: a machine nobody could see read as quiet.
+    observed.unwrap_or_else(|| (f64::INFINITY, "<ps unobservable>".to_owned(), Vec::new()))
+}
+
+/// Parses `ps axo pid=,pcpu=,comm=` output.
+///
+/// `None` means the machine could not be observed: `ps` failed, or its
+/// output held no row this parser understood. A caller must treat that as a
+/// failed condition, never as an absence of load.
+fn parse_ps(ok: bool, stdout: &str, exclude: Option<u32>) -> Option<(f64, String, Vec<String>)> {
+    if !ok {
+        return None;
+    }
     let (mut top_cpu, mut top_comm) = (0.0_f64, String::from("<none>"));
     let mut builders = Vec::new();
-    for line in text.lines() {
+    let mut rows = 0_u32;
+    for line in stdout.lines() {
         let mut parts = line.split_whitespace();
         let (Some(pid), Some(cpu)) = (parts.next(), parts.next()) else {
             continue;
@@ -768,6 +789,7 @@ fn process_snapshot(exclude: Option<u32>) -> (f64, String, Vec<String>) {
         let (Ok(pid), Ok(cpu)) = (pid.parse::<u32>(), cpu.parse::<f64>()) else {
             continue;
         };
+        rows += 1;
         let name = comm.rsplit('/').next().unwrap_or(comm);
         if name == "cargo" || name == "rustc" {
             builders.push(format!("{name}(pid {pid})"));
@@ -777,7 +799,9 @@ fn process_snapshot(exclude: Option<u32>) -> (f64, String, Vec<String>) {
             comm.clone_into(&mut top_comm);
         }
     }
-    (top_cpu, top_comm, builders)
+    // No parsable row at all is an observation failure, not an idle machine:
+    // this process is always running, so a working `ps` reports at least it.
+    (rows > 0).then_some((top_cpu, top_comm, builders))
 }
 
 /// Stage 1. Polls until all three conditions hold **together**, stamps the
@@ -854,62 +878,52 @@ struct WindowMonitor {
 }
 
 impl WindowMonitor {
-    /// Starts sampling. **The first sample is taken at t=0**, before any
-    /// wait: a run shorter than one cadence must not be able to succeed with
-    /// zero samples, which is what a leading sleep would allow.
+    /// Starts sampling, **with the first sample already taken and recorded
+    /// when this returns**.
+    ///
+    /// That guarantee is the point, and spawning cannot provide it: a thread
+    /// that samples first thing still has to be scheduled, and a short row
+    /// can finish before it ever runs. The window would then be "covered" by
+    /// a single sample taken *after* measurement ended — one sample, so the
+    /// zero-sample check passes, and nothing about the window observed.
+    /// So sample one happens here, on the caller's thread, before any
+    /// measurement can begin.
+    fn start() -> Self {
+        let own_pid = id();
+        Self::start_with(move || MachineSample::take(Some(own_pid)))
+    }
+
+    /// [`start`](Self::start) with an injectable sampler, so the guarantee
+    /// above can be tested without depending on the machine being quiet.
     #[expect(
         clippy::disallowed_methods,
         reason = "samples real host state on a real cadence, not executor time (RFC 0009 §3.1)"
     )]
-    fn start() -> Self {
+    fn start_with(sampler: impl Fn() -> MachineSample + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(AtomicU64::new(0));
         let bounds = Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY)));
+
+        // Sample one, synchronously. Only after this returns can the caller
+        // begin measuring, so "first sample at t=0" is a fact rather than a
+        // hope about the scheduler.
+        let streak = observe(&sampler(), &samples, &bounds, 0);
+
         let (t_stop, t_samples, t_bounds) =
             (Arc::clone(&stop), Arc::clone(&samples), Arc::clone(&bounds));
-        let own_pid = id();
         let handle = thread::spawn(move || {
-            let mut streak = 0_u32;
+            let mut streak = streak;
             loop {
-                let sample = MachineSample::take(Some(own_pid));
-                let verdict = sample.in_window(streak);
-                let n = t_samples.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Ok(mut b) = t_bounds.lock() {
-                    b.0 = b.0.min(sample.load1);
-                    b.1 = b.1.max(sample.load1);
-                }
-                println!("{}", sample.record_line(n, &verdict));
-                flush_row();
-                match verdict {
-                    Verdict::Quiet => streak = 0,
-                    Verdict::Elevated(_) => streak += 1,
-                    Verdict::Void(why) => {
-                        println!("\n# RUN VOID — in-window sample {n}: {}", why.join("; "));
-                        flush_row();
-                        eprintln!(
-                            "error: acceptance window violated at sample {n} ({}); the whole \
-                             run is void, not merely the row it landed in. Collected data is \
-                             not acceptance evidence.",
-                            why.join("; ")
-                        );
-                        // Exits rather than returns: a violated window voids
-                        // the run at the instant it is observed, and letting
-                        // the measurement continue would leave partial output
-                        // a caller could mistake for acceptance evidence
-                        // (RFC 0006 §5.3).
-                        exit(4);
-                    }
-                }
-                // The stop flag is read *after* a sample, so the signal is
-                // always followed by one final observation before the thread
-                // leaves.
-                if t_stop.load(Ordering::Acquire) {
-                    break;
-                }
                 let mut waited = Duration::ZERO;
                 while waited < WINDOW_CADENCE && !t_stop.load(Ordering::Acquire) {
                     thread::sleep(STOP_POLL);
                     waited += STOP_POLL;
+                }
+                // Sampled after the wait, so a stop that arrives mid-wait is
+                // still followed by one final observation before leaving.
+                streak = observe(&sampler(), &t_samples, &t_bounds, streak);
+                if t_stop.load(Ordering::Acquire) {
+                    break;
                 }
             }
         });
@@ -942,6 +956,48 @@ impl WindowMonitor {
     }
 }
 
+/// Records one sample and returns the updated elevated streak.
+///
+/// Shared by the synchronous first sample and the monitor thread, so both go
+/// through exactly one classification and one recording path.
+#[expect(
+    clippy::exit,
+    reason = "a violated window voids the run at the instant it is observed; returning would let a caller mistake partial output for acceptance evidence (RFC 0006 §5.3)"
+)]
+fn observe(
+    sample: &MachineSample,
+    samples: &AtomicU64,
+    bounds: &Mutex<(f64, f64)>,
+    streak: u32,
+) -> u32 {
+    let verdict = sample.in_window(streak);
+    let n = samples.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Ok(mut b) = bounds.lock() {
+        b.0 = b.0.min(sample.load1);
+        b.1 = b.1.max(sample.load1);
+    }
+    println!("{}", sample.record_line(n, &verdict));
+    flush_row();
+    match verdict {
+        Verdict::Quiet => 0,
+        Verdict::Elevated(_) => streak + 1,
+        Verdict::Void(why) => {
+            println!("\n# RUN VOID — in-window sample {n}: {}", why.join("; "));
+            flush_row();
+            eprintln!(
+                "error: acceptance window violated at sample {n} ({}); the whole run is void, \
+                 not merely the row it landed in. Collected data is not acceptance evidence.",
+                why.join("; ")
+            );
+            // Exits rather than returns: a violated window voids the run at
+            // the instant it is observed, and letting the measurement
+            // continue would leave partial output a caller could mistake for
+            // acceptance evidence (RFC 0006 §5.3).
+            exit(4);
+        }
+    }
+}
+
 /// Negative tests for the isolation logic, run by `--self-test`.
 ///
 /// These exist because each one is a fail-**open** that a passing run cannot
@@ -954,6 +1010,14 @@ impl WindowMonitor {
 ///
 /// Panics on the first case that does not hold; that is the report.
 fn self_test() {
+    self_test_decision_rules();
+    self_test_monitor_boundaries();
+    self_test_observation_failure();
+    println!("self-test: all isolation negative cases hold");
+}
+
+/// The in-window decision rules: ordering, fail-closed reading, persistence.
+fn self_test_decision_rules() {
     // P1-1, the ordering bug this replaced: a build process present **and** a
     // process between the two CPU bounds, on a fresh streak. Persistence-first
     // returned Elevated and the run survived with `cargo` running.
@@ -995,7 +1059,87 @@ fn self_test() {
         Decision::Quiet,
         "quiet is quiet"
     );
-    // P1-2: a window that took no sample is an error, never an empty success.
+}
+
+/// The monitor's start and end boundaries (P1-1, P1-2).
+fn self_test_monitor_boundaries() {
+    // P1-1: `start()` must return with sample one already recorded. The old
+    // implementation spawned and returned, so on a slow schedule a short row
+    // finished first and the only sample landed *after* measurement — one
+    // sample, so the zero-sample check passed and nothing was observed.
+    // A synthetic quiet sample keeps this independent of the real machine.
+    let quiet = || MachineSample {
+        load1: 0.5,
+        top_cpu: 1.0,
+        top_comm: "<self-test>".to_owned(),
+        builders: Vec::new(),
+    };
+    let started = WindowMonitor::start_with(quiet);
+    assert!(
+        started.samples.load(Ordering::Relaxed) >= 1,
+        "start() must return with the first sample already taken"
+    );
+    let (n, lo, hi) = started.finish().expect("a sampled window reports held");
+    assert!(
+        n >= 2,
+        "finish() takes a final sample after the stop signal"
+    );
+    assert!(
+        lo.is_finite() && hi.is_finite(),
+        "load bounds must be real once any sample exists, never inf..-inf"
+    );
+
+    // P1-2: every guarded path ends through `close_window`, so a window that
+    // cannot be verified overrides the measurement's own outcome.
+    let unverifiable = WindowMonitor {
+        stop: Arc::new(AtomicBool::new(true)),
+        handle: thread::spawn(|| {}),
+        samples: Arc::new(AtomicU64::new(0)),
+        bounds: Arc::new(Mutex::new((f64::INFINITY, f64::NEG_INFINITY))),
+    };
+    let code = format!("{:?}", close_window(Some(unverifiable), ExitCode::SUCCESS));
+    assert_eq!(
+        code,
+        format!("{:?}", ExitCode::from(5)),
+        "an unverified window must override a successful measurement"
+    );
+    assert_eq!(
+        format!("{:?}", close_window(None, ExitCode::SUCCESS)),
+        format!("{:?}", ExitCode::SUCCESS),
+        "an unguarded run passes its own outcome through unchanged"
+    );
+}
+
+/// Observation failure must never read as an idle machine (P2).
+fn self_test_observation_failure() {
+    // P2: every way `ps` can fail is an observation failure, not an idle
+    // machine. A non-zero exit used to arrive as "top 0.0%, no builders".
+    assert!(
+        parse_ps(false, "1 0.0 init\n", None).is_none(),
+        "a non-zero `ps` exit is an observation failure"
+    );
+    assert!(
+        parse_ps(true, "", None).is_none(),
+        "empty `ps` output is an observation failure"
+    );
+    assert!(
+        parse_ps(true, "not a process row\n", None).is_none(),
+        "unparsable `ps` output is an observation failure"
+    );
+    let (cpu, comm, builders) = parse_ps(true, "1 3.5 launchd\n42 91.0 /usr/bin/cargo\n", None)
+        .expect("well-formed ps output parses");
+    assert!((cpu - 91.0).abs() < f64::EPSILON, "top CPU is the maximum");
+    assert!(comm.contains("cargo"), "top process is named");
+    assert_eq!(builders.len(), 1, "a build process is detected by name");
+    let excluded = parse_ps(true, "1 3.5 launchd\n42 91.0 /usr/bin/cargo\n", Some(42))
+        .expect("parses")
+        .0;
+    assert!(
+        (excluded - 3.5).abs() < f64::EPSILON,
+        "the excluded pid is left out of the maximum"
+    );
+
+    // A window that took no sample is an error, never an empty success.
     let empty = WindowMonitor {
         stop: Arc::new(AtomicBool::new(true)),
         handle: thread::spawn(|| {}),
@@ -1006,7 +1150,6 @@ fn self_test() {
         empty.finish().is_err(),
         "a zero-sample window must not report as held"
     );
-    println!("self-test: all isolation negative cases hold");
 }
 
 /// The blocked-producer counts the probe series sweeps.
@@ -1924,12 +2067,19 @@ fn main() -> ExitCode {
         .expect("tokio runtime");
 
     if smoke {
-        return if run_smoke(&executor) {
+        let code = if run_smoke(&executor) {
             ExitCode::SUCCESS
         } else {
             eprintln!("error: smoke profile failed");
             ExitCode::FAILURE
         };
+        // Guarded runs end through `close_window` on **every** path, this one
+        // included. `--acceptance` guards the run and `--smoke` chooses the
+        // rows — the header states them as independent, so a combined
+        // invocation has to mean "guard the smoke rows", not "guard nothing".
+        // Returning straight from here skipped the final sample, the join and
+        // the held check, and exited 0 with the window unverified.
+        return close_window(monitor, code);
     }
 
     let matches = |name: &str| selected.is_empty() || selected.iter().any(|arg| arg == name);
@@ -1984,24 +2134,39 @@ fn main() -> ExitCode {
     }
     // The window held for every sample taken — the monitor exits the process
     // itself on the first one that does not, so reaching here is the proof.
-    if let Some(monitor) = monitor {
-        match monitor.finish() {
-            Ok((n, lo, hi)) => println!(
-                "# acceptance window held: {n} samples at {}s cadence, load1 {lo:.2}..{hi:.2}",
-                WINDOW_CADENCE.as_secs()
-            ),
-            Err(why) => {
-                eprintln!("error: {why}");
-                return ExitCode::from(5);
-            }
-        }
-        flush_row();
-    }
     // A row that could not collect its sample is not a measurement, so it
     // fails the run rather than being reported as one.
-    if incomplete {
+    let code = if incomplete {
         eprintln!("error: one or more rows did not collect a complete sample");
-        return ExitCode::FAILURE;
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    };
+    close_window(monitor, code)
+}
+
+/// Ends a guarded run: final sample, join, and the held check — then the
+/// outcome the measurement itself reached.
+///
+/// The single exit for every guarded path. A window that cannot be verified
+/// overrides a successful measurement, because an unverified window is not
+/// evidence whatever the rows say.
+fn close_window(monitor: Option<WindowMonitor>, code: ExitCode) -> ExitCode {
+    let Some(monitor) = monitor else {
+        return code;
+    };
+    match monitor.finish() {
+        Ok((n, lo, hi)) => {
+            println!(
+                "# acceptance window held: {n} samples at {}s cadence, load1 {lo:.2}..{hi:.2}",
+                WINDOW_CADENCE.as_secs()
+            );
+            flush_row();
+            code
+        }
+        Err(why) => {
+            eprintln!("error: {why}");
+            ExitCode::from(5)
+        }
     }
-    ExitCode::SUCCESS
 }
