@@ -2322,29 +2322,55 @@ of the first three runs, not re-fitted:
 
 | Condition | Rows | Oracle | Verdict |
 | --- | ---: | --- | --- |
-| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | *not yet run* |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **established** |
 
-The validating run is a fresh session on a monitor whose start is
-synchronised — the call that starts it returning only once the first
-sample is complete, so that the window's opening is observed rather
-than assumed — with the oracle and both constants unchanged. The
-discipline is the one every gate here carries: a run that misses
-either number is a finding, reported rather than accommodated.
+**Backlog independence is established, on a run whose window is
+bracketed at both ends.** The oracle and both of its constants are
+the ones pinned before it ran, and it clears each half:
 
-One thing the attempts so far do establish is that the monitor's
-clauses bite. Every one of them has fired in the field: a sample
-carrying more than one violated condition and reporting all of them,
-a process held above 20% across three consecutive samples, a single
-sample above 100%, and a pre-flight that never cleared. A rule that
-had refused nothing would be worth doubting; these have refused
-repeatedly, which is why what remains at issue is the boundary of the
-window rather than the conditions inside it.
+| Quantity | Measured | Bound | Margin |
+| --- | ---: | --- | ---: |
+| slope | −0.1200 ns/envelope | ≤ +0.5 | 0.620 ns/env |
+| span | 0.102 ms | ≤ 0.6 ms | 0.498 ms |
+
+What makes this run eligible where the one before it was not is the
+opening. The call that starts the monitor takes the first sample on
+the calling thread and returns only once that sample is complete, so
+the window's start is a property of the code rather than an
+expectation of the scheduler. The end is the ordering the previous
+monitor already had — last row, final sample, join, then the held
+declaration — now reached by every guarded exit path. A third change
+closes a quieter gap on the same axis: a process listing that exits
+non-zero, returns nothing, or cannot be parsed counts as an
+observation failure, where before it could pass for a quiet machine.
+
+The window it recorded: the barrier cleared on its first probe, at a
+one-minute average of 1.79 with the largest working process at 7.9%
+and no build process present; sixty-one in-window samples at the
+five-second cadence, load average 1.22 to 2.40; no void; no sample
+above 100%; nine samples above 20%, the longest consecutive run of
+those being two against a bound of three. Every sample carries the
+input to each condition rather than only its verdict, so the record
+answers directly whether a build process was running at any sample it
+contains.
+
+Seven attempts voided before this one completed — four on the
+above-100% clause, which acts on sight, and three on the
+three-consecutive-sample clause. The revised persistence rule is
+therefore not one that admits everything: both of its branches
+refused windows in the field, and one of the three-sample refusals
+caught a process belonging to the session's own tooling rather than
+any daemon, which is what a rule that watches the machine rather than
+a list of expected offenders looks like when it works.
 
 Per-row figures came with it as confirmation, the acceptance source
-unchanged: fourteen of the sixteen row-and-route p99s at or below the
-source run's, and the two above it higher by one to three reporting
-units, both far inside their own bounds. Those bounds were decided on
-the source run and are not reopened here.
+unchanged. **Every row came in inside its pre-registered bound**, on
+both quit routes, at two hundred valid trials with no predicate
+misses. Secondarily, thirteen of the sixteen row-and-route p99s are
+at or below the source run's; the three above it are higher by five
+to sixteen microseconds and all three sit far inside their gates.
+Those bounds were decided on the source run and are not reopened
+here.
 
 **The slope's sign is not a stable quantity, and the bound never
 depended on it.** Across the calibration runs that have produced one
