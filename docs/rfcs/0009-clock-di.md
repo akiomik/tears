@@ -245,10 +245,12 @@ sits outside the axis this rule governs (like network latency, it was
 never virtual).
 
 Outside library code, exactly one deliberate exception exists:
-`benches/runtime_load.rs` measures real wall-clock latency because
+`benches/kernel_load.rs` measures real wall-clock latency because
 RFC 0006's statistical acceptance criteria are defined on real time.
-The §4.1 migration, which landed the lint configuration, added an
-explicit lint allow at the bench's measurement sites in the same change. Unit
+The allow is per measurement site rather than file-wide — the form the
+§4.1 migration established when it landed the lint configuration — and
+`clippy.toml` names the harness, so the exception cannot widen without
+the inventory here and the lint moving together. Unit
 and integration tests contain no `std::time` reads today and fall under
 the same rule.
 
@@ -690,7 +692,7 @@ consumers (§5) does.
   conforming inventory rows.
 - `src/subscription/http/cell.rs`, `src/subscription/http/query.rs` —
   the §4.1 migration sites.
-- `benches/runtime_load.rs` — the named real-time exception.
+- `benches/kernel_load.rs` — the named real-time exception.
 - `clippy.toml` — INV-C1's mechanical enforcement site.
 - `src/testing.rs` (module doc), `src/subscription/http/config.rs`
   (`QueryConfig`) — the §5.5 recipe's rustdoc homes.
