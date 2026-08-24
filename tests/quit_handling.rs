@@ -99,7 +99,7 @@ impl Application for DelayedQuitApp {
         let cmd = Command::future(async {
             sleep(Duration::from_millis(50)).await;
         });
-        (Self, cmd)
+        (Self, cmd.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {

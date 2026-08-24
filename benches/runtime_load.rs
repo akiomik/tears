@@ -163,10 +163,6 @@ struct ScenarioCfg {
     /// message with this seq, instead of quitting at `total`. The flood keeps
     /// the backlog deep past this point, so the quit races a loaded loop.
     quit_at_seq: Option<u64>,
-    /// Route the triggered quit through a keyed (cancellable) command, i.e.
-    /// the command's private channel, instead of an unkeyed command's direct
-    /// send to the dedicated quit channel.
-    keyed_quit: bool,
     /// Delivery mode the runtime is built in (default/unbounded vs the §5.1
     /// bounded configuration).
     mode: Mode,
@@ -228,7 +224,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(30),
@@ -242,7 +237,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(30),
@@ -257,7 +251,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(30),
@@ -272,7 +265,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(60),
@@ -287,7 +279,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: true,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(30),
@@ -303,7 +294,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: true,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Default,
             max_wall: Duration::from_secs(60),
@@ -320,7 +310,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Bounded,
             max_wall: Duration::from_secs(30),
@@ -333,7 +322,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: false,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Bounded,
             max_wall: Duration::from_secs(60),
@@ -346,7 +334,6 @@ fn scenarios() -> Vec<ScenarioCfg> {
             render_cost: Duration::from_micros(500),
             keyed_probe: true,
             quit_at_seq: None,
-            keyed_quit: false,
             producers: 1,
             mode: Mode::Bounded,
             max_wall: Duration::from_secs(60),
@@ -361,7 +348,6 @@ const QUIT_TRIALS: u32 = 200;
 /// Trials for the keyed quit scenario. Each trial drains the whole backlog
 /// before the quit is delivered, so trials are long and the expected effect
 /// (latency ~ drain time) is orders of magnitude above trial noise.
-const KEYED_QUIT_TRIALS: u32 = 20;
 
 #[expect(clippy::too_many_lines, reason = "a flat table of scenario literals")]
 fn quit_scenarios() -> Vec<QuitScenarioCfg> {
@@ -376,7 +362,6 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
         render_cost: Duration::from_micros(500),
         keyed_probe: false,
         quit_at_seq: Some(5_000),
-        keyed_quit: false,
         producers: 1,
         mode: Mode::Default,
         max_wall: Duration::from_secs(30),
@@ -424,19 +409,6 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
                 ..base.clone()
             },
             trials: QUIT_TRIALS,
-            valid_trial: ValidTrial::Always,
-        },
-        // Keyed quit under the 50k backlog: delivered through the command's
-        // private channel, so INV-14 shared-first pull defers it until the
-        // shared backlog drains (expected latency ~ full drain time).
-        QuitScenarioCfg {
-            base: ScenarioCfg {
-                name: "quit_keyed_backlog_50k",
-                total: 55_000,
-                keyed_quit: true,
-                ..base.clone()
-            },
-            trials: KEYED_QUIT_TRIALS,
             valid_trial: ValidTrial::Always,
         },
         // Bounded quit rows (RFC 0007 §5.2). Under the §5.1 configuration the
@@ -490,17 +462,6 @@ fn quit_scenarios() -> Vec<QuitScenarioCfg> {
             },
             trials: QUIT_TRIALS,
             valid_trial: ValidTrial::Churn,
-        },
-        QuitScenarioCfg {
-            base: ScenarioCfg {
-                name: "quit_keyed_bounded",
-                total: 500_000,
-                keyed_quit: true,
-                mode: Mode::Bounded,
-                ..base
-            },
-            trials: KEYED_QUIT_TRIALS,
-            valid_trial: ValidTrial::BlockedAtLeast(1),
         },
     ]
 }
@@ -939,7 +900,9 @@ impl Application for LoadApp {
             let probes = IntervalStream::new(ticker).map(|_| Msg::KeyedProbe {
                 sent_at: Instant::now(),
             });
-            Command::stream(probes).cancellable(CommandId::new("keyed-probe"))
+            Command::stream(probes)
+                .cancellable(CommandId::new("keyed-probe"))
+                .into()
         } else {
             Command::none()
         };
@@ -1003,14 +966,12 @@ impl Application for LoadApp {
                     self.metrics
                         .quit_requested_ns
                         .store(self.metrics.elapsed_ns(), Ordering::Relaxed);
-                    // The unkeyed quit is sent by its command task straight to
-                    // the dedicated quit channel; the keyed variant travels the
-                    // command's private channel instead (RFC 0006 section 4.2).
-                    return if self.cfg.keyed_quit {
-                        Command::quit().cancellable(CommandId::new("quit"))
-                    } else {
-                        Command::quit()
-                    };
+                    // The quit is sent by its command task straight to the
+                    // dedicated quit channel (RFC 0006 §4.2). The keyed variant
+                    // that travelled a command's private channel is gone with
+                    // the shape that expressed it: a spawn key attaches to an
+                    // effect carrier, and `Command::quit()` is not one.
+                    return Command::quit();
                 }
                 Command::none()
             }
@@ -1346,11 +1307,10 @@ fn print_quit_report(report: &QuitReport) {
         format!("{}/s", cfg.rate)
     };
     println!(
-        "   load: rate={rate} total={} update_cost={:?} quit_at_seq={} keyed_quit={}",
+        "   load: rate={rate} total={} update_cost={:?} quit_at_seq={}",
         cfg.total,
         cfg.update_cost,
         cfg.quit_at_seq.expect("quit scenarios set quit_at_seq"),
-        cfg.keyed_quit,
     );
     println!(
         "   trials: {} valid / {} required ({} attempts, {} predicate misses, \
@@ -1727,7 +1687,9 @@ struct KeyedIsolationApp {
 impl KeyedIsolationApp {
     fn spawn_key(&self, key: usize) -> Command<IsoMsg> {
         let counter = Arc::clone(&self.iso.key_yields[key]);
-        Command::stream(iso_keyed_stream(counter)).cancellable(CommandId::new(key as u64))
+        Command::stream(iso_keyed_stream(counter))
+            .cancellable(CommandId::new(key as u64))
+            .into()
     }
 }
 

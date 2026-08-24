@@ -268,7 +268,7 @@ fn a_cleanup_run_counts_in_no_gauge_field() {
     let started = Beacon::default();
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
+            parking_effect([1]).into(),
             Command::on_teardown({
                 let started = started.clone();
                 async move {

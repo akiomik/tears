@@ -864,6 +864,7 @@ mod tests {
             runtime.core.enqueue_command(
                 Command::future(pending::<TestMessage>())
                     .cancellable(CommandId::new("keyed"))
+                    .into_command()
                     .into_runtime_parts(),
             );
             assert_eq!(
@@ -1210,6 +1211,7 @@ mod tests {
         runtime.core.enqueue_command(
             Command::stream(iter([Message::Result(1), Message::Result(2)]))
                 .cancellable(id.clone())
+                .into_command()
                 .into_runtime_parts(),
         );
         wait_until(
@@ -1234,82 +1236,6 @@ mod tests {
 
         assert!(runtime.core.app.results.is_empty());
         assert!(runtime.core.app_inputs.try_next_ready().is_none());
-    }
-
-    #[tokio::test]
-    async fn keep_in_flight_applies_redraw_and_cancels_before_dropping_new_stream() {
-        struct DropGuard(Arc<AtomicBool>);
-
-        impl Drop for DropGuard {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let keep_id = CommandId::new("kept");
-        let cancel_id = CommandId::new("cancelled");
-        let kept_dropped = Arc::new(AtomicBool::new(false));
-        let cancelled_dropped = Arc::new(AtomicBool::new(false));
-        let arrival_dropped = Arc::new(AtomicBool::new(false));
-        let (kept_started_tx, kept_started_rx) = oneshot::channel();
-        let (cancelled_started_tx, cancelled_started_rx) = oneshot::channel();
-        let mut runtime = Runtime::<TestApp>::new(0, frame_rate(60));
-
-        let kept_guard = DropGuard(Arc::clone(&kept_dropped));
-        runtime.core.enqueue_command(
-            Command::future(async move {
-                let _guard = kept_guard;
-                let _ = kept_started_tx.send(());
-                pending::<TestMessage>().await
-            })
-            .cancellable(keep_id.clone())
-            .into_runtime_parts(),
-        );
-        let cancelled_guard = DropGuard(Arc::clone(&cancelled_dropped));
-        runtime.core.enqueue_command(
-            Command::future(async move {
-                let _guard = cancelled_guard;
-                let _ = cancelled_started_tx.send(());
-                pending::<TestMessage>().await
-            })
-            .cancellable(cancel_id.clone())
-            .into_runtime_parts(),
-        );
-        timeout(Duration::from_secs(1), kept_started_rx)
-            .await
-            .expect("kept command should start before the timeout")
-            .expect("kept command should signal that it started");
-        timeout(Duration::from_secs(1), cancelled_started_rx)
-            .await
-            .expect("cancelled command should start before the timeout")
-            .expect("cancelled command should signal that it started");
-
-        runtime.scheduler.pending.needs_redraw = false;
-        let arrival_guard = DropGuard(Arc::clone(&arrival_dropped));
-        let dropped_arrival = Command::future(async move {
-            let _guard = arrival_guard;
-            pending::<TestMessage>().await
-        });
-        let command = Command::batch([Command::cancel(cancel_id), dropped_arrival])
-            .cancellable_with(keep_id, CancelPolicy::KeepInFlight);
-
-        runtime.dispatch_update_command(command);
-
-        assert!(runtime.scheduler.pending.needs_redraw);
-        assert!(arrival_dropped.load(Ordering::SeqCst));
-        assert!(!kept_dropped.load(Ordering::SeqCst));
-        wait_until(
-            || cancelled_dropped.load(Ordering::SeqCst),
-            "explicit cancels should be applied before KeepInFlight drops the arrival",
-        )
-        .await;
-
-        runtime.core.shutdown();
-        wait_until(
-            || kept_dropped.load(Ordering::SeqCst),
-            "shutdown should clean up the kept command",
-        )
-        .await;
     }
 
     /// Derives the scoped `CommandId` that `.cancellable(CommandId::new(local)).scoped(scope)`
@@ -1360,12 +1286,14 @@ mod tests {
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable(CommandId::new("search"))
                 .scoped("pane-a")
+                .into_command()
                 .into_runtime_parts(),
         );
         runtime.core.enqueue_command(
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable(CommandId::new("search"))
                 .scoped("pane-b")
+                .into_command()
                 .into_runtime_parts(),
         );
 
@@ -1413,6 +1341,7 @@ mod tests {
             })
             .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
             .scoped("pane-a")
+            .into_command()
             .into_runtime_parts(),
         );
         timeout(Duration::from_secs(1), pane_a_started_rx)
@@ -1427,6 +1356,7 @@ mod tests {
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
                 .scoped("pane-b")
+                .into_command()
                 .into_runtime_parts(),
         );
 
@@ -1461,12 +1391,14 @@ mod tests {
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable(CommandId::new("search"))
                 .scoped(CollidingScope(1))
+                .into_command()
                 .into_runtime_parts(),
         );
         runtime.core.enqueue_command(
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable(CommandId::new("search"))
                 .scoped(CollidingScope(2))
+                .into_command()
                 .into_runtime_parts(),
         );
 
@@ -1511,6 +1443,7 @@ mod tests {
             })
             .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
             .scoped(CollidingScope(1))
+            .into_command()
             .into_runtime_parts(),
         );
         timeout(Duration::from_secs(1), scope_a_started_rx)
@@ -1526,6 +1459,7 @@ mod tests {
             Command::stream(iter([TestMessage::Increment]))
                 .cancellable_with(CommandId::new("search"), CancelPolicy::KeepInFlight)
                 .scoped(CollidingScope(2))
+                .into_command()
                 .into_runtime_parts(),
         );
 
@@ -1571,6 +1505,7 @@ mod tests {
             })
             .cancellable(CommandId::new("search"))
             .scoped(CollidingScope(1))
+            .into_command()
             .into_runtime_parts(),
         );
         let guard_b = DropGuard(Arc::clone(&scope_b_dropped));
@@ -1582,6 +1517,7 @@ mod tests {
             })
             .cancellable(CommandId::new("search"))
             .scoped(CollidingScope(2))
+            .into_command()
             .into_runtime_parts(),
         );
         timeout(Duration::from_secs(1), scope_a_started_rx)
@@ -1599,6 +1535,7 @@ mod tests {
             Command::future(pending::<TestMessage>())
                 .cancellable(CommandId::new("search"))
                 .scoped(CollidingScope(1))
+                .into_command()
                 .into_runtime_parts(),
         );
 
@@ -1613,38 +1550,6 @@ mod tests {
         );
 
         runtime.core.shutdown();
-    }
-
-    #[tokio::test]
-    async fn live_keyed_quit_exits_the_runtime() -> Result<()> {
-        struct KeyedQuitApp;
-
-        impl Application for KeyedQuitApp {
-            type Message = ();
-            type Flags = ();
-
-            fn new((): ()) -> (Self, Command<Self::Message>) {
-                (Self, Command::quit().cancellable(CommandId::new("quit")))
-            }
-
-            fn update(&mut self, (): ()) -> Command<Self::Message> {
-                Command::none()
-            }
-
-            fn view(&self, _frame: &mut Frame<'_>) {}
-
-            fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-                Vec::new()
-            }
-        }
-
-        let runtime = Runtime::<KeyedQuitApp>::new((), frame_rate(60));
-        let mut terminal = Terminal::new(TestBackend::new(80, 24))?;
-
-        timeout(Duration::from_secs(1), runtime.run(&mut terminal))
-            .await
-            .expect("live keyed quit should stop the runtime")?;
-        Ok(())
     }
 
     // Quit must terminate the loop even while idle, i.e. after the initial frame

@@ -38,6 +38,7 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::Notify;
 use tokio::task::yield_now;
 
+use crate::command::effect_command::EffectCommand;
 use crate::command::{Action, Command};
 use crate::kernel::Kernel;
 use crate::kernel::arbiter::WakeSource;
@@ -733,9 +734,9 @@ pub struct Script {
 impl Script {
     /// A script whose `init` returns `init` and whose `reduce` returns
     /// nothing.
-    pub fn new(init: Command<u8>) -> Self {
+    pub fn new(init: impl Into<Command<u8>>) -> Self {
         Self {
-            init,
+            init: init.into(),
             replies: VecDeque::new(),
             mocks: Vec::new(),
             feeds: Vec::new(),
@@ -750,8 +751,8 @@ impl Script {
 
     /// The commands `reduce` returns, one per delivered message in order.
     #[must_use]
-    pub fn replying(mut self, replies: impl IntoIterator<Item = Command<u8>>) -> Self {
-        self.replies = replies.into_iter().collect();
+    pub fn replying(mut self, replies: impl IntoIterator<Item = impl Into<Command<u8>>>) -> Self {
+        self.replies = replies.into_iter().map(Into::into).collect();
         self
     }
 
@@ -1118,12 +1119,12 @@ pub fn accept_within<P: Program, B: Backend>(
 
 /// An effect that never produces and never ends, so a run exists to name and
 /// no output arrives unbidden.
-pub fn silent_effect() -> Command<u8> {
+pub fn silent_effect() -> EffectCommand<u8> {
     Command::stream(stream::pending())
 }
 
 /// An effect that sends each of `messages` and then ends.
-pub fn sending_effect<I>(messages: I) -> Command<u8>
+pub fn sending_effect<I>(messages: I) -> EffectCommand<u8>
 where
     I: IntoIterator<Item = u8>,
     I::IntoIter: Send + 'static,
@@ -1133,7 +1134,7 @@ where
 
 /// An effect that sends each of `messages` and then parks forever, so its
 /// run outlives its own output and no exit accompanies the sends.
-pub fn parking_effect<I>(messages: I) -> Command<u8>
+pub fn parking_effect<I>(messages: I) -> EffectCommand<u8>
 where
     I: IntoIterator<Item = u8>,
     I::IntoIter: Send + 'static,
@@ -1143,7 +1144,7 @@ where
 
 /// An effect that marks `beacon` and then ends, sending nothing — the shape
 /// a cleanup finalizer has, and the one a `settle` predicate watches for.
-pub fn marking_effect(beacon: Beacon) -> Command<u8> {
+pub fn marking_effect(beacon: Beacon) -> EffectCommand<u8> {
     Command::stream(stream::unfold(Some(beacon), |state| async move {
         state?.mark();
         None::<(u8, Option<Beacon>)>
@@ -1155,7 +1156,7 @@ pub fn marking_effect(beacon: Beacon) -> Command<u8> {
 ///
 /// The guard is built before the returned future, so a run reclaimed before
 /// its first poll still marks.
-pub fn holding_effect(beacon: Beacon) -> Command<u8> {
+pub fn holding_effect(beacon: Beacon) -> EffectCommand<u8> {
     let guard = DropMark::new(beacon);
     Command::stream(stream::unfold(guard, |guard| async move {
         pending::<()>().await;
@@ -1169,7 +1170,7 @@ pub fn holding_effect(beacon: Beacon) -> Command<u8> {
     clippy::panic,
     reason = "the panic class under test is a real producer panic"
 )]
-pub fn panicking_effect<I>(messages: I, panicked: Beacon) -> Command<u8>
+pub fn panicking_effect<I>(messages: I, panicked: Beacon) -> EffectCommand<u8>
 where
     I: IntoIterator<Item = u8>,
     I::IntoIter: Send + 'static,
@@ -1183,7 +1184,7 @@ where
 /// An effect that sends each of `messages`, marks `done`, and then ends —
 /// a run whose natural finish is observable from the application side, so a
 /// `settle` predicate can wait for it.
-pub fn finishing_effect(messages: Vec<u8>, done: Beacon) -> Command<u8> {
+pub fn finishing_effect(messages: Vec<u8>, done: Beacon) -> EffectCommand<u8> {
     Command::stream(
         stream::iter(messages).chain(stream::unfold(Some(done), |state| async move {
             state?.mark();
@@ -1194,7 +1195,7 @@ pub fn finishing_effect(messages: Vec<u8>, done: Beacon) -> Command<u8> {
 
 /// A producer-originated quit: the run emits one quit on the control lane
 /// and then ends (RFC 0014 §3.3).
-pub fn quitting_effect() -> Command<u8> {
+pub fn quitting_effect() -> EffectCommand<u8> {
     Command::actions(stream::once(async { Action::Quit }))
 }
 
@@ -1208,7 +1209,7 @@ pub fn quitting_effect() -> Command<u8> {
 /// quit's send returned, so it reports a commit rather than an intent — the
 /// reducer that is blocked on it resumes only once the quit is in the
 /// control lane.
-pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> Command<u8> {
+pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> EffectCommand<u8> {
     let MidBatchGate {
         open,
         committed,
@@ -1243,7 +1244,7 @@ pub fn gated_quitting_effect(messages: Vec<u8>, gate: MidBatchGate) -> Command<u
 /// `sent` is marked on the poll that follows the quit's send, which is the
 /// poll the producer body reaches only once that send committed — the
 /// application-side handshake a park witness synchronizes on.
-pub fn parked_quitting_effect(latch: Latch, sent: Beacon) -> Command<u8> {
+pub fn parked_quitting_effect(latch: Latch, sent: Beacon) -> EffectCommand<u8> {
     Command::actions(
         stream::once(async move {
             latch.wait().await;
@@ -1262,7 +1263,7 @@ pub fn parked_quitting_effect(latch: Latch, sent: Beacon) -> Command<u8> {
 /// The mark is made on the poll after the last send returned, so it is the
 /// application-side signal that the message is in the lane — and the run
 /// never ends, so no producer exit accompanies the arrival.
-pub fn latched_effect(latch: Latch, messages: Vec<u8>, sent: Beacon) -> Command<u8> {
+pub fn latched_effect(latch: Latch, messages: Vec<u8>, sent: Beacon) -> EffectCommand<u8> {
     Command::stream(stream::unfold(
         (Some(latch), messages.into_iter(), sent),
         |(latch, mut messages, sent)| async move {

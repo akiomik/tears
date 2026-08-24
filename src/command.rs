@@ -28,6 +28,7 @@ mod cancellation;
 mod cleanup;
 pub(crate) mod core;
 mod effect;
+pub(crate) mod effect_command;
 mod kernel_parts;
 mod retry;
 mod runtime_directives;

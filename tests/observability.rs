@@ -47,13 +47,15 @@ impl Application for GaugeApp {
     fn new((): ()) -> (Self, Command<Self::Message>) {
         (
             Self,
-            Command::future(pending::<Msg>()).cancellable(CommandId::new("keyed")),
+            Command::future(pending::<Msg>())
+                .cancellable(CommandId::new("keyed"))
+                .into(),
         )
     }
 
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
         match msg {
-            Msg::Tick => Command::future(async { Msg::Quit }),
+            Msg::Tick => Command::future(async { Msg::Quit }).into(),
             Msg::Quit => Command::quit(),
         }
     }

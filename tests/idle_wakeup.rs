@@ -48,7 +48,7 @@ impl Application for IdleThenQuitApp {
             sleep(IDLE_WINDOW).await;
             Wake
         });
-        (Self { renders }, cmd)
+        (Self { renders }, cmd.into())
     }
 
     fn update(&mut self, _msg: Wake) -> Command<Self::Message> {

@@ -407,7 +407,7 @@ impl<P: Program> Kernel<P> {
     /// forced, which is what leaves `without_redraw` meaningful for a
     /// command whose `update` ran (RFC 0002's separation).
     pub fn dispatch(&mut self, command: Command<P::Message>) {
-        let plan = lowering::dispatch_plan(lowering::lower(command.into_runtime_parts()));
+        let plan = lowering::dispatch_plan(command.into_runtime_parts().into_kernel_parts());
         self.redraw_pending |= plan.redraw;
         for step in plan.steps {
             match step {
@@ -855,7 +855,7 @@ mod tests {
     /// An effect that never produces and never ends, so a run exists to
     /// attribute injected envelopes to and no output arrives unbidden.
     fn silent_effect() -> Command<u8> {
-        Command::stream(stream::pending())
+        Command::stream(stream::pending()).into()
     }
 
     impl Kernel<Probe> {
@@ -1150,8 +1150,10 @@ mod tests {
     #[tokio::test]
     async fn parking_wakes_on_a_producer_exit() {
         let mut screen = terminal();
-        let (mut kernel, _journal) =
-            kernel(Setup::new(Command::stream(stream::empty())), &config());
+        let (mut kernel, _journal) = kernel(
+            Setup::new(Command::stream(stream::empty()).into()),
+            &config(),
+        );
         let report = kernel.boot(&mut screen).expect("the test backend renders");
         let run = report.producers[0].token;
 
@@ -1174,7 +1176,7 @@ mod tests {
     async fn a_production_kernel_records_nothing_in_either_ledger() {
         let mut screen = terminal();
         let (mut kernel, journal) = kernel(
-            Setup::new(Command::stream(stream::iter(1..=4_u8))),
+            Setup::new(Command::stream(stream::iter(1..=4_u8)).into()),
             &config(),
         );
         kernel.boot(&mut screen).expect("the test backend renders");

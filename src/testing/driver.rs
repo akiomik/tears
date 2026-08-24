@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     fn an_init_quit_terminates_during_boot() {
         let (mut driver, _journal) = driver(Script::new(Command::batch([
-            silent_effect(),
+            silent_effect().into(),
             Command::quit(),
         ])));
 

@@ -10,14 +10,15 @@ use std::time::Duration;
 
 #[cfg(test)]
 use futures::stream::BoxStream;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt, stream};
 
 use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
-use super::cancellation::{CancelPolicy, CancellableCommand, CommandCancellation, CommandId};
+use super::cancellation::{CancellableCommand, CommandCancellation, CommandId};
 use super::cleanup::CleanupRegistration;
-use super::effect::Effect;
+use super::effect::{Effect, Leaf};
+use super::effect_command::EffectCommand;
 use super::retry::{self, RetryContext, RetryError, RetryPolicy};
 use super::runtime_directives::RuntimeDirectives;
 use super::runtime_parts::RuntimeCommandParts;
@@ -72,6 +73,29 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
+    /// The command one [`EffectCommand`] carrier makes — the whole body of
+    /// the one-way conversion between them.
+    ///
+    /// The key is written twice on purpose, and only until the switch. A
+    /// carrier's key is the reading the kernel lowers from; the command-level
+    /// `cancellation.key` is the one the superseded runtime reads, and it is
+    /// still the authoritative production path. With exactly one carrier the
+    /// two readings cannot disagree, which is what lets both consumers stand
+    /// while only one of them is live. The command-level half goes when the
+    /// runtime that reads it does.
+    pub(super) fn from_carrier(leaf: Leaf<Msg>, directives: RuntimeDirectives) -> Self {
+        Self {
+            cancellation: CommandCancellation {
+                key: leaf.key.clone(),
+                cancels: Vec::new(),
+            },
+            directives,
+            effect: Effect::from_leaf(leaf),
+            teardowns: Vec::new(),
+            cleanups: Vec::new(),
+        }
+    }
+
     /// Create a command with no side-effect stream.
     ///
     /// A stream-less command may still carry runtime attributes after applying
@@ -103,7 +127,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let cmd: Command<i32> = Command::none();
     /// assert!(cmd.is_none());
     ///
-    /// let cmd = Command::perform(async { 42 }, |x| x);
+    /// let cmd: Command<i32> = Command::perform(async { 42 }, |x| x).into();
     /// assert!(!cmd.is_none());
     /// ```
     #[must_use]
@@ -121,7 +145,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// ```
     /// use tears::prelude::*;
     ///
-    /// let cmd = Command::perform(async { 42 }, |x| x);
+    /// let cmd: Command<i32> = Command::perform(async { 42 }, |x| x).into();
     /// assert!(cmd.is_some());
     ///
     /// let cmd: Command<i32> = Command::none();
@@ -167,89 +191,17 @@ impl<Msg: Send + 'static> Command<Msg> {
         self
     }
 
-    /// Runs this command under `id`, replacing any deliverable same-id command.
-    ///
-    /// Cancellation is strict for output delivery: after replacement, buffered
-    /// messages and quit requests from the old command cannot affect the app.
-    /// This does not roll back external side effects that already occurred.
-    ///
-    /// A cancellation key applies to this top-level command only. If this
-    /// command is later passed as a child to [`Command::batch`], its key is
-    /// ignored; apply `cancellable` to the resulting batch instead.
-    ///
-    /// # Ordering with `scoped`
-    ///
-    /// [`Command::scoped`] only qualifies lifecycle ids already present when
-    /// it is called; it is a boundary operation, not a mode inherited by
-    /// later modifiers. Calling `cancellable` *after* `scoped` therefore
-    /// installs a new, unscoped, root-global key:
-    ///
-    /// ```
-    /// use tears::prelude::*;
-    /// use tears::command::CommandId;
-    ///
-    /// // Scoped key: `scoped` qualifies the id already attached by `cancellable`.
-    /// let scoped_first = Command::message(1)
-    ///     .cancellable(CommandId::new("load"))
-    ///     .scoped("pane-1");
-    ///
-    /// // Root-global key: `cancellable` runs after `scoped`, so its id is not scoped.
-    /// let scoped_then_global = Command::message(1)
-    ///     .scoped("pane-1")
-    ///     .cancellable(CommandId::new("load"));
-    /// ```
-    #[must_use = "cancellable consumes the command and returns the modified value"]
-    pub fn cancellable(self, id: CommandId) -> Self {
-        self.cancellable_with(id, CancelPolicy::CancelInFlight)
-    }
-
-    /// Runs this command under `id` using the supplied same-id policy.
-    ///
-    /// [`CancelPolicy::CancelInFlight`] replaces current deliverable work;
-    /// [`CancelPolicy::KeepInFlight`] discards this command's stream while the
-    /// id is occupied. Runtime directives and explicit cancels still apply.
-    ///
-    /// A cancellation key applies to this top-level command only. Child keys
-    /// are ignored by [`Command::batch`]; key the resulting batch when the whole
-    /// batch should share one lifecycle.
-    ///
-    /// # Ordering with `scoped`
-    ///
-    /// [`Command::scoped`] only qualifies lifecycle ids already present when
-    /// it is called; it is a boundary operation, not a mode inherited by
-    /// later modifiers. Calling `cancellable_with` *after* `scoped` therefore
-    /// installs a new, unscoped, root-global key:
-    ///
-    /// ```
-    /// use tears::prelude::*;
-    /// use tears::command::{CancelPolicy, CommandId};
-    ///
-    /// // Scoped key: `scoped` qualifies the id already attached by `cancellable_with`.
-    /// let scoped_first = Command::message(1)
-    ///     .cancellable_with(CommandId::new("load"), CancelPolicy::KeepInFlight)
-    ///     .scoped("pane-1");
-    ///
-    /// // Root-global key: `cancellable_with` runs after `scoped`, so its id is not scoped.
-    /// let scoped_then_global = Command::message(1)
-    ///     .scoped("pane-1")
-    ///     .cancellable_with(CommandId::new("load"), CancelPolicy::KeepInFlight);
-    /// ```
-    #[must_use = "cancellable_with consumes the command and returns the modified value"]
-    pub fn cancellable_with(mut self, id: CommandId, policy: CancelPolicy) -> Self {
-        self.cancellation.key = Some(CancellableCommand { id, policy });
-        self
-    }
-
     /// Qualifies this command's lifecycle ids with one structural scope
     /// segment, expressing that this command belongs to a distinct child
     /// composition boundary (see RFC 0005 section 4.3).
     ///
-    /// `scoped` prepends `scope` to the keyed spawn id (if
-    /// [`Command::cancellable`] or [`Command::cancellable_with`] was already
-    /// called) and to every explicit cancel id already present, for example
-    /// from [`Command::cancel`] or a folded [`Command::batch`]. It does not
-    /// touch the effect stream, message mapping, redraw directive, timeout,
-    /// retry wrapper, or output.
+    /// `scoped` prepends `scope` to every carrier's spawn key (attached by
+    /// [`EffectCommand::cancellable`] or
+    /// [`EffectCommand::cancellable_with`] before the carrier became part of
+    /// this command) and to every explicit cancel id already present, for
+    /// example from [`Command::cancel`] or a [`Command::batch`] child. It
+    /// does not touch the effect stream, message mapping, redraw directive,
+    /// timeout, retry wrapper, or output.
     ///
     /// [`Command::none().scoped(scope)`](Command::none) is lifecycle-inert:
     /// there is no spawn key or explicit cancel to qualify.
@@ -258,14 +210,14 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// `scoped` is a boundary operation over lifecycle metadata already
     /// present at the call site, not a persistent mode inherited by later
-    /// modifiers. `work.cancellable(id).scoped(scope)` scopes `id`, while
+    /// modifiers. The ordering examples live on
+    /// [`EffectCommand::cancellable_with`], where the two keying modifiers
+    /// are: `work.cancellable(id).scoped(scope)` scopes `id`, while
     /// `work.scoped(scope).cancellable(id)` attaches `id` as a new,
-    /// unscoped, root-global key — see the ordering examples on
-    /// [`Command::cancellable`] and [`Command::cancellable_with`]. No
-    /// diagnostic is emitted when `cancellable` follows `scoped`, because a
-    /// later root-global key can be an intentional composition (a
-    /// pane-scoped effect participating in an application-wide slot), not
-    /// only a mistake.
+    /// unscoped, root-global key. No diagnostic is emitted for the second
+    /// order, because a later root-global key can be an intentional
+    /// composition (a pane-scoped effect participating in an
+    /// application-wide slot), not only a mistake.
     ///
     /// # Examples
     ///
@@ -503,7 +455,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Message::Loaded,
     /// );
     /// ```
-    pub fn retry<A, E, Fut, Op, F>(policy: RetryPolicy, operation: Op, f: F) -> Self
+    pub fn retry<A, E, Fut, Op, F>(policy: RetryPolicy, operation: Op, f: F) -> EffectCommand<Msg>
     where
         A: Send + 'static,
         E: Send + 'static,
@@ -531,7 +483,7 @@ impl<Msg: Send + 'static> Command<Msg> {
         operation: Op,
         should_retry: P,
         f: F,
-    ) -> Self
+    ) -> EffectCommand<Msg>
     where
         A: Send + 'static,
         E: Send + 'static,
@@ -562,7 +514,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub fn perform<A>(
         future: impl Future<Output = A> + Send + 'static,
         f: impl FnOnce(A) -> Msg + Send + 'static,
-    ) -> Self {
+    ) -> EffectCommand<Msg> {
         Self::future(future.map(f))
     }
 
@@ -575,8 +527,8 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::future(async { 42 });
     /// ```
-    pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
-        Self::with_effect(Effect::future(future))
+    pub fn future(future: impl Future<Output = Msg> + Send + 'static) -> EffectCommand<Msg> {
+        EffectCommand::from_action_stream(future.into_stream().map(Action::Message).boxed())
     }
 
     /// Send a message to the application immediately.
@@ -592,7 +544,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// let cmd = Command::message(Message::Refresh);
     /// ```
-    pub fn message(msg: Msg) -> Self {
+    pub fn message(msg: Msg) -> EffectCommand<Msg> {
         Self::effect(Action::Message(msg))
     }
 
@@ -613,8 +565,8 @@ impl<Msg: Send + 'static> Command<Msg> {
         Self::with_effect(Effect::immediate_quit())
     }
 
-    fn effect(action: Action<Msg>) -> Self {
-        Self::with_effect(Effect::action(action))
+    fn effect(action: Action<Msg>) -> EffectCommand<Msg> {
+        EffectCommand::from_action_stream(stream::once(async move { action }).boxed())
     }
 
     /// An ordinary effect carrier built from a stream of raw actions.
@@ -630,8 +582,10 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// public spelling belongs to the effect-constructor work RFC 0014 §13
     /// leaves open, not here.
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn actions(stream: impl Stream<Item = Action<Msg>> + Send + 'static) -> Self {
-        Self::with_effect(Effect::from_stream(stream.boxed()))
+    pub(crate) fn actions(
+        stream: impl Stream<Item = Action<Msg>> + Send + 'static,
+    ) -> EffectCommand<Msg> {
+        EffectCommand::from_action_stream(stream.boxed())
     }
 
     /// Batch multiple commands into a single command.
@@ -654,7 +608,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///     Command::perform(async { "data".to_string() }, Message::Second),
     /// ]);
     /// ```
-    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
+    pub fn batch<C: Into<Self>>(commands: impl IntoIterator<Item = C>) -> Self {
         let mut directives = RuntimeDirectives::DEFAULT.without_redraw();
         let mut any_child = false;
         let mut effects = Vec::new();
@@ -662,7 +616,8 @@ impl<Msg: Send + 'static> Command<Msg> {
         let mut teardowns = Vec::new();
         let mut cleanups = Vec::new();
 
-        for mut cmd in commands {
+        for cmd in commands {
+            let cmd = cmd.into();
             any_child = true;
             directives = directives.combine(cmd.directives);
             if let Some(key) = cmd.cancellation.key {
@@ -671,19 +626,17 @@ impl<Msg: Send + 'static> Command<Msg> {
                     id = ?key.id,
                     "cancellable child key ignored by Command::batch"
                 );
-                // The warning still describes this runtime, which spawns
-                // one folded stream per command and so has no place to put
-                // a second key. It stops describing anything once the
-                // kernel is the only consumer of this lowering — a key
-                // reaching a batch is then honoured rather than ignored —
-                // so the warning is removed with the switch that lands
-                // RFC 0014 §9 row 3's supersession, not before. Pushing the
-                // key down onto the child's own carriers keeps it available
-                // to the kernel, which lowers each carrier to an
-                // independent keyed entry (RFC 0014
-                // §3.4) — until then the metadata is unreachable through
-                // `into_execution_parts`.
-                cmd.effect.attach_key(&key);
+                // The warning still describes this runtime, which spawns one
+                // folded stream per command and so has no place to put a
+                // second key. It stops describing anything once the kernel is
+                // the only consumer of this lowering — a key reaching a batch
+                // child is then honoured rather than ignored — so it is
+                // removed with the switch that lands RFC 0014 §9 row 3's
+                // supersession, not before. Nothing is pushed down here: the
+                // key already sits on the child's own carrier, written there
+                // when the carrier became a command, and the command-level
+                // copy this reads is the superseded runtime's reading of the
+                // same single carrier.
             }
             cancels.extend(cmd.cancellation.cancels);
             teardowns.extend(cmd.teardowns);
@@ -715,8 +668,8 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// let messages = stream::iter(vec![1, 2, 3]);
     /// let cmd = Command::stream(messages);
     /// ```
-    pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
-        Self::with_effect(Effect::stream(stream))
+    pub fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> EffectCommand<Msg> {
+        EffectCommand::from_action_stream(stream.map(Action::Message).boxed())
     }
 
     /// Run a stream and convert each item to a message.
@@ -735,7 +688,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     pub fn run<A>(
         stream: impl Stream<Item = A> + Send + 'static,
         f: impl Fn(A) -> Msg + Send + 'static,
-    ) -> Self
+    ) -> EffectCommand<Msg>
     where
         Msg: 'static,
     {
@@ -766,7 +719,8 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// // Create a command that produces Result<String, String>
     /// let cmd: Command<Result<String, String>> = Command::future(async {
     ///     Ok("data".to_string())
-    /// });
+    /// })
+    /// .into();
     ///
     /// // Map it to your application's message type
     /// let cmd = cmd.map(Message::DataLoaded);
@@ -822,20 +776,36 @@ mod tests {
     use tokio::time::{advance, sleep};
     use tracing::Level;
 
-    use crate::command::KernelParts;
+    use crate::command::{CancelPolicy, KernelParts};
     use crate::test_support::TraceRecorder;
 
     #[test]
     fn test_redraw_defaults_to_true_for_constructors() {
         assert!(Command::<i32>::none().requests_redraw());
-        assert!(Command::message(1).requests_redraw());
-        assert!(Command::future(async { 1 }).requests_redraw());
-        assert!(Command::perform(async { 1 }, |value| value).requests_redraw());
+        assert!(Command::message(1).into_command().requests_redraw());
+        assert!(
+            Command::future(async { 1 })
+                .into_command()
+                .requests_redraw()
+        );
+        assert!(
+            Command::perform(async { 1 }, |value| value)
+                .into_command()
+                .requests_redraw()
+        );
         assert!(Command::<i32>::quit().requests_redraw());
-        assert!(Command::stream(stream::iter(vec![1])).requests_redraw());
-        assert!(Command::run(stream::iter(vec![1]), |value| value).requests_redraw());
+        assert!(
+            Command::stream(stream::iter(vec![1]))
+                .into_command()
+                .requests_redraw()
+        );
+        assert!(
+            Command::run(stream::iter(vec![1]), |value| value)
+                .into_command()
+                .requests_redraw()
+        );
         assert!(Command::batch(vec![Command::<i32>::none()]).requests_redraw());
-        assert!(Command::<i32>::batch(vec![]).requests_redraw());
+        assert!(Command::<i32>::batch(Vec::<Command<i32>>::new()).requests_redraw());
     }
 
     #[test]
@@ -857,7 +827,11 @@ mod tests {
         let command = Command::message(1)
             .cancellable_with(CommandId::new("first"), CancelPolicy::KeepInFlight)
             .cancellable(CommandId::new("second"));
-        let key = command.cancellation.key.expect("key should be present");
+        let key = command
+            .into_command()
+            .cancellation
+            .key
+            .expect("key should be present");
 
         assert_eq!(key.id, CommandId::new("second"));
         assert_eq!(key.policy, CancelPolicy::CancelInFlight);
@@ -869,7 +843,12 @@ mod tests {
         let scoped = Command::message(1)
             .cancellable(CommandId::new("load"))
             .scoped("pane-1");
-        let scoped_id = scoped.cancellation.key.expect("key should be present").id;
+        let scoped_id = scoped
+            .into_command()
+            .cancellation
+            .key
+            .expect("key should be present")
+            .id;
 
         assert_ne!(tupled, scoped_id);
     }
@@ -888,7 +867,11 @@ mod tests {
         let scoped = Command::message(1)
             .cancellable(CommandId::new("load"))
             .scoped("pane-1");
-        let key = scoped.cancellation.key.expect("key should be present");
+        let key = scoped
+            .into_command()
+            .cancellation
+            .key
+            .expect("key should be present");
 
         assert_ne!(key.id, CommandId::new("load"));
         assert_eq!(key.policy, CancelPolicy::CancelInFlight);
@@ -904,8 +887,18 @@ mod tests {
             .scoped("pane-b");
 
         assert_ne!(
-            pane_a.cancellation.key.expect("key should be present").id,
-            pane_b.cancellation.key.expect("key should be present").id
+            pane_a
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id,
+            pane_b
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id
         );
     }
 
@@ -919,8 +912,18 @@ mod tests {
             .scoped("pane-1");
 
         assert_eq!(
-            first.cancellation.key.expect("key should be present").id,
-            second.cancellation.key.expect("key should be present").id
+            first
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id,
+            second
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id
         );
     }
 
@@ -952,8 +955,18 @@ mod tests {
             .scoped(Collision(2));
 
         assert_ne!(
-            first.cancellation.key.expect("key should be present").id,
-            second.cancellation.key.expect("key should be present").id
+            first
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id,
+            second
+                .into_command()
+                .cancellation
+                .key
+                .expect("key should be present")
+                .id
         );
     }
 
@@ -962,7 +975,11 @@ mod tests {
         let command = Command::message(1)
             .scoped("pane-1")
             .cancellable(CommandId::new("load"));
-        let key = command.cancellation.key.expect("key should be present");
+        let key = command
+            .into_command()
+            .cancellation
+            .key
+            .expect("key should be present");
 
         assert_eq!(key.id, CommandId::new("load"));
     }
@@ -970,14 +987,19 @@ mod tests {
     #[test]
     fn test_mixed_scoped_cancels_stay_scoped_while_later_global_key_does_not() {
         let cancel_id = CommandId::new("old");
-        let command = Command::<i32>::cancel(cancel_id.clone())
-            .scoped("pane-1")
-            .cancellable(CommandId::new("global"));
-        let key = command.cancellation.key.expect("key should be present");
 
         // The explicit cancel present before `scoped` remains pane-scoped.
-        assert_ne!(command.cancellation.cancels[0], cancel_id);
-        // The spawn key attached after `scoped` is root-global.
+        let cancel = Command::<i32>::cancel(cancel_id.clone()).scoped("pane-1");
+        assert_ne!(cancel.cancellation.cancels[0], cancel_id);
+
+        // The spawn key attached after `scoped` is root-global. It rides an
+        // effect carrier: `cancel` is not an effect constructor, so it takes
+        // no key at all now.
+        let keyed = Command::<i32>::message(1)
+            .scoped("pane-1")
+            .cancellable(CommandId::new("global"))
+            .into_command();
+        let key = keyed.cancellation.key.expect("key should be present");
         assert_eq!(key.id, CommandId::new("global"));
     }
 
@@ -988,9 +1010,10 @@ mod tests {
 
         let batch = Command::batch([
             Command::<i32>::cancel(left_cancel.clone()).scoped("left-pane"),
-            Command::cancel(right_cancel.clone())
-                .scoped("right-pane")
-                .cancellable(CommandId::new("ignored")),
+            Command::cancel(right_cancel.clone()).scoped("right-pane"),
+            Command::message(1)
+                .cancellable(CommandId::new("ignored"))
+                .into(),
         ]);
 
         assert_eq!(batch.cancellation.cancels.len(), 2);
@@ -1028,12 +1051,21 @@ mod tests {
     fn test_map_preserves_cancellation_metadata() {
         let cancel_id = CommandId::new("old");
         let key_id = CommandId::new("current");
-        let command = Command::batch([Command::cancel(cancel_id.clone()), Command::message(1)])
-            .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
-            .map(|value| value.to_string());
-        let key = command.cancellation.key.expect("key should be present");
+        let command = Command::batch([
+            Command::<i32>::cancel(cancel_id.clone()),
+            Command::message(1)
+                .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
+                .into(),
+        ])
+        .map(|value| value.to_string());
 
         assert_eq!(command.cancellation.cancels, vec![cancel_id]);
+
+        // The key names the carrier it was attached to, so it is read there
+        // rather than off the command: keying the batch itself no longer
+        // builds (RFC 0014 §3.4).
+        let parts = kernel_parts(command);
+        let key = parts.spawns[0].key.as_ref().expect("key should be present");
         assert_eq!(key.id, key_id);
         assert_eq!(key.policy, CancelPolicy::KeepInFlight);
     }
@@ -1044,7 +1076,10 @@ mod tests {
         let second = CommandId::new("second");
         let command = Command::batch([
             Command::<i32>::cancel(first.clone()),
-            Command::cancel(second.clone()).cancellable(CommandId::new("ignored")),
+            Command::cancel(second.clone()),
+            Command::message(1)
+                .cancellable(CommandId::new("ignored"))
+                .into(),
         ]);
 
         assert_eq!(command.cancellation.cancels, vec![first, second]);
@@ -1072,7 +1107,11 @@ mod tests {
         let command = Command::future(pending::<i32>())
             .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
             .timeout(Duration::from_secs(1), || 99);
-        let key = command.cancellation.key.expect("key should be present");
+        let key = command
+            .into_command()
+            .cancellation
+            .key
+            .expect("key should be present");
 
         assert_eq!(key.id, key_id);
         assert_eq!(key.policy, CancelPolicy::KeepInFlight);
@@ -1082,7 +1121,7 @@ mod tests {
     fn test_batch_redraw_is_or_over_children() {
         let cmd = Command::batch(vec![
             Command::none().without_redraw(),
-            Command::future(async { 1 }),
+            Command::future(async { 1 }).into(),
         ]);
         assert!(cmd.requests_redraw());
 
@@ -1106,7 +1145,7 @@ mod tests {
         let cmd = Command::future(async { 1 })
             .without_redraw()
             .map(|value| value * 2);
-        assert!(!cmd.requests_redraw());
+        assert!(!cmd.into_command().requests_redraw());
     }
 
     #[test]
@@ -1179,7 +1218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_into_runtime_parts_message_requests_redraw_and_yields_message() {
-        let parts = Command::message(42).into_runtime_parts();
+        let parts = Command::message(42).into_command().into_runtime_parts();
 
         assert!(parts.requests_redraw());
 
@@ -1206,9 +1245,9 @@ mod tests {
     #[tokio::test]
     async fn test_into_runtime_parts_batch_preserves_redraw_and_stream() {
         let cmd = Command::batch(vec![
-            Command::message(2).without_redraw(),
+            Command::message(2).without_redraw().into(),
             Command::none().without_redraw(),
-            Command::message(1).without_redraw(),
+            Command::message(1).without_redraw().into(),
         ]);
         let parts = cmd.into_runtime_parts();
 
@@ -1233,6 +1272,7 @@ mod tests {
         let parts = Command::message(21)
             .without_redraw()
             .map(|value| value * 2)
+            .into_command()
             .into_runtime_parts();
 
         assert!(!parts.requests_redraw());
@@ -1245,7 +1285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_empty() {
-        let cmd: Command<i32> = Command::batch(vec![]);
+        let cmd: Command<i32> = Command::batch(Vec::<Command<i32>>::new());
         assert!(cmd.is_none());
     }
 
@@ -1285,9 +1325,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_with_none_commands() {
-        let cmd1 = Command::future(async { 1 });
+        let cmd1 = Command::future(async { 1 }).into();
         let cmd2 = Command::<i32>::none();
-        let cmd3 = Command::future(async { 3 });
+        let cmd3 = Command::future(async { 3 }).into();
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
@@ -1317,9 +1357,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_with_quit_action() {
-        let cmd1 = Command::future(async { 1 });
+        let cmd1 = Command::future(async { 1 }).into();
         let cmd2 = Command::quit();
-        let cmd3 = Command::future(async { 3 });
+        let cmd3 = Command::future(async { 3 }).into();
 
         let cmd = Command::batch(vec![cmd1, cmd2, cmd3]);
 
@@ -1346,7 +1386,10 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::stream(input_stream);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -1364,7 +1407,10 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::run(input_stream, |x| x * 2);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -1387,7 +1433,10 @@ mod tests {
         let input_stream = stream::iter(vec![1, 2, 3]);
         let cmd = Command::run(input_stream, |x| Message::Number(x * 10));
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let mut results = vec![];
 
         while let Some(action) = stream.next().await {
@@ -1412,7 +1461,10 @@ mod tests {
         let input_stream = stream::iter(Vec::<i32>::new());
         let cmd = Command::run(input_stream, |x| x * 2);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let result = stream.next().await;
 
         assert!(result.is_none(), "empty stream should produce no messages");
@@ -1428,7 +1480,10 @@ mod tests {
     async fn test_future() {
         let cmd = Command::future(async { 42 });
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -1449,7 +1504,10 @@ mod tests {
 
         let cmd = Command::perform(fetch_value(), |x| x * 2);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 84));
@@ -1470,7 +1528,10 @@ mod tests {
             Err(e) => format!("Error: {e}"),
         });
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "Got: success"));
@@ -1480,7 +1541,10 @@ mod tests {
     async fn test_message() {
         let cmd = Command::message(42);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -1493,7 +1557,10 @@ mod tests {
     async fn test_message_with_string() {
         let cmd = Command::message("hello".to_owned());
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "hello"));
@@ -1503,7 +1570,10 @@ mod tests {
     async fn test_effect_with_message() {
         let cmd = Command::effect(Action::Message(100));
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 100));
@@ -1511,7 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_effect_with_quit() {
-        let cmd: Command<i32> = Command::effect(Action::Quit);
+        let cmd: Command<i32> = Command::effect(Action::Quit).into();
 
         let mut stream = cmd.into_stream().expect("stream should exist");
         let action = stream.next().await.expect("should have action");
@@ -1524,7 +1594,10 @@ mod tests {
         let input_stream = stream::iter(Vec::<i32>::new());
         let cmd = Command::stream(input_stream);
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         assert!(stream.next().await.is_none());
     }
 
@@ -1562,7 +1635,10 @@ mod tests {
             "delayed".to_owned()
         });
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == "delayed"));
@@ -1585,7 +1661,10 @@ mod tests {
         // Test success case
         let cmd = Command::perform(may_fail(false), |result| result.unwrap_or(-1));
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 42));
@@ -1593,7 +1672,10 @@ mod tests {
         // Test error case
         let cmd = Command::perform(may_fail(true), |result| result.unwrap_or(-1));
 
-        let mut stream = cmd.into_stream().expect("stream should exist");
+        let mut stream = cmd
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == -1));
@@ -1638,7 +1720,10 @@ mod tests {
         let cmd = Command::future(async { 42 });
         let mapped = cmd.map(|x| x * 2);
 
-        let mut stream = mapped.into_stream().expect("stream should exist");
+        let mut stream = mapped
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
         let action = stream.next().await.expect("should have action");
 
         assert!(matches!(action, Action::Message(msg) if msg == 84));
@@ -1651,7 +1736,7 @@ mod tests {
             Number(i32),
         }
 
-        let cmd: Command<i32> = Command::future(async { 42 });
+        let cmd: Command<i32> = Command::future(async { 42 }).into();
         let mapped = cmd.map(Message::Number);
 
         let mut stream = mapped.into_stream().expect("stream should exist");
@@ -1668,7 +1753,8 @@ mod tests {
             Error(String),
         }
 
-        let cmd: Command<Result<String, String>> = Command::future(async { Ok("data".to_owned()) });
+        let cmd: Command<Result<String, String>> =
+            Command::future(async { Ok("data".to_owned()) }).into();
 
         let mapped = cmd.map(|result| match result {
             Ok(s) => Message::Success(s),
@@ -1710,6 +1796,7 @@ mod tests {
     #[test]
     fn test_is_some() {
         let cmd = Command::perform(async { 42 }, |x| x);
+        let cmd = cmd.into_command();
         assert!(cmd.is_some());
         assert!(!cmd.is_none());
     }
@@ -1717,6 +1804,7 @@ mod tests {
     #[test]
     fn test_is_some_with_future() {
         let cmd = Command::future(async { 100 });
+        let cmd = cmd.into_command();
         assert!(cmd.is_some());
         assert!(!cmd.is_none());
     }
@@ -1724,6 +1812,7 @@ mod tests {
     #[test]
     fn test_is_some_with_message() {
         let cmd = Command::message("test");
+        let cmd = cmd.into_command();
         assert!(cmd.is_some());
         assert!(!cmd.is_none());
     }
@@ -1737,7 +1826,7 @@ mod tests {
 
     #[test]
     fn test_is_none_after_batch_empty() {
-        let cmd: Command<i32> = Command::batch(vec![]);
+        let cmd: Command<i32> = Command::batch(Vec::<Command<i32>>::new());
         assert!(cmd.is_none());
         assert!(!cmd.is_some());
     }
@@ -1757,7 +1846,7 @@ mod tests {
     fn test_is_some_after_batch_with_some() {
         let cmd = Command::batch(vec![
             Command::<i32>::none(),
-            Command::future(async { 42 }),
+            Command::future(async { 42 }).into(),
             Command::<i32>::none(),
         ]);
         assert!(cmd.is_some());
@@ -1776,6 +1865,7 @@ mod tests {
     fn test_is_some_after_map_some() {
         let cmd = Command::future(async { 42 });
         let mapped = cmd.map(|x| x * 2);
+        let mapped = mapped.into_command();
         assert!(mapped.is_some());
         assert!(!mapped.is_none());
     }
@@ -1790,7 +1880,7 @@ mod tests {
             Command::future(async { 3 }),
             Command::future(async { 4 }),
         ]);
-        let cmd = Command::batch(vec![batch1, batch2, Command::future(async { 5 })]);
+        let cmd = Command::batch(vec![batch1, batch2, Command::future(async { 5 }).into()]);
 
         // batch(batch(a, b), batch(c, d), e) collapses to a single flat leaf
         // sequence [a, b, c, d, e] rather than a nested structure.
@@ -1800,10 +1890,10 @@ mod tests {
     #[test]
     fn test_batch_drops_streamless_children_from_leaves() {
         let cmd = Command::batch(vec![
-            Command::future(async { 1 }),
+            Command::future(async { 1 }).into(),
             Command::none(),
             Command::none().without_redraw(),
-            Command::future(async { 2 }),
+            Command::future(async { 2 }).into(),
         ]);
 
         // Stream-less children contribute no leaves even though their redraw
@@ -1868,12 +1958,14 @@ mod tests {
         assert!(
             Command::future(async { 1 })
                 .map(|v| v * 2)
+                .into_command()
                 .requests_redraw()
         );
         assert!(
             !Command::future(async { 1 })
                 .without_redraw()
                 .map(|v| v * 2)
+                .into_command()
                 .requests_redraw()
         );
 
@@ -1979,7 +2071,11 @@ mod tests {
 
     #[test]
     fn a_top_level_key_names_the_single_carrier_it_reaches() {
-        let parts = kernel_parts(Command::message(1).cancellable(CommandId::new("load")));
+        let parts = kernel_parts(
+            Command::message(1)
+                .cancellable(CommandId::new("load"))
+                .into(),
+        );
 
         assert_eq!(parts.spawns.len(), 1);
         assert_eq!(
@@ -2022,22 +2118,22 @@ mod tests {
 
     #[test]
     fn sibling_scopes_do_not_alias_carrier_attribution() {
-        let left = kernel_parts(Command::message(1).scoped("pane-a"));
-        let right = kernel_parts(Command::message(1).scoped("pane-b"));
+        let left = kernel_parts(Command::message(1).scoped("pane-a").into());
+        let right = kernel_parts(Command::message(1).scoped("pane-b").into());
 
         assert_ne!(left.spawns[0].scope, right.spawns[0].scope);
     }
 
     #[test]
     fn an_unscoped_carrier_is_attributed_to_the_root() {
-        let parts = kernel_parts(Command::message(1));
+        let parts = kernel_parts(Command::message(1).into());
 
         assert_eq!(parts.spawns[0].scope, ScopePath::empty());
     }
 
     #[test]
     fn nested_scopes_nest_outermost_first() {
-        let parts = kernel_parts(Command::message(1).scoped("field").scoped("pane-1"));
+        let parts = kernel_parts(Command::message(1).scoped("field").scoped("pane-1").into());
         let outer = ScopePath::empty().prefixed("pane-1");
 
         assert!(parts.spawns[0].scope.starts_with(&outer));
@@ -2106,7 +2202,7 @@ mod tests {
     fn test_batch_redraw_matrix_over_effect_and_map() {
         // Mixed children: OR over redraw flags holds regardless of effects.
         let cmd = Command::batch(vec![
-            Command::future(async { 1 }).without_redraw(),
+            Command::future(async { 1 }).without_redraw().into(),
             Command::none(),
         ]);
         assert!(cmd.is_some());
@@ -2114,7 +2210,7 @@ mod tests {
 
         // All opted out, both with and without a stream: stays opted out.
         let cmd = Command::batch(vec![
-            Command::future(async { 1 }).without_redraw(),
+            Command::future(async { 1 }).without_redraw().into(),
             Command::none().without_redraw(),
         ]);
         assert!(cmd.is_some());

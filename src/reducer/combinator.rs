@@ -564,8 +564,10 @@ mod tests {
             match message {
                 ChildMessage::Quiet => Command::none(),
                 ChildMessage::Carriers => Command::batch([
-                    Command::stream(stream::pending()).cancellable(CommandId::new("work")),
-                    Command::stream(stream::pending()),
+                    Command::stream(stream::pending())
+                        .cancellable(CommandId::new("work"))
+                        .into(),
+                    Command::stream(stream::pending()).into(),
                     Command::cancel(CommandId::new("other")),
                     Command::teardown("inner"),
                     Command::on_teardown(async {}),
@@ -658,9 +660,9 @@ mod tests {
                     state.modal.present(ChildState::new(true));
                     Command::none()
                 }
-                Message::RootWork => {
-                    Command::stream(stream::pending()).cancellable(CommandId::new("root"))
-                }
+                Message::RootWork => Command::stream(stream::pending())
+                    .cancellable(CommandId::new("root"))
+                    .into(),
                 Message::Silent => Command::none().without_redraw(),
                 _ => Command::none(),
             }

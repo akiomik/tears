@@ -311,7 +311,7 @@ mod tests {
 
         fn new(_flags: ()) -> (Self, Command<Self::Message>) {
             let cmd = Command::future(async { true });
-            (Self { initialized: false }, cmd)
+            (Self { initialized: false }, cmd.into())
         }
 
         fn update(&mut self, msg: Self::Message) -> Command<Self::Message> {
@@ -352,7 +352,7 @@ mod tests {
 
         // Enqueue a command that sends a message
         let cmd = Command::future(async { TestMessage::Increment });
-        core.enqueue_command(cmd.into_runtime_parts());
+        core.enqueue_command(cmd.into_command().into_runtime_parts());
 
         let input = timeout(Duration::from_secs(1), core.app_inputs.next())
             .await
@@ -373,7 +373,7 @@ mod tests {
             pending::<TestMessage>().await
         })
         .timeout(Duration::from_secs(1), || TestMessage::Increment);
-        core.enqueue_command(command.into_runtime_parts());
+        core.enqueue_command(command.into_command().into_runtime_parts());
 
         timeout(Duration::from_secs(1), started_rx)
             .await
@@ -409,7 +409,7 @@ mod tests {
             },
             |result| result.expect("second attempt should succeed"),
         );
-        core.enqueue_command(command.into_runtime_parts());
+        core.enqueue_command(command.into_command().into_runtime_parts());
 
         let input = timeout(Duration::from_secs(1), core.app_inputs.next())
             .await
@@ -614,6 +614,7 @@ mod tests {
                     let _ = started_tx.send(());
                     pending::<TestMessage>().await
                 })
+                .into_command()
                 .into_runtime_parts(),
             );
 
@@ -658,6 +659,7 @@ mod tests {
                     pending::<TestMessage>().await
                 })
                 .cancellable(CommandId::new("running"))
+                .into_command()
                 .into_runtime_parts(),
             );
 
@@ -705,7 +707,7 @@ mod tests {
                 )]
                 TestMessage::Increment
             })
-            .into_runtime_parts(),
+            .into_command().into_runtime_parts(),
         );
 
         wait_until(

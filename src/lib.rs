@@ -115,6 +115,12 @@ pub mod testing;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::core::Command;
+// `Command`'s companion: every effect constructor returns one, so the type is
+// at the crate root beside its owner for the same reason `FrameRateError` is
+// beside `FrameRate`. It stays out of the prelude because skeleton code chains
+// it without ever writing the name (docs/api-guidelines.md "Prelude
+// Membership").
+pub use command::effect_command::EffectCommand;
 // Re-exported because implementing `SubscriptionSource::stream` requires
 // writing this type out in the return position; see docs/api-guidelines.md
 // "External Crate Re-exports".

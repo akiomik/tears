@@ -763,11 +763,14 @@ mod tests {
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(Command::future(async move {
-                let _guard = guard;
-                let _ = started_tx.send(());
-                pending().await
-            })),
+            command_stream(
+                Command::future(async move {
+                    let _guard = guard;
+                    let _ = started_tx.send(());
+                    pending().await
+                })
+                .into(),
+            ),
         );
 
         timeout(Duration::from_secs(1), started_rx)
@@ -870,7 +873,7 @@ mod tests {
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(Command::future(pending())),
+            command_stream(Command::future(pending()).into()),
         );
 
         manager.spawn(
@@ -926,7 +929,10 @@ mod tests {
         let command = Command::future(pending())
             .timeout(Duration::from_secs(5), || 99)
             .cancellable(id.clone());
-        let (_, key, leaves) = command.into_runtime_parts().into_execution_parts();
+        let (_, key, leaves) = command
+            .into_command()
+            .into_runtime_parts()
+            .into_execution_parts();
         let key = key.expect("key should be present");
         let stream = fold_leaves(leaves).expect("stream should exist");
         manager.spawn(key.id, key.policy, stream);
@@ -957,7 +963,7 @@ mod tests {
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(retry),
+            command_stream(retry.into()),
         );
         wait_until(
             || attempts.load(Ordering::SeqCst) == 1,
@@ -997,12 +1003,12 @@ mod tests {
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(first),
+            command_stream(first.into()),
         );
         manager.spawn(
             id.clone(),
             CancelPolicy::KeepInFlight,
-            command_stream(second),
+            command_stream(second.into()),
         );
         yield_now().await;
 
@@ -1017,12 +1023,12 @@ mod tests {
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(Command::future(pending())),
+            command_stream(Command::future(pending()).into()),
         );
         manager.spawn(
             id.clone(),
             CancelPolicy::CancelInFlight,
-            command_stream(Command::future(pending())),
+            command_stream(Command::future(pending()).into()),
         );
 
         // Inject the old run's normal completion directly. The real aborted
@@ -1060,7 +1066,7 @@ mod tests {
                         reason = "the value follows an unconditional panic! that never returns, but types the async block"
                     )]
                     1
-                })),
+                }).into()),
             );
 
             wait_until(
@@ -1109,7 +1115,7 @@ mod tests {
                     reason = "the value follows an unconditional panic! that never returns, but types the async block"
                 )]
                 1
-            })),
+            }).into()),
         );
 
         wait_until(
@@ -1142,10 +1148,13 @@ mod tests {
         manager.spawn(
             id,
             CancelPolicy::CancelInFlight,
-            command_stream(Command::future(async move {
-                let _guard = guard;
-                pending().await
-            })),
+            command_stream(
+                Command::future(async move {
+                    let _guard = guard;
+                    pending().await
+                })
+                .into(),
+            ),
         );
         yield_now().await;
 

@@ -108,8 +108,8 @@ fn a_teardown_starts_the_prefix_s_registration_at_its_application_point() {
     let (ran, booted) = (Beacon::default(), Beacon::default());
     let (mut driver, journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
-            marking_effect(booted.clone()),
+            parking_effect([1]).into(),
+            marking_effect(booted.clone()).into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane")]),
@@ -148,7 +148,7 @@ fn a_repeated_teardown_starts_no_consumed_hook_again() {
     let ran = Beacon::default();
     let (mut driver, journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1, 2]),
+            parking_effect([1, 2]).into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane"), Command::teardown("pane")]),
@@ -185,7 +185,7 @@ fn a_sibling_prefix_consumes_no_registration() {
     let ran = Beacon::default();
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1, 2]),
+            parking_effect([1, 2]).into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("other-pane"), Command::teardown("pane")]),
@@ -220,7 +220,7 @@ fn an_ordinary_cleanup_run_is_invisible_to_the_application() {
     let ran = Beacon::default();
     let (mut driver, journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
+            parking_effect([1]).into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane")]),
@@ -269,7 +269,7 @@ fn termination_discards_an_unfired_registration() {
     let ran = Beacon::default();
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
+            parking_effect([1]).into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::quit()]),
@@ -302,7 +302,7 @@ fn termination_cancels_a_running_cleanup_run() {
     let (started, reclaimed) = (Beacon::default(), Beacon::default());
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1, 2]),
+            parking_effect([1, 2]).into(),
             parked_finalizer(started.clone(), reclaimed.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane"), Command::quit()]),
@@ -350,7 +350,7 @@ fn an_in_flight_cleanup_run_defers_no_subscription_admission() {
     let source = ProbeSource::silent("feed");
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1, 2]),
+            parking_effect([1, 2]).into(),
             parked_finalizer(started.clone(), reclaimed.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane")])
@@ -396,7 +396,7 @@ fn a_teardown_and_reregister_command_consumes_the_old_hook_and_arms_the_new_one(
     let (first, second) = (Beacon::default(), Beacon::default());
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1, 2]),
+            parking_effect([1, 2]).into(),
             finalizer(first.clone()).scoped("pane"),
         ]))
         .replying([
@@ -453,8 +453,8 @@ fn a_finalizer_starts_before_the_quiescence_it_accompanies_and_waits_for_none_of
     let (ran, reclaimed) = (Beacon::default(), Beacon::default());
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
-            holding_effect(reclaimed.clone()).scoped("pane"),
+            parking_effect([1]).into(),
+            holding_effect(reclaimed.clone()).scoped("pane").into(),
             finalizer(ran.clone()).scoped("pane"),
         ]))
         .replying([Command::teardown("pane")]),
@@ -493,8 +493,8 @@ fn a_final_update_that_tears_down_and_quits_fires_no_hook_from_termination() {
         (Beacon::default(), Beacon::default(), Beacon::default());
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
-            holding_effect(occupant.clone()).scoped("pane"),
+            parking_effect([1]).into(),
+            holding_effect(occupant.clone()).scoped("pane").into(),
             // Its own start is not the subject here — termination may
             // cancel it before its first poll — so only the guard it holds
             // is read.

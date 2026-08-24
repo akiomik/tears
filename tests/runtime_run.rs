@@ -157,7 +157,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
                 Message::Quit
             });
 
-            (Self, cmd)
+            (Self, cmd.into())
         }
 
         fn update(&mut self, _msg: Message) -> Command<Message> {

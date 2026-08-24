@@ -185,7 +185,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///
 ///     fn new(initial: u32) -> (Self, Command<Message>) {
 ///         let load = Command::perform(async { 41 }, Message::Loaded);
-///         (Counter { value: initial }, load)
+///         (Counter { value: initial }, load.into())
 ///     }
 ///
 ///     fn update(&mut self, msg: Message) -> Command<Message> {
@@ -194,7 +194,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///                 self.value = value;
 ///                 Command::none()
 ///             }
-///             Message::Refresh => Command::message(Message::Loaded(42)),
+///             Message::Refresh => Command::message(Message::Loaded(42)).into(),
 ///         }
 ///     }
 ///
@@ -791,6 +791,7 @@ mod tests {
     use tokio::net::UdpSocket;
     use tracing::Level;
 
+    use crate::command::effect_command::EffectCommand;
     use crate::command::{Command, RetryPolicy};
     use crate::subscription::core::Subscription;
     use crate::subscription::mock::MockSource;
@@ -901,7 +902,7 @@ mod tests {
     /// time-only context fails the test (RFC 0008 §4.3), so it stands in
     /// for the would-fail-if-polled class.
     #[cfg(not(loom))]
-    fn io_command() -> Command<Msg> {
+    fn io_command() -> EffectCommand<Msg> {
         Command::perform(async { register_with_io_driver() }, |()| {
             unreachable!("the I/O-dependent leaf must fail the test before completing")
         })
@@ -910,7 +911,9 @@ mod tests {
     /// A `Command::timeout` leaf over a never-ready future: deliverable
     /// only once the store's virtual clock reaches its deadline.
     fn timeout_command(secs: u64) -> Command<Msg> {
-        Command::future(pending()).timeout(Duration::from_secs(secs), || Msg::N(99))
+        Command::future(pending())
+            .timeout(Duration::from_secs(secs), || Msg::N(99))
+            .into()
     }
 
     fn failure_message<T>(result: Result<T, Box<dyn Any + Send>>) -> String {
@@ -938,7 +941,7 @@ mod tests {
     #[test]
     fn store_bounds_are_debug_only() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Opaque::Ping => Command::message(Opaque::Pong),
+            Opaque::Ping => Command::message(Opaque::Pong).into(),
             Opaque::Pong => Command::none(),
         });
         store.send(Opaque::Ping);
@@ -959,7 +962,8 @@ mod tests {
             ]),
             move |msg| match msg {
                 Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                    .cancellable(id.clone()),
+                    .cancellable(id.clone())
+                    .into(),
                 Msg::Cancel => Command::cancel(id.clone()),
                 _ => Command::none(),
             },
@@ -1035,7 +1039,7 @@ mod tests {
     #[test]
     fn one_leaf_delivers_in_stream_order() {
         let mut store = store_with(
-            Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])),
+            Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])).into(),
             |_| Command::none(),
         );
         store.receive(Msg::N(1));
@@ -1093,8 +1097,11 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
-            Msg::Restart => Command::message(Msg::Keyed(9)).cancellable(id.clone()),
+                .cancellable(id.clone())
+                .into(),
+            Msg::Restart => Command::message(Msg::Keyed(9))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1112,8 +1119,10 @@ mod tests {
     fn cancel_in_flight_supersedes_an_io_dependent_occupant() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => io_command().cancellable(id.clone()),
-            Msg::Restart => Command::message(Msg::Keyed(9)).cancellable(id.clone()),
+            Msg::Start => io_command().cancellable(id.clone()).into(),
+            Msg::Restart => Command::message(Msg::Keyed(9))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1130,9 +1139,11 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
+                .cancellable(id.clone())
+                .into(),
             Msg::TryKeep => Command::message(Msg::Keyed(9))
-                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight),
+                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight)
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1151,9 +1162,12 @@ mod tests {
     fn keep_in_flight_is_admitted_after_occupant_exhaustion() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::message(Msg::Keyed(1)).cancellable(id.clone()),
+            Msg::Start => Command::message(Msg::Keyed(1))
+                .cancellable(id.clone())
+                .into(),
             Msg::TryKeep => Command::message(Msg::Keyed(2))
-                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight),
+                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight)
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1172,7 +1186,9 @@ mod tests {
     fn explicit_cancel_is_strict_and_idempotent() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
             Msg::Cancel => Command::cancel(id.clone()),
             _ => Command::none(),
         });
@@ -1193,11 +1209,14 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
-            Msg::Restart => {
-                Command::batch([Command::cancel(id.clone()), Command::message(Msg::Keyed(9))])
+                .cancellable(id.clone())
+                .into(),
+            Msg::Restart => Command::batch([
+                Command::cancel(id.clone()),
+                Command::message(Msg::Keyed(9))
                     .cancellable(id.clone())
-            }
+                    .into(),
+            ]),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1213,8 +1232,10 @@ mod tests {
     #[test]
     fn unkeyed_output_is_unaffected_by_cancellation() {
         let id = CommandId::new("k");
-        let mut store = store_with(Command::message(Msg::N(1)), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
+        let mut store = store_with(Command::message(Msg::N(1)).into(), move |msg| match msg {
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
             Msg::Cancel => Command::cancel(id.clone()),
             _ => Command::none(),
         });
@@ -1224,35 +1245,12 @@ mod tests {
         store.finish();
     }
 
-    // INV-T7: a superseded keyed quit is never observable via `receive_quit`
-    // (RFC 0003 INV-9); the store never enters the quit state.
-    #[test]
-    fn cancelled_keyed_quit_is_suppressed() {
-        let id = CommandId::new("k");
-        let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::StartQuit => Command::quit().cancellable(id.clone()),
-            Msg::Cancel => Command::cancel(id.clone()),
-            _ => Command::none(),
-        });
-        store.send(Msg::StartQuit);
-        store.send(Msg::Cancel);
-
-        let failure = catch_unwind(AssertUnwindSafe(|| store.receive_quit()));
-        assert!(
-            failure_message(failure).contains("no pending effects"),
-            "the suppressed quit must not be deliverable"
-        );
-        // The store is still running (quit was suppressed, not observed).
-        store.send(Msg::Unrelated);
-        store.finish();
-    }
-
     // INV-T8: a ready message never received fails `finish`, naming the
     // leaked value via `Debug`.
     #[test]
     #[should_panic(expected = "deliverable output was never received: N(7)")]
     fn finish_fails_on_an_unreceived_ready_message() {
-        let store = store_with(Command::message(Msg::N(7)), |_| Command::none());
+        let store = store_with(Command::message(Msg::N(7)).into(), |_| Command::none());
         store.finish();
     }
 
@@ -1263,7 +1261,7 @@ mod tests {
         expected = "1 effect leaf(s) not driven to completion; first still pending at enqueue position 0"
     )]
     fn finish_fails_on_an_unfinished_leaf() {
-        let store = store_with(Command::stream(stream::pending::<Msg>()), |_| {
+        let store = store_with(Command::stream(stream::pending::<Msg>()).into(), |_| {
             Command::none()
         });
         store.finish();
@@ -1273,7 +1271,7 @@ mod tests {
     #[test]
     fn drop_without_finish_fails_on_leaked_output() {
         let failure = catch_unwind(AssertUnwindSafe(|| {
-            let store = store_with(Command::message(Msg::N(7)), |_| Command::none());
+            let store = store_with(Command::message(Msg::N(7)).into(), |_| Command::none());
             drop(store);
         }));
         let message = failure_message(failure);
@@ -1291,7 +1289,9 @@ mod tests {
     fn send_does_not_block_on_pending_keyed_output() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1304,7 +1304,7 @@ mod tests {
     // (the ordering there is the store's own linearization, RFC 0008 §6).
     #[test]
     fn send_does_not_block_on_pending_unkeyed_output() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.send(Msg::Unrelated);
         store.receive(Msg::N(1));
         store.finish();
@@ -1318,7 +1318,9 @@ mod tests {
     fn send_does_not_block_on_keyed_init_output() {
         let id = CommandId::new("k");
         let mut store = store_with(
-            Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id),
+            Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id)
+                .into(),
             |_| Command::none(),
         );
         store.send(Msg::Unrelated);
@@ -1330,7 +1332,7 @@ mod tests {
     #[test]
     fn send_does_not_block_on_unkeyed_step_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::Start => Command::message(Msg::N(1)),
+            Msg::Start => Command::message(Msg::N(1)).into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1356,7 +1358,7 @@ mod tests {
     #[test]
     fn quit_is_terminal_and_discards_remaining_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::StartQuit => Command::batch([Command::quit(), io_command()]),
+            Msg::StartQuit => Command::batch([Command::quit(), io_command().into()]),
             _ => Command::none(),
         });
         store.send(Msg::StartQuit);
@@ -1388,7 +1390,7 @@ mod tests {
     // first-render prediction.
     #[test]
     fn redraw_reports_the_init_directive_before_the_first_step() {
-        let defaulted = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let defaulted = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         assert!(
             defaulted.redraw_requested(),
             "constructors default to redraw"
@@ -1407,7 +1409,7 @@ mod tests {
     // `receive` is a step, and `receive_quit` is not.
     #[test]
     fn redraw_tracks_steps_and_receive_quit_is_not_a_step() {
-        let mut store = store_with(Command::message(Msg::N(1)), |msg| match msg {
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |msg| match msg {
             Msg::N(_) => Command::none().without_redraw(),
             Msg::StartQuit => Command::quit().without_redraw(),
             _ => Command::none(),
@@ -1587,7 +1589,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "message mismatch")]
     fn receive_fails_on_a_mismatch() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive(Msg::N(2));
     }
 
@@ -1602,7 +1604,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the next deliverable output is a message: N(1)")]
     fn receive_quit_fails_when_the_next_output_is_a_message() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive_quit();
     }
 
@@ -1618,7 +1620,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "no deliverable output: effects are pending but none is ready")]
     fn receive_fails_with_effects_pending_but_not_ready() {
-        let mut store = store_with(Command::stream(stream::pending::<Msg>()), |_| {
+        let mut store = store_with(Command::stream(stream::pending::<Msg>()).into(), |_| {
             Command::none()
         });
         store.receive(Msg::N(1));
@@ -1628,7 +1630,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "predicate rejected the delivered message: N(1)")]
     fn receive_matching_fails_when_the_predicate_rejects() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive_matching(|msg| matches!(msg, Msg::N(2)));
     }
 
@@ -1659,7 +1661,7 @@ mod tests {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Start => Command::batch([
                 timeout_command(60),
-                Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])),
+                Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])).into(),
             ]),
             _ => Command::none(),
         });
@@ -1688,7 +1690,7 @@ mod tests {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Start => Command::batch([
                 timeout_command(60),
-                Command::stream(stream::iter([Msg::N(1)])),
+                Command::stream(stream::iter([Msg::N(1)])).into(),
             ]),
             _ => Command::none(),
         });
@@ -1766,7 +1768,7 @@ mod tests {
     // canonical position instead of delivering or dropping it.
     #[test]
     fn advance_buffers_ready_output_without_delivering() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.advance(Duration::ZERO);
         store.receive(Msg::N(1));
         store.finish();

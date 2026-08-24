@@ -195,6 +195,7 @@ impl App {
             results,
         })
         .cancellable_with(search_id(), self.policy)
+        .into()
     }
 
     fn render_log(&self, frame: &mut Frame, area: Rect) {

@@ -563,41 +563,45 @@ impl StatusState {
 
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     match key.code {
-        KeyCode::Char('q') => Command::message(Message::Quit),
-        KeyCode::Tab => Command::message(Message::FocusNext),
+        KeyCode::Char('q') => Command::message(Message::Quit).into(),
+        KeyCode::Tab => Command::message(Message::FocusNext).into(),
         KeyCode::Up => match focus {
-            Focus::Navigation => Command::message(Message::Navigation(NavigationMessage::Up)),
-            Focus::Tasks => Command::message(Message::Tasks(TaskMessage::Up)),
+            Focus::Navigation => {
+                Command::message(Message::Navigation(NavigationMessage::Up)).into()
+            }
+            Focus::Tasks => Command::message(Message::Tasks(TaskMessage::Up)).into(),
             _ => Command::none(),
         },
         KeyCode::Down => match focus {
-            Focus::Navigation => Command::message(Message::Navigation(NavigationMessage::Down)),
-            Focus::Tasks => Command::message(Message::Tasks(TaskMessage::Down)),
+            Focus::Navigation => {
+                Command::message(Message::Navigation(NavigationMessage::Down)).into()
+            }
+            Focus::Tasks => Command::message(Message::Tasks(TaskMessage::Down)).into(),
             _ => Command::none(),
         },
         KeyCode::Char(' ') if focus == Focus::Tasks => {
-            Command::message(Message::Tasks(TaskMessage::Toggle))
+            Command::message(Message::Tasks(TaskMessage::Toggle)).into()
         }
         KeyCode::Char('n') if focus == Focus::Tasks => {
-            Command::message(Message::Tasks(TaskMessage::Add))
+            Command::message(Message::Tasks(TaskMessage::Add)).into()
         }
         KeyCode::Char('d') if focus == Focus::Tasks => {
-            Command::message(Message::Tasks(TaskMessage::Delete))
+            Command::message(Message::Tasks(TaskMessage::Delete)).into()
         }
         KeyCode::Char('c') if focus == Focus::Activity => {
-            Command::message(Message::Activity(ActivityMessage::Clear))
+            Command::message(Message::Activity(ActivityMessage::Clear)).into()
         }
         KeyCode::Char(c) if focus == Focus::Details => {
-            Command::message(Message::Details(DetailMessage::Input(c)))
+            Command::message(Message::Details(DetailMessage::Input(c))).into()
         }
         KeyCode::Backspace if focus == Focus::Details => {
-            Command::message(Message::Details(DetailMessage::Backspace))
+            Command::message(Message::Details(DetailMessage::Backspace)).into()
         }
         KeyCode::Enter if focus == Focus::Details => {
-            Command::message(Message::Details(DetailMessage::Save))
+            Command::message(Message::Details(DetailMessage::Save)).into()
         }
         KeyCode::Esc if focus == Focus::Details => {
-            Command::message(Message::Details(DetailMessage::Reset))
+            Command::message(Message::Details(DetailMessage::Reset)).into()
         }
         _ => Command::none(),
     }

@@ -84,7 +84,7 @@ fn an_update_returned_quit_terminates_with_no_further_input_processed() {
 #[test]
 fn an_init_quit_terminates_before_the_reconcile_and_before_any_render() {
     let (mut driver, journal) = driver(Script::new(Command::batch([
-        silent_effect(),
+        silent_effect().into(),
         Command::quit(),
     ])));
 

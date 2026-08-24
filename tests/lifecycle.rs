@@ -36,7 +36,7 @@ use ratatui::prelude::Frame;
 use tears::command::CommandId;
 use tears::prelude::*;
 use tears::subscription::time::Timer;
-use tears::{BoxStream, SubscriptionSource};
+use tears::{BoxStream, EffectCommand, SubscriptionSource};
 use tokio::task::yield_now;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
@@ -222,12 +222,6 @@ async fn assert_two_stage_postconditions(
 
 // --- INV-LC5: controlled termination ----------------------------------------
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum QuitRoute {
-    Unkeyed,
-    Keyed,
-}
-
 #[derive(Clone, Copy, Debug)]
 enum QuitMessage {
     Tick,
@@ -236,16 +230,14 @@ enum QuitMessage {
 #[derive(Clone)]
 struct QuitFlags {
     transitions: Transitions,
-    route: QuitRoute,
     keyed_effect_dropped: Arc<AtomicBool>,
     unkeyed_effect_dropped: Arc<AtomicBool>,
 }
 
 impl QuitFlags {
-    fn new(route: QuitRoute) -> Self {
+    fn new() -> Self {
         Self {
             transitions: Transitions::default(),
-            route,
             keyed_effect_dropped: Arc::new(AtomicBool::new(false)),
             unkeyed_effect_dropped: Arc::new(AtomicBool::new(false)),
         }
@@ -288,7 +280,7 @@ impl Application for QuitApp {
         })
         .cancellable(CommandId::new("parked-keyed"));
 
-        (Self { flags, ticks: 0 }, command)
+        (Self { flags, ticks: 0 }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -302,13 +294,11 @@ impl Application for QuitApp {
             return Command::future(async move {
                 let _guard = guard;
                 pending::<QuitMessage>().await
-            });
+            })
+            .into();
         }
 
-        match self.flags.route {
-            QuitRoute::Unkeyed => Command::quit(),
-            QuitRoute::Keyed => Command::quit().cancellable(CommandId::new("keyed-quit")),
-        }
+        Command::quit()
     }
 
     fn view(&self, _frame: &mut Frame<'_>) {
@@ -324,11 +314,11 @@ impl Application for QuitApp {
     }
 }
 
-async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
+async fn assert_quit_terminates() -> Result<()> {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let flags = QuitFlags::new(route);
+    let flags = QuitFlags::new();
     let mut terminal = common::test_terminal()?;
     let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
 
@@ -338,7 +328,7 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
 
     assert!(
         outcome.is_ok(),
-        "a {route:?} quit classifies the run as Ok(())"
+        "an update-returned quit classifies the run as Ok(())"
     );
     let immediate = flags.transitions.snapshot();
     assert!(
@@ -361,19 +351,19 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
     Ok(())
 }
 
-// INV-LC5: an unkeyed quit under running producers exits the loop, returns
-// `Ok(())`, and invokes no further transition; INV-LC7's settle loop then
-// witnesses the producers winding down.
+// INV-LC5: an update-returned quit under running producers exits the loop,
+// returns `Ok(())`, and invokes no further transition; INV-LC7's settle loop
+// then witnesses the producers winding down.
+//
+// The sibling row that drove the same postconditions through a *keyed* quit is
+// gone with the shape it needed. A spawn key attaches to an effect carrier, and
+// `Command::quit()` is not one — an update-returned quit names no run for a key
+// to identify (RFC 0014 §3.3, §3.4). A producer-originated quit is still keyed
+// or anonymous like any other run, but nothing in the public surface emits one,
+// so this file cannot script that half; the kernel's conformance series does.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn unkeyed_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
-    assert_quit_route_terminates(QuitRoute::Unkeyed).await
-}
-
-// INV-LC5: a keyed quit — delivered in band through its run's private channel —
-// reaches the same postconditions with the same `Ok(())` classification.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn keyed_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
-    assert_quit_route_terminates(QuitRoute::Keyed).await
+async fn an_update_returned_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
+    assert_quit_terminates().await
 }
 
 /// A backend whose every draw fails, so the runtime's render step takes the
@@ -453,7 +443,7 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let flags = QuitFlags::new(QuitRoute::Unkeyed);
+    let flags = QuitFlags::new();
     let mut terminal = Terminal::new(FailingBackend::new())?;
     let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
 
@@ -584,7 +574,7 @@ impl Application for AbruptApp {
         })
         .cancellable(CommandId::new("parked-keyed"));
 
-        (Self { flags }, command)
+        (Self { flags }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -809,7 +799,7 @@ impl Application for InertApp {
             pending::<InertMessage>().await
         });
 
-        (Self { probe }, command)
+        (Self { probe }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -919,7 +909,7 @@ enum ContainmentMessage {
     clippy::panic,
     reason = "the effect panics deliberately to exercise INV-LC8's command-task rows"
 )]
-fn panicking_effect() -> Command<ContainmentMessage> {
+fn panicking_effect() -> EffectCommand<ContainmentMessage> {
     Command::future(async {
         panic!("runtime-owned command task panicked");
         #[expect(
@@ -974,10 +964,10 @@ impl Application for ContainmentApp {
 
     fn new((kind, transitions): Self::Flags) -> (Self, Command<Self::Message>) {
         let command = match kind {
-            PanickingProducer::UnkeyedCommand => panicking_effect(),
-            PanickingProducer::KeyedCommand => {
-                panicking_effect().cancellable(CommandId::new("panicking-keyed"))
-            }
+            PanickingProducer::UnkeyedCommand => panicking_effect().into(),
+            PanickingProducer::KeyedCommand => panicking_effect()
+                .cancellable(CommandId::new("panicking-keyed"))
+                .into(),
             PanickingProducer::SubscriptionForwarder => Command::none(),
         };
 
