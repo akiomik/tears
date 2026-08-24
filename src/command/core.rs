@@ -1,7 +1,7 @@
 //! The `Command` type itself, split out from `command.rs` so the parent
 //! module can stay `pub` (hosting opt-in vocabulary like `RetryPolicy`)
-//! while closing the `command::Command` path. See `runtime::frame_rate` for
-//! the same pattern applied to `Runtime`'s scheduling input.
+//! while closing the `command::Command` path — the item keeps exactly one
+//! public spelling, at the crate root.
 
 use std::hash::Hash;
 #[cfg(test)]
@@ -75,13 +75,10 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// The command one [`EffectCommand`] carrier makes — the whole body of
     /// the one-way conversion between them.
     ///
-    /// The key is written twice on purpose, and only until the switch. A
-    /// carrier's key is the reading the kernel lowers from; the command-level
-    /// `cancellation.key` is the one the superseded runtime reads, and it is
-    /// still the authoritative production path. With exactly one carrier the
-    /// two readings cannot disagree, which is what lets both consumers stand
-    /// while only one of them is live. The command-level half goes when the
-    /// runtime that reads it does.
+    /// The key travels on the carrier and nowhere else. There is no
+    /// command-level copy to keep in step, which is the whole reason keying a
+    /// batch cannot be expressed: a key reaches exactly the one carrier it
+    /// was attached to.
     pub(super) fn from_carrier(leaf: Leaf<Msg>, directives: RuntimeDirectives) -> Self {
         Self {
             cancellation: CommandCancellation::default(),
@@ -348,15 +345,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// runtime that starts a finalizer is the kernel of RFC 0014, and a
     /// public constructor the current runtime would accept and ignore is the
     /// silent mismatch RFC 0007 INV-C5 prohibits.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the kernel that starts a registered finalizer is here, but no non-test build \
-                      can reach it until the entry point is switched over to it"
-        )
-    )]
-    pub(crate) fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {
+    pub fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
             cleanups: vec![CleanupRegistration::new(finalizer)],
             ..Self::none()

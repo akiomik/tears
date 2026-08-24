@@ -21,7 +21,7 @@ use super::load::{self, Channel, LoadObserver};
 ///
 /// `pub` rather than `pub(crate)` only to satisfy `clippy::redundant_pub_crate`:
 /// the enclosing `runtime` module is `pub(crate)`, so this type's effective
-/// reachability is capped at the crate regardless (see `frame_rate`).
+/// reachability is capped at the crate regardless.
 pub enum Sender<T> {
     Unbounded(mpsc::UnboundedSender<T>),
     Bounded {

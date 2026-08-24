@@ -71,7 +71,7 @@
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
-//! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
+//! (see `channel`), while `pub` avoids the redundant-`pub(crate)`
 //! lint.
 
 use std::collections::VecDeque;
@@ -86,8 +86,8 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// One value, deliberately kept as an enum: the field name and its schema
 /// position are what an observability consumer depends on, and the type is
-/// where a second lane would have to declare itself. `"shared"` and
-/// `"keyed"` retired with the channels they named (RFC 0014 §9 row 9).
+/// where a second lane would have to declare itself. The two values that
+/// named the retired private channels went with them (RFC 0014 §9 row 9).
 #[derive(Clone, Copy)]
 pub enum Channel {
     /// The kernel's single data lane, which every producer shares

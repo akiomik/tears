@@ -115,11 +115,10 @@ pub mod testing;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::core::Command;
-// `Command`'s companion: every effect constructor returns one, so the type is
-// at the crate root beside its owner for the same reason `FrameRateError` is
-// beside `FrameRate`. It stays out of the prelude because skeleton code chains
-// it without ever writing the name (docs/api-guidelines.md "Prelude
-// Membership").
+// `Command`'s companion: every effect constructor returns one, so the type
+// sits at the crate root beside its owner, under the companion rule in
+// docs/api-guidelines.md "Root Promotion Criteria". It stays out of the
+// prelude because skeleton code chains it without ever writing the name.
 pub use command::effect_command::EffectCommand;
 // Re-exported because implementing `SubscriptionSource::stream` requires
 // writing this type out in the return position; see docs/api-guidelines.md
@@ -131,10 +130,6 @@ pub use runtime::{ProgramRuntime, Runtime};
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app
 // calling `Runtime::new` never names it (RFC 0007 §2.3, INV-C4).
 pub use runtime::config::RuntimeConfig;
-// `FrameRate` lives under `runtime` (it is a scheduling input); re-exported here
-// as `tears::FrameRate` so it keeps a single canonical public path. See
-// docs/api-guidelines.md for the module visibility / root promotion rules
-// this follows.
 pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 // Bench-only re-export exposing the producer-gauge observer to
 // `benches/gauge.rs`, which compiles as a separate crate and only sees the
