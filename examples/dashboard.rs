@@ -9,7 +9,6 @@
 //!
 //! Run with: cargo run --example dashboard
 
-
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::prelude::*;

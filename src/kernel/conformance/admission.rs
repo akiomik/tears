@@ -38,6 +38,11 @@
 //! before any stop is issued, and it takes no second admission attempt after
 //! issuing one — which is also INV-RC12 (c)'s structural carrier.
 //!
+//! One row here has no owner in that suite: that a repeated declaration
+//! admits one run. It was a property of the superseded manager's map keying
+//! and is now a property of `reconcile`'s read order, so it changed owners
+//! rather than disappearing, and it is asserted where the admission site is.
+//!
 //! INV-RC12's own additions — (a) the non-participating run kinds and (b)
 //! the non-dirt sources — live with the seams that produce them:
 //! [`lifecycle`](super::lifecycle) and [`cleanup`](super::cleanup) carry
@@ -82,6 +87,39 @@ fn a_declaration_s_spawner_runs_once_per_admitted_run_and_not_per_declaration() 
         "and the still-declared identity was admitted at none of them"
     );
     assert_eq!(source.quiescences(), 0, "nor was its run ever stopped");
+}
+
+// The declared set is a set. A `subscriptions` that returns one identity
+// twice admits one run, and it is the first: `reconcile` inserts the entry
+// before it reads the next declaration, so the duplicate finds the identity
+// already running and reaches nothing.
+//
+// Collision independence rides along structurally rather than as a second
+// row. The registry compares `SubscriptionId`s by value on a linear walk and
+// never hashes one, so two distinct identities cannot be conflated by their
+// hashes agreeing. The superseded manager keyed a map by identity, which is
+// what made that a behavioural risk with a row of its own there; here the
+// property is a consequence of the lookup and has nothing to fail.
+#[test]
+fn a_repeated_declaration_admits_one_run_and_it_is_the_first() {
+    let source = ProbeSource::silent("feed");
+    let (mut driver, journal) = driver(
+        Script::new(parking_effect([1]))
+            .feeding([Feed::new(source.clone()), Feed::new(source.clone())]),
+    );
+    driver.boot();
+
+    assert_eq!(
+        journal.evaluations(),
+        1,
+        "the bootstrap reconcile read the declarations once"
+    );
+    assert_eq!(
+        source.admissions(),
+        1,
+        "and admitted the repeated identity once, not once per declaration"
+    );
+    assert_eq!(source.quiescences(), 0, "nothing was stopped to make room");
 }
 
 // INV-SE2: a continuing identity is exempt. The re-evaluation that removes
