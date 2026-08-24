@@ -90,10 +90,10 @@ impl Application for App {
         match msg {
             Message::Terminal(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 match key.code {
-                    KeyCode::Char('q') => Command::message(Message::Quit),
-                    KeyCode::Char(c) => Command::message(Message::InputChanged(c)),
-                    KeyCode::Backspace => Command::message(Message::InputBackspace),
-                    KeyCode::Enter => Command::message(Message::SubmitTodo),
+                    KeyCode::Char('q') => Command::message(Message::Quit).into(),
+                    KeyCode::Char(c) => Command::message(Message::InputChanged(c)).into(),
+                    KeyCode::Backspace => Command::message(Message::InputBackspace).into(),
+                    KeyCode::Enter => Command::message(Message::SubmitTodo).into(),
                     _ => Command::none(),
                 }
             }
@@ -149,6 +149,7 @@ impl Application for App {
                     },
                 )
                 .map(Message::TodoCreated)
+                .into()
             }
             Message::TodoCreated(Ok(todo)) => {
                 self.status = format!("Created: {}", todo.title);

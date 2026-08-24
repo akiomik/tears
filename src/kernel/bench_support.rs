@@ -68,6 +68,7 @@ where
         on_emit();
         Action::Quit
     }))
+    .into()
 }
 
 /// The production kernel, driven by the production loop.

@@ -62,7 +62,7 @@ use std::marker::PhantomData;
 
 use futures::future::BoxFuture;
 
-use crate::Command;
+use crate::{Command, EffectCommand};
 
 use super::query::QueryError;
 
@@ -176,9 +176,10 @@ where
     ///         Ok(user) => Message::UserUpdated(user),
     ///         Err(e) => Message::UpdateFailed(e.to_string()),
     ///     })
+    ///     .into()
     /// }
     /// ```
-    pub fn mutate<F>(input: I, mutator: F) -> Command<Result<O, QueryError>>
+    pub fn mutate<F>(input: I, mutator: F) -> EffectCommand<Result<O, QueryError>>
     where
         F: FnOnce(I) -> BoxFuture<'static, Result<O, QueryError>> + Send + 'static,
     {
