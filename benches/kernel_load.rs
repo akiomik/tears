@@ -1,11 +1,14 @@
 //! Load harness for the reducer-first kernel — the re-derivation half of
 //! RFC 0014 §13.5, which RFC 0006 §5.2 names as INV-L4's prerequisite.
 //!
-//! `benches/runtime_load.rs` measures the superseded topology and is left
-//! untouched: it is the *before* column. This harness runs the same shapes of
-//! load against the kernel's own driving loop (`Kernel::drive`, reached
-//! through the bench-only `BenchKernel` handle), so the two columns differ in
-//! the topology under test and in nothing else the harness controls.
+//! This harness runs the same shapes of load against the kernel's own driving
+//! loop (`Kernel::drive`, reached through the bench-only `BenchKernel`
+//! handle) that the superseded topology's harness ran against the old runtime,
+//! so the two columns differ in the topology under test and in nothing else
+//! the harness controlled. That harness is gone with the topology it drove;
+//! its numbers survive as recorded historical evidence in RFC 0006 §5, which
+//! is the *before* column this one is read against. Reproducing them means
+//! checking out a revision that still has the old runtime.
 //!
 //! # What the new topology changes about the measurement
 //!
