@@ -1,6 +1,8 @@
 # RFC 0006: Runtime Load Control
 
-- Status: Implemented (section 5.1 records the bounded acceptance results)
+- Status: Implemented (section 5.1 records the bounded acceptance
+  results; section 5.3 re-derives INV-L4's acceptance on the
+  reducer-first successor topology, which lands with that kernel)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
   at 0.11.0 (a schema change, hence a contract change under INV-L13 —
@@ -1429,6 +1431,15 @@ measurement rather than an implementation-time choice:
   unbounded column first and is recorded as an amendment to this
   section. Runs on other machines are regression-informative, never
   acceptance.
+- **An acceptance run is the machine's only substantial load.** No
+  concurrent build, test suite, or other working session shares the
+  reference machine while one is measured. Medians survive company —
+  two runs of one configuration have agreed to within single-digit
+  microseconds with a build alongside — but tail statistics do not,
+  and a criterion stated on p99 is only as good as the quietness of
+  the run it reads. A run that overlapped other work is
+  regression-informative and usable for calibration; it is not an
+  acceptance source, and section 5.3 records one such case.
 - **CI gates on no latency criterion.** CI machines are not the
   reference machine, so no cell of this matrix and no INV-L4 condition
   is evaluated in CI. Whether a smoke profile of the harness —
@@ -1601,21 +1612,20 @@ own.
   cancellation contract reads over that decision's revocation set:
   explicit cancel, supersession, scope teardown, and termination
   (RFC 0014 §3.1).
-- **INV-L4's property is preserved; its acceptance conditions are a
-  named prerequisite.** Backlog independence survives on the control
-  lane (R4 above). The conditions — the four `quit_*` scenarios, the
-  trial counts, the p99 threshold, and the reference-machine scoping —
-  are stated over this topology and over RFC 0011 §7's unbiased-select
-  premise, and neither the scenario set nor the premise survives
-  unchanged. Re-deriving the formulation and the bounded-mode scenario
-  set on the successor topology, under this section's reference-machine
-  and reproducibility discipline, is owned by this RFC and tracked as
-  RFC 0014 §13.5; the successor's acceptance run waits on it, and no
-  numeric threshold is claimed for the successor before it lands. What
-  holds meanwhile is RFC 0014 §3.3's latency statement with INV-RC9's
-  constructive bounds. The formulation-(a) fallback INV-L4 records is
-  moot there: the control drain is a fixed pass stage, not a select
-  branch that could be biased.
+- **INV-L4's property is preserved; its acceptance conditions are
+  re-derived in section 5.3.** Backlog independence survives on the
+  control lane (R4 above). The conditions — the four `quit_*`
+  scenarios, the trial counts, the p99 threshold, and the
+  reference-machine scoping — were stated over this topology and over
+  RFC 0011 §7's unbiased-select premise, and neither the scenario set
+  nor the premise survives unchanged: the row set doubles because the
+  two quit routes are two contract objects, and the absolute threshold
+  gives way to a criterion quantified over RFC 0014 §3.3's
+  constructive bound. Section 5.3 states both, under this section's
+  reference-machine and reproducibility discipline, and RFC 0014 §13.5
+  points at it. The formulation-(a) fallback INV-L4 records is moot
+  there: the control drain is a fixed pass stage, not a select branch
+  that could be biased.
 - **INV-L6 splits.** Its `None`-path claim survives as the unbounded
   lane mode's selection — an unset `data_lane_capacity` selects
   unbounded delivery, not a large bound. Its batching half does not:
@@ -1655,14 +1665,18 @@ own.
   `shared_pending` reads as the data lane's residual occupancy at batch
   end; `channel` becomes single-valued, carrying `"data"` for the one
   bounded lane in place of today's `"shared"`/`"keyed"` pair; and the
-  gauge kind counts map onto the
-  kernel's run kinds — `unkeyed_commands` counts anonymous runs,
-  `keyed_commands` counts keyed runs, `subscriptions` counts subscription
-  runs. Levels, targets, required fields, `runtime_id`, `seq`, the
-  per-instance current-value rule, and every firing condition are
-  unchanged (RFC 0014 §9 row 9). The kernel's cleanup runs (RFC 0014
-  §4.4) are a producer kind no gauge field counts; row 9 adds none, and
-  this schema stays as stated.
+  gauge kind counts map onto the kernel's run kinds — `unkeyed_commands`
+  counts anonymous runs, `keyed_commands` counts keyed runs,
+  `subscriptions` counts subscription runs. Levels, targets, required
+  fields, `runtime_id`, `seq`, the per-instance current-value rule, and
+  every firing condition are unchanged (RFC 0014 §9 row 9). One firing
+  *reaches* less far without the rule changing: an `update`-returned
+  quit no longer travels a channel, so a batch it ends emits no event
+  where the superseded route's did. The condition is the same condition;
+  what changed is the route, and that change belongs to RFC 0014 §3.3
+  and row 4. The kernel's cleanup runs (RFC 0014 §4.4) are a producer
+  kind no gauge field counts; row 9 adds none, and this schema stays as
+  stated.
 - **INV-L14's object goes with INV-14.** What it narrows is the
   incidental strength INV-14 lends in unbounded mode; with shared-first
   pull superseded (row 2) the recorded loss is the general one
@@ -1748,6 +1762,730 @@ own.
   and remain the regression baseline for it; the successor's numbers come
   from INV-L4's named prerequisite above, never by carrying these cells
   over.
+
+### 5.3 Successor acceptance: INV-L4 re-derived
+
+Section 5.2 records INV-L4's acceptance conditions as a named
+prerequisite, owed on the successor topology. This section discharges
+it. Every figure below was measured on the section 2 reference
+machine (Apple M1 Max, 10 cores, rustc 1.97.0) at 200 valid trials
+per row: the calibration sessions on **2026-08-19**, including the
+superseded topology's rows re-run that same day so the two columns
+are comparable, and the acceptance run on **2026-08-20**. Section
+5.1's reproducibility rules are unchanged and apply here as written.
+
+**The row set doubles, because one contract object became two.** The
+superseded topology routed every `Command::quit()` through the
+dedicated quit channel, and INV-L4 quantified over that channel. On
+the successor an `update`-returned quit is applied synchronously and
+travels no lane at all, while a producer-originated quit takes the
+control lane (RFC 0014 §3.3). Only the second inherits INV-L4's
+property, so acceptance is stated per route and every quit row is run
+twice — once returning the quit from `update`, once emitting it from
+a spawned run. Section 5.2's INV-L10/INV-L11 supersession is what
+split them; acceptance follows the split rather than averaging over
+it.
+
+**The instrument is an upper bound, deliberately.** The superseded
+harness timestamped a delivery-instant tracing event, which INV-L4's
+text calls out as "the delivery instant itself … not a proxy". The
+kernel's control drain emits no such event, and none is added here:
+RFC 0014 §9 row 9 fixes that schema by re-reading its fields rather
+than extending them, and a delivery-instant event would be an
+extension. The successor's terminus is instead the driving loop's
+return — the quit's application *plus* its immediate postcondition,
+which includes releasing the data lane's residual envelopes. That
+overstates delivery by the residual term, and overstating is the
+conservative direction: a row accepted on the upper bound is accepted
+on the delivery instant it bounds. The residual term is measured
+separately below rather than left inside the number.
+
+**Pinned parameters.** Section 5.1's first reproducibility rule — the
+run's configuration is fixed before the implementation PR, not chosen
+at implementation time — applies here, so the successor's acceptance
+rows carry their parameters explicitly rather than inheriting a
+kernel default that could later move under them:
+
+| Parameter | Acceptance rows | Decomposition rows |
+| --- | --- | --- |
+| `data_lane_capacity` | unset (unbounded) and set, per row | unset |
+| `batch_max_messages` | **1024**, stated by every row | 1 |
+| render cost | **500 µs** | 500 µs and 0 |
+| trials | ≥ 200 valid per quit row; the load depth rows are single-run | ≥ 200 valid per row |
+
+Both pinned values equal what the rows measured before they were
+stated, so no figure in this section moves with the pinning. The two
+the decomposition rows vary are varied *because* the upper bound is
+decomposed by varying them, which is the point of those rows and the
+reason both belong in the matrix rather than only the first.
+
+What section 5.1's rule assigns to RFC 0007 §6 — fixing the bounded
+run's configuration under test — is **deferred to the switch-over**
+for two of its three fields: `app_channel_capacity` and
+`keyed_channel_capacity` are the superseded topology's controls, and
+the successor's single control is `data_lane_capacity`, which is that
+rename's own landing (section 5.2; RFC 0014 §9 row 2). The obligation
+is unchanged, and RFC 0007 restates it against the field that exists
+once the field exists. `batch_max_messages` needs no deferral — it
+survives the rename and is pinned above.
+
+**Producer-originated route — the INV-L4 successor.** The criterion is
+no longer one absolute threshold. RFC 0014 §3.3 gives this route a
+*constructive* bound, and acceptance quantifies over that bound's
+components: a quit arriving mid-batch is preceded by the in-progress
+batch's remainder and nothing else, then the pass's frame stage, then
+a hop, then the postcondition's residual release. Measured
+decomposition at 50k backlog, control route, unbounded lane:
+
+| Component | Measured (p50) | What bounds it |
+| --- | ---: | --- |
+| in-progress batch remainder | 2.961 ms | `batch_max_messages` × per-item update cost |
+| frame stage | 0.461 ms | one render at the configured cost |
+| hop | ≈ 0.049 ms | fixed |
+| residual release | 0.437 ms | linear in residual depth |
+
+The batch-remainder term is the one the contract names, and it
+predicts: at cap 1024 with the quit arriving at input 5000, the
+remainder is 119 items, and 119 × 25 µs = 2.975 ms against 2.961 ms
+measured — **within 0.5%**. That agreement is what makes a
+component-wise criterion checkable rather than decorative.
+
+**Calibration and acceptance are different runs.** The decomposition
+above is a *calibration*: it is where the bound's constants come
+from, so it cannot also be where the bound is tested — a criterion
+fitted to a run and then checked against that same run reports
+nothing about the next one. Every figure quoted so far is
+calibration, drawn from session 1 and from the blocked-producer probe
+below. Acceptance is decided on a separate run of fresh trials under
+the pinned parameters and section 5.1's environment rule, with every
+criterion fixed before it. That run is session 3, and the two
+sessions before it are calibration for the reasons given below. The
+separation is stated rather than assumed because the first
+formulation of this section did not have it, and read as a threshold
+when it was a description of the data it came from.
+
+**Calibrated constants (session 1).** The constructive bound's terms,
+each fixed here as a number rather than as "the measured value":
+
+| Term | Value | Source |
+| --- | ---: | --- |
+| per-item update cost `c` | **25 µs** | the row's configured update cost; session 1 measured 24.88 µs at p50 over the 119-item remainder |
+| render term `R` | **0.50 ms** | the configured render cost; session 1 measured 0.461 ms |
+| hop allowance `H` | **0.25 ms** | one-sided; session 1 measured 0.049 ms at depth 49,999 and 0.216 ms at 299,999 |
+| residual term | **0.019 ms + 8.4 ns × depth** | the synchronous route's fit, which is the same postcondition |
+| tail allowance `k` | **1.25** | one-sided; session 1's control-route p99/p50 ratios span 1.016–1.100 |
+
+`H` and `k` are one-sided allowances, not estimates. `H` sits above
+the larger of the two measured hops — 0.216 ms at depth 299,999 — by
+about 1.16×, taken as a round figure rather than a computed multiple;
+`k` covers the widest p99/p50 spread the calibration showed, with
+room above it. Both are stated as numbers so that no later run can
+move them.
+
+**Acceptance condition, producer route.** For each quit row of the
+acceptance run, on the reference machine, at ≥ 200 valid trials:
+
+> measured p99 ≤ **B(row)** = ( remainder(row) × `c` + `R` + `H` +
+> residual(depth) ) × `k`
+
+where remainder(row) is the in-progress batch's remaining items at
+the quit's arrival, computed from that row's `batch_max_messages` and
+its quit position — the quantity RFC 0014 §3.3 bounds — and
+residual(depth) reads the row's **p50 depth**. That estimator is the
+one the numeric B values were computed from when this section pinned
+them, and naming it here records which statistic those numbers came
+from rather than choosing one after the fact. It makes no practical
+difference: the only row whose p50 and max depths differ enough to
+show is `quit_overload_control`, where B moves by 0.003 ms, three
+orders of magnitude inside that row's margin. The measured
+side is the upper-bound instrument, so the comparison is conservative
+on both ends. It is one-sided: a row that comes in faster passes.
+
+A second condition carries INV-L4's own property: **backlog
+independence on the delivery half** — with the residual term
+subtracted, delivery does not scale with depth. It has its own
+numeric oracle and its own validation run, both below.
+
+**The acceptance rows are the eight quit rows of each route.** The
+`decomp_*` and `probe_*` rows vary the batch cap, the render cost, or
+the blocked-producer count in order to separate the bound's terms,
+which is what makes them calibration instruments; they are
+informative and carry no criterion.
+
+**Synchronous route — the predictor it is gated over.** This route
+performs no send and waits behind no batch, so its cost is the
+postcondition alone, and its median is linear in the row's residual
+depth: **0.019 ms + 8.4 ns × depth**, fitted on p50 in calibration
+across depths 0 / 1,024 / 7,799 / 49,999 / 299,999. That fit is a
+predictor rather than a gate — at depth 0 the quantity it predicts is
+below the measurement's resolution, so a tolerance around it would be
+arithmetic on noise — and what it is for is giving the condition
+below something to quantify over. The condition is one-sided in both
+its terms: a row that comes in faster than the gate passes, and is
+expected to on this route, which travels no channel at all.
+
+**Session 2 is not an acceptance source, and why.** It ran while
+other work was live on the same machine, which section 5.1's
+environment rule now forbids for exactly the reason the probe
+measured: two runs of one configuration, differing only in what else
+the machine was doing, agreed on p50 to within 1–9 µs and disagreed
+on p99 by as much as forty-fold. A gate stated on p99 cannot be
+decided by a run of that kind. Session 2's medians remain usable as
+calibration — they agree with session 1's throughout — and its tail
+figures, including the `quit_blocked_64_sync` p99 that failed the
+first formulation of this gate, are set aside rather than treated as
+a finding about the kernel.
+
+**Recalibration: the synchronous gate takes a floor.** A tail has a
+floor this environment imposes regardless of depth, so a purely
+multiplicative gate is wrong at small depths, where 2.5 × a
+sub-resolution median is itself sub-resolution. The gate becomes
+
+> measured p99 ≤ **max( 2.5 × predicted p50, F )**, with
+> **F = 0.15 ms**
+
+The multiplier is unchanged. `F` is derived, not chosen: over the
+quiet runs — session 1 and the probe's second run, the two with no
+concurrent activity recorded — the largest synchronous
+`quit→applied` p99 at a depth where a floor could bind is **95 µs**
+(the probe at 128 blocked producers; the same rows otherwise span
+5–54 µs), and `F` is that value with a one-sided 1.5× margin, rounded
+up. The floor binds below depth ≈4,900 and the multiplicative term
+above it, so the depth-carrying rows are gated exactly as before.
+
+**Informative: the O(N) blocked-producer terms.** Termination costs
+scale with the number of blocked producers, and the probe measured
+both halves against RFC 0011 §4.4's two stages: **92.5 ns per
+producer** on `quit→applied`, which carries the abort requests, and
+**1,069.5 ns per producer** on `applied→exit`, which carries the join
+drain — the cost sits roughly 11× on the join side, and issuing the
+aborts is cheap. Both are p50 fits with R² ≥ 0.97; the same fits on
+p99 do not hold, which is the tail instability above rather than a
+property of N. No gate term is added for either: at 128 producers the
+`quit→applied` contribution is about 12 µs, an order of magnitude
+inside `F`, so a producer-count term would change no verdict while
+adding a constant to maintain.
+
+**Session 3 is the acceptance source, and it passes.** A fresh run of
+all sixteen acceptance rows under section 5.1's environment rule,
+with both gates and every constant in them fixed by this section
+before it ran. The isolation is on the record: the run started from
+the commit that pre-registered these criteria with a clean worktree,
+launched a prebuilt binary directly, and held no `cargo` or `rustc`
+process at either end of a 5 min 50 s window; all sixteen rows
+collected 200 valid trials with no failures.
+
+**Producer-originated route.** Gate `p99 ≤ B(row)`, milliseconds:
+
+| Row | depth (p50) | B(row) | p99 | margin |
+| --- | ---: | ---: | ---: | ---: |
+| `quit_idle_control` | 0 | 0.961 | 0.525 | +0.436 |
+| `quit_idle_bounded_control` | 0 | 0.961 | 0.552 | +0.409 |
+| `quit_blocked_1_control` | 1,024 | 4.691 | 3.987 | +0.704 |
+| `quit_blocked_64_control` | 1,087 | 4.691 | 4.008 | +0.683 |
+| `quit_overload_bounded_control` | 1,024 | 4.691 | 3.994 | +0.697 |
+| `quit_overload_control` | 7,897 | 4.763 | 3.690 | +1.073 |
+| `quit_backlog_50k_control` | 49,997 | 5.205 | 4.040 | +1.165 |
+| `quit_backlog_300k_control` | 299,997 | 7.830 | 6.401 | +1.429 |
+
+**Synchronous route.** Gate `p99 ≤ max(2.5 × predicted p50, F)`,
+milliseconds, with the term that binds each row named:
+
+| Row | 2.5 × predicted | gate | p99 | margin | binds |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `quit_idle_sync` | 0.048 | 0.150 | 0.008 | +0.142 | floor |
+| `quit_idle_bounded_sync` | 0.048 | 0.150 | 0.006 | +0.144 | floor |
+| `quit_blocked_1_sync` | 0.069 | 0.150 | 0.031 | +0.119 | floor |
+| `quit_overload_bounded_sync` | 0.069 | 0.150 | 0.037 | +0.113 | floor |
+| `quit_blocked_64_sync` | 0.070 | 0.150 | 0.113 | +0.037 | floor |
+| `quit_overload_sync` | 0.213 | 0.213 | 0.112 | +0.101 | multiplier |
+| `quit_backlog_50k_sync` | 1.097 | 1.097 | 0.515 | +0.582 | multiplier |
+| `quit_backlog_300k_sync` | 6.347 | 6.347 | 3.228 | +3.119 | multiplier |
+
+Sixteen of sixteen pass. **INV-L4's acceptance conditions are met on
+the successor topology**, at the trial counts and on the reference
+machine this section pins.
+
+**Backlog independence needs an oracle, and here it is.** This is
+INV-L4's own property and the second condition, and until now it was
+stated as "flat", which is a judgement rather than a test — three
+runs were called flat after they were seen. The condition is now two
+numbers, over the **six non-idle rows** (the two idle rows are
+excluded because a single-message batch has no remainder to wait
+behind, so their delivery half measures something else — they sit
+near 0.51 ms in every session while the six sit near 3.5):
+
+> (i) the least-squares slope of delivery-half p50 against depth is
+> **≤ +0.5 ns per envelope**, and (ii) its **span (max − min) ≤ 0.6
+> ms**
+
+Both are one-sided: flatter passes, tighter passes. The slope bound
+is set against the term the model already carries — the residual
+slope is 8.4 ns per envelope, and +0.5 is under a sixteenth of it, so
+a delivery half creeping at that rate would be indistinguishable from
+flat beside the quantity depth is already known to move. The span
+bound is roughly 2.3× the widest span the calibration produced.
+
+Three sessions calibrate it, and all three sit well inside:
+
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 1 | −0.171 | 0.123 |
+| 2 | −0.440 | 0.166 |
+| 3 | −0.426 | 0.266 |
+
+All three slopes are negative here, and in session 3 the largest
+value sits at the smallest depth with the three deepest rows the
+three lowest. That sign is not itself the property being bounded —
+later sessions put it either side of zero, as the verdict below
+records — which is why the oracle bounds the slope rather than
+requiring it to point one way. Because these
+three sessions are what the two constants were read off, none of them
+can also decide the condition.
+
+**Session 4 is calibration, not the validation, and this section
+already said which it would be.** The pre-registration above names
+the validating run as one made *under section 5.1's environment
+rule*. Session 4 began at a load average of 8.23 against session 3's
+2.70, so it does not meet that rule, and the criterion it was meant
+to decide is therefore **not decided by it**. This section briefly
+said otherwise — it recorded the condition as established, on the
+ground that the oracle reads p50 and p50 had held in that run — and
+that reasoning was an exception carved out of the environment rule
+using observations from the very run the rule excluded, after the
+results were seen. An evidence class fixed before a run cannot be
+widened by that run's own output; the pre-registration meant what it
+said, and session 4 does not decide the condition.
+
+What session 4 *is* good for is calibration, on the same footing as
+the three sessions that set the constants. Its oracle quantities, for
+the record and beside them:
+
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 4 | −0.0101 | 0.110 |
+
+The two constants are **not re-fitted** to include it. They were
+derived from sessions 1 through 3 and pinned before session 3 ran;
+adding a fourth sample to their basis now would repeat the mistake
+this paragraph is correcting, in the other direction.
+
+The validating run is a fresh session that satisfies section 5.1's
+environment rule, with these constants unchanged. The per-row p99
+gates are untouched by any of this — they were decided on session 3
+— and the discipline is the one they carry: a validating run that
+misses either number is a finding, reported rather than accommodated.
+
+**Session 5 is calibration too, and the reason is the window's
+start.** Its closing load average was 1.73 and no `cargo` or `rustc`
+process existed at either end, but at the moment recording began a
+single working process held 68.2% of the machine. A closing average
+describes the last minute; it cannot reach back and make the earlier
+part of the window quiet, and section 5.1 asks about the window, not
+its end. So the beginning of session 5 was measured against a machine
+under other load, and the condition is **not decided by it** either.
+Its oracle quantities join the calibration record, tabulated with
+session 6's below.
+
+**Quiet has to hold for the window, and the harness has to enforce
+it.** Three runs have now been argued eligible after the fact and
+none was; a fourth checked its conditions once, at the instant
+recording began, and that is not the same claim either. A start
+instant says nothing about the minutes that follow — the second
+attempt at that run watched its own load climb from 2.37 to 6.95
+inside a ten-minute window, which is exactly the shape a start-only
+check cannot see. The requirement is therefore two-stage, and both
+stages belong to the **harness itself**, enabled by an
+acceptance-mode flag, rather than to whatever script launches it: a
+launcher can only observe around the measurement, and what has to be
+observed is the measurement.
+
+**Stage 1, pre-flight.** Before any measurement exists, the harness
+polls until all three hold together, then stamps its isolation record
+and starts:
+
+| Pre-flight condition | Threshold |
+| --- | --- |
+| no `cargo` or `rustc` process | absent |
+| one-minute load average | **≤ 2.5** |
+| largest single working process | **≤ 20% CPU** |
+| maximum wait for all three | **10 minutes** |
+
+Exceeding the wait means the run does not exist: non-zero exit,
+nothing recorded, no partial data to be tempted by.
+
+**Stage 2, in-window monitoring.** For as long as measurement
+continues, the harness samples at a fixed **5-second** cadence:
+
+| In-window condition | Voids the run when |
+| --- | --- |
+| `cargo` or `rustc` process | present in any sample |
+| non-bench working process above 20% CPU | in **3 consecutive** samples (≈15 s) |
+| non-bench working process above 100% CPU | in **any single** sample |
+| one-minute load average, bench included | above **5.0** in any sample |
+
+A void is the **whole run**: the harness exits non-zero, records
+which samples failed and on which condition, and the data it
+collected is not acceptance evidence. Voiding the run rather than the
+row is deliberate — a disturbance that reaches one row has no reason
+to have spared the ones before it. **Every sample is written to the
+run's record regardless**, including the bursts that do not void, so
+that what the window contained is inspectable rather than summarised
+by whether it survived.
+
+The persistence requirement on the 20% condition is the one part of
+this specification that a measurement changed, and the measurement is
+recorded below. What the condition is *for* is excluding a concurrent
+working session — a build, an editor, another agent — and those hold
+a core for as long as they run. A macOS daemon that wakes, works for
+a few seconds, and sleeps is not that, and a rule that cannot tell
+them apart excludes nothing while refusing everything. Three
+consecutive samples is the smallest window that distinguishes them at
+this cadence. The **100%** clause is the safety side: one full core
+is real work by any reading, and it voids on sight without waiting
+for persistence.
+
+The load condition is on a different axis from pre-flight's, and
+carries a second job. Its threshold is higher because the bench is
+itself the load once measurement starts: 5.0 sits above the 4.01
+that was the highest closing average any clean window produced, with
+margin, where pre-flight's 2.5 describes a machine that is supposed
+to be idle. It is also the **aggregate** guard. The per-process
+condition passes a machine busy with several processes at 15% each,
+which is not a quiet machine; a bench-inclusive load ceiling catches
+that case, which no per-process bound can.
+
+Monitoring cost is negligible against what it protects: a sample
+reads a load average and a process list, on the order of a
+millisecond, and a 5-second cadence over a run of roughly five and a
+half minutes takes about 66 of them — under a tenth of a second of
+work spread across a run whose shortest row measures for far longer.
+
+**Why the persistence requirement exists: nine attempts, none
+usable.** The first specification of this stage voided on a single
+sample above 20%, and under it a validating run could not be
+obtained. Nine attempts were made between 22:15 and 00:52, and every
+one ended without data:
+
+| Attempt | Outcome | Cause |
+| --- | --- | --- |
+| 1 | void | `WindowServer` 32.4% |
+| 2 | void | `VirtualMachine` 20.1% |
+| 3 | void | `launchd` 42.5% |
+| 4 | void | `System/Library/Input` 41.1% |
+| 5 | void | `VirtualMachine` 25.3% |
+| 6–8 | pre-flight not met | `spotlightknowledged` 57–96%, `syspolicyd` 83–94% |
+| 9 | void | `syspolicyd` 69.1% |
+
+Every one of the six voids was the 20% condition; not one was the
+load ceiling, and no `cargo` or `rustc` process appeared in any
+sample of any attempt. That is the signature of a threshold this
+machine cannot meet rather than of a machine that was busy: the load
+averages at the violating samples were 1.42 to 2.25, which is an idle
+reference machine by every other measure this section uses.
+
+The three pre-flight refusals are the contrast that makes the rest
+legible. Those windows were genuinely not quiet — Spotlight indexing held
+between 57% and 96% of a core across thirty-one probes spanning ten
+minutes — and pre-flight refused them, correctly and without needing any
+persistence rule, because sustained load is what a single sample already
+detects.
+
+One limit of this evidence is worth stating, because it also shapes
+the revision. The harness stopped at the first violating sample, so
+these records do **not** show how long each burst lasted; they show
+that the threshold was reached, not that it was reached briefly. The
+revision therefore rests on the mismatch between the rule and its
+purpose — sustained sessions versus daemon wakeups — rather than on a
+measured burst duration, and the requirement that every sample be
+recorded exists so the next run can supply what these could not.
+
+**This revision is pre-registered, and the timing is what makes it
+so.** No validating run exists: every attempt above ended in a void
+or a refusal, and none produced acceptance data. There is therefore
+no result this change could have been steered toward, which is the
+property that separates it from the two revisions this section
+already records as post-hoc. The oracle, its two constants, and every
+numeric gate are untouched.
+
+Each pre-flight number is read off the calibration runs. A
+one-minute load average of 2.5 is attainable on this machine and has
+been observed at 1.73 and 2.14 with the bench as the only substantial
+load, while the two windows that failed the environment rule opened
+at 7.87 and 8.23. The 20% process bound sits just above the quietest
+observed maximum, `sysmond` at 19.5% — close enough to admit a
+machine at rest, far enough below the 28.9% and 68.2% that
+accompanied those failures to exclude them. Ten minutes bounds a
+decay from 7.87 to 1.73 that took under nine.
+
+This is a strengthening, and it applies to runs made under it. It
+does not reopen the per-row acceptance: that was decided on a run
+judged against section 5.1 as stated, whose isolation record shows no
+dominating process, and a rule tightened afterwards is not evidence
+about a run that preceded it. A reader comparing the numbers should
+know that run opened at a one-minute average of 2.70, above the
+pre-flight threshold now required of new ones.
+
+**Sessions 5 and 6 are calibration.** Session 5's window opened with
+a single process holding 68.2% of the machine, which the pre-flight
+condition would have caught. Session 6 cleared a pre-flight check —
+load 2.28, largest process 17.9% — but nothing watched the window
+after that, so it cannot answer the requirement above either. Their
+oracle quantities join the calibration record; the two constants stay
+those of sessions 1 through 3 and are not re-fitted to include them:
+
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 5 | −0.0806 | 0.113 |
+| 6 | +0.1013 | 0.102 |
+
+Session 6's slope is the first positive one, against −0.426 and
+−0.081 before it. Recorded rather than explained: its magnitude is
+about an eighty-third of the 8.4 ns per envelope the residual term
+carries, so the sign says which side of zero a small quantity fell on
+rather than anything about a trend.
+
+Session 6 also carried per-row figures as confirmation, with session
+3 unchanged as the acceptance source. Fourteen of the sixteen
+row-and-route figures came in at or below session 3's, and the two
+that did not are inside their own bounds: `quit_backlog_50k_sync` at
+0.541 ms against a 1.097 ms gate, and `quit_idle_control` at 0.526
+against 0.525, a difference of one reporting unit. Its maxima sat
+close to its p99s in absolute terms — every row within 190 µs, and
+most within a few — where sessions 4 and 5 had maxima milliseconds
+clear of theirs. The ratios are not the useful comparison at this
+scale: a 3 µs gap on a 6 µs p99 reads as 1.5× and means the
+measurement resolved to a microsecond.
+
+**Session 7 is calibration, because its monitor could fail open.**
+The run's record reads well — pre-flight cleared on the first probe
+at load 1.04 with a largest working process of 8.3%, sixty-three
+in-window samples, load average 1.04 to 1.83 throughout, no void, and
+two above-20% bursts logged and cleared. But the monitor that
+produced it had two paths on which a violation would not have been
+reported, and both sit inside what this record would have to prove:
+
+- **An immediate violation could be swallowed by the streak logic.**
+  The conditions that void on sight — a `cargo` or `rustc` process,
+  or one above 100% CPU — were evaluated through the same path that
+  counts consecutive samples, so a single sample carrying one of them
+  could be consumed as "streak of one" rather than reported. The
+  record therefore cannot establish that no build process was present
+  at the two bursts it does report.
+- **The window was declared held without reading its end.** The final
+  sample was not taken, and the monitor was not joined before the run
+  declared success, so whatever happened between the last recorded
+  sample and the end of measurement is outside the record entirely.
+
+Neither is a claim that the window was dirty; it is that the record
+cannot say. This section has twice refused a run whose eligibility
+rested on something the record could not carry, and the same standard
+applied here demotes this one. Its oracle quantities join the
+calibration record, and the constants stay those of sessions 1
+through 3, not re-fitted:
+
+| Session | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| 7 | −0.1263 | 0.096 |
+
+**The run made on the revised monitor is calibration too, because
+the window's opening is still unproven.** That monitor closed the two
+paths the previous one left open: the void-on-sight conditions are
+evaluated independently of the streak counter, and the window is
+declared held only after a final sample is taken and the monitor
+joined. Its record is correspondingly better — pre-flight cleared on
+the first probe, sixty-one in-window samples with none voided, each
+recording the input to every condition rather than only its verdict,
+and the window's end in order. What it still cannot establish is its
+beginning.
+
+The monitor is started without a handshake: the call that starts it
+returns once the sampler has been spawned, not once the first sample
+has been taken. The record shows the first sample preceding the first
+row report, which looks like the ordering the condition needs, but a
+row is reported only after its two hundred trials complete — so
+"before the first report" is a far weaker fact than "before
+measurement began", and the second does not follow from it. Under a
+scheduler that delays the sampler, measurement can begin before any
+sample exists, and the window would still be declared held with
+nothing observed about its opening.
+
+That is the same shape as the two demotions above: not a claim that
+the window was dirty, but that the record cannot say. Applying the
+standard symmetrically demotes this run as well. Its oracle
+quantities join the calibration record, and the constants stay those
+of the first three runs, not re-fitted:
+
+| Run | slope (ns/envelope) | span (ms) |
+| --- | ---: | ---: |
+| on the revised monitor | −0.1263 | 0.095 |
+
+| Condition | Rows | Oracle | Verdict |
+| --- | ---: | --- | --- |
+| backlog independence | 6 | slope ≤ +0.5 ns/env and span ≤ 0.6 ms | **established** |
+
+**Backlog independence is established, on a run whose window is
+bracketed at both ends.** The oracle and both of its constants are
+the ones pinned before it ran, and it clears each half:
+
+| Quantity | Measured | Bound | Margin |
+| --- | ---: | --- | ---: |
+| slope | −0.1200 ns/envelope | ≤ +0.5 | 0.620 ns/env |
+| span | 0.102 ms | ≤ 0.6 ms | 0.498 ms |
+
+What makes this run eligible where the one before it was not is the
+opening. The call that starts the monitor takes the first sample on
+the calling thread and returns only once that sample is complete, so
+the window's start is a property of the code rather than an
+expectation of the scheduler. The end is the ordering the previous
+monitor already had — last row, final sample, join, then the held
+declaration — now reached by every guarded exit path. A third change
+closes a quieter gap on the same axis: a process listing that exits
+non-zero, returns nothing, or cannot be parsed counts as an
+observation failure, where before it could pass for a quiet machine.
+
+The window it recorded: the barrier cleared on its first probe, at a
+one-minute average of 1.79 with the largest working process at 7.9%
+and no build process present; sixty-one in-window samples at the
+five-second cadence, load average 1.22 to 2.40; no void; no sample
+above 100%; nine samples above 20%, the longest consecutive run of
+those being two against a bound of three. Every sample carries the
+input to each condition rather than only its verdict, so the record
+answers directly whether a build process was running at any sample it
+contains.
+
+Seven attempts voided before this one completed — four on the
+above-100% clause, which acts on sight, and three on the
+three-consecutive-sample clause. The revised persistence rule is
+therefore not one that admits everything: both of its branches
+refused windows in the field, and one of the three-sample refusals
+caught a process belonging to the session's own tooling rather than
+any daemon, which is what a rule that watches the machine rather than
+a list of expected offenders looks like when it works.
+
+Per-row figures came with it as confirmation, the acceptance source
+unchanged. **Every row came in inside its pre-registered bound**, on
+both quit routes, at two hundred valid trials with no predicate
+misses. Secondarily, thirteen of the sixteen row-and-route p99s are
+at or below the source run's; the three above it are higher by five
+to sixteen microseconds and all three sit far inside their gates.
+Those bounds were decided on the source run and are not reopened
+here.
+
+**The slope's sign is not a stable quantity, and the bound never
+depended on it.** Across the calibration runs that have produced one
+it has ranged from −0.440 to +0.101, changing sign twice. Every
+magnitude is inside the bound, and the largest is a nineteenth of the
+8.4 ns per envelope the residual term carries. A criterion stated as
+"the slope does not exceed +0.5" survives that; one stated as "the
+slope is negative" would have failed, which is why the oracle is
+signed and one-sided rather than directional. The narrowest span any
+of them produced is 0.095 ms.
+
+**Recorded from session 4: medians held, tails did not.** Its
+`quit→applied` p50 moved by at most 0.190 ms across all sixteen rows
+and mostly within ±0.05 ms, while several rows' `applied→exit` p99
+rose by more than an order of magnitude and
+`quit_overload_control`'s `quit→applied` p99 reached 4.995 ms against
+a 4.763 ms bound. Neither fact decides anything here: the run cannot
+grant the backlog-independence condition, and it equally cannot
+retract session 3's acceptance of that row, for the same reason in
+both directions. It is recorded because a reader comparing the
+sessions will see it, and because it is a second illustration of why
+section 5.1 requires the environment it does.
+
+**`quit_blocked_64_sync` passes on the floor, and what its tail
+shows is a record rather than a mechanism.** The row has been
+measured eight times, across runs whose conditions differed: in run
+order the applied p99 ran 0.054, 0.111, 0.113, 0.092, 0.084, 0.056,
+0.055, and **0.057 ms**. So **the value varies across runs by a
+factor of about two, and the acceptance figure of 0.113 ms is the
+largest of the eight rather than a representative one.** The ordering
+is suggestive and no more — establishing that the environment
+*causes* the variation would take a controlled experiment, varying
+the load deliberately with everything else held, and none of the
+eight was that. What the spread does establish is narrower and worth
+keeping: two samples of this quantity that happen to agree say
+nothing about its stability.
+
+None of this reaches the gate: the row passes because `F` is above
+it, not because its tail is small or steady. Its acceptance figure of
+0.113 ms exceeds the multiplicative term's
+0.070 ms and clears the floor by 0.037 ms, and `F` was not fitted to
+it. The floor's binding value came from the blocked-producer probe
+at 128 producers (95 µs); this row's own quiet figure sat in the
+calibration pool at 54 µs and did not set the maximum. What the floor
+asserts is that below a certain latency this environment's tail is
+not a measurable quantity, and this row sits under that line — so the
+gate admits it without claiming to have measured it.
+
+**Two single-trial outliers, recorded.** `quit_idle_bounded_control`
+reaches a max of 4.219 ms against a p99 of 0.552, and
+`quit_backlog_300k_sync` a max of 4.944 against a p99 of 3.228; both
+correspond to an `applied→exit` excursion in the same trial. Each
+row's p50 and p95 agree with its neighbours, so these are single
+trials in 200 rather than a shifted distribution. The criterion is
+p99, which holds for both, and this is the same treatment section 5.1
+already gives the superseded topology's blocked rows, where per-trial
+maxima exceeded 1 ms under a p99 criterion that held.
+
+**The join drain carries the blocked-producer cost, as measured.**
+`quit_blocked_64`'s `applied→exit` stands out from every other row —
+0.076 ms on the synchronous route and 0.068 ms on the control route,
+against 0.002–0.029 ms elsewhere — and that is the size the probe
+predicts: 1,070 ns per producer × 64 ≈ 68 µs. The two halves of
+RFC 0011 §4.4's postcondition split as that measurement described,
+with the abort requests cheap and the join drain carrying the term.
+
+**What the numbers say about the old threshold, stated plainly.** The
+superseded criterion was p99 ≤ 1 ms at every measured depth, and it
+does not carry over as a number, because on the successor the two
+routes moved in opposite directions and for contracted reasons. At
+idle the synchronous route is roughly a hundred times faster than the
+superseded path (p99 0.006 ms against 0.603 ms), since it travels no
+channel. At backlog the control route is slower than 1 ms (4.0 ms at
+50k, 6.3 ms at 300k), because its bound is now the in-progress
+batch's remainder, which scales with the configured cap — exactly
+what RFC 0014 §3.3 contracts and RFC 0014 §3.5's finite cap bounds. Neither
+movement is a regression against a contract; carrying the old number
+across would have measured the successor against a topology it does
+not have.
+
+**Bounded mode.** The depth accounting is unchanged and holds:
+`overload_bounded` and `burst_200k_bounded` both cap at **1,025** =
+`data_lane_capacity + concurrent producers`, the same value and the
+same accounting section 5.1 fixes. Every successor row is lossless
+(`produced == processed`) and in-order. INV-L9's `keyed_isolation`
+row has no successor and is not re-measured: with the per-command
+channels gone there is nothing to isolate, which section 5.2 already
+records as a property loss.
+
+**Informative: the kernel's per-dispatch linear scans.** The successor
+replaces per-command channels with one run registry, and several of
+its bookkeeping operations walk that registry. Measured on the same
+machine and profile, each is linear in the number of live entries,
+with per-entry slopes of ~4.8 ns (keyed-occupant lookup, per explicit
+cancel or keyed spawn), ~2.9 ns (subscription-running lookup, per
+declaration per re-evaluation), ~1.7 ns (any-stopping-subscription,
+per re-evaluation), and ~7.8–10.0 ns (teardown prefix selection, per
+teardown); the cleanup ledger's prefix partition runs ~6.3 ns per
+registration, or ~61 ns when the selected registrations are also
+dropped, which production does not do — it starts them. Worst case
+for one re-evaluation at 64 declarations against 512 live runs is
+about 97 µs. These figures are recorded, not gated: no invariant here
+quantifies over scan cost, and they are stated so a later change to
+the registry's structure — which RFC 0013 §3.7 leaves as
+mechanism — has a before value to be measured against.
+
+**Recorded, not gated: render count.** Removing configured frame
+pacing (RFC 0014 §6.3) changes how often the frame stage runs —
+`steady_20k` renders 300 times on the superseded topology and 3,859
+on the successor. This is the measurable face of RFC 0014 §9 row 4's
+supersession, recorded here because a reader comparing the two
+columns will see it, and deliberately **not** an acceptance
+condition: no requirement in this document constrains render count,
+and the user-visible cadence change is carried by the implementation
+release's CHANGELOG.
 
 ## 6. Open questions (all resolved)
 

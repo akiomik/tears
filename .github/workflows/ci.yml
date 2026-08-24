@@ -52,10 +52,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
-        # only, in the `bench` job below) since `runtime_load`'s custom
-        # harness ignores `cargo test`'s `--test` flag and always runs its
-        # full scenarios; matrixing that across every OS/toolchain makes
-        # Windows CI disproportionately slow for no additional coverage.
+        # only, in the `bench` job below) since the load harnesses'
+        # (`runtime_load`, `kernel_load`) custom mains ignore `cargo test`'s
+        # `--test` flag and always run their full scenarios; matrixing that
+        # across every OS/toolchain makes Windows CI disproportionately slow
+        # for no additional coverage.
         run: cargo test --lib --bins --tests --examples --all-features
 
   bench:
@@ -66,18 +67,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
-      - name: Run subscription benchmark
+      - name: Run criterion benchmarks in test mode
         # `--bench <name>` (singular, per-target) rather than `--benches`
         # (plural): the plural form implicitly also runs the lib's unit
         # tests, duplicating what the `test` job's matrix already covers.
-        run: cargo test --bench subscription --all-features
-      - name: Run runtime-load smoke profile
-        # The full `runtime_load` scenarios leave CI: they are deliberate
-        # acceptance/regression runs (RFC 0006 §5.1, RFC 0007 §5–6), and their
-        # latency numbers gate nothing on a CI machine. CI runs only the
-        # reduced, latency-assertion-free smoke profile, which gates on
-        # completion. Invoked via `just` so the local and CI invocations are
-        # identical (RFC 0007 §6).
+        # Criterion's own test mode is the smoke profile for these two: one
+        # iteration each, no sample, so what it gates is that they still
+        # compile and run.
+        run: |
+          cargo test --bench subscription --all-features
+          cargo test --bench kernel_scan --all-features
+      - name: Run the load harnesses' smoke profiles
+        # The full scenarios of both load harnesses leave CI: they are
+        # deliberate acceptance/regression runs (RFC 0006 §5.1, RFC 0007
+        # §5–6, RFC 0014 §13.5), and their latency numbers gate nothing on a
+        # CI machine — a shortened row's percentiles are not the quantity the
+        # acceptance matrices are stated over. CI runs only the reduced,
+        # latency-assertion-free smoke profiles, which gate on completion and
+        # sequence integrity. Invoked via `just` so the local and CI
+        # invocations are identical (RFC 0007 §6).
         run: just bench-smoke
 
   loom:

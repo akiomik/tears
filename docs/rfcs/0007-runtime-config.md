@@ -706,8 +706,8 @@ channel occupancy, per the note on that distinction below the table:
 
 ## 6. CI smoke profile
 
-**Resolved: yes — CI runs a smoke profile of the harness, in place of a
-full-scenario run.** RFC 0006 fixed that CI gates on no
+**Resolved: yes — CI runs a smoke profile of each load harness, in
+place of a full-scenario run.** RFC 0006 fixed that CI gates on no
 latency criterion. At this question's resolution CI built and ran the
 full harness on every push (`cargo test --bench runtime_load`, whose
 custom `main` ignored `cargo test`'s filtering); the
@@ -724,6 +724,22 @@ deliberate acceptance or regression runs (§5), on any machine, with RFC
 on the reference machine, and runs on other machines are
 regression-informative, never acceptance. The job's `subscription` bench
 invocation is unchanged.
+
+**The recipe carries two profiles.** RFC 0014 §13.5 adds a second load
+harness (`benches/kernel_load.rs`) for the reducer-first kernel beside
+this one, and `just bench-smoke` runs both. The second is this
+section's form applied to that harness, not a second definition of it:
+the same `--smoke` argument, the same two assertion classes — the
+scripted-sequence gate on its draining rows, completion alone on its
+quit rows — no latency assertion anywhere, and the same attempt cap
+scaled to the row's own trial count. Two things differ, and both follow
+from the successor topology rather than from the profile: its quit rows
+run one row per quit route rather than each row twice, the two routes
+RFC 0014 §3.3 separates, and its
+attempt cap binds every row rather than the predicate rows alone,
+because an attempt there can end with no sample when no predicate has
+missed. The rest of this section is stated over one harness and reads
+over either.
 
 - **Invocation**: a `--smoke` argument to the harness binary (which already
   takes scenario-name arguments), selecting reduced variants: `steady_20k`
@@ -804,9 +820,9 @@ invocation is unchanged.
   retry or into attempt-cap exhaustion. The three failure classes stay
   distinct in the smoke run exactly as §5.2 defines them.
 - **What it is not**: not an acceptance run, not a regression baseline, and
-  its numbers are not recorded anywhere. It exists to prove the harness
-  still builds (all scenarios compile in the one binary) and the smoke
-  scenarios still terminate, at a wall time that stays viable as the
+  its numbers are not recorded anywhere. It exists to prove a harness
+  still builds (all of its scenarios compile in its one binary) and the
+  smoke scenarios still terminate, at a wall time that stays viable as the
   scenario set grows.
 
 ## 7. Invariants

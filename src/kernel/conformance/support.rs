@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
+use std::mem;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
@@ -39,6 +40,7 @@ use tokio::task::yield_now;
 
 use crate::command::{Action, Command};
 use crate::kernel::Kernel;
+use crate::kernel::arbiter::WakeSource;
 use crate::kernel::lane::GateMode;
 use crate::reducer::{Exit, Program, Reducer};
 use crate::runtime::config::RuntimeConfig;
@@ -47,7 +49,7 @@ use crate::runtime::load::LoadObserver;
 use crate::subscription::mock::MockSource;
 use crate::subscription::{Subscription, SubscriptionSource};
 use crate::test_support::{FailingBackend, hook_guard};
-use crate::testing::driver::{Confirmed, ParkProbe, RunName, TestDriver};
+use crate::testing::driver::{Confirmed, ParkProbe, RunName, StepReport, TestDriver};
 
 /// The turn budget the series hand [`TestDriver::settle`] and
 /// [`TestDriver::confirm`].
@@ -139,6 +141,107 @@ impl Drop for DropMark {
     }
 }
 
+/// A gate a stopped subscription run's **quiescence** holds at, so a script
+/// can keep a run stop-requested and not-yet-quiesced across a whole pass.
+///
+/// Why this exists: a stop's abort resolves within one executor turn on the
+/// current-thread executor, so there the only pass in which a stopped run is
+/// still unquiesced is the pass that issued the stop — the window RFC 0012
+/// INV-SE4's mandated sequence needs is not constructible. Holding the
+/// *dismantling* itself is what opens that window, and it is only safe to
+/// hold beside worker threads: the abort drops the run's stream on a worker,
+/// so blocking there costs the driving thread nothing and the driver stays
+/// steppable throughout.
+///
+/// Like [`MidBatchHandshake`], the ordering this establishes is the
+/// application's own, not the scheduler's, and a series using it cites no
+/// part of INV-RC14's determinism claim (RFC 0008 §9.8's verified range is
+/// current-thread).
+#[derive(Clone, Debug, Default)]
+pub struct QuiescenceGate {
+    open: Arc<AtomicBool>,
+    entered: Beacon,
+    exhausted: Arc<AtomicBool>,
+}
+
+impl QuiescenceGate {
+    /// Releases the held run, which then quiesces.
+    pub fn open(&self) {
+        self.open.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the held run's dismantling has begun — the abort has landed
+    /// on a worker and the run is now stop-requested with its quiescence
+    /// pending, which is the state a script waits for before opening the
+    /// window's second half.
+    pub fn entered(&self) -> bool {
+        self.entered.marked()
+    }
+
+    /// Whether a hold ran out its budget instead of being released.
+    ///
+    /// The hold cannot report its own exhaustion by panicking — that would
+    /// abort the process from a drop rather than fail a test — so it records
+    /// it here and the script reads it beside the window assertions. Without
+    /// this, an exhausted hold looks exactly like a run that quiesced early,
+    /// and the row fails on a downstream admission count that names neither
+    /// the cause nor the file it happened in.
+    pub fn exhausted(&self) -> bool {
+        self.exhausted.load(Ordering::SeqCst)
+    }
+}
+
+/// The guard a probe source's stream holds, whose drop is that run's
+/// quiescence as the application sees it.
+///
+/// Two shapes because two windows: the ordinary one reports the quiescence
+/// and returns, and the gated one holds the dismantling open until the
+/// script releases it.
+#[derive(Debug)]
+enum Quiescence {
+    Immediate(DropMark),
+    Gated(GatedQuiescence),
+}
+
+/// The guard whose drop is a gated run's quiescence.
+///
+/// The two marks are made either side of the hold, and that is the whole
+/// point: `entered` says the dismantling started, `quiesced` says it
+/// finished, and between them the run is in the state the window needs.
+#[derive(Debug)]
+struct GatedQuiescence {
+    gate: QuiescenceGate,
+    quiesced: Beacon,
+}
+
+impl Drop for GatedQuiescence {
+    /// Held with a counted busy-yield rather than a waker or a deadline: a
+    /// drop cannot await, and a deadline would be a clock read. The bound is
+    /// a hang guard whose value is mechanism, in the style of
+    /// [`MidBatchHandshake`]'s.
+    ///
+    /// Panicking inside a drop would abort the process rather than fail the
+    /// test, so an exhausted bound is *recorded* instead
+    /// ([`QuiescenceGate::exhausted`]) and the script reads it where it can
+    /// name it. The hold then ends, which is the only other option: staying
+    /// in the drop forever would hang the suite.
+    fn drop(&mut self) {
+        self.gate.entered.mark();
+        let mut released = false;
+        for _ in 0..HANDSHAKE_YIELDS {
+            if self.gate.open.load(Ordering::SeqCst) {
+                released = true;
+                break;
+            }
+            thread::yield_now();
+        }
+        if !released {
+            self.gate.exhausted.store(true, Ordering::SeqCst);
+        }
+        self.quiesced.mark();
+    }
+}
+
 /// A permit-storing release signal for producer bodies.
 ///
 /// [`open`](Latch::open) banks the permit whether or not the body has
@@ -185,13 +288,36 @@ pub enum Call {
 }
 
 /// The application's own record of what the kernel asked it to do.
+///
+/// The renders are logged twice over: once as a [`Call::View`] in the call
+/// sequence, which is what orders a render against the batch and the
+/// re-evaluation around it, and once as the state that render observed —
+/// the last message `update` had been invoked with when `view` ran. The
+/// second log is what makes "the render observed the pass's current state"
+/// (RFC 0011 INV-LC2) readable, and it is deliberately not a `Call`
+/// variant: folding the state into the sequence would make every ordering
+/// assertion in the suite state-sensitive.
 #[derive(Clone, Debug, Default)]
-pub struct Journal(Arc<Mutex<Vec<Call>>>);
+pub struct Journal {
+    calls: Arc<Mutex<Vec<Call>>>,
+    renders: Arc<Mutex<Vec<Option<u8>>>>,
+}
 
 impl Journal {
     /// Appends one call.
     fn record(&self, call: Call) {
         self.calls_mut().push(call);
+    }
+
+    /// Appends the state one render observed: the last message delivered
+    /// before it, or `None` where no message had been.
+    fn render(&self, observed: Option<u8>) {
+        self.renders_mut().push(observed);
+    }
+
+    /// What each render observed, in render order.
+    pub fn rendered(&self) -> Vec<Option<u8>> {
+        self.renders_mut().clone()
     }
 
     /// Every call, in order.
@@ -230,7 +356,12 @@ impl Journal {
     /// poison error in place of the test's own assertion, and the data is an
     /// append-only list with no cross-record invariant.
     fn calls_mut(&self) -> MutexGuard<'_, Vec<Call>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The render log's lock, recovered for the same reason.
+    fn renders_mut(&self) -> MutexGuard<'_, Vec<Option<u8>>> {
+        self.renders.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -246,8 +377,24 @@ pub struct ProbeSource {
     key: &'static str,
     values: Vec<u8>,
     ends: bool,
+    fault: Option<Fault>,
+    /// Where this source's quiescence is held, for the one series that needs
+    /// a stopped run to stay unquiesced across a pass.
+    gate: Option<QuiescenceGate>,
     admissions: Beacon,
     quiescences: Beacon,
+}
+
+/// Where a faulty [`ProbeSource`] panics — the two sites RFC 0011 keeps
+/// apart, because they land in different panic classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fault {
+    /// In the spawner, which the kernel invokes at the admission site on the
+    /// **driving task** — so the unwind is fail-fast (INV-LC6).
+    Spawner,
+    /// In the stream, polled inside the **runtime-owned** forwarder task —
+    /// so the panic is contained (INV-LC8).
+    Stream,
 }
 
 impl ProbeSource {
@@ -258,8 +405,20 @@ impl ProbeSource {
             key,
             values: Vec::new(),
             ends: false,
+            fault: None,
+            gate: None,
             admissions: Beacon::default(),
             quiescences: Beacon::default(),
+        }
+    }
+
+    /// A silent source whose run's **quiescence** holds at `gate` once
+    /// something stops it, so a script can drive a whole pass while the stop
+    /// is outstanding (RFC 0012 INV-SE4's mandated window).
+    pub fn gated(key: &'static str, gate: QuiescenceGate) -> Self {
+        Self {
+            gate: Some(gate),
+            ..Self::silent(key)
         }
     }
 
@@ -280,6 +439,26 @@ impl ProbeSource {
         }
     }
 
+    /// A source whose lazy constructor panics, at the reconcile that admits
+    /// it — application code on the driving task, so fail-fast
+    /// (RFC 0011 INV-LC6).
+    pub fn unbuildable(key: &'static str) -> Self {
+        Self {
+            fault: Some(Fault::Spawner),
+            ..Self::silent(key)
+        }
+    }
+
+    /// A source that builds and then panics while the forwarder task polls
+    /// it — inside a runtime-owned task, so contained
+    /// (RFC 0011 INV-LC8).
+    pub fn exploding(key: &'static str) -> Self {
+        Self {
+            fault: Some(Fault::Stream),
+            ..Self::silent(key)
+        }
+    }
+
     /// How many times this source has been admitted (its spawner invoked).
     pub fn admissions(&self) -> usize {
         self.admissions.marks()
@@ -296,13 +475,38 @@ impl SubscriptionSource for ProbeSource {
     type Output = u8;
     type Key = &'static str;
 
+    /// The spawner. Admission is marked *before* either fault fires, because
+    /// the count is of spawner invocations (RFC 0012 INV-SE1) and the kernel
+    /// did invoke it — an unbuildable source's admission is a real
+    /// admission that then unwound.
+    #[expect(
+        clippy::panic,
+        reason = "the two panic classes under test are real panics, at the two sites RFC 0011 \
+                  keeps apart"
+    )]
     fn stream(&self) -> BoxStream<'static, u8> {
         self.admissions.mark();
-        let state = (
-            self.values.clone().into_iter(),
-            DropMark::new(self.quiescences.clone()),
-            self.ends,
+        assert!(
+            self.fault != Some(Fault::Spawner),
+            "subscription source constructor panic under the fail-fast class"
         );
+        if self.fault == Some(Fault::Stream) {
+            let guard = DropMark::new(self.quiescences.clone());
+            return Box::pin(stream::once(async move {
+                let _quiesced = guard;
+                panic!("subscription forwarder panic under the containment class")
+            }));
+        }
+        let guard = self.gate.clone().map_or_else(
+            || Quiescence::Immediate(DropMark::new(self.quiescences.clone())),
+            |gate| {
+                Quiescence::Gated(GatedQuiescence {
+                    gate,
+                    quiesced: self.quiescences.clone(),
+                })
+            },
+        );
+        let state = (self.values.clone().into_iter(), guard, self.ends);
         Box::pin(stream::unfold(
             state,
             |(mut values, guard, ends)| async move {
@@ -471,6 +675,33 @@ impl Feed {
     }
 }
 
+/// Which of the two `subscriptions` call sites a script panics at
+/// (RFC 0011 INV-LC6 keeps them apart: one is reached from `boot`, the other
+/// from a pass's frame stage).
+///
+/// Stated over the *state* rather than over a call count, so the declaration
+/// function stays pure — the same state gives the same outcome, which is
+/// what RFC 0012 INV-SE6 requires of it even in a fixture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeclarationPanic {
+    /// The bootstrap reconcile, before any message has been delivered.
+    Bootstrap,
+    /// The steady re-evaluation of a state this message was delivered into.
+    After(u8),
+}
+
+impl DeclarationPanic {
+    /// Whether this site is the one being called, given the last message
+    /// `update` was invoked with.
+    const fn fires(self, last: Option<u8>) -> bool {
+        match (self, last) {
+            (Self::Bootstrap, None) => true,
+            (Self::After(message), Some(delivered)) => message == delivered,
+            (Self::Bootstrap, Some(_)) | (Self::After(_), None) => false,
+        }
+    }
+}
+
 /// What the scripted program is told to do, handed over at `init`.
 pub struct Script {
     /// The command `init` returns unchanged.
@@ -490,6 +721,10 @@ pub struct Script {
     redeclare: HashMap<u8, Vec<&'static str>>,
     /// The message whose `update` panics — the driving-task panic class.
     panic_on: Option<u8>,
+    /// Whether `view` panics — the same class, at the render call site.
+    panic_in_view: bool,
+    /// Which `subscriptions` call site panics, if either.
+    panic_in_subscriptions: Option<DeclarationPanic>,
     /// The message whose `update` runs the mid-batch handshake, and the
     /// handshake it runs.
     handshake: Option<(u8, MidBatchHandshake)>,
@@ -507,6 +742,8 @@ impl Script {
             wanted: Vec::new(),
             redeclare: HashMap::new(),
             panic_on: None,
+            panic_in_view: false,
+            panic_in_subscriptions: None,
             handshake: None,
         }
     }
@@ -560,6 +797,30 @@ impl Script {
         self
     }
 
+    /// Makes `view` panic — the same fail-fast class at the render call
+    /// site (RFC 0011 INV-LC6).
+    #[must_use]
+    pub const fn panicking_in_view(mut self) -> Self {
+        self.panic_in_view = true;
+        self
+    }
+
+    /// Makes `subscriptions` panic at the bootstrap call site: the initial
+    /// reconcile, before any message has been delivered.
+    #[must_use]
+    pub const fn panicking_in_subscriptions_at_bootstrap(mut self) -> Self {
+        self.panic_in_subscriptions = Some(DeclarationPanic::Bootstrap);
+        self
+    }
+
+    /// Makes `subscriptions` panic at the steady call site: the
+    /// re-evaluation of a state `message` has been delivered into.
+    #[must_use]
+    pub const fn panicking_in_subscriptions_after(mut self, message: u8) -> Self {
+        self.panic_in_subscriptions = Some(DeclarationPanic::After(message));
+        self
+    }
+
     /// Runs `handshake` from the `update` for `message`, so a gated
     /// producer's send commits between that message and the batch's next
     /// one.
@@ -578,7 +839,13 @@ pub struct State {
     wanted: Vec<&'static str>,
     redeclare: HashMap<u8, Vec<&'static str>>,
     panic_on: Option<u8>,
+    panic_in_view: bool,
+    panic_in_subscriptions: Option<DeclarationPanic>,
     handshake: Option<(u8, MidBatchHandshake)>,
+    /// The last message `update` was invoked with — the state a render and a
+    /// re-evaluation observe, which is what makes "this pass's current
+    /// state" readable from the application side (RFC 0011 INV-LC2).
+    last: Option<u8>,
 }
 
 /// A program that replies from its script and records every call the kernel
@@ -597,6 +864,7 @@ impl Reducer for Scripted {
             state.panic_on != Some(message),
             "application panic under the fail-fast class"
         );
+        state.last = Some(message);
         if let Some(wanted) = state.redeclare.get(&message) {
             state.wanted.clone_from(wanted);
         }
@@ -613,6 +881,12 @@ impl Reducer for Scripted {
 
     fn subscriptions(&self, state: &State) -> Vec<Subscription<u8>> {
         self.journal.record(Call::Subscriptions);
+        assert!(
+            !state
+                .panic_in_subscriptions
+                .is_some_and(|site| site.fires(state.last)),
+            "application panic in `subscriptions` under the fail-fast class"
+        );
         state
             .mocks
             .iter()
@@ -641,6 +915,8 @@ impl Program for Scripted {
             wanted,
             redeclare,
             panic_on,
+            panic_in_view,
+            panic_in_subscriptions,
             handshake,
         } = flags;
         (
@@ -651,14 +927,22 @@ impl Program for Scripted {
                 wanted,
                 redeclare,
                 panic_on,
+                panic_in_view,
+                panic_in_subscriptions,
                 handshake,
+                last: None,
             },
             init,
         )
     }
 
-    fn view(&self, _state: &State, _frame: &mut Frame<'_>) {
+    fn view(&self, state: &State, _frame: &mut Frame<'_>) {
         self.journal.record(Call::View);
+        self.journal.render(state.last);
+        assert!(
+            !state.panic_in_view,
+            "application panic in `view` under the fail-fast class"
+        );
     }
 }
 
@@ -772,6 +1056,49 @@ pub fn park_kernel(script: Script) -> (Kernel<Scripted>, Journal) {
 /// further grant admitted anywhere on the driver.
 pub fn accept<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, run: RunName) {
     accept_within(driver, run, TEST_TURNS);
+}
+
+/// Steps a pass begun by `source`, spending turns while that source is not
+/// yet ready, on a stated budget.
+///
+/// **For the multi-worker series only, and it weakens nothing.** Each
+/// attempt is a whole pass in the fixed stage order or nothing at all — a
+/// refused `step_pass` drives the kernel not at all — so this is pass-unit
+/// driving with a bounded wait in front of it, not a stage probe. What makes
+/// it necessary is a fact about worker threads rather than about the kernel:
+/// a run's exit becomes observable when a worker finishes reaping its task,
+/// and no application-side signal can be ordered against that, so the
+/// current-thread series' pattern — settle on the application's own mark,
+/// then step — has a gap there that no script can close.
+///
+/// The turn between attempts is spent through [`TestDriver::settle`], the
+/// driver's own budgeted waiting primitive, so nothing here reaches past the
+/// published surface.
+///
+/// # Panics
+///
+/// Panics when `max_turns` is spent with the source still not ready.
+///
+/// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
+#[expect(
+    clippy::panic,
+    reason = "an exhausted bound fails the test, which is what a panic is here"
+)]
+pub fn step_when_ready<P: Program, B: Backend>(
+    driver: &mut TestDriver<P, B>,
+    source: WakeSource,
+    max_turns: usize,
+) -> StepReport<B::Error> {
+    for _ in 0..max_turns {
+        if let Ok(stepped) = driver.step_pass(source) {
+            return stepped;
+        }
+        // Exactly one turn: the predicate is false on its first reading and
+        // true on the one after the turn.
+        let mut spent = false;
+        driver.settle(1, || mem::replace(&mut spent, true));
+    }
+    panic!("bounded step exhausted: {source:?} was still not ready after {max_turns} turns");
 }
 
 /// [`accept`] under a stated budget, for the multi-worker series

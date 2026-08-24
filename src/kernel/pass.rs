@@ -24,7 +24,9 @@
 //!
 //! [`Kernel::pass_cycle`] is a single implementation shared verbatim by the
 //! production loop and by the driver's pass-unit stepping, which is what
-//! makes the driving differential the two seams and nothing else.
+//! keeps the driving differential out of the pass entirely: the two seams
+//! sit outside it, and the driver's one pre-pass executor turn is taken
+//! before this function is entered (RFC 0008 §9.2).
 //!
 //! **No wall clock.** Nothing in this module reads a clock, arms a timer, or
 //! sleeps: the batch is count-bounded, the frame is pass-bounded, and the
@@ -164,8 +166,15 @@ impl<P: Program> Kernel<P> {
     /// redraw: that is the commands' own directive, OR-folded across the
     /// batch by [`Kernel::dispatch`] (RFC 0002's separation, which a
     /// `without_redraw` command relies on).
+    ///
+    /// The two counts it keeps are the batch event's, and they differ for
+    /// the reason RFC 0006 INV-L12 names: a dequeue is what the cap counts,
+    /// whether or not it reached `reduce`, so an envelope discarded at the
+    /// delivery decision is `pulled` without being `updated`
+    /// ([`Kernel::report_batch`]).
     fn input_batch(&mut self) {
-        let mut applied = 0_usize;
+        let mut pulled = 0_usize;
+        let mut updated = 0_usize;
         for _ in 0..self.batch_cap.get() {
             if self.terminating() {
                 break;
@@ -173,6 +182,7 @@ impl<P: Program> Kernel<P> {
             let Some(envelope) = self.next_data() else {
                 break;
             };
+            pulled += 1;
             let revoked = self.registry.on_dequeue(envelope.origin);
             if revoked {
                 continue;
@@ -182,12 +192,13 @@ impl<P: Program> Kernel<P> {
             };
             let state = self.state.as_mut().expect("kernel booted");
             let command = self.program.reduce(state, message);
-            applied += 1;
+            updated += 1;
             self.dispatch(command);
         }
-        if applied > 0 {
+        if updated > 0 {
             self.dirty = true;
         }
+        self.report_batch(pulled, updated);
     }
 
     /// Stage 4: at most one render, then at most one re-evaluation, both on

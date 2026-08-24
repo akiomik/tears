@@ -624,10 +624,12 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// lowering applies synchronously at its dispatch and never spawns, and
     /// no other constructor here puts an [`Action::Quit`] into a carrier a
     /// run is spawned for. The kernel's conformance series need that route
-    /// to script a producer quit at all, so it is crate-visible; the public
-    /// spelling belongs to the effect-constructor work RFC 0014 §13 leaves
-    /// open, not here.
-    #[cfg(test)]
+    /// to script a producer quit at all, and the load harness needs it to
+    /// measure the control lane at all (RFC 0014 §13.5), so it is
+    /// crate-visible under `test` and under the bench-only feature; the
+    /// public spelling belongs to the effect-constructor work RFC 0014 §13
+    /// leaves open, not here.
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn actions(stream: impl Stream<Item = Action<Msg>> + Send + 'static) -> Self {
         Self::with_effect(Effect::from_stream(stream.boxed()))
     }

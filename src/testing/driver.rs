@@ -3,13 +3,17 @@
 //! [`TestDriver`] drives the very same [`Kernel`] production does: the same
 //! construction path, the same runtime-owned tasks on the same join set, the
 //! same lanes, the same pass implementation, the same termination. The
-//! driving differential is confined to **two seams** plus application-side
-//! inputs (RFC 0014 §7.2, INV-RC13):
+//! driving differential is confined to **two seams**, one recorded turn,
+//! and application-side inputs (RFC 0014 §7.2, INV-RC13):
 //!
 //! 1. **pass initiation** — the driver names which armed source begins a
 //!    pass, instead of a park choosing among the ready ones (§9.5);
 //! 2. **the send gate** — the driver releases producer sends one at a time,
-//!    instead of every send being ready on its first poll (§9.6).
+//!    instead of every send being ready on its first poll (§9.6);
+//! 3. **one pre-pass executor turn**, taken unconditionally where
+//!    production takes its at the park it is woken from. It is no seam —
+//!    it gates nothing and changes no branch inside the pass — and is
+//!    recorded rather than removed (RFC 0008 §9.2).
 //!
 //! Readiness is not part of the differential and cannot be fabricated:
 //! [`TestDriver::step_pass`] reads the named source from the real lanes and
@@ -589,10 +593,12 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// stage boundary by an application-side handshake, never by the
     /// scheduler, and those series cite no part of INV-RC14.
     ///
-    /// Crate-visible and test-only. Whether the driving contract should
-    /// carry a public form of it is the executor-independence question
-    /// RFC 0014 §13.3 leaves open, and this is an input to it rather than an
-    /// answer.
+    /// The driving contract carries this constructor: RFC 0008 §9.3's
+    /// block states it, on the footing §9.12 gives it — it drives what
+    /// the determinism claim's verified range excludes, and cites no
+    /// part of that claim. What stays open is the executor-independence
+    /// question itself (RFC 0014 §13.3), to which these runs are an
+    /// input rather than an answer.
     ///
     /// # Panics
     ///
@@ -855,9 +861,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// committed yet" and then go on driving has nothing to assert with —
     /// and a row that instead reads the acceptance ledger asserts nothing at
     /// all, since a grant that has not been taken leaves the ledger
-    /// unchanged for reasons that have nothing to do with the lane. Whether
-    /// the driving contract should carry a public form of it belongs to the
-    /// bounded-lane work RFC 0014 §13.3 leaves open.
+    /// unchanged for reasons that have nothing to do with the lane. The
+    /// driving contract carries it for that reason: RFC 0008 §9.3's block
+    /// states it, and §9.12 records the bounded-lane verification pass it
+    /// made witnessable.
     ///
     /// It reports the terminal the *gate* holds. A grant that released no
     /// send has none, so this is `None` there — the second reclaiming fact

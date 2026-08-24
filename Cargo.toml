@@ -27,9 +27,15 @@ include = [
 default = []
 
 http = ["dashmap", "thiserror"]
-# Bench-only feature exposing internal-only subscription reconciliation hooks
-# to `benches/subscription.rs`; do not enable for normal builds. Not part of
-# the public API and not covered by semver.
+# Bench-only feature exposing internal-only handles to the benches that need
+# them, and to nothing else: the subscription reconciliation hooks
+# (`benches/subscription.rs`), the load observer (`benches/gauge.rs`), and the
+# kernel's driving and bookkeeping handles together with `Command::actions` —
+# the only route to a producer-originated quit — for the load-acceptance and
+# registry-scan harnesses (`benches/kernel_load.rs`, `benches/kernel_scan.rs`).
+# Do not enable for normal builds. Not part of the public API and not covered
+# by semver: every item it adds is `#[doc(hidden)]`, and a default build
+# compiles none of them.
 bench-internals = []
 # Test-only feature for the isolated loom cell core; do not enable for normal builds.
 loom-core = ["dep:loom"]
@@ -91,6 +97,19 @@ harness = false
 
 [[bench]]
 name = "gauge"
+harness = false
+required-features = ["bench-internals"]
+
+# The kernel's load-acceptance re-derivation (RFC 0014 §13.5). Reaches the
+# kernel through the `bench-internals` handles; `benches/runtime_load.rs` is
+# the superseded topology's harness and stays as the before column.
+[[bench]]
+name = "kernel_load"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "kernel_scan"
 harness = false
 required-features = ["bench-internals"]
 

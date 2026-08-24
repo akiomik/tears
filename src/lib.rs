@@ -141,6 +141,14 @@ pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use runtime::load::LoadObserver;
+// Bench-only re-exports for the kernel load-acceptance re-derivation
+// (RFC 0014 §13.5). `kernel` is `pub(crate)`, so `benches/kernel_load.rs` and
+// `benches/kernel_scan.rs` — separate crates that see the public API only —
+// could otherwise construct neither a kernel nor the bookkeeping whose walks
+// they measure. Same gate, same guarantees (none) as `LoadObserver` above.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use kernel::bench_support::{BenchKernel, CleanupLedgerScan, RegistryScan, producer_quit};
 
 #[cfg(test)]
 mod test_support;

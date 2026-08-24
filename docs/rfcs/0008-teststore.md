@@ -134,35 +134,35 @@ context the store itself owns (§4.3).
 ### 1.3 Delegated: the stage-3 driving layer
 
 Stages 1 and 2 never start, poll, or restart a subscription source and
-never spawn a task (§1.2); that boundary is unchanged. A third layer
-sits beside them rather than inside them: a `TestDriver` that drives the
+never spawn a task (§1.2); that boundary is unchanged. A third layer sits
+beside them rather than inside them: a `TestDriver` that drives the
 production kernel itself. Its contract is pinned by RFC 0014 §7.2 —
 construction through the production path, with the production task
 bookkeeping, lanes, phase machine, and termination shared rather than
 re-implemented; a driving differential confined, exhaustively, to two
-seams — pass-initiation arbitration and producer send grants — plus
-what the application side supplies, which is **inputs and readiness**
-(mock sources satisfying RFC 0012 §6.1's template, and test-controlled
-gates inside application-supplied effects); scripted determinism over
-the whole script — inputs, readiness, arbitration choices, and
-grants, together with the driving calls §9 adds and their
-arguments — for a deterministic application, with the
-grant-then-acceptance handshake as the narrower condition under which
-*enqueue order* is guaranteed at all, and the whole determinism claim
-scoped to its verified range: a current-thread executor and unbounded
-lanes, with the bounded-lane extension and its two protocol conditions
-open at RFC 0014 §13.3; and **pass-unit driving as the
-evidence surface**, one driver step executing one whole production
-pass, with stage-granular probes admissible as component-level
-instruments but outside that surface. The one boundary no pass-unit
-step reaches is the park boundary, where RFC 0014 §7.2 names a
-separate instrument, `ParkProbe`, whose observations are evidence for
-that RFC's park-and-wake invariant alone — never for the driver's
-topology or determinism claims, and not for anything this store's
-layers claim. §4.2's citation rule generalizes to both: an order the
-driver establishes is never evidence of a production order. §1.2's negative
-space is about the store and is unchanged — what each layer claims is
-RFC 0014 §7.3's.
+seams — pass-initiation arbitration and producer send grants — plus one
+recorded pre-pass executor turn that is no seam (§9.2), plus what
+the application side supplies, which is **inputs and readiness** (mock
+sources satisfying RFC 0012 §6.1's template, and test-controlled gates
+inside application-supplied effects); scripted determinism over the whole
+script — inputs, readiness, arbitration choices, and grants, together
+with the driving calls §9 adds and their arguments — for a deterministic
+application, with the grant-then-acceptance handshake as the narrower
+condition under which *enqueue order* is guaranteed at all, and the whole
+determinism claim scoped to its verified range: a current-thread
+executor, on either lane mode once §9.12 records the bounded extension's
+verification pass, with executor independence still open at RFC 0014
+§13.3; and **pass-unit driving as the evidence surface**, one driver step
+executing one whole production pass, with stage-granular probes
+admissible as component-level instruments but outside that surface. The
+one boundary no pass-unit step reaches is the park boundary, where RFC
+0014 §7.2 names a separate instrument, `ParkProbe`, whose observations
+are evidence for that RFC's park-and-wake invariant alone — never for the
+driver's topology or determinism claims, and not for anything this
+store's layers claim. §4.2's citation rule generalizes to both: an order
+the driver establishes is never evidence of a production order. §1.2's
+negative space is about the store and is unchanged — what each layer
+claims is RFC 0014 §7.3's.
 
 The API body — the concrete `TestDriver` surface — is §9: the
 additive section RFC 0014 §9 row 11 records and RFC 0012 §6.2
@@ -1151,10 +1151,11 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   rows are conditioned on the delivery. The crate's own
   types in §9.3 divide in three, and no statement here asserts that
   anything in the first or third division exists in the crate today.
-  The partition covers those and nothing else: `Backend` and
-  `ratatui::Terminal` belong to the host UI library, and `Future`,
-  `Pin`, and `Poll` to `std`, so neither group is this crate's to
-  place.
+  The partition covers those and nothing else. Two groups of names
+  appear in this section without belonging to it: `Backend` and
+  `ratatui::Terminal`, which are the host UI library's, and `Future`,
+  `Pin`, `Poll`, and `NonZeroUsize`, which are `std`'s. Neither group
+  is this crate's to place.
   - **Introduced here**, arriving with that landing: `TestDriver`,
     `ParkProbe`, `WakeSource`, `RunName`, `RunKind`, `SendRecord`,
     `Lane`, `StepReport`, `GrantToken`, `Confirmed`, `GrantOutstanding`,
@@ -1233,12 +1234,25 @@ its API. Stated over this surface:
   an item to deliver. What travels either lane is producer output,
   which is the kernel's own contract (RFC 0014 §3.1).
 
-What the surface supplies instead is the two seams and nothing else:
-which ready wake source begins a pass (§9.5), and the release of a
-producer's send-intent (§9.6). Inputs and readiness come from the
-application side — sources conforming to RFC 0012 §6.1's template,
-and test-controlled gates inside application-supplied effects — never
-from a driver method.
+What the surface supplies instead is the two seams — which ready wake
+source begins a pass (§9.5), and the release of a producer's
+send-intent (§9.6) — plus one difference that is not a seam and is
+recorded here rather than hidden: **`step_pass` takes one executor
+turn before it runs the pass**, unconditionally. Production takes its
+turn at the park it is woken from; a scripted step has no park to be
+woken from, so the turn is taken outright. It changes no branch
+inside the pass and gates nothing — readiness is read *before* it
+(§9.5), so the turn cannot unmake what admitted the step, since only
+a pass consumes from a lane or the join set and a turn only ever adds
+arrivals. It is a third driving differential all the same, because it
+is a step production does not take in that position, and RFC 0014
+§7.2's differential is exhaustive only if this is in it. `ParkProbe`
+takes no such turn, which is why the park boundary's series are
+unaffected (§9.7).
+
+Inputs and readiness come from the application side — sources
+conforming to RFC 0012 §6.1's template, and test-controlled gates
+inside application-supplied effects — never from a driver method.
 
 ### 9.3 The API body
 
@@ -1257,6 +1271,18 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         flags: P::Flags,
         config: RuntimeConfig,
         terminal: ratatui::Terminal<B>,
+    ) -> Self;
+
+    /// The same construction on a multi-worker executor. Outside the
+    /// determinism claim's verified range (§9.8) by design: it exists
+    /// to drive what that range excludes.
+    #[must_use]
+    pub fn on_worker_threads(
+        program: P,
+        flags: P::Flags,
+        config: RuntimeConfig,
+        terminal: ratatui::Terminal<B>,
+        workers: NonZeroUsize,
     ) -> Self;
 
     /// Runs the production bootstrap through to a parked kernel
@@ -1296,6 +1322,12 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         max_turns: usize,
         token: GrantToken,
     ) -> Confirmed;
+
+    /// Reports the gate's terminal for `token` without driving,
+    /// consuming, or clearing anything — `Some` once the gate holds
+    /// one, `None` while it does not (§9.6). An observation call, so
+    /// `&self` and a borrowed token.
+    pub fn try_confirm(&self, token: &GrantToken) -> Option<Confirmed>;
 
     /// Drives the executor — beginning no pass and releasing no
     /// send-intent — for at most `max_turns` turns, until `until`
@@ -1440,7 +1472,8 @@ pass-initiation vocabulary (§9.5), `grant`'s detached token and its
 driver-wide admission rule (§9.6), and the ledgers' division at the
 send gate (§9.6). The **receivers are normative too**, and not as a
 spelling: every `TestDriver` driving method takes `&mut self` and
-every `TestDriver` observation method `&self`, which is how the
+every `TestDriver` observation method — `accepted`, `intents`, and
+`try_confirm` — takes `&self`, which is how the
 block carries RFC 0011 INV-LC9's exclusivity (§9.2, §9.11) and what
 makes a borrowing grant token unrepresentable (§9.6).
 Spellings — parameter names, accessor names, whether a report field
@@ -1488,11 +1521,18 @@ terminated is reached without ever passing through running.
 | `step_pass`, `confirm` | misuse | legal | misuse |
 | `grant`, `settle` | misuse | legal under §9.6 | misuse |
 | `accepted`, `intents` | legal, empty | legal | legal |
+| `try_confirm` | misuse | legal | misuse |
 
 The third row's condition is §9.6's grant lifecycle, which is where
 those two calls' legality is stated in full: `grant` is misuse at an
 run the kernel's bookkeeping does not hold, and `settle` is
 misuse while a grant is outstanding.
+
+`try_confirm` is an observation in receiver and effect — it drives
+nothing and consumes nothing — but its legality follows the *grant*
+lifecycle rather than the ledgers': a token exists only in the
+running state, so it is misuse outside it, and misuse again on a
+token this driver's gate does not hold.
 
 Misuse **fails the test** rather than returning an error, in the
 store's own style (§5.3), and the observation calls stay callable
@@ -1700,10 +1740,12 @@ correlated to the commit its release produces. The trailing clause holds
 as written wherever a grant resolves by acceptance: no grant at any run
 is admitted while a commit is still uncorrelated. Where a grant resolves
 as `Confirmed::Reclaimed` there is no commit to correlate, so the clause
-has nothing to range over, and **how it reads in that case is not settled
-here**: it is part of what RFC 0014 §13.3's resolution fixes, which §9.8
-keeps open. This section neither narrows nor widens that condition, and
-states no reading of it beyond the acceptance case its letter covers.
+has nothing to range over, and **that reading is fixed in §9.12**, which
+resolves RFC 0014 §13.3's bounded half: the next grant follows the
+previous grant's resolution either way, and a reclaimed one leaves no
+commit to correlate. This section itself neither narrows nor widens
+that condition, stating no reading beyond the acceptance case its
+letter covers.
 
 **Grant lifecycle, in full.** A grant at a run the kernel's
 bookkeeping does not currently hold — a run never started, or one
@@ -2045,11 +2087,13 @@ here:
 - **Enqueue order is guaranteed only through the handshake** — grant,
   confirmed acceptance, next grant (§9.6). Raw grant order guarantees
   nothing, and is not expressible.
-- **The verified range is a current-thread executor and unbounded
-  lanes**, and the claim is scoped to it.
+- **The verified range is a current-thread executor**, on either lane
+  mode: unbounded as this section states it, and bounded as §9.12
+  records after that extension's verification pass. The claim is
+  scoped to that executor.
 
-**The bounded extension stays open.** Extending the determinism claim
-to bounded lanes and executor-independent scheduling needs its own
+**The executor-independent extension stays open.** Extending the
+determinism claim past a current-thread executor needs its own
 verification pass and the two protocol conditions RFC 0014 §13.3
 names: **driver progress** — the driver stays steppable while a
 grant's acceptance is outstanding, so a capacity-blocked send cannot
@@ -2063,10 +2107,12 @@ resolves with no commit at all is part of what §13.3's own resolution
 fixes, and §9.6 settles nothing about it. This section's surface is
 shaped to satisfy both conditions as far as that letter reaches
 (§9.6's detached token and its driver-wide admission rule), but a
-shape is not a verification: until that pass lands, the claim keeps
-the verified range above and RFC 0014 §13.3 stays open. It resolves
-as an addition to this section, recording what was verified and at
-what scope.
+shape is not a verification. That verification has since run for one
+of the two extensions §13.3 names, and §9.12 records it: the claim
+now reaches **bounded lanes** on a current-thread executor, while
+**executor-independent scheduling** keeps the verified range above
+and stays open. §9.12 also fixes the trailing clause's reading for a
+grant that resolves with no commit, which is the part §9.6 deferred.
 
 ### 9.9 The evidence surface and the citation rule
 
@@ -2167,6 +2213,10 @@ of §9.3's block maps to one of them, walked in order:
   its sole ownership of its kernel instance additionally hold RFC 0011
   INV-LC9's exclusivity property, which that RFC's §6 requires any
   step-style surface to preserve.
+- `step_pass`'s unconditional pre-pass turn → INV-RC13, as the third
+  driving differential §9.2 records; it is inside the same
+  API-surface review, and the structural fact it rests on is that the
+  pass implementation takes no argument distinguishing its caller.
 - `boot`, `step_pass`, `WakeSource`, and `NotReady` → INV-RC13's
   behavioral half, which runs through pass-unit steps against the
   production seams; `boot`'s whole-bootstrap granularity additionally
@@ -2183,6 +2233,14 @@ of §9.3's block maps to one of them, walked in order:
   reducer under test records for itself; the dequeue that drops it does
   no `update` work at all (RFC 0014 §4.3), which is why there is nothing
   for a record of this section's to hold.
+- `try_confirm` → INV-RC14, negatively: it reports the gate's
+  terminal without driving, so it can neither append to the
+  guaranteed sequence nor consume a grant, and it exists because a
+  bounded-lane series needs to distinguish "not resolved yet" from
+  "resolved and not yet reported" without spending a turn (§9.12).
+- `on_worker_threads` → INV-RC13 for the topology it constructs, and
+  to no determinism claim at all: it drives outside §9.8's verified
+  range by design (§9.12).
 - `settle` and its completion predicate → INV-RC13: it drives the
   production executor and adds no seam, so it is covered by the same
   API-surface review. It reaches INV-RC14's observation sequence only
@@ -2311,9 +2369,9 @@ own calls, and that is where INV-RC10's redraw row is read — its own
 enforcement line calls for "a scripted flood with an interposed probe and
 a pending redraw", and the interposed probe is that application-side
 instrument, not a driver method. This is deliberate negative space rather
-than an omission: a frame observation on the driver would be a third
-thing the surface reports about a pass, beside the two seams RFC 0014
-§7.2 confines it to.
+than an omission: a frame observation on the driver would be one more
+thing the surface reports about a pass, beside the differential
+RFC 0014 §7.2 confines it to.
 
 Two elements were suspected of redundancy and kept, neither implied
 by its suspected survivor. `confirm` against `step_pass`, which also drives
@@ -2324,6 +2382,80 @@ against `confirm`, which also drives the executor without a pass:
 `confirm` requires a token to consume, so a test whose only
 outstanding work is a run that never sends has no token to confirm
 and no way to reach that run at all.
+
+### 9.12 Bounded-lane determinism: verified, and what stays open
+
+RFC 0014 §13.3 asks for two extensions of §9.8's determinism claim,
+bounded lanes and executor-independent scheduling, each gated on its
+own verification pass and on that section's two protocol conditions.
+One of the two has been verified; the other has not, and they are
+recorded separately because they are separate claims.
+
+**Bounded lanes: verified, and the claim extends.** For a
+deterministic application on a **current-thread executor**, one
+script yields one observation sequence with the data lane bounded,
+exactly as §9.8 states it for the unbounded case. Both of §13.3's
+conditions are met by execution rather than by shape:
+
+The pass itself is a replay row: a one-slot lane and two keyed
+producers, scripted so that every send but the first finds the lane
+full, replayed for one observation sequence per script and again for
+the reversed script. Two faces are what make it a claim rather than a
+description — a run that ignored the handshake and drained in arrival
+order would produce the same sequence for one script alone. The
+capacity mechanism sits inside the replayed region: each wait is
+resolved by the pass that drains the item ahead of it, so what
+replays is the bounded behaviour and not an unbounded script over a
+lane that merely happens to be bounded (which is the neighbouring
+headroom row's job).
+
+- **Driver progress** — every grant after the first is issued onto a
+  full lane and acknowledged only after the `step_pass` that drains
+  the item ahead of it, with the token held across that step. That is
+  the steppability the condition asks for, and it is inside the
+  claim rather than beside it. Three further rows drive the blocked
+  send's other faces: a release onto a full lane that does not
+  commit, an acknowledgement that arrives only after a dequeue frees
+  capacity, and a revocation that frees no capacity for a waiting
+  send.
+- **Ack correlation** — the token outstanding across that step is the
+  only grant outstanding anywhere on the driver, which is the
+  driver-wide rule of §9.6 doing the correlating, and `try_confirm`
+  between the release and the drain separates "the dequeue freed the
+  slot" from "the dequeue committed the send". Without that
+  separation a release that would have committed anyway reads the
+  same as one the dequeue released, and the row would witness
+  nothing.
+
+**Executor independence: still open.** The multi-worker constructor
+(§9.3) drives what the current-thread range excludes, and what it
+establishes is deliberately narrower than determinism: the handshake
+holds there, but no one-script-one-sequence claim is made for it, and
+none is derivable from those runs. §13.3's second extension therefore
+stays open, with §9.8's verified range unchanged for it.
+
+**The trailing clause, for a grant that resolves with no commit.**
+§13.3's ack-correlation condition ends "the next grant to an origin
+only after the previous acceptance", and §9.6 answered its letter
+only where a grant resolves *by* acceptance, leaving the reclaimed
+case to this resolution. It reads: **the next grant follows the
+previous grant's resolution, whichever of the two it is.** Where the
+resolution is `Confirmed::Reclaimed` there is no commit to correlate,
+so the correlation obligation is discharged vacuously — there is
+nothing outstanding for a later grant to be confused with, which is
+the whole of what the clause protects. Reading it instead as
+requiring an acceptance would make a reclaimed grant unfollowable and
+strand the driver, which is the state §9.11's *Unresolvable grant*
+model excludes. RFC 0014 §7.2 states the same condition and closes it
+with a citation to §13.3, so that citation now reaches this reading
+and the two documents say one thing.
+
+**What this does not extend.** Bounded-lane *revocation* remains what
+RFC 0014 §13.1's series of that name witnesses — INV-RC5 under a
+bounded lane — and nothing here widens it. The determinism claim's
+other bounds are untouched: enqueue order is still guaranteed only
+through the handshake (§9.8), and the guaranteed sequence still
+begins at the send gate (§9.6).
 
 ## 10. Open questions
 

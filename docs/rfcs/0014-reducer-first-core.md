@@ -116,7 +116,8 @@ Eight decisions:
    `TestDriver` drives the production kernel itself — same
    construction, same task bookkeeping, same lanes, same termination —
    with the driving differential confined to two seams (pass-initiation
-   arbitration, send-intent grants) plus application-side inputs.
+   arbitration, send-intent grants), one recorded pre-pass executor
+   turn, and application-side inputs.
 
 Mechanism — the kernel's registries, counters, and seam types — is
 informative (§10). The kernel exists today as the prototype §13.1's
@@ -954,17 +955,24 @@ contract; its API body lands in that amendment. Contract:
   manual run retention, reimplemented reconciliation, a mirrored quit
   route, manual effect polling, direct kernel injection — are not
   constructible through its API.
-- **The driving differential is two seams plus inputs.** What differs
-  from production, exhaustively: (i) pass-initiation arbitration —
+- **The driving differential is two seams, one recorded turn, and
+  inputs.** What differs from production, exhaustively: (i)
+  pass-initiation arbitration —
   which ready wake source begins the next pass (§3.5) — is scripted
   instead of unbiased; (ii)
   producer send grants — a producer's send-intent is released by
   script instead of immediately; (iii) inputs and readiness are
   supplied by the application side (mock sources satisfying RFC 0012
   §6.1's template, test-controlled gates inside application-supplied
-  effects). The production implementations of both seams are inert
-  (unbiased selection, immediate grant) and observably equivalent to
-  the seamless kernel; production scheduling stays uninstrumented.
+  effects); and (iv) a driver step takes one executor turn before the
+  pass, where production takes its at the park it is woken from. The
+  production implementations of both seams are inert (unbiased
+  selection, immediate grant) and observably equivalent to the
+  seamless kernel; production scheduling stays uninstrumented. The
+  turn is no seam and is recorded rather than removed: it gates
+  nothing — readiness is read before it — and changes no branch
+  inside the pass, which is why the stage sharing stays verbatim
+  (RFC 0008 §9.2).
 - **Determinism, scoped (INV-RC14).** The driver guarantees scripted
   reproducibility: one script yields one observation sequence, for a
   deterministic application — the driver introduces no nondeterminism
@@ -1017,10 +1025,13 @@ contract; its API body lands in that amendment. Contract:
   (§3.5 pins the policy, not the occasion).
 - **Scope of the determinism claim.** The handshake's acceptance
   confirmation is the post-send acknowledgement, which is the form an
-  executor-independent or bounded-lane extension requires; the
-  *claim* this RFC makes is nevertheless scoped to a current-thread
-  executor and unbounded lanes, the verified range. A bounded
-  extension additionally requires **driver progress** (the driver
+  executor-independent or bounded-lane extension requires. The
+  *claim* this RFC makes is scoped to a current-thread executor; it
+  covered unbounded lanes alone until the bounded extension had its
+  verification pass, which it now has (RFC 0008 §9.12), so the
+  verified range is that executor on either lane mode and executor
+  independence is what remains open (§13.3). A bounded
+  extension requires **driver progress** (the driver
   stays steppable while a grant's acceptance is outstanding, so a
   capacity-blocked send cannot deadlock the handshake) and **ack
   correlation** (at most one outstanding grant per origin, or an
@@ -1326,20 +1337,32 @@ tiers remain the regression suite afterward.
   and §6.3's premise substitution. Behavioral: RFC 0011's own test
   rows re-run against the kernel, plus the init-quit row.
 - **INV-RC12 — barrier scope, defer, and dirt sources.** RFC 0012's
-  admission suite passes; additionally (a) a stop-requested command or
-  cleanup run defers no subscription admission, (b) dirt is marked
-  only by §5.2's two sources — the quiescence of a naturally finished
-  subscription run, of a command run, or of a cleanup run marks
-  none — and (c) a stop-issuing re-evaluation admits zero in its own
-  pass, even when the stop quiesces while that pass is still running.
-  Enforcement splits by what a check can construct: (a) and (b) are
-  **behavioral** at the reconcile seam, one row per non-participating
-  run kind and one per non-dirt source; (c) is **structural** at the
-  same seam — the reconcile path takes no second admission attempt
-  after issuing its stops, so a quiescence observed while the pass
-  runs has no site to admit into — because a mid-pass quiescence is
-  not constructible on the single-threaded executor those behavioral
-  rows use. RFC 0012 §4.2 states the same split from the owner side.
+  admission suite passes; additionally (a) a stop-requested command
+  or cleanup run defers no subscription admission, (b) dirt is
+  marked only by §5.2's two sources — the quiescence of a naturally
+  finished subscription run, of a command run, or of a cleanup run
+  marks none — and (c) a stop-issuing re-evaluation admits zero in
+  its own pass, even when the stop quiesces while that pass is still
+  running. Enforcement splits by what a check can construct, and (a)
+  splits inside itself. Its **command** half and all of (b) are
+  **behavioral** at the reconcile seam, one row per
+  non-participating run kind and one per non-dirt source. Its
+  **cleanup** half is structural, because the clause is about a
+  **stop-requested** cleanup run and one is not constructible
+  outside termination — a teardown excludes the kind, a cancel and a
+  supersession address keyed slots, a re-evaluation addresses
+  subscription runs — and at termination no admission site is left
+  for one to defer. That clause is therefore carried at the barrier
+  predicate, which reads subscription runs only and so can never see
+  one. A cleanup run *in flight* is the behavioral neighbour rather
+  than part of this clause, and has its own row
+  (`src/kernel/conformance/cleanup.rs` records the enumeration
+  beside it). (c) is **structural** at the reconcile seam — the
+  reconcile path takes no second admission attempt after issuing its
+  stops, so a quiescence observed while the pass runs has no site to
+  admit into — because a mid-pass quiescence is not constructible on
+  the single-threaded executor those behavioral rows use. RFC 0012
+  §4.2 states the same split from the owner side.
 - **INV-RC13 — driver topology.** The driver constructs through the
   production path and shares bookkeeping, producer execution, lanes,
   and termination with production; the five prohibited shapes are not
@@ -1352,7 +1375,9 @@ tiers remain the regression suite afterward.
   evidence surface).
 - **INV-RC14 — scripted determinism.** One script yields one
   observation sequence across repeated runs (deterministic
-  application premise; current-thread executor, unbounded lanes);
+  application premise; current-thread executor, either lane mode —
+  the bounded half verified at RFC 0008 §9.12, executor independence
+  open at §13.3);
   enqueue-order guarantees exist only through the
   grant-then-acceptance handshake; pre-gate records are excluded from
   the guaranteed sequence. Behavioral: repeat-stability over the
@@ -1476,8 +1501,15 @@ previous acceptance). Until then the claim keeps its verified scope:
 exactly the two conditions above and witnesses INV-RC5 there, which is
 what that invariant's both-lane-modes check consumes — it is evidence
 for revocation under a bounded lane, never for a general bounded-lane
-determinism claim. Resolves as an amendment to the driving contract in
-the RFC 0008 amendment.
+determinism claim.
+
+**Resolved in part, at RFC 0008 §9.12.** The bounded-lane extension
+has had its verification pass and the determinism claim now reaches
+bounded lanes on a current-thread executor, both conditions above met
+by execution. The executor-independent extension has not and stays
+open at the verified range. That section also fixes how this
+condition's trailing clause reads for a grant that resolves with no
+commit, which §7.2 closes by citing this question.
 
 ### 13.4 External driving surface
 
@@ -1488,9 +1520,18 @@ pacing responsibilities, park/wake integration. Future RFC.
 
 RFC 0006's statistical acceptance (INV-L4 formulation and the
 bounded-mode scenario set) re-measured on the new topology, with the
-same reference-environment discipline. Implementation-stage work under
-RFC 0006's ownership; until it lands, §3.3's latency statements are
-the contract and no numeric threshold is claimed here.
+same reference-environment discipline. **Resolved at RFC 0006 §5.3**,
+which states the successor's conditions per quit route, quantifying
+the producer route's over §3.3's constructive bound. The per-row
+bounds are met: all sixteen acceptance rows pass at 200 valid trials
+each, on the reference machine, under a run whose criteria were pinned
+before it executed and whose isolation is recorded. Backlog
+independence carries its own numeric oracle, and both of its
+conditions are met by the validating run recorded there, whose
+isolation window is bracketed at both ends. Ownership is unchanged
+and no numeric threshold is claimed here; §3.3's latency statements
+remain this RFC's contract, and RFC 0006 §5.3 is where the numbers
+that satisfy them live.
 
 ## 14. References
 

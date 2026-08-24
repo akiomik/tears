@@ -346,9 +346,9 @@ impl ScopeRegistry {
     /// root over structural segment equality, so shorter, reordered,
     /// subset, and deeper-position paths are not selected. The walk's cost
     /// in the number of live runs is part of that mechanism and is not
-    /// pinned here: where it matters is the load acceptance RFC 0014 §13.5
-    /// re-derives on this topology, under RFC 0006's ownership, and a wider
-    /// index is a change this signature already admits.
+    /// pinned here: it is measured and recorded as informative in
+    /// RFC 0006 §5.3, which is the before value a wider index would be
+    /// measured against — a change this signature already admits.
     ///
     /// Tombstones are selected like any other entry: a run that finished
     /// with output still queued is exactly the case INV-ST4 names, and

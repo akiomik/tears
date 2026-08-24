@@ -47,11 +47,17 @@ pub mod accounting;
 #[cfg(all(feature = "loom-core", test))]
 pub mod accounting_core;
 pub mod arbiter;
+// Bench-only construction handles for `benches/kernel_load.rs` and
+// `benches/kernel_scan.rs`; not part of the public API and not compiled by a
+// normal build (see the module's own note).
+#[cfg(feature = "bench-internals")]
+pub mod bench_support;
 pub mod cleanup;
 #[cfg(test)]
 pub mod conformance;
 pub mod lane;
 pub mod lowering;
+pub mod observability;
 pub mod pass;
 pub mod producer;
 pub mod registry;

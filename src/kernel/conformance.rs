@@ -80,37 +80,53 @@
 //! | `parked control-quit wake` | [`park`] | INV-RC16 |
 //! | `parked subscription-quiescence wake` | [`park`] | INV-RC16 |
 //!
-//! Four neighbours sit beside the twelve, in the same files and under the
+//! Six neighbours sit beside the twelve, in the same files and under the
 //! same rules: [`delivery`] carries INV-RC10's flood rows (FIFO prefix,
 //! backlog-proportional passes, a render between batches); [`teardown`]
 //! carries RFC 0013 §7.1's kernel rows — INV-ST1, INV-ST3, INV-ST5, INV-ST6,
 //! and INV-ST7's observable half, with the kernel carriers INV-RC6 and
 //! INV-RC7, plus the divergent composition where a run's placement prefix
 //! and its key's scope disagree and both still reach it; [`cleanup`] carries
-//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup kind; and
+//! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup neighbour;
 //! [`combinator`] carries INV-RC2, INV-RC3, and INV-RC4's rows as the kernel
 //! applies them, over a program that is a closed combinator stack rather
-//! than the scripted reducer.
+//! than the scripted reducer; [`admission`] carries RFC 0012's admission
+//! suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and INV-SE4's
+//! mandated supersession sequence — which is INV-RC12's first clause; and
+//! [`observability`] carries the batch event's kernel reading and INV-RC15's
+//! behavioural neighbour (RFC 0014 §9 row 9).
+//!
+//! [`lifecycle`] additionally carries the rows of RFC 0011's suite that the
+//! four series above do not, which is the rest of INV-RC11; its own module
+//! documentation maps every INV-LC row to where it is held.
 //!
 //! # What this surface does not reach
 //!
 //! The behavioral rows above are §13.1's twelve series and their named
-//! neighbours. What stays open is the implementation-acceptance tier
-//! RFC 0014 §13.1 lists rather than anything this harness cannot build: the
-//! observability vocabulary (INV-RC15's behavioral neighbour), and the
-//! structural halves that no finite script can carry — INV-RC16's arming,
-//! §3.5's unbiased pass initiation, INV-RC12 (c), INV-ST7's absence half,
-//! and INV-RC8's no-output clause, each of which is structural by its own
-//! statement.
+//! neighbours. What stays outside them is the structural halves that no
+//! finite script can carry — INV-RC16's arming, §3.5's unbiased pass
+//! initiation, INV-RC12 (c), INV-ST7's absence half, and INV-RC8's
+//! no-output clause, each of which is structural by its own statement.
 //!
-//! One clause of INV-RC12 (a) is unreachable for a different reason, and it
-//! is a construction limit rather than an open row: outside termination
-//! nothing stop-requests a *cleanup* run — a teardown excludes the kind, a
-//! cancel and a supersession address keyed slots, a re-evaluation addresses
+//! One production surface is read here rather than driven: the
+//! `tears::runtime::load` events, which [`observability`] and two rows in
+//! [`quit`] and `kernel` assert on through a `tracing` recorder. That is the
+//! schema's own surface (RFC 0006 §4.4, INV-L13) and no part of the driver's
+//! evidence surface, which is why those rows read it directly instead of
+//! through a ledger.
+//!
+//! INV-RC12 (a)'s cleanup half divides, and the two pieces are held in
+//! different classes. The clause proper is about a **stop-requested**
+//! cleanup run, and no row can construct one: outside termination nothing
+//! stop-requests a cleanup run — a teardown excludes the kind, a cancel and
+//! a supersession address keyed slots, a re-evaluation addresses
 //! subscription runs — and at termination there is no admission site left
-//! for one to defer. [`cleanup`] carries the reachable half (an in-flight
-//! cleanup run defers nothing) and the registry's barrier predicate, which
-//! reads subscription runs only, is the structural carrier for the rest.
+//! for one to defer. That clause is therefore **structural**, carried by the
+//! registry's barrier predicate, which reads subscription runs only and so
+//! can never see a cleanup run. Its **behavioral neighbour** is a different
+//! statement and is reachable: a cleanup run *in flight* defers no
+//! admission, which [`cleanup`] witnesses beside the enumeration of the
+//! stop-request sites.
 //!
 //! One behavioral limit is worth naming because a script runs into it: the
 //! uniform barrier's deferral of a *later* pass's admissions. A stop
@@ -120,11 +136,13 @@
 //! [`lifecycle`]). INV-RC12 (c) records the same limit from the invariant's
 //! side and takes the structural class for it.
 
+pub mod admission;
 pub mod bounded;
 pub mod cleanup;
 pub mod combinator;
 pub mod delivery;
 pub mod lifecycle;
+pub mod observability;
 pub mod park;
 pub mod quit;
 pub mod support;
