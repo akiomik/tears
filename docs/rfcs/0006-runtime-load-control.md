@@ -1332,8 +1332,8 @@ kernel RFC 0014 defines, invariant by invariant.
   bounded-test-against-unbounded-parameter argument).
 
 Each invariant except INV-L6, INV-L7, INV-L8, INV-L14, and INV-L15 gets
-a regression scenario in the section 2 harness (`benches/runtime_load.rs`)
-or a unit, runtime-layer, or integration test. Those five are
+a regression scenario in a load harness or a unit, runtime-layer, or
+integration test. Those five are
 structural-only, each for a stated reason: INV-L6 because the checkable
 claim is the default code path's structural identity — its own statement
 rules the empirical alternative ("outputs are identical under load") not
@@ -1348,7 +1348,24 @@ there is no compliant behavior for a scenario to regress against, and
 no finite scenario can prove an absence (the same argument as INV-L9's
 pool case below). Their checks are the reviews declared with them; for
 INV-L15 the shared-wins unit tests remain the nearest behavioral
-neighbors, scoped as regression checks by section 4.7. The overload scenario is the acceptance measurement for
+neighbors, scoped as regression checks by section 4.7.
+
+**INV-L9's scenario does not carry forward, and no successor replaces
+it.** It had one — `keyed_isolation` (section 5.1) — which saturated
+nine keyed channels concurrently and read each one admitting exactly
+`capacity + 1` while the shared channel reached its own capacity
+independently. RFC 0014 section 9 row 2 replaces those channels with the
+one data lane every producer shares, so the shape the row measured is no
+longer constructible: there is no second channel for a full one to fail
+to delay, and nothing to count a per-key admission against. Section 5.2
+records that the isolation itself is not preserved. The scenario
+therefore retires structurally rather than by deletion — the invariant
+keeps its statement as the record of what the superseded topology
+guaranteed, and its primary check was already the structural one below.
+Section 2's measurements and section 5.1's rows are historical evidence
+throughout, not live gates.
+
+The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no

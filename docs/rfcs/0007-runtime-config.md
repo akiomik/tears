@@ -559,23 +559,22 @@ channel occupancy, per the note on that distinction below the table:
   contract.** Every predicate that reads `blocked` (the `quit_blocked_*`
   and `quit_keyed_bounded` rows) reads the *current* value of the
   `blocked` gauge at the quit instant, and the harness's teardown barrier
-  (`await_quiescence`, `benches/runtime_load.rs`) reads the current gauge
+  (`await_quiescence`, `benches/kernel_load.rs`) reads the current gauge
   sum returning to zero. "Current value" is RFC 0006 §4.4's contract term,
   and it is per runtime instance: the value on the gauge event with the
   greatest `seq` *among events carrying that instance's `runtime_id`*,
   not the value on
   the most recently *arrived* event — the schema does not order gauge
   events by arrival, and a general consumer partitions by `runtime_id`
-  before taking the greatest `seq`. This harness runs one runtime at a
-  time and its teardown barrier completes before the next runtime
-  starts, so exactly one partition is ever active; its scalar
-  high-water read is the single-partition degenerate form of that rule,
-  and parsing `runtime_id` is unnecessary here
-  (`benches/runtime_load.rs`). The harness therefore consumes these
-  gauges by
-  greatest `seq` within the one active instance, discarding any event
-  whose `seq` does not advance, so a
-  reordered stale gauge event can corrupt neither a predicate reading nor
+  before taking the greatest `seq`. The harness
+  (`benches/kernel_load.rs`) is that general consumer rather than a
+  degenerate case of one: it keeps a high-water `seq` **per
+  `runtime_id`** and discards any gauge event that does not advance its
+  own partition's mark. It happens to run one runtime at a time, with
+  its teardown barrier completing before the next starts, so only one
+  partition is ever active — but the reading does not depend on that,
+  which is what keeps it correct if a row ever runs two. A reordered
+  stale gauge event can therefore corrupt neither a predicate reading nor
   the barrier. This dependency is stated explicitly because it is
   otherwise easy to miss: gauge events are dispatched off the runtime's
   gauge lock (RFC 0006 §4.4), so the schema does not guarantee their
@@ -638,12 +637,13 @@ channel occupancy, per the note on that distinction below the table:
   a row can no longer retry forever waiting on a rare predicate — the
   actual failure mode this rule exists to close. It is not itself a
   bound on the row's total wall time, and `10 × trials × max_wall`
-  overstates what is guarded: `max_wall` (`benches/runtime_load.rs`)
-  times out only the `runtime.run(&mut terminal)` call inside a single
-  attempt (`run_quit_trial`), not the `Runtime`/`Terminal` construction
-  before it, the sample extraction after it, or the per-attempt loop
+  overstates what is guarded: `max_wall` (`benches/kernel_load.rs`)
+  times out only the `kernel.drive(&mut terminal)` call inside a single
+  attempt (`run_kernel`, reached from `run_quit_trial`), not the kernel
+  and terminal construction before it, the settle and sample extraction
+  after it, or the per-attempt loop
   overhead in `run_quit_scenario` — so `10 × trials × max_wall` bounds
-  only the cumulative time those `runtime.run` calls can spend across
+  only the cumulative time those `drive` calls can spend across
   the capped attempts, not the row's actual wall time. A strict
   wall-clock ceiling on the whole row would need a separate, row-level
   aggregate timeout wrapping every attempt together, which this RFC does
@@ -807,10 +807,12 @@ over either.
   percentile is compared against
   anything — the profile carries no latency assertion. One wall-clock
   condition remains: every smoke scenario carries the harness's
-  per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
-  at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
-  current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
-  same — and the smoke run fails when any scenario times out. That
+  per-scenario completion guard (`max_wall` in `benches/kernel_load.rs`),
+  and the smoke run fails when any scenario times out. The successor
+  harness sets it per row class rather than uniformly — 60 s on the load
+  rows, 30 s on the quit rows — which is the split the two shapes of row
+  justify: a load row drives a configured message total to completion, a
+  quit row only as far as the quit it measures. That
   timeout-failure rule is part of the profile's definition, and the two
   paths divide it: on the full-run path, quit trials fail the run on
   timeout while a timed-out load scenario stays report-only; the smoke
@@ -828,10 +830,15 @@ over either.
   the case a per-attempt timeout alone cannot catch (§5.2's rationale for
   the cap). Both quit scenarios also inherit §5.2's quit-contract-failure
   class independent of the cap: any attempt that times out or completes
-  with no recorded quit-delivery event fails the run outright — the harness
-  already fails on either (`benches/runtime_load.rs`) — reported as the
-  timeout / missing-delivery class, never folded into a predicate-miss
-  retry or into attempt-cap exhaustion. The three failure classes stay
+  with no recorded quit instant fails the run outright — the harness
+  already fails on either (`benches/kernel_load.rs`) — reported as the
+  timeout / missing-instant class, never folded into a predicate-miss
+  retry or into attempt-cap exhaustion. The distinction is not
+  bookkeeping: folding a violation into the retry would leave an
+  *intermittent* one invisible, since the replacement attempt can complete
+  the row inside the cap, and the run would then report success over
+  evidence that the contract broke. The cap catches a violation that
+  repeats; only this class catches one that does not. The three failure classes stay
   distinct in the smoke run exactly as §5.2 defines them.
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove a harness
