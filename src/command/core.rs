@@ -578,9 +578,22 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// run is spawned for. The kernel's conformance series need that route
     /// to script a producer quit at all, and the load harness needs it to
     /// measure the control lane at all (RFC 0014 §13.5), so it is
-    /// crate-visible under `test` and under the bench-only feature; the
-    /// public spelling belongs to the effect-constructor work RFC 0014 §13
-    /// leaves open, not here.
+    /// crate-visible under `test` and under the bench-only feature.
+    ///
+    /// **It stays crate-visible.** The effect-constructor split that owns the
+    /// public shape of keying has landed, so the deferral this comment used
+    /// to make has somewhere to resolve. Publishing the constructor would
+    /// carry [`Action`] into the public vocabulary with it, for a capability
+    /// applications already have by other means: an effect emits a message
+    /// and the `update` that observes it returns [`Command::quit`], which is
+    /// the order RFC 0014 §3.3 recommends for "deliver then quit" anyway.
+    /// What a public `actions` adds over that is backlog independence for the
+    /// quit — a property of the control lane rather than of the constructor —
+    /// and no part of the switch or of store parity needs it.
+    ///
+    /// It is an effect constructor, so it returns a carrier like the rest:
+    /// `Command::actions(..).cancellable(id)` builds, because a
+    /// producer-originated quit is keyed or anonymous like any other run.
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn actions(
         stream: impl Stream<Item = Action<Msg>> + Send + 'static,
