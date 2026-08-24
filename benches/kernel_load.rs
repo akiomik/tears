@@ -1012,7 +1012,124 @@ fn self_test() {
     self_test_decision_rules();
     self_test_monitor_boundaries();
     self_test_observation_failure();
+    self_test_quit_contract_class();
     println!("self-test: all isolation negative cases hold");
+}
+
+/// The quit-contract failure class, and the absorption bug it exists to
+/// prevent.
+///
+/// This one guards a *quieter* failure than the monitor's do. A row that
+/// retries a contract violation still reports "200 valid trials" and exits
+/// zero; nothing in its output says the kernel timed out once along the way.
+/// So the negative case here is not "does the harness notice" — it is "does
+/// the harness notice when it could have gotten away with not noticing",
+/// which is the intermittent case, well inside the attempt budget.
+fn self_test_quit_contract_class() {
+    const TRIALS: u32 = 5;
+    const CAP: u32 = TRIALS * 10;
+
+    const fn sample() -> QuitAttempt {
+        QuitAttempt::Valid(QuitSample {
+            applied_ns: 1_000,
+            exit_ns: 2_000,
+            depth_at_quit: 0,
+            valid: true,
+        })
+    }
+
+    fn drive(script: Vec<QuitAttempt>) -> QuitCollection {
+        let mut collection = QuitCollection::new();
+        let mut script = script.into_iter();
+        while collection.wants_more(TRIALS, CAP) {
+            let Some(attempt) = script.next() else { break };
+            collection.absorb(attempt);
+        }
+        collection
+    }
+
+    // The positive case: predicate misses are retryable, and a row that
+    // reaches its trials inside the budget passes with no violation. Without
+    // this the rule below could be satisfied by refusing every row.
+    let mut script: Vec<QuitAttempt> = (0..4).map(|_| QuitAttempt::PredicateMiss).collect();
+    script.extend((0..TRIALS).map(|_| sample()));
+    let passing = drive(script);
+    assert!(
+        passing.violation.is_none() && passing.applied.len() == TRIALS as usize,
+        "predicate misses must stay retryable"
+    );
+    assert_eq!(passing.misses, 4, "and must be counted as their own class");
+
+    // **P2-1, the absorption bug.** One violation, surrounded by enough valid
+    // attempts to finish the row inside the cap — the shape the old rule let
+    // through, because it counted the violation as a retryable failure and
+    // the replacement attempt completed the row. The collection must stop at
+    // the violation with its trials *unfinished*, so the row fails.
+    let mut script = vec![sample(), sample()];
+    script.push(QuitAttempt::Violation(QuitViolation::Timeout));
+    script.extend((0..TRIALS).map(|_| sample()));
+    let intermittent = drive(script);
+    assert_eq!(
+        intermittent.violation,
+        Some(QuitViolation::Timeout),
+        "an intermittent violation must end the row, not be retried"
+    );
+    assert_eq!(
+        intermittent.applied.len(),
+        2,
+        "and must stop the row where it happened, leaving the trials short"
+    );
+    assert_eq!(
+        intermittent.attempts, 3,
+        "spending no attempt after the violation"
+    );
+
+    // The same shape for a missing quit instant: the second violation kind is
+    // not a special case of the first, and a row that only recognised
+    // timeouts would pass this one.
+    let mut script = vec![sample()];
+    script.push(QuitAttempt::Violation(QuitViolation::MissingInstant));
+    script.extend((0..TRIALS).map(|_| sample()));
+    let missing = drive(script);
+    assert_eq!(
+        missing.violation,
+        Some(QuitViolation::MissingInstant),
+        "a missing quit instant is a violation too"
+    );
+
+    // And the class must reach the verdict, separately from the cap: a
+    // violation reports as a violation, an exhausted budget as an exhausted
+    // budget. Folding them would lose exactly the distinction RFC 0007 §6
+    // draws.
+    let report = |collection: QuitCollection| QuitReport {
+        cfg: quit_scenarios()
+            .first()
+            .expect("the quit table is non-empty")
+            .base
+            .clone(),
+        trials: TRIALS,
+        attempts: collection.attempts,
+        misses: collection.misses,
+        violation: collection.violation,
+        applied: collection.applied,
+        exit: collection.exit,
+        settle: collection.settle,
+        depths: collection.depths,
+    };
+    let violated = report(intermittent).failure().expect("the row failed");
+    assert!(
+        violated.contains("quit-contract violation") && violated.contains("timed out"),
+        "the violation must name itself: {violated}"
+    );
+    let exhausted = report(drive(
+        (0..CAP).map(|_| QuitAttempt::PredicateMiss).collect(),
+    ))
+    .failure()
+    .expect("the row failed");
+    assert!(
+        exhausted.contains("predicate misses") && !exhausted.contains("violation"),
+        "an exhausted budget must not report as a violation: {exhausted}"
+    );
 }
 
 /// The in-window decision rules: ordering, fail-closed reading, persistence.
@@ -1300,14 +1417,14 @@ fn run_smoke(executor: &TokioRuntime) -> bool {
     for row in smoke_quit_rows() {
         let report = executor.block_on(run_quit_scenario(&row));
         print_quit_report(&report);
-        // Completion only: at this harness's observation point a legal
-        // shutdown discard is indistinguishable from an illegal drop, so
-        // there is no sequence to gate a quit row on.
-        if report.incomplete() {
-            eprintln!(
-                "smoke: quit row `{}` did not collect its trials",
-                report.cfg.name
-            );
+        // Completion and the quit contract: at this harness's observation
+        // point a legal shutdown discard is indistinguishable from an illegal
+        // drop, so there is no *sequence* to gate a quit row on — but a row
+        // that timed out or lost its quit instant is a contract failure at
+        // any profile, and the smoke run fails on it exactly as the full run
+        // does (RFC 0007 §6).
+        if let Some(failure) = report.failure() {
+            eprintln!("smoke: quit row `{}`: {failure}", report.cfg.name);
             ok = false;
         }
     }
@@ -1830,7 +1947,43 @@ struct QuitSample {
     valid: bool,
 }
 
-async fn run_quit_trial(cfg: Cfg, valid_trial: ValidTrial) -> Option<QuitSample> {
+/// A quit-contract violation: the row fails on the attempt that produces
+/// one, and does not retry it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitViolation {
+    /// `Kernel::drive` did not return inside `max_wall`.
+    Timeout,
+    /// The run completed without the quit instant the row measures from —
+    /// the quit was never requested, or was requested after it was applied.
+    MissingInstant,
+}
+
+impl QuitViolation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timed out",
+            Self::MissingInstant => "no quit instant",
+        }
+    }
+}
+
+/// What one attempt produced.
+///
+/// The three arms are the three failure classes RFC 0007 §6 keeps distinct,
+/// and keeping them distinct in the type is what stops the quiet one from
+/// being absorbed by the loud one.
+enum QuitAttempt {
+    /// A sample the row's validity predicate accepted.
+    Valid(QuitSample),
+    /// A completed attempt the predicate rejected. Retryable, and the reason
+    /// a row has an attempt budget at all: the predicate is a property of the
+    /// run, not of the harness, so some attempts legitimately miss.
+    PredicateMiss,
+    /// The kernel broke the quit contract. Not retryable.
+    Violation(QuitViolation),
+}
+
+async fn run_quit_trial(cfg: Cfg, valid_trial: ValidTrial) -> QuitAttempt {
     await_quiescence().await;
     let metrics = Arc::new(Metrics::new());
     *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = Some(Arc::clone(&metrics));
@@ -1850,23 +2003,33 @@ async fn run_quit_trial(cfg: Cfg, valid_trial: ValidTrial) -> Option<QuitSample>
         .store(waits as u64, Ordering::Relaxed);
     *TRIAL_METRICS.lock().expect("trial metrics slot poisoned") = None;
 
-    let (applied_ns, exit_ns, _joined) = outcome?;
+    let Some((applied_ns, exit_ns, _joined)) = outcome else {
+        return QuitAttempt::Violation(QuitViolation::Timeout);
+    };
     if requested == 0 || applied_ns < requested {
-        return None;
+        return QuitAttempt::Violation(QuitViolation::MissingInstant);
     }
-    Some(QuitSample {
+    let sample = QuitSample {
         applied_ns: applied_ns - requested,
         exit_ns: exit_ns - requested,
         depth_at_quit: metrics.depth_at_quit.load(Ordering::Relaxed),
         valid: valid_trial.holds(&metrics),
-    })
+    };
+    if sample.valid {
+        QuitAttempt::Valid(sample)
+    } else {
+        QuitAttempt::PredicateMiss
+    }
 }
 
 struct QuitReport {
     cfg: Cfg,
     trials: u32,
     attempts: u32,
-    failures: u32,
+    /// Attempts the row's validity predicate rejected.
+    misses: u32,
+    /// The quit-contract violation that ended the row, if one did.
+    violation: Option<QuitViolation>,
     applied: Vec<u64>,
     exit: Vec<u64>,
     /// Per trial, `exit - applied`: the quiescent postcondition alone.
@@ -1886,6 +2049,90 @@ impl QuitReport {
     const fn incomplete(&self) -> bool {
         self.applied.len() < self.trials as usize
     }
+
+    /// Whether the row failed, and why — the three classes, in the order a
+    /// reader needs them.
+    ///
+    /// A violation is named first because it is the only one that says the
+    /// *kernel* did something wrong; the other two say the row did not
+    /// gather enough evidence to judge it.
+    fn failure(&self) -> Option<String> {
+        if let Some(violation) = self.violation {
+            return Some(format!(
+                "quit-contract violation ({}) on attempt {}",
+                violation.label(),
+                self.attempts
+            ));
+        }
+        if self.incomplete() {
+            return Some(format!(
+                "collected {} of {} trials in {} attempts ({} predicate misses)",
+                self.applied.len(),
+                self.trials,
+                self.attempts,
+                self.misses
+            ));
+        }
+        None
+    }
+}
+
+/// A row's accumulating trials, and the rule for when to stop.
+struct QuitCollection {
+    applied: Vec<u64>,
+    exit: Vec<u64>,
+    settle: Vec<u64>,
+    depths: Vec<u64>,
+    attempts: u32,
+    misses: u32,
+    violation: Option<QuitViolation>,
+}
+
+impl QuitCollection {
+    const fn new() -> Self {
+        Self {
+            applied: Vec::new(),
+            exit: Vec::new(),
+            settle: Vec::new(),
+            depths: Vec::new(),
+            attempts: 0,
+            misses: 0,
+            violation: None,
+        }
+    }
+
+    /// Whether to spend another attempt.
+    const fn wants_more(&self, trials: u32, attempt_cap: u32) -> bool {
+        self.violation.is_none()
+            && (self.applied.len() as u32) < trials
+            && self.attempts < attempt_cap
+    }
+
+    /// Folds one attempt in.
+    ///
+    /// **A violation ends the row and is never retried**, which is the whole
+    /// of RFC 0007 §6's quit-contract failure class and the reason it is
+    /// stated separately from the attempt cap. Retrying it would make an
+    /// *intermittent* violation invisible: one timeout in two hundred
+    /// attempts, retried, its replacement valid, the row green — a run that
+    /// reports success over evidence that the contract broke. A deterministic
+    /// violation would still exhaust the cap and fail eventually; the
+    /// intermittent one is the case the cap cannot catch, and it is the case
+    /// this class exists for.
+    fn absorb(&mut self, attempt: QuitAttempt) {
+        self.attempts += 1;
+        match attempt {
+            QuitAttempt::Valid(sample) => {
+                self.applied.push(sample.applied_ns);
+                self.exit.push(sample.exit_ns);
+                self.settle
+                    .push(sample.exit_ns.saturating_sub(sample.applied_ns));
+                self.depths.push(sample.depth_at_quit);
+            }
+            QuitAttempt::PredicateMiss => self.misses += 1,
+            QuitAttempt::Violation(violation) => self.violation = Some(violation),
+        }
+    }
 }
 
 async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
@@ -1896,30 +2143,25 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
     // anyone hears about it.
     //
     // Unlike the old harness, this cap binds an `Always` row too. That
-    // predicate never misses, but an attempt can still yield no sample — a
-    // trial whose kernel timed out, or one whose quit instant was never
-    // recorded — and those are exactly the failures that would otherwise
-    // retry forever instead of ending the row.
+    // predicate never misses, so without the cap a row whose attempts all
+    // miss for some other reason would retry forever. The cap is not what
+    // catches a broken quit contract — `QuitCollection::absorb` is, on the
+    // first attempt that shows one.
     let attempt_cap = scenario.trials.saturating_mul(10);
-    let mut applied = Vec::new();
-    let mut exit = Vec::new();
-    let mut settle = Vec::new();
-    let mut depths = Vec::new();
-    let mut attempts = 0;
-    let mut failures = 0;
-    while (applied.len() as u32) < scenario.trials && attempts < attempt_cap {
-        attempts += 1;
-        match run_quit_trial(scenario.base.clone(), scenario.valid_trial).await {
-            Some(sample) if sample.valid => {
-                applied.push(sample.applied_ns);
-                exit.push(sample.exit_ns);
-                settle.push(sample.exit_ns.saturating_sub(sample.applied_ns));
-                depths.push(sample.depth_at_quit);
-            }
-            Some(_) => {}
-            None => failures += 1,
-        }
+    let mut collection = QuitCollection::new();
+    while collection.wants_more(scenario.trials, attempt_cap) {
+        let attempt = run_quit_trial(scenario.base.clone(), scenario.valid_trial).await;
+        collection.absorb(attempt);
     }
+    let QuitCollection {
+        mut applied,
+        mut exit,
+        mut settle,
+        mut depths,
+        attempts,
+        misses,
+        violation,
+    } = collection;
     applied.sort_unstable();
     exit.sort_unstable();
     settle.sort_unstable();
@@ -1928,7 +2170,8 @@ async fn run_quit_scenario(scenario: &QuitCfg) -> QuitReport {
         cfg: scenario.base.clone(),
         trials: scenario.trials,
         attempts,
-        failures,
+        misses,
+        violation,
         applied,
         exit,
         settle,
@@ -2008,11 +2251,14 @@ fn print_quit_report(report: &QuitReport) {
         report.cfg.quit_route
     );
     println!(
-        "  trials            {} valid / {} attempts / {} failures",
+        "  trials            {} valid / {} attempts / {} predicate misses",
         report.applied.len(),
         report.attempts,
-        report.failures
+        report.misses
     );
+    if let Some(violation) = report.violation {
+        println!("  QUIT CONTRACT     violated: {}", violation.label());
+    }
     println!("  quit->applied     {}", format_ms(&report.applied));
     println!("  quit->exit        {}", format_ms(&report.exit));
     println!("  applied->exit     {}", format_ms(&report.settle));
@@ -2120,14 +2366,23 @@ fn main() -> ExitCode {
     }
     for row in quit_rows {
         let report = executor.block_on(run_quit_scenario(&row));
-        incomplete |= report.incomplete();
+        if let Some(failure) = report.failure() {
+            eprintln!("error: quit row `{}`: {failure}", report.cfg.name);
+            incomplete = true;
+        }
         print_quit_report(&report);
     }
     if !probe_rows.is_empty() {
         println!("# blocked-producer sweep (informative; not acceptance rows)\n");
         for row in probe_rows {
             let report = executor.block_on(run_quit_scenario(&row));
-            incomplete |= report.incomplete();
+            // Informative rows carry no acceptance number, but a quit-contract
+            // violation is not a number — it is the kernel misbehaving, and it
+            // fails the run from here as it would from an acceptance row.
+            if let Some(failure) = report.failure() {
+                eprintln!("error: probe row `{}`: {failure}", report.cfg.name);
+                incomplete = true;
+            }
             print_quit_report(&report);
         }
     }
