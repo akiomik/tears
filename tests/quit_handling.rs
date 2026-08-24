@@ -1,46 +1,23 @@
 //! Integration tests for quit handling.
+//!
+//! Two rows that used to live here were selected by frame pacing — a quit at
+//! a deliberately slow frame rate, and a quit arriving while the loop was
+//! parked on the frame timer — and pacing is gone (RFC 0014 §6.3, §9 row 4).
+//! Neither had a property left to assert: render cadence is pass-bounded now,
+//! so there is no frame period for a quit to be gated by and no frame timer to
+//! park on. The successor statements are the kernel's own: quit latency is
+//! bounded by the batch cap (§3.3) and the parked-kernel wake sources are
+//! INV-RC16's, both carried by the conformance series.
 
 mod common;
-
-use std::num::NonZeroU32;
 
 use color_eyre::eyre::Result;
 use ratatui::Frame;
 use tears::prelude::*;
 
-use tokio::time::{Duration, Instant, sleep, timeout};
-
-fn frame_rate(value: u32) -> FrameRate {
-    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
-        .expect("frame rate must be valid")
-}
+use tokio::time::{Duration, Instant, timeout};
 
 // Test application that sends quit from init command
-
-#[tokio::test]
-async fn test_quit_responsiveness_low_framerate() -> Result<()> {
-    // Test that quit is responsive even with low frame rate (16 FPS = 62.5ms per frame)
-    // This test uses InitQuitApp which sends quit from init command
-    let mut terminal = common::test_terminal()?;
-
-    let runtime = Runtime::<InitQuitApp>::new((), frame_rate(16));
-
-    let start = Instant::now();
-    // Use low frame rate (16 FPS = 62.5ms per frame)
-    let result = timeout(Duration::from_millis(200), runtime.run(&mut terminal)).await?;
-    let elapsed = start.elapsed();
-
-    assert!(result.is_ok(), "Runtime should complete without error");
-
-    // With the fix, quit should happen much faster than frame duration (62.5ms)
-    println!("Quit with low framerate took: {elapsed:?}");
-    assert!(
-        elapsed < Duration::from_millis(150),
-        "Should quit quickly even with low framerate"
-    );
-
-    Ok(())
-}
 
 struct InitQuitApp;
 
@@ -69,7 +46,7 @@ async fn test_quit_from_init_command() -> Result<()> {
     // Test that quit from init command is processed quickly
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<InitQuitApp>::new((), frame_rate(60));
+    let runtime = Runtime::<InitQuitApp>::new(());
 
     let start = Instant::now();
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
@@ -82,57 +59,6 @@ async fn test_quit_from_init_command() -> Result<()> {
     assert!(
         elapsed < Duration::from_millis(200),
         "Should quit quickly from init command"
-    );
-
-    Ok(())
-}
-
-// Test application that quits during frame wait
-struct DelayedQuitApp;
-
-impl Application for DelayedQuitApp {
-    type Message = ();
-    type Flags = ();
-
-    fn new(_flags: ()) -> (Self, Command<Self::Message>) {
-        // Schedule a quit command with delay
-        let cmd = Command::future(async {
-            sleep(Duration::from_millis(50)).await;
-        });
-        (Self, cmd.into())
-    }
-
-    fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
-        Command::quit()
-    }
-
-    fn view(&self, _frame: &mut Frame<'_>) {}
-
-    fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
-        vec![]
-    }
-}
-
-#[tokio::test]
-async fn test_quit_during_frame_wait() -> Result<()> {
-    // Test that quit signal during frame wait is processed immediately
-    let mut terminal = common::test_terminal()?;
-
-    let runtime = Runtime::<DelayedQuitApp>::new((), frame_rate(10));
-
-    let start = Instant::now();
-    // Use very low frame rate (10 FPS = 100ms per frame)
-    let result = timeout(Duration::from_millis(300), runtime.run(&mut terminal)).await?;
-    let elapsed = start.elapsed();
-
-    assert!(result.is_ok(), "Runtime should complete without error");
-
-    // With tokio::select!, quit should happen around 50ms (command delay)
-    // not 100ms+ (frame duration)
-    println!("Delayed quit took: {elapsed:?}");
-    assert!(
-        elapsed < Duration::from_millis(200),
-        "Should quit quickly even during frame wait"
     );
 
     Ok(())
@@ -186,7 +112,7 @@ async fn test_quit_after_multiple_messages() -> Result<()> {
     // Test that quit is processed quickly even after multiple messages
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<MultiMessageQuitApp>::new((), frame_rate(60));
+    let runtime = Runtime::<MultiMessageQuitApp>::new(());
 
     let start = Instant::now();
     let result = timeout(Duration::from_millis(500), runtime.run(&mut terminal)).await?;

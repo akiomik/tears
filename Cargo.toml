@@ -87,11 +87,6 @@ reqwest = { version = "0.13", features = ["json", "query"] }
 libc = "0.2"
 
 [[bench]]
-name = "subscription"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
 name = "gauge"
 harness = false
 required-features = ["bench-internals"]

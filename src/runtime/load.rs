@@ -82,23 +82,22 @@ use std::time::Duration;
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
-/// `channel` field (`"shared"`, `"keyed"`, or `"data"`).
+/// `channel` field.
+///
+/// One value, deliberately kept as an enum: the field name and its schema
+/// position are what an observability consumer depends on, and the type is
+/// where a second lane would have to declare itself. `"shared"` and
+/// `"keyed"` retired with the channels they named (RFC 0014 §9 row 9).
 #[derive(Clone, Copy)]
 pub enum Channel {
-    Shared,
-    Keyed,
-    /// The kernel's single data lane, which every producer shares (RFC 0014
-    /// §3.1). Once the kernel owns the production path this is the only
-    /// value the field takes, and `"shared"`/`"keyed"` retire with the
-    /// channels they name (RFC 0014 §9 row 9).
+    /// The kernel's single data lane, which every producer shares
+    /// (RFC 0014 §3.1).
     Data,
 }
 
 impl Channel {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Shared => "shared",
-            Self::Keyed => "keyed",
             Self::Data => "data",
         }
     }
@@ -944,11 +943,11 @@ mod tests {
         // Capacity-wait event: DEBUG, not TRACE.
         {
             let _guard = at_debug.set_default();
-            capacity_wait(Channel::Shared, Duration::from_micros(1));
+            capacity_wait(Channel::Data, Duration::from_micros(1));
         }
         assert_eq!(
             at_debug.str_values("channel"),
-            vec!["shared".to_owned()],
+            vec!["data".to_owned()],
             "capacity-wait event is DEBUG"
         );
 

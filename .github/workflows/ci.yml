@@ -71,11 +71,10 @@ jobs:
         # `--bench <name>` (singular, per-target) rather than `--benches`
         # (plural): the plural form implicitly also runs the lib's unit
         # tests, duplicating what the `test` job's matrix already covers.
-        # Criterion's own test mode is the smoke profile for these two: one
-        # iteration each, no sample, so what it gates is that they still
-        # compile and run.
+        # Criterion's own test mode is the smoke profile for it: one
+        # iteration, no sample, so what it gates is that it still compiles
+        # and runs.
         run: |
-          cargo test --bench subscription --all-features
           cargo test --bench kernel_scan --all-features
       - name: Run the load harness's smoke profiles
         # The full scenarios of the load harness leave CI: they are

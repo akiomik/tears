@@ -92,7 +92,6 @@ pub enum CancelPolicy {
 
 #[derive(Default)]
 pub(super) struct CommandCancellation {
-    pub(super) key: Option<CancellableCommand>,
     pub(super) cancels: Vec<CommandId>,
 }
 

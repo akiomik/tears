@@ -110,8 +110,9 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time;
 
 use crate::application::Application;
-use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts};
+use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
+use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
 
 /// One undelivered effect leaf, held at its enqueue position.
@@ -125,8 +126,12 @@ struct PendingLeaf<Msg> {
     /// yield) and `advance`'s anchoring scan (which skips already-buffered
     /// leaves), and delivery scans take the buffer before polling again.
     buffered: Option<Action<Msg>>,
-    /// The cancellation id this leaf's command runs under, if keyed.
+    /// The cancellation id this carrier runs under, if keyed.
     key: Option<CommandId>,
+    /// Where the carrier is placed — what a teardown prefix selects it by
+    /// (RFC 0014 §4.1). Every carrier has one; an unscoped carrier's is the
+    /// root, which only a root-wide teardown covers.
+    scope: ScopePath,
     /// Zero-based enqueue position over the store's lifetime, for
     /// diagnostics.
     position: usize,
@@ -214,6 +219,12 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 /// assert_eq!(store.state().value, 42);
 /// store.finish();
 /// ```
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent one-bit facts about one store — redraw request, \
+              quit observed, dispatch quit, finished — with no state they \
+              could be folded into without inventing one"
+)]
 pub struct TestStore<App: Application>
 where
     App::Message: Debug,
@@ -229,6 +240,13 @@ where
     pending: Vec<PendingLeaf<App::Message>>,
     redraw_requested: bool,
     quit_observed: bool,
+    /// A quit the dispatch applied synchronously, waiting to be observed.
+    ///
+    /// It is *not* deliverable output and does not queue behind any: an
+    /// `update`-returned quit applies at its dispatch's completion, before
+    /// the next input is pulled (RFC 0014 §3.3), so it cannot be overtaken
+    /// by a message the same command produced.
+    dispatch_quit: bool,
     /// Total leaves ever enqueued; the next leaf's enqueue position.
     enqueued_leaves: usize,
     /// Set by [`TestStore::finish`] so the drop check does not run twice.
@@ -286,6 +304,7 @@ where
             // the init command's folded directive (§5.2).
             redraw_requested: true,
             quit_observed: false,
+            dispatch_quit: false,
             enqueued_leaves: 0,
             finished: false,
         };
@@ -434,13 +453,32 @@ where
     /// [`subscription_ids`](Self::subscription_ids), and
     /// [`finish`](Self::finish) remain callable.
     ///
+    /// # The two quit routes
+    ///
+    /// A quit an `update` returned was already applied, synchronously, at
+    /// the dispatch that returned it (RFC 0014 §3.3) — this observes that
+    /// application, and does not require the quit to be the next deliverable
+    /// output, because it never queued behind any. A message the same
+    /// command produced is therefore *not* a failure here, and still
+    /// deliverable afterwards only in the sense that shutdown legally
+    /// discards it.
+    ///
+    /// A producer-originated quit — one a spawned run emitted — does travel
+    /// as output, so for that route this still requires the quit to be next.
+    ///
     /// # Panics
     ///
-    /// Fails the test if the next deliverable output is a message, if
-    /// nothing is deliverable, or if quit has already been observed.
+    /// Fails the test if no quit was applied at a dispatch and the next
+    /// deliverable output is a message, if neither is present, or if quit
+    /// has already been observed.
     #[track_caller]
     pub fn receive_quit(&mut self) {
         self.assert_running("receive_quit");
+        if self.dispatch_quit {
+            self.dispatch_quit = false;
+            self.quit_observed = true;
+            return;
+        }
         match self.next_deliverable("receive_quit") {
             Action::Quit => self.quit_observed = true,
             Action::Message(msg) => panic!(
@@ -514,50 +552,71 @@ where
         self.enqueue_command(command.into_runtime_parts());
     }
 
-    /// Accepts one command through the same decomposition boundary the
-    /// runtime consumes (RFC 0008 INV-T3): directives, explicit cancels, the
-    /// keyed admission decision, then the leaves in flattened declaration
-    /// order.
+    /// Accepts one command through the decomposition boundary the kernel
+    /// consumes (RFC 0008 INV-T3), applying RFC 0014 §3.4's phase order:
+    /// directives, then the cancel phase (explicit cancels and teardown
+    /// prefixes) before *every* spawn of the same command, then the spawn
+    /// phase in flattened declaration order, then the quit if one was
+    /// carried.
     fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
-        self.redraw_requested = parts.requests_redraw();
-        let (cancels, key, leaves) = parts.into_execution_parts();
+        let parts = parts.into_kernel_parts();
+        self.redraw_requested = parts.redraw;
 
-        // RFC 0003 semantics over the pending set (RFC 0008 §5.1): explicit
-        // cancels apply before the keyed spawn decision, as in the runtime.
-        for id in &cancels {
+        for id in &parts.cancels {
             self.cancel_id(id);
         }
+        for prefix in &parts.teardowns {
+            self.teardown_under(prefix);
+        }
 
-        if leaves.is_empty() {
-            // The runtime spawns nothing for a stream-less command, so its
-            // key (if any) occupies nothing here either.
+        for spawn in parts.spawns {
+            self.admit(spawn);
+        }
+
+        if parts.quit_now {
+            self.dispatch_quit = true;
+        }
+    }
+
+    /// One carrier's admission decision, made per carrier rather than per
+    /// command: a batch's children each lower to their own keyed entry, so
+    /// two same-key children in one command apply in declaration order as
+    /// two consecutive dispatches, the second replacing the first under its
+    /// own policy (RFC 0014 §3.4).
+    fn admit(&mut self, spawn: SpawnEntry<App::Message>) {
+        let Some(key) = spawn.key else {
+            self.push_leaf(None, spawn.scope, spawn.stream);
             return;
-        }
+        };
 
-        match key {
-            None => self.push_leaves(None, leaves),
-            Some(key) => match key.policy {
-                CancelPolicy::CancelInFlight => {
-                    // Supersede: the occupant's undelivered output — buffered
-                    // messages and quit requests alike — can no longer be
-                    // delivered (RFC 0003 INV-3, INV-6, INV-9). No
-                    // reconciliation poll: the outcome does not depend on the
-                    // occupant's state, which also lets a reactor-dependent
-                    // occupant be superseded without polling it.
-                    self.cancel_id(&key.id);
-                    self.push_leaves(Some(&key.id), leaves);
+        match key.policy {
+            CancelPolicy::CancelInFlight => {
+                // Supersede: the occupant's undelivered output — buffered
+                // messages and quit requests alike — can no longer be
+                // delivered (RFC 0003 INV-3, INV-6, INV-9 as RFC 0014 §3.1's
+                // revocation succeeds them). No reconciliation poll: the
+                // outcome does not depend on the occupant's state, which also
+                // lets a reactor-dependent occupant be superseded without
+                // polling it.
+                self.cancel_id(&key.id);
+                self.push_leaf(Some(&key.id), spawn.scope, spawn.stream);
+            }
+            CancelPolicy::KeepInFlight => {
+                // Keyed-intake reconciliation: the admission decision reads
+                // the reconciled occupancy (RFC 0003 INV-5, INV-7).
+                if self.reconcile_is_occupied(&key.id) {
+                    drop(spawn.stream);
+                } else {
+                    self.push_leaf(Some(&key.id), spawn.scope, spawn.stream);
                 }
-                CancelPolicy::KeepInFlight => {
-                    // Keyed-intake reconciliation: the admission decision
-                    // reads the reconciled occupancy (RFC 0003 INV-5, INV-7).
-                    if self.reconcile_is_occupied(&key.id) {
-                        drop(leaves);
-                    } else {
-                        self.push_leaves(Some(&key.id), leaves);
-                    }
-                }
-            },
+            }
         }
+    }
+
+    /// Drops every carrier placed under `prefix`, of every kind and
+    /// regardless of key — the store's half of RFC 0014 §4.1's selection.
+    fn teardown_under(&mut self, prefix: &ScopePath) {
+        self.pending.retain(|leaf| !leaf.scope.starts_with(prefix));
     }
 
     /// Drops every leaf keyed under `id`, discarding streams and buffered
@@ -605,21 +664,21 @@ where
         false
     }
 
-    fn push_leaves(
+    fn push_leaf(
         &mut self,
         key: Option<&CommandId>,
-        leaves: Vec<BoxStream<'static, Action<App::Message>>>,
+        scope: ScopePath,
+        stream: BoxStream<'static, Action<App::Message>>,
     ) {
-        for stream in leaves {
-            let position = self.enqueued_leaves;
-            self.enqueued_leaves += 1;
-            self.pending.push(PendingLeaf {
-                stream: Some(stream),
-                buffered: None,
-                key: key.cloned(),
-                position,
-            });
-        }
+        let position = self.enqueued_leaves;
+        self.enqueued_leaves += 1;
+        self.pending.push(PendingLeaf {
+            stream: Some(stream),
+            buffered: None,
+            key: key.cloned(),
+            scope,
+            position,
+        });
     }
 
     #[track_caller]
@@ -1593,11 +1652,17 @@ mod tests {
         store.receive(Msg::N(2));
     }
 
-    // Diagnostics: quit-versus-message confusion in both directions.
+    // Diagnostics: quit-versus-message confusion in both directions. The
+    // quit here is producer-originated — the route that still travels as
+    // deliverable output; an `update`-returned quit applies at its dispatch
+    // and never reaches a delivery scan (RFC 0014 §3.3).
     #[test]
     #[should_panic(expected = "assert it with TestStore::receive_quit")]
     fn receive_fails_when_the_next_output_is_a_quit_request() {
-        let mut store = store_with(Command::<Msg>::quit(), |_| Command::none());
+        let mut store = store_with(
+            Command::<Msg>::actions(stream::once(async { Action::Quit })).into(),
+            |_| Command::none(),
+        );
         store.receive(Msg::N(1));
     }
 

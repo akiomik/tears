@@ -11,7 +11,6 @@
 //! Run with: cargo run --example websocket --features ws,rustls
 
 use std::io;
-use std::num::NonZeroU32;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -252,8 +251,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<EchoChat>::new((), frame_rate);
+    let runtime = Runtime::<EchoChat>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

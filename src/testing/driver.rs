@@ -1871,7 +1871,7 @@ mod tests {
                 marking_effect(beacon.clone()),
             ]))
             .replying([Command::cancel(keyed)]),
-            config().app_channel_capacity(cap(1)),
+            config().data_lane_capacity(cap(1)),
         );
         let worker = driver.boot().started[0].clone();
         assert!(beacon.marks() > 0, "the marking run ended on the boot turn");

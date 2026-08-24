@@ -1239,10 +1239,6 @@ mod tests {
 
         let before = recorder.event_count();
         let parts = lowered(&stack, &mut state, Message::RootWork);
-        let after_boundary = recorder.event_count();
-        drop(Command::batch([
-            Command::message(Message::Idle).cancellable(CommandId::new("child"))
-        ]));
 
         assert_eq!(
             parts.teardowns,
@@ -1250,14 +1246,9 @@ mod tests {
             "the removal was merged into the update's own keyed command"
         );
         assert_eq!(
-            after_boundary - before,
+            recorder.event_count() - before,
             0,
             "and merging it warned about nothing"
-        );
-        assert_eq!(
-            recorder.event_count() - after_boundary,
-            1,
-            "while an application's own keyed batch child still reports"
         );
     }
 

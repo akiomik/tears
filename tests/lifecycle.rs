@@ -20,7 +20,7 @@ mod trace_recorder;
 use std::convert::Infallible;
 use std::future::pending;
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -40,11 +40,6 @@ use tears::{BoxStream, EffectCommand, SubscriptionSource};
 use tokio::task::yield_now;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
-
-fn frame_rate(value: u32) -> FrameRate {
-    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
-        .expect("frame rate must be valid")
-}
 
 fn timer_subscription<Msg: Send + 'static>(make: fn() -> Msg) -> Subscription<Msg> {
     Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero"))).map(move |_| make())
@@ -320,7 +315,7 @@ async fn assert_quit_terminates() -> Result<()> {
 
     let flags = QuitFlags::new();
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone());
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -445,7 +440,7 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
 
     let flags = QuitFlags::new();
     let mut terminal = Terminal::new(FailingBackend::new())?;
-    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone());
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -635,7 +630,7 @@ async fn assert_transition_panic_tears_down(site: PanicSite, source_starts: bool
 
     let flags = AbruptFlags::new(site);
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<AbruptApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<AbruptApp>::new(flags.clone());
 
     let outcome = panic_hook::with_silent_panic_hook(
         AssertUnwindSafe(timeout(Duration::from_secs(5), runtime.run(&mut terminal)))
@@ -683,7 +678,7 @@ async fn dropping_the_run_future_reaches_both_postconditions() -> Result<()> {
 
     let flags = AbruptFlags::new(PanicSite::None);
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<AbruptApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<AbruptApp>::new(flags.clone());
 
     let mut run = Box::pin(runtime.run(&mut terminal));
     let cancelled = timeout(Duration::from_millis(50), &mut run).await;
@@ -843,7 +838,7 @@ async fn constructing_a_runtime_starts_no_effect_and_no_subscription_source() {
     let _guard = recorder.set_default();
 
     let probe = InertProbe::default();
-    let runtime = Runtime::<InertApp>::new(probe.clone(), frame_rate(60));
+    let runtime = Runtime::<InertApp>::new(probe.clone());
 
     drain_executor().await;
 
@@ -873,7 +868,7 @@ async fn dropping_a_never_run_runtime_winds_down_nothing() {
     let _guard = recorder.set_default();
 
     let probe = InertProbe::default();
-    drop(Runtime::<InertApp>::new(probe.clone(), frame_rate(60)));
+    drop(Runtime::<InertApp>::new(probe.clone()));
 
     drain_executor().await;
 
@@ -1011,7 +1006,7 @@ impl Application for ContainmentApp {
 async fn assert_producer_panic_is_contained(kind: PanickingProducer) -> Result<()> {
     let transitions = Transitions::default();
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<ContainmentApp>::new((kind, transitions.clone()), frame_rate(60));
+    let runtime = Runtime::<ContainmentApp>::new((kind, transitions.clone()));
 
     let outcome = panic_hook::with_silent_panic_hook(timeout(
         Duration::from_secs(5),

@@ -28,6 +28,7 @@ pub struct AppProgram<A>(PhantomData<fn() -> A>);
 
 impl<A> AppProgram<A> {
     /// The adapter for `A`. Carries nothing, so construction is inert.
+    #[must_use]
     pub const fn new() -> Self {
         Self(PhantomData)
     }

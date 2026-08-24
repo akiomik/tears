@@ -22,7 +22,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
 use std::mem;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,7 +45,6 @@ use crate::kernel::arbiter::WakeSource;
 use crate::kernel::lane::GateMode;
 use crate::reducer::{Exit, Program, Reducer};
 use crate::runtime::config::RuntimeConfig;
-use crate::runtime::frame_rate::FrameRate;
 use crate::runtime::load::LoadObserver;
 use crate::subscription::mock::MockSource;
 use crate::subscription::{Subscription, SubscriptionSource};
@@ -949,9 +948,7 @@ impl Program for Scripted {
 
 /// The default configuration the series construct through.
 pub fn config() -> RuntimeConfig {
-    RuntimeConfig::new(
-        FrameRate::new(NonZeroU32::new(60).expect("non-zero")).expect("a valid frame rate"),
-    )
+    RuntimeConfig::new()
 }
 
 /// A non-zero count, for the two configured bounds.

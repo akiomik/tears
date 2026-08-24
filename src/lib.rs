@@ -102,7 +102,7 @@ pub(crate) mod kernel;
 pub(crate) mod noop_waker;
 pub(crate) mod panic;
 pub mod prelude;
-pub(crate) mod reducer;
+pub mod reducer;
 pub(crate) mod runtime;
 mod structural_key;
 pub mod subscription;
@@ -126,7 +126,7 @@ pub use command::effect_command::EffectCommand;
 // "External Crate Re-exports".
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
-pub use runtime::Runtime;
+pub use runtime::{ProgramRuntime, Runtime};
 // `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app
 // calling `Runtime::new` never names it (RFC 0007 §2.3, INV-C4).
@@ -135,7 +135,6 @@ pub use runtime::config::RuntimeConfig;
 // as `tears::FrameRate` so it keeps a single canonical public path. See
 // docs/api-guidelines.md for the module visibility / root promotion rules
 // this follows.
-pub use runtime::frame_rate::{FrameRate, FrameRateError};
 pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 // Bench-only re-export exposing the producer-gauge observer to
 // `benches/gauge.rs`, which compiles as a separate crate and only sees the

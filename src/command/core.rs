@@ -15,7 +15,7 @@ use futures::{FutureExt, Stream, StreamExt, stream};
 use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
-use super::cancellation::{CancellableCommand, CommandCancellation, CommandId};
+use super::cancellation::{CommandCancellation, CommandId};
 use super::cleanup::CleanupRegistration;
 use super::effect::{Effect, Leaf};
 use super::effect_command::EffectCommand;
@@ -65,7 +65,6 @@ impl<Msg: Send + 'static> Command<Msg> {
             effect,
             directives: RuntimeDirectives::DEFAULT,
             cancellation: CommandCancellation {
-                key: None,
                 cancels: Vec::new(),
             },
             teardowns: Vec::new(),
@@ -85,10 +84,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// runtime that reads it does.
     pub(super) fn from_carrier(leaf: Leaf<Msg>, directives: RuntimeDirectives) -> Self {
         Self {
-            cancellation: CommandCancellation {
-                key: leaf.key.clone(),
-                cancels: Vec::new(),
-            },
+            cancellation: CommandCancellation::default(),
             directives,
             effect: Effect::from_leaf(leaf),
             teardowns: Vec::new(),
@@ -236,11 +232,6 @@ impl<Msg: Send + 'static> Command<Msg> {
         // scope type itself need not be `Clone` (RFC 0005 §8.1).
         let segment = StructuralKey::new(scope);
 
-        self.cancellation.key = self.cancellation.key.map(|cancellable| CancellableCommand {
-            id: cancellable.id.scoped_with(segment.clone()),
-            policy: cancellable.policy,
-        });
-
         self.cancellation.cancels = self
             .cancellation
             .cancels
@@ -275,10 +266,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// requests a redraw unless followed by [`Command::without_redraw`].
     pub fn cancel(id: CommandId) -> Self {
         Self {
-            cancellation: CommandCancellation {
-                key: None,
-                cancels: vec![id],
-            },
+            cancellation: CommandCancellation { cancels: vec![id] },
             ..Self::none()
         }
     }
@@ -296,14 +284,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// RFC 0014, and a public constructor whose effect the current runtime
     /// would accept and ignore is precisely the silent mismatch RFC 0007
     /// INV-C5 prohibits.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the kernel that applies a teardown, and the combinators that build one, land after this carrier"
-        )
-    )]
-    pub(crate) fn teardown<Scope>(scope: Scope) -> Self
+    pub fn teardown<Scope>(scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,
     {
@@ -331,20 +312,11 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// warns about a child spawn key for a command the boundary is only
     /// passing through. A boundary adds identity carriers and nothing else
     /// (RFC 0014 §2.5).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reached only through the kernel's own consumers, which no non-test build can \
-                      construct until the entry point is switched over"
-        )
-    )]
     pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
         debug_assert!(
             other.is_none()
                 && other.directives == RuntimeDirectives::DEFAULT
                 && other.cleanups.is_empty()
-                && other.cancellation.key.is_none()
                 && other.cancellation.cancels.is_empty(),
             "merging_teardowns aggregates teardown entries only; an effect, a redraw directive, a \
              cleanup registration, a spawn key, or an explicit cancel on `other` would be dropped \
@@ -633,24 +605,6 @@ impl<Msg: Send + 'static> Command<Msg> {
             let cmd = cmd.into();
             any_child = true;
             directives = directives.combine(cmd.directives);
-            if let Some(key) = cmd.cancellation.key {
-                tracing::warn!(
-                    target: "tears::command",
-                    id = ?key.id,
-                    "cancellable child key ignored by Command::batch"
-                );
-                // The warning still describes this runtime, which spawns one
-                // folded stream per command and so has no place to put a
-                // second key. It stops describing anything once the kernel is
-                // the only consumer of this lowering — a key reaching a batch
-                // child is then honoured rather than ignored — so it is
-                // removed with the switch that lands RFC 0014 §9 row 3's
-                // supersession, not before. Nothing is pushed down here: the
-                // key already sits on the child's own carrier, written there
-                // when the carrier became a command, and the command-level
-                // copy this reads is the superseded runtime's reading of the
-                // same single carrier.
-            }
             cancels.extend(cmd.cancellation.cancels);
             teardowns.extend(cmd.teardowns);
             cleanups.extend(cmd.cleanups);
@@ -661,7 +615,7 @@ impl<Msg: Send + 'static> Command<Msg> {
             Self {
                 effect: Effect::batch(effects),
                 directives,
-                cancellation: CommandCancellation { key: None, cancels },
+                cancellation: CommandCancellation { cancels },
                 teardowns,
                 cleanups,
             }
@@ -831,8 +785,8 @@ mod tests {
     fn test_cancellation_metadata_defaults_empty() {
         let command = Command::<i32>::none();
 
-        assert!(command.cancellation.key.is_none());
         assert!(command.cancellation.cancels.is_empty());
+        assert!(kernel_parts(command).spawns.is_empty());
     }
 
     #[test]
@@ -840,10 +794,10 @@ mod tests {
         let command = Command::message(1)
             .cancellable_with(CommandId::new("first"), CancelPolicy::KeepInFlight)
             .cancellable(CommandId::new("second"));
-        let key = command
-            .into_command()
-            .cancellation
-            .key
+        let mut spawns = kernel_parts(command.into()).spawns;
+        let key = spawns
+            .pop()
+            .and_then(|spawn| spawn.key)
             .expect("key should be present");
 
         assert_eq!(key.id, CommandId::new("second"));
@@ -856,12 +810,7 @@ mod tests {
         let scoped = Command::message(1)
             .cancellable(CommandId::new("load"))
             .scoped("pane-1");
-        let scoped_id = scoped
-            .into_command()
-            .cancellation
-            .key
-            .expect("key should be present")
-            .id;
+        let scoped_id = carrier_key(scoped).expect("key should be present");
 
         assert_ne!(tupled, scoped_id);
     }
@@ -871,7 +820,6 @@ mod tests {
         let command = Command::<i32>::none().scoped("pane-1");
 
         assert!(command.is_none());
-        assert!(command.cancellation.key.is_none());
         assert!(command.cancellation.cancels.is_empty());
     }
 
@@ -880,10 +828,10 @@ mod tests {
         let scoped = Command::message(1)
             .cancellable(CommandId::new("load"))
             .scoped("pane-1");
-        let key = scoped
-            .into_command()
-            .cancellation
-            .key
+        let mut spawns = kernel_parts(scoped.into()).spawns;
+        let key = spawns
+            .pop()
+            .and_then(|spawn| spawn.key)
             .expect("key should be present");
 
         assert_ne!(key.id, CommandId::new("load"));
@@ -900,18 +848,8 @@ mod tests {
             .scoped("pane-b");
 
         assert_ne!(
-            pane_a
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id,
-            pane_b
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id
+            carrier_key(pane_a).expect("key should be present"),
+            carrier_key(pane_b).expect("key should be present")
         );
     }
 
@@ -925,18 +863,8 @@ mod tests {
             .scoped("pane-1");
 
         assert_eq!(
-            first
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id,
-            second
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id
+            carrier_key(first).expect("key should be present"),
+            carrier_key(second).expect("key should be present")
         );
     }
 
@@ -968,18 +896,8 @@ mod tests {
             .scoped(Collision(2));
 
         assert_ne!(
-            first
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id,
-            second
-                .into_command()
-                .cancellation
-                .key
-                .expect("key should be present")
-                .id
+            carrier_key(first).expect("key should be present"),
+            carrier_key(second).expect("key should be present")
         );
     }
 
@@ -988,13 +906,10 @@ mod tests {
         let command = Command::message(1)
             .scoped("pane-1")
             .cancellable(CommandId::new("load"));
-        let key = command
-            .into_command()
-            .cancellation
-            .key
-            .expect("key should be present");
-
-        assert_eq!(key.id, CommandId::new("load"));
+        assert_eq!(
+            carrier_key(command).expect("key should be present"),
+            CommandId::new("load")
+        );
     }
 
     #[test]
@@ -1010,10 +925,11 @@ mod tests {
         // no key at all now.
         let keyed = Command::<i32>::message(1)
             .scoped("pane-1")
-            .cancellable(CommandId::new("global"))
-            .into_command();
-        let key = keyed.cancellation.key.expect("key should be present");
-        assert_eq!(key.id, CommandId::new("global"));
+            .cancellable(CommandId::new("global"));
+        assert_eq!(
+            carrier_key(keyed).expect("key should be present"),
+            CommandId::new("global")
+        );
     }
 
     #[test]
@@ -1030,9 +946,11 @@ mod tests {
         ]);
 
         assert_eq!(batch.cancellation.cancels.len(), 2);
-        assert!(batch.cancellation.key.is_none());
         assert_ne!(batch.cancellation.cancels[0], left_cancel);
         assert_ne!(batch.cancellation.cancels[1], right_cancel);
+        // The child key stayed on the child's own carrier; nothing put it on
+        // the batch (RFC 0014 §3.4).
+        assert_eq!(carrier_keys(batch), vec![Some(CommandId::new("ignored"))]);
     }
 
     #[test]
@@ -1057,15 +975,14 @@ mod tests {
         assert!(command.is_none());
         assert!(!command.requests_redraw());
         assert_eq!(command.cancellation.cancels, vec![id]);
-        assert!(command.cancellation.key.is_none());
     }
 
     #[test]
     fn test_map_preserves_cancellation_metadata() {
         let cancel_id = CommandId::new("old");
         let key_id = CommandId::new("current");
-        let command = Command::batch([
-            Command::<i32>::cancel(cancel_id.clone()),
+        let command = Command::<i32>::batch([
+            Command::cancel(cancel_id.clone()),
             Command::message(1)
                 .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
                 .into(),
@@ -1087,7 +1004,7 @@ mod tests {
     fn test_batch_folds_cancels_and_discards_child_keys() {
         let first = CommandId::new("first");
         let second = CommandId::new("second");
-        let command = Command::batch([
+        let command: Command<i32> = Command::batch([
             Command::<i32>::cancel(first.clone()),
             Command::cancel(second.clone()),
             Command::message(1)
@@ -1096,22 +1013,28 @@ mod tests {
         ]);
 
         assert_eq!(command.cancellation.cancels, vec![first, second]);
-        assert!(command.cancellation.key.is_none());
     }
 
+    // RFC 0014 §9 row 3: a batch no longer discards a child's key, so there
+    // is nothing left to warn about. Each child lowers to its own keyed
+    // entry, and the unkeyed sibling stays unkeyed.
     #[test]
-    fn test_batch_warns_when_discarding_a_child_key() {
+    fn batch_children_keep_their_own_keys_and_warn_about_nothing() {
         let recorder = TraceRecorder::new()
             .with_target("tears::command")
             .with_level(Level::WARN);
         let _guard = recorder.set_default();
 
-        let _command = Command::batch([
-            Command::message(1).cancellable(CommandId::new("ignored")),
-            Command::message(2),
+        let command = Command::batch([
+            Command::from(Command::message(1).cancellable(CommandId::new("kept"))),
+            Command::from(Command::message(2)),
         ]);
 
-        assert_eq!(recorder.event_count(), 1);
+        assert_eq!(
+            carrier_keys(command),
+            vec![Some(CommandId::new("kept")), None]
+        );
+        assert_eq!(recorder.event_count(), 0);
     }
 
     #[test]
@@ -1120,10 +1043,10 @@ mod tests {
         let command = Command::future(pending::<i32>())
             .cancellable_with(key_id.clone(), CancelPolicy::KeepInFlight)
             .timeout(Duration::from_secs(1), || 99);
-        let key = command
-            .into_command()
-            .cancellation
-            .key
+        let mut spawns = kernel_parts(command.into()).spawns;
+        let key = spawns
+            .pop()
+            .and_then(|spawn| spawn.key)
             .expect("key should be present");
 
         assert_eq!(key.id, key_id);
@@ -1997,6 +1920,23 @@ mod tests {
         command.into_runtime_parts().into_kernel_parts()
     }
 
+    /// The spawn key of a command's single carrier — where a key lives now
+    /// that `cancellable` attaches it to the carrier rather than the command.
+    fn carrier_key<Msg: Send + 'static>(command: impl Into<Command<Msg>>) -> Option<CommandId> {
+        let mut spawns = kernel_parts(command.into()).spawns;
+        assert_eq!(spawns.len(), 1, "expected exactly one carrier");
+        spawns.pop().and_then(|spawn| spawn.key).map(|key| key.id)
+    }
+
+    /// Every carrier's spawn key, in declaration order.
+    fn carrier_keys<Msg: Send + 'static>(command: Command<Msg>) -> Vec<Option<CommandId>> {
+        kernel_parts(command)
+            .spawns
+            .into_iter()
+            .map(|spawn| spawn.key.map(|key| key.id))
+            .collect()
+    }
+
     #[test]
     fn quit_lowers_to_a_synchronous_quit_and_spawns_nothing() {
         let parts = kernel_parts(Command::<i32>::quit());
@@ -2005,21 +1945,15 @@ mod tests {
         assert!(parts.spawns.is_empty());
     }
 
-    // The execution reading is what today's runtime and `TestStore` consume;
-    // marking the quit carrier must leave it byte-for-byte the stream it was.
-    #[tokio::test]
-    async fn quit_still_reaches_the_execution_reading_as_a_plain_stream() {
-        let (cancels, key, mut streams) = Command::<i32>::quit()
-            .into_runtime_parts()
-            .into_execution_parts();
+    // The quit carrier is marked, not spawned: lowering applies it at the
+    // dispatch's completion and no run is started for it (RFC 0014 §3.3).
+    #[test]
+    fn quit_lowers_to_the_marker_and_starts_no_run() {
+        let parts = kernel_parts(Command::<i32>::quit());
 
-        assert!(cancels.is_empty());
-        assert!(key.is_none());
-        assert_eq!(streams.len(), 1);
-
-        let mut stream = streams.pop().expect("length checked to be 1");
-        assert!(matches!(stream.next().await, Some(Action::Quit)));
-        assert!(stream.next().await.is_none());
+        assert!(parts.quit_now);
+        assert!(parts.spawns.is_empty());
+        assert!(parts.cancels.is_empty());
     }
 
     // RFC 0003 INV-12 / RFC 0005 INV-17: the wrappers relay the stream and
@@ -2157,7 +2091,6 @@ mod tests {
         let command = Command::<i32>::teardown("pane-1");
 
         assert!(command.is_none());
-        assert!(command.cancellation.key.is_none());
         assert!(command.cancellation.cancels.is_empty());
 
         let parts = kernel_parts(command);
@@ -2198,17 +2131,15 @@ mod tests {
         assert_eq!(parts.teardowns, vec![ScopePath::empty().prefixed("pane-1")]);
     }
 
-    // Teardown is command metadata, so the execution reading — the one the
-    // current runtime and `TestStore` consume — cannot observe it at all.
+    // Teardown is command metadata carried through the cancel phase, and it
+    // starts nothing: it is a selection over live runs, not a run of its own.
     #[test]
-    fn teardown_is_unreachable_through_the_execution_reading() {
-        let (cancels, key, streams) = Command::<i32>::teardown("pane-1")
-            .into_runtime_parts()
-            .into_execution_parts();
+    fn teardown_lowers_to_a_prefix_and_starts_no_run() {
+        let parts = kernel_parts(Command::<i32>::teardown("pane-1"));
 
-        assert!(cancels.is_empty());
-        assert!(key.is_none());
-        assert!(streams.is_empty());
+        assert_eq!(parts.teardowns, vec![ScopePath::empty().prefixed("pane-1")]);
+        assert!(parts.cancels.is_empty());
+        assert!(parts.spawns.is_empty());
     }
 
     #[test]

@@ -169,11 +169,13 @@ impl<K: ScopeValue, V> Keyed<K, V> {
     }
 
     /// The instances, in insertion order.
+    #[must_use]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&K, &V)> {
         self.rows.iter().map(|(key, value)| (key, value))
     }
 
     /// The keys, in insertion order.
+    #[must_use]
     pub fn keys(&self) -> impl ExactSizeIterator<Item = &K> {
         self.rows.iter().map(|(key, _)| key)
     }

@@ -93,7 +93,7 @@ fn a_bounded_lane_filters_a_revoked_run_s_committed_item_and_frees_its_slot_at_t
         ]))
         .replying([Command::cancel(worker)]),
         config()
-            .app_channel_capacity(cap(2))
+            .data_lane_capacity(cap(2))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();
@@ -236,7 +236,7 @@ fn blocking_face(first: usize, second: usize) -> Replay {
             parking_effect([10, 20]).cancellable(CommandId::new("beta")),
         ])),
         config()
-            .app_channel_capacity(cap(1))
+            .data_lane_capacity(cap(1))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();
@@ -294,7 +294,7 @@ fn headroom_face(first: usize, second: usize) -> Vec<u8> {
             parking_effect([100]),
             parking_effect([200]),
         ])),
-        config().app_channel_capacity(cap(8)),
+        config().data_lane_capacity(cap(8)),
     );
     let report = driver.boot();
     let (first, second) = (
@@ -319,7 +319,7 @@ fn a_full_bounded_lane_acknowledges_only_after_a_dequeue_frees_capacity() {
     let (mut driver, journal) = driver_with(
         Script::new(Command::batch([parking_effect([1]), parking_effect([2])])),
         config()
-            .app_channel_capacity(cap(1))
+            .data_lane_capacity(cap(1))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();
@@ -368,7 +368,7 @@ fn a_release_onto_a_full_lane_does_not_commit_without_a_dequeue() {
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([parking_effect([1]), parking_effect([2])])),
         config()
-            .app_channel_capacity(cap(1))
+            .data_lane_capacity(cap(1))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();
@@ -396,7 +396,7 @@ fn a_revocation_frees_no_capacity_for_a_waiting_send() {
         ]))
         .replying([Command::cancel(worker)]),
         config()
-            .app_channel_capacity(cap(2))
+            .data_lane_capacity(cap(2))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();

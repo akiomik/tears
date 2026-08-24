@@ -16,16 +16,17 @@
 //! inside the root view over the root state — pane and modal layout, draw
 //! order, and area allocation are application code (RFC 0014 §2.1).
 
-// Nothing runs a `Program` yet: the kernel that would is still being
-// scaffolded, so the traits and the adapter have no caller.
-#![allow(
-    dead_code,
-    reason = "the core protocol lands before the kernel that executes it"
-)]
+// The three submodules are file organization, not a hierarchy a user needs
+// to navigate: everything public in them is re-exported here, so each item
+// has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
+// Path" and "Module Visibility").
+pub(crate) mod adapter;
+pub(crate) mod collection;
+pub(crate) mod combinator;
 
-pub mod adapter;
-pub mod collection;
-pub mod combinator;
+pub use adapter::AppProgram;
+pub use collection::{Keyed, ScopeValue, Slot};
+pub use combinator::{ForEach, IntoProgram, Presented, ReducerExt, Scoped};
 
 use ratatui::Frame;
 

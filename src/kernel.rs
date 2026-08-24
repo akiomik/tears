@@ -703,7 +703,7 @@ impl<P: Program> Drop for Kernel<P> {
 mod tests {
     use super::*;
 
-    use std::num::{NonZeroU32, NonZeroUsize};
+    use std::num::NonZeroUsize;
     use std::sync::Mutex;
 
     use futures::stream;
@@ -712,7 +712,6 @@ mod tests {
     use tokio::task::yield_now;
 
     use crate::reducer::Reducer;
-    use crate::runtime::frame_rate::FrameRate;
     use crate::subscription::Subscription;
     use crate::subscription::mock::MockSource;
     use crate::test_support::TraceRecorder;
@@ -827,9 +826,7 @@ mod tests {
     }
 
     fn config() -> RuntimeConfig {
-        RuntimeConfig::new(
-            FrameRate::new(NonZeroU32::new(60).expect("non-zero")).expect("a valid frame rate"),
-        )
+        RuntimeConfig::new()
     }
 
     fn terminal() -> Terminal<TestBackend> {

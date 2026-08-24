@@ -10,7 +10,7 @@ mod common;
 mod trace_recorder;
 
 use std::future::pending;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 use color_eyre::eyre::Result;
 use ratatui::Frame;
@@ -20,11 +20,6 @@ use tears::subscription::time::Timer;
 use tokio::task::yield_now;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
-
-fn frame_rate(value: u32) -> FrameRate {
-    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
-        .expect("frame rate must be valid")
-}
 
 #[derive(Clone)]
 enum Msg {
@@ -80,7 +75,7 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
     let _guard = recorder.set_default();
 
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<GaugeApp>::new((), frame_rate(60));
+    let runtime = Runtime::<GaugeApp>::new(());
     timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
         .expect("the timer tick should quit the run before the timeout")?;

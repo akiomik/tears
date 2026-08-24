@@ -179,7 +179,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 use std::io::{self, Write};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::process::{Command as OsCommand, ExitCode, exit, id};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -191,7 +191,7 @@ use futures::stream::{self, StreamExt};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tears::prelude::*;
-use tears::{BenchKernel, BoxStream, FrameRate, RuntimeConfig, SubscriptionSource, producer_quit};
+use tears::{BenchKernel, BoxStream, RuntimeConfig, SubscriptionSource, producer_quit};
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 use tokio::task::yield_now;
 use tokio::time::{MissedTickBehavior, interval, timeout};
@@ -239,11 +239,6 @@ const SMOKE_TRIALS: u32 = 5;
 /// Terminal size every row renders into.
 const SCREEN: (u16, u16) = (80, 24);
 
-/// The frame rate `RuntimeConfig::new` requires and the kernel never reads.
-fn unread_frame_rate() -> FrameRate {
-    FrameRate::new(NonZeroU32::new(60).expect("non-zero fps")).expect("60 FPS is valid")
-}
-
 /// Which of RFC 0014 §3.3's two quit routes a row exercises.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum QuitRoute {
@@ -265,12 +260,13 @@ enum Mode {
 }
 
 impl Mode {
-    fn config(self) -> RuntimeConfig {
-        let config = RuntimeConfig::new(unread_frame_rate());
+    const fn config(self) -> RuntimeConfig {
+        let config = RuntimeConfig::new();
         match self {
             Self::Unbounded => config,
-            Self::Bounded => config
-                .app_channel_capacity(NonZeroUsize::new(DATA_LANE_CAPACITY).expect("non-zero")),
+            Self::Bounded => {
+                config.data_lane_capacity(NonZeroUsize::new(DATA_LANE_CAPACITY).expect("non-zero"))
+            }
         }
     }
 
@@ -309,7 +305,7 @@ struct Cfg {
 /// The cap is not optional here, and that is the point — the acceptance
 /// matrix has no unset-parameter state for a kernel default to fill in
 /// later.
-fn config_for(cfg: &Cfg) -> RuntimeConfig {
+const fn config_for(cfg: &Cfg) -> RuntimeConfig {
     cfg.mode
         .config()
         .batch_max_messages(NonZeroUsize::new(cfg.batch_cap).expect("non-zero cap"))
