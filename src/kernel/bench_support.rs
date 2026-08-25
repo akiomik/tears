@@ -4,10 +4,9 @@
 //! The kernel is `pub(crate)`, and `benches/` compiles as separate crates that
 //! see the public API only, so a bench cannot construct a kernel, a registry,
 //! or a cleanup ledger at all. This module is the same bench-only escape the
-//! crate already uses twice — `BenchSubscriptionManager` for the subscription
-//! hot path and the `LoadObserver` re-export for the gauge bench — applied to
-//! the kernel: gated behind `bench-internals`, which is not part of the public
-//! API and carries no semver guarantee, and `#[doc(hidden)]` at its re-export.
+//! `LoadObserver` re-export uses for the gauge bench, applied to the kernel:
+//! gated behind `bench-internals`, which is not part of the public API and
+//! carries no semver guarantee, and `#[doc(hidden)]` at its re-export.
 //!
 //! Three handles, one per measured object:
 //!
@@ -68,6 +67,7 @@ where
         on_emit();
         Action::Quit
     }))
+    .into()
 }
 
 /// The production kernel, driven by the production loop.

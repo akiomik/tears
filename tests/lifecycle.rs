@@ -1,15 +1,19 @@
 //! Integration tests for RFC 0011's runtime lifecycle contract at the layer
 //! its invariants place them: the controlled and abrupt termination routes and
 //! their two-stage postconditions (INV-LC5/INV-LC6/INV-LC7), panic containment
-//! for runtime-owned producer tasks (INV-LC8), and the construction-inertness
-//! contract whose behavior change lands with the 0.11.0 lifecycle work
+//! for runtime-owned producer tasks (INV-LC8), and construction inertness
 //! (INV-LC3, RFC 0011 §3.4).
 //!
 //! The steady-state phase-order invariants (INV-LC1/INV-LC2) and the
-//! first-render eligibility half of INV-LC4 are white-box and live in
-//! `src/runtime.rs`. INV-LC9, the ordering half of INV-LC4, and the synchrony
-//! half of INV-LC6 are structural checks (RFC 0011 §8): they have no behavioral
-//! seam a test can anchor on.
+//! first-render eligibility half of INV-LC4 are white-box and live with the
+//! kernel that orders them: the conformance rows are in
+//! `src/kernel/conformance/lifecycle.rs`, and `src/kernel.rs` carries the
+//! bootstrap row and a phase-order row of its own. (`src/kernel/pass.rs`
+//! holds the pass implementation those rows drive, not rows.)
+//!
+//! INV-LC9, the ordering half of INV-LC4, and the synchrony half of INV-LC6
+//! are structural checks (RFC 0011 §8): they have no behavioral seam a test
+//! can anchor on.
 
 mod common;
 #[path = "common/panic_hook.rs"]
@@ -20,7 +24,7 @@ mod trace_recorder;
 use std::convert::Infallible;
 use std::future::pending;
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,15 +40,10 @@ use ratatui::prelude::Frame;
 use tears::command::CommandId;
 use tears::prelude::*;
 use tears::subscription::time::Timer;
-use tears::{BoxStream, SubscriptionSource};
+use tears::{BoxStream, EffectCommand, SubscriptionSource};
 use tokio::task::yield_now;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
-
-fn frame_rate(value: u32) -> FrameRate {
-    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
-        .expect("frame rate must be valid")
-}
 
 fn timer_subscription<Msg: Send + 'static>(make: fn() -> Msg) -> Subscription<Msg> {
     Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero"))).map(move |_| make())
@@ -222,12 +221,6 @@ async fn assert_two_stage_postconditions(
 
 // --- INV-LC5: controlled termination ----------------------------------------
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum QuitRoute {
-    Unkeyed,
-    Keyed,
-}
-
 #[derive(Clone, Copy, Debug)]
 enum QuitMessage {
     Tick,
@@ -236,16 +229,14 @@ enum QuitMessage {
 #[derive(Clone)]
 struct QuitFlags {
     transitions: Transitions,
-    route: QuitRoute,
     keyed_effect_dropped: Arc<AtomicBool>,
     unkeyed_effect_dropped: Arc<AtomicBool>,
 }
 
 impl QuitFlags {
-    fn new(route: QuitRoute) -> Self {
+    fn new() -> Self {
         Self {
             transitions: Transitions::default(),
-            route,
             keyed_effect_dropped: Arc::new(AtomicBool::new(false)),
             unkeyed_effect_dropped: Arc::new(AtomicBool::new(false)),
         }
@@ -288,7 +279,7 @@ impl Application for QuitApp {
         })
         .cancellable(CommandId::new("parked-keyed"));
 
-        (Self { flags, ticks: 0 }, command)
+        (Self { flags, ticks: 0 }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -302,13 +293,11 @@ impl Application for QuitApp {
             return Command::future(async move {
                 let _guard = guard;
                 pending::<QuitMessage>().await
-            });
+            })
+            .into();
         }
 
-        match self.flags.route {
-            QuitRoute::Unkeyed => Command::quit(),
-            QuitRoute::Keyed => Command::quit().cancellable(CommandId::new("keyed-quit")),
-        }
+        Command::quit()
     }
 
     fn view(&self, _frame: &mut Frame<'_>) {
@@ -324,13 +313,13 @@ impl Application for QuitApp {
     }
 }
 
-async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
+async fn assert_quit_terminates() -> Result<()> {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let flags = QuitFlags::new(route);
+    let flags = QuitFlags::new();
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone());
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -338,7 +327,7 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
 
     assert!(
         outcome.is_ok(),
-        "a {route:?} quit classifies the run as Ok(())"
+        "an update-returned quit classifies the run as Ok(())"
     );
     let immediate = flags.transitions.snapshot();
     assert!(
@@ -361,19 +350,19 @@ async fn assert_quit_route_terminates(route: QuitRoute) -> Result<()> {
     Ok(())
 }
 
-// INV-LC5: an unkeyed quit under running producers exits the loop, returns
-// `Ok(())`, and invokes no further transition; INV-LC7's settle loop then
-// witnesses the producers winding down.
+// INV-LC5: an update-returned quit under running producers exits the loop,
+// returns `Ok(())`, and invokes no further transition; INV-LC7's settle loop
+// then witnesses the producers winding down.
+//
+// The sibling row that drove the same postconditions through a *keyed* quit is
+// gone with the shape it needed. A spawn key attaches to an effect carrier, and
+// `Command::quit()` is not one — an update-returned quit names no run for a key
+// to identify (RFC 0014 §3.3, §3.4). A producer-originated quit is still keyed
+// or anonymous like any other run, but nothing in the public surface emits one,
+// so this file cannot script that half; the kernel's conformance series does.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn unkeyed_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
-    assert_quit_route_terminates(QuitRoute::Unkeyed).await
-}
-
-// INV-LC5: a keyed quit — delivered in band through its run's private channel —
-// reaches the same postconditions with the same `Ok(())` classification.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn keyed_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
-    assert_quit_route_terminates(QuitRoute::Keyed).await
+async fn an_update_returned_quit_returns_ok_and_reaches_both_postconditions() -> Result<()> {
+    assert_quit_terminates().await
 }
 
 /// A backend whose every draw fails, so the runtime's render step takes the
@@ -453,9 +442,9 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
-    let flags = QuitFlags::new(QuitRoute::Unkeyed);
+    let flags = QuitFlags::new();
     let mut terminal = Terminal::new(FailingBackend::new())?;
-    let runtime = Runtime::<QuitApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<QuitApp>::new(flags.clone());
 
     let outcome = timeout(Duration::from_secs(5), runtime.run(&mut terminal))
         .await
@@ -584,7 +573,7 @@ impl Application for AbruptApp {
         })
         .cancellable(CommandId::new("parked-keyed"));
 
-        (Self { flags }, command)
+        (Self { flags }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -645,7 +634,7 @@ async fn assert_transition_panic_tears_down(site: PanicSite, source_starts: bool
 
     let flags = AbruptFlags::new(site);
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<AbruptApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<AbruptApp>::new(flags.clone());
 
     let outcome = panic_hook::with_silent_panic_hook(
         AssertUnwindSafe(timeout(Duration::from_secs(5), runtime.run(&mut terminal)))
@@ -693,7 +682,7 @@ async fn dropping_the_run_future_reaches_both_postconditions() -> Result<()> {
 
     let flags = AbruptFlags::new(PanicSite::None);
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<AbruptApp>::new(flags.clone(), frame_rate(60));
+    let runtime = Runtime::<AbruptApp>::new(flags.clone());
 
     let mut run = Box::pin(runtime.run(&mut terminal));
     let cancelled = timeout(Duration::from_millis(50), &mut run).await;
@@ -809,7 +798,7 @@ impl Application for InertApp {
             pending::<InertMessage>().await
         });
 
-        (Self { probe }, command)
+        (Self { probe }, command.into())
     }
 
     fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {
@@ -844,16 +833,16 @@ async fn drain_executor() {
 
 // INV-LC3: constructing a `Runtime` spawns no runtime-owned task, polls no
 // command effect, and starts no subscription source — construction is inert
-// (RFC 0011 §3.1). Today the constructor dispatches the init command itself, so
-// this asserts the post-conformance contract of the §3.4 deliverable.
+// (RFC 0011 §3.1). The constructor holds its flags and does nothing with them;
+// `run` is what initializes the application and dispatches the init command,
+// so there is no work for this to observe.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "RFC 0011 §3.4 conformance lands with the 0.11.0 lifecycle change"]
 async fn constructing_a_runtime_starts_no_effect_and_no_subscription_source() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
     let probe = InertProbe::default();
-    let runtime = Runtime::<InertApp>::new(probe.clone(), frame_rate(60));
+    let runtime = Runtime::<InertApp>::new(probe.clone());
 
     drain_executor().await;
 
@@ -873,17 +862,17 @@ async fn constructing_a_runtime_starts_no_effect_and_no_subscription_source() {
     drop(runtime);
 }
 
-// INV-LC6 (never-run-drop row): with the §3.4 change landed there is nothing to
-// wind down when a constructed-but-never-run runtime is dropped, and this row
-// asserts exactly that, reusing INV-LC3's recorder setup (RFC 0011 §8).
+// INV-LC6 (never-run-drop row): nothing starts at construction, so there is
+// nothing to wind down when a constructed-but-never-run runtime is dropped.
+// This row asserts exactly that, reusing INV-LC3's recorder setup
+// (RFC 0011 §8).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "RFC 0011 §3.4 conformance lands with the 0.11.0 lifecycle change"]
 async fn dropping_a_never_run_runtime_winds_down_nothing() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
     let probe = InertProbe::default();
-    drop(Runtime::<InertApp>::new(probe.clone(), frame_rate(60)));
+    drop(Runtime::<InertApp>::new(probe.clone()));
 
     drain_executor().await;
 
@@ -919,7 +908,7 @@ enum ContainmentMessage {
     clippy::panic,
     reason = "the effect panics deliberately to exercise INV-LC8's command-task rows"
 )]
-fn panicking_effect() -> Command<ContainmentMessage> {
+fn panicking_effect() -> EffectCommand<ContainmentMessage> {
     Command::future(async {
         panic!("runtime-owned command task panicked");
         #[expect(
@@ -974,10 +963,10 @@ impl Application for ContainmentApp {
 
     fn new((kind, transitions): Self::Flags) -> (Self, Command<Self::Message>) {
         let command = match kind {
-            PanickingProducer::UnkeyedCommand => panicking_effect(),
-            PanickingProducer::KeyedCommand => {
-                panicking_effect().cancellable(CommandId::new("panicking-keyed"))
-            }
+            PanickingProducer::UnkeyedCommand => panicking_effect().into(),
+            PanickingProducer::KeyedCommand => panicking_effect()
+                .cancellable(CommandId::new("panicking-keyed"))
+                .into(),
             PanickingProducer::SubscriptionForwarder => Command::none(),
         };
 
@@ -1021,7 +1010,7 @@ impl Application for ContainmentApp {
 async fn assert_producer_panic_is_contained(kind: PanickingProducer) -> Result<()> {
     let transitions = Transitions::default();
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<ContainmentApp>::new((kind, transitions.clone()), frame_rate(60));
+    let runtime = Runtime::<ContainmentApp>::new((kind, transitions.clone()));
 
     let outcome = panic_hook::with_silent_panic_hook(timeout(
         Duration::from_secs(5),

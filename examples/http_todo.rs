@@ -11,7 +11,6 @@
 //! Run with: `cargo run --example http_todo --features http`
 
 use std::io;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use color_eyre::eyre::Result;
@@ -90,10 +89,10 @@ impl Application for App {
         match msg {
             Message::Terminal(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 match key.code {
-                    KeyCode::Char('q') => Command::message(Message::Quit),
-                    KeyCode::Char(c) => Command::message(Message::InputChanged(c)),
-                    KeyCode::Backspace => Command::message(Message::InputBackspace),
-                    KeyCode::Enter => Command::message(Message::SubmitTodo),
+                    KeyCode::Char('q') => Command::message(Message::Quit).into(),
+                    KeyCode::Char(c) => Command::message(Message::InputChanged(c)).into(),
+                    KeyCode::Backspace => Command::message(Message::InputBackspace).into(),
+                    KeyCode::Enter => Command::message(Message::SubmitTodo).into(),
                     _ => Command::none(),
                 }
             }
@@ -149,6 +148,7 @@ impl Application for App {
                     },
                 )
                 .map(Message::TodoCreated)
+                .into()
             }
             Message::TodoCreated(Ok(todo)) => {
                 self.status = format!("Created: {}", todo.title);
@@ -285,8 +285,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<App>::new((), frame_rate);
+    let runtime = Runtime::<App>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

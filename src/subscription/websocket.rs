@@ -285,7 +285,7 @@ impl SubscriptionSource for WebSocket {
                         }
                     }
                     // FIXME(#103): when the outer task is aborted (e.g. via
-                    // SubscriptionManager::shutdown() calling handle.abort()),
+                    // the runtime aborting a subscription run's task),
                     // this future is dropped at the select! await point and
                     // WsStreamState::Running is dropped synchronously.  The TCP
                     // connection closes via the OS on TcpStream drop, but no
@@ -293,7 +293,7 @@ impl SubscriptionSource for WebSocket {
                     // async Drop, so close-frame delivery on abort requires an
                     // explicit cooperative shutdown signal (e.g. a
                     // CancellationToken checked in the select! below) combined
-                    // with SubscriptionManager::shutdown() providing a grace
+                    // with the runtime's shutdown providing a grace
                     // period before calling handle.abort().
                     //
                     // This is a limitation, not a bug: the OS still closes the

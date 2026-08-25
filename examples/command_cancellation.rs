@@ -23,7 +23,6 @@
 //! - Press Ctrl+C to quit
 
 use std::io;
-use std::num::NonZeroU32;
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
@@ -195,6 +194,7 @@ impl App {
             results,
         })
         .cancellable_with(search_id(), self.policy)
+        .into()
     }
 
     fn render_log(&self, frame: &mut Frame, area: Rect) {
@@ -241,8 +241,7 @@ async fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
 
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<App>::new((), frame_rate);
+    let runtime = Runtime::<App>::new(());
     let result = runtime.run(&mut terminal).await;
 
     ratatui::restore();

@@ -351,8 +351,8 @@ where
     /// parent's `update` is the only place a row is removed *during* a
     /// reduce, and that branch drains what it just recorded. What the drain
     /// on the child branch is for is an entry recorded **before** this
-    /// reduce — by a mutation outside one, which the module note on
-    /// [`collection`](super::collection) discourages but nothing prevents.
+    /// reduce — by a mutation outside one, which [`Keyed`](super::Keyed)
+    /// discourages but nothing prevents.
     /// Such an entry is owed its teardown whichever branch the next message
     /// takes, and draining once per reduce is what pays it.
     ///
@@ -564,8 +564,10 @@ mod tests {
             match message {
                 ChildMessage::Quiet => Command::none(),
                 ChildMessage::Carriers => Command::batch([
-                    Command::stream(stream::pending()).cancellable(CommandId::new("work")),
-                    Command::stream(stream::pending()),
+                    Command::stream(stream::pending())
+                        .cancellable(CommandId::new("work"))
+                        .into(),
+                    Command::stream(stream::pending()).into(),
                     Command::cancel(CommandId::new("other")),
                     Command::teardown("inner"),
                     Command::on_teardown(async {}),
@@ -658,9 +660,9 @@ mod tests {
                     state.modal.present(ChildState::new(true));
                     Command::none()
                 }
-                Message::RootWork => {
-                    Command::stream(stream::pending()).cancellable(CommandId::new("root"))
-                }
+                Message::RootWork => Command::stream(stream::pending())
+                    .cancellable(CommandId::new("root"))
+                    .into(),
                 Message::Silent => Command::none().without_redraw(),
                 _ => Command::none(),
             }
@@ -1237,10 +1239,6 @@ mod tests {
 
         let before = recorder.event_count();
         let parts = lowered(&stack, &mut state, Message::RootWork);
-        let after_boundary = recorder.event_count();
-        drop(Command::batch([
-            Command::message(Message::Idle).cancellable(CommandId::new("child"))
-        ]));
 
         assert_eq!(
             parts.teardowns,
@@ -1248,14 +1246,9 @@ mod tests {
             "the removal was merged into the update's own keyed command"
         );
         assert_eq!(
-            after_boundary - before,
+            recorder.event_count() - before,
             0,
             "and merging it warned about nothing"
-        );
-        assert_eq!(
-            recorder.event_count() - after_boundary,
-            1,
-            "while an application's own keyed batch child still reports"
         );
     }
 

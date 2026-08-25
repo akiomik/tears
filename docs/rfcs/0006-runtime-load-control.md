@@ -41,9 +41,11 @@ Under sustained overload — producers faster than the update loop
 all grow without
 bound, and outputs of keyed (cancellable) commands are starved for as long as
 the shared queue stays non-empty. Full-loop measurements
-(`benches/runtime_load.rs`) confirm each of these failure modes and also
-confirm that the runtime behaves well within capacity: bounded queues, sub-ms
-latencies, and a stable frame rate, with bursts absorbed and drained.
+(`benches/runtime_load.rs`, retired with the topology it drove; section 2
+keeps its numbers as historical evidence) confirm each of these failure
+modes and also confirm that the runtime behaves well within capacity:
+bounded queues, sub-ms latencies, and a stable frame rate, with bursts
+absorbed and drained.
 
 This RFC defines the load-control contract in two steps:
 
@@ -168,13 +170,24 @@ Scheduling facts that interact with load:
 ## 2. Measurements
 
 Full-loop load characteristics were measured with `benches/runtime_load.rs`,
-which drives the real `Runtime` through the public API: a subscription floods
-the shared channel at a configured rate; `update` and `view` simulate CPU cost
-(2–25µs and 500µs respectively); a keyed command emits probe messages every
-25ms in the `keyed_*` scenarios. Reference run: Apple M1 Max (10 cores),
-rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS target; measured
-2026-07-17 — the reference date this section's measured results, and the
-section 5.1 baseline that reuses them, are defined on.
+which drove the real `Runtime` through the public API: a subscription
+flooded the shared channel at a configured rate; `update` and `view`
+simulated CPU cost (2–25µs and 500µs respectively); a keyed command emitted
+probe messages every 25ms in the `keyed_*` scenarios. Reference run: Apple
+M1 Max (10 cores), rustc 1.97.0, `cargo bench --bench runtime_load`, 60 FPS
+target; measured 2026-07-17 — the reference date this section's measured
+results, and the section 5.1 baseline that reuses them, are defined on.
+
+**That harness is no longer in the tree**: it was retired with the delivery
+topology it drove, and the load harness that stands in its place measures
+the successor (`benches/kernel_load.rs`, section 5.3's re-derivation, RFC
+0014 §13.5). Everything this section reports — and the section 5.1
+unbounded baseline that reuses it — is therefore historical evidence,
+the *before* column the successor's rows are read against, and reproducing
+any of it means checking out a revision that still carries the superseded
+runtime. The retired harness keeps its name wherever a measurement is
+attributed to it, here and below: the numbers were taken with it, and
+attributing them to the successor would credit it with runs it never made.
 
 | Scenario | Load | Max queue depth | Update latency p50 / p99 | Render latency p50 / p99 | Keyed latency p50 / max | FPS |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1319,11 +1332,11 @@ kernel RFC 0014 defines, invariant by invariant.
   bounded-test-against-unbounded-parameter argument).
 
 Each invariant except INV-L6, INV-L7, INV-L8, INV-L14, and INV-L15 gets
-a regression scenario in `benches/runtime_load.rs` or a unit,
-runtime-layer, or integration test. Those five are structural-only,
-each for a stated reason: INV-L6 because the checkable claim is the
-default code path's structural identity — its own statement rules the
-empirical alternative ("outputs are identical under load") not
+a regression scenario in a load harness or a unit, runtime-layer, or
+integration test. Those five are
+structural-only, each for a stated reason: INV-L6 because the checkable
+claim is the default code path's structural identity — its own statement
+rules the empirical alternative ("outputs are identical under load") not
 practically checkable, and its section 5.1 `steady_*` row is a
 code-inspection row, not a measurement; INV-L7 and INV-L8 because code
 review of every runtime-internal send and spawn site is the only
@@ -1335,7 +1348,24 @@ there is no compliant behavior for a scenario to regress against, and
 no finite scenario can prove an absence (the same argument as INV-L9's
 pool case below). Their checks are the reviews declared with them; for
 INV-L15 the shared-wins unit tests remain the nearest behavioral
-neighbors, scoped as regression checks by section 4.7. The overload scenario is the acceptance measurement for
+neighbors, scoped as regression checks by section 4.7.
+
+**INV-L9's scenario does not carry forward, and no successor replaces
+it.** It had one — `keyed_isolation` (section 5.1) — which saturated
+nine keyed channels concurrently and read each one admitting exactly
+`capacity + 1` while the shared channel reached its own capacity
+independently. RFC 0014 section 9 row 2 replaces those channels with the
+one data lane every producer shares, so the shape the row measured is no
+longer constructible: there is no second channel for a full one to fail
+to delay, and nothing to count a per-key admission against. Section 5.2
+records that the isolation itself is not preserved. The scenario
+therefore retires structurally rather than by deletion — the invariant
+keeps its statement as the record of what the superseded topology
+guaranteed, and its primary check was already the structural one below.
+Section 2's measurements and section 5.1's rows are historical evidence
+throughout, not live gates.
+
+The overload scenario is the acceptance measurement for
 INV-L1/L3: bounded queue depth and shared update latency must flatten where
 the unbounded baseline grows linearly. The keyed-probe scenario never
 becomes an acceptance measurement: open question 6 resolved that no
@@ -2630,7 +2660,7 @@ question remains as a prerequisite of the implementation PR
    variants considered, in section 4.6.
 8. Harness follow-up: add a quit-under-backlog scenario (F6/F7) and a bounded
    vs. unbounded comparison matrix before implementation.
-   **Resolved.** `benches/runtime_load.rs` now runs the
+   **Resolved.** The section 2 harness (`benches/runtime_load.rs`) ran the
    `quit_*` trial scenarios — unkeyed quit at three backlog depths plus an
    actively refilling overload, and a keyed-quit control — with per-trial
    tail statistics (section 2, F6/F7). The bounded-vs-unbounded comparison
@@ -2644,8 +2674,11 @@ question remains as a prerequisite of the implementation PR
 
 ## 7. References
 
-- `benches/runtime_load.rs` — full-loop load harness and reference numbers
-  (section 2).
+- `benches/kernel_load.rs` — the load harness in the tree: section 5.3's
+  instrument on the successor topology (RFC 0014 §13.5).
+- `benches/runtime_load.rs` — the retired full-loop harness section 2's
+  reference numbers were measured with; gone with the topology it drove,
+  and no longer in the tree.
 - RFC 0002 — redraw suppression (frame-branch behavior under load).
 - RFC 0003 — command cancellation (INV-14 shared-first pull,
   cancel-before-delivery, INV-9 buffered-quit suppression; it states no

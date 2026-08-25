@@ -15,8 +15,8 @@
 //! after touching `LoadObserver::emit` to confirm the fast path is still
 //! paying for itself.
 //!
-//! `benches/runtime_load.rs`'s full-loop harness would bury this cost under
-//! update/render work, so it is not a substitute for this isolated measurement.
+//! A full-loop load harness would bury this cost under update/render work, so
+//! `benches/kernel_load.rs` is not a substitute for this isolated measurement.
 //!
 //! Run with `cargo bench --bench gauge --features bench-internals`.
 

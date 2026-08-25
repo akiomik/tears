@@ -269,7 +269,7 @@ mod tests {
             |result| result,
         );
 
-        assert_eq!(final_result(command).await, Ok(42));
+        assert_eq!(final_result(command.into()).await, Ok(42));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
@@ -293,7 +293,7 @@ mod tests {
             |result| result,
         );
 
-        assert_eq!(final_result(command).await, Ok(42));
+        assert_eq!(final_result(command.into()).await, Ok(42));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -311,7 +311,7 @@ mod tests {
             |result| result,
         );
 
-        let error = final_result(command)
+        let error = final_result(command.into())
             .await
             .expect_err("attempt should fail");
         assert_eq!(error.attempts().get(), 1);
@@ -331,7 +331,7 @@ mod tests {
             |result| result,
         );
 
-        let error = final_result(command)
+        let error = final_result(command.into())
             .await
             .expect_err("attempt should fail");
         assert_eq!(error.attempts().get(), 1);
@@ -357,7 +357,7 @@ mod tests {
             |result| result,
         );
 
-        assert_eq!(final_result(command).await, Ok(42));
+        assert_eq!(final_result(command.into()).await, Ok(42));
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -379,7 +379,10 @@ mod tests {
             },
             |result| result,
         );
-        let mut stream = command.into_stream().expect("stream should exist");
+        let mut stream = command
+            .into_command()
+            .into_stream()
+            .expect("stream should exist");
 
         assert!(poll!(stream.next()).is_pending());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -458,10 +461,11 @@ mod tests {
         .without_redraw()
         .map(|value| value * 2);
 
+        let retry = retry.into_command();
         assert_eq!(retry.effect.leaf_count(), 1);
         assert!(!retry.requests_redraw());
 
-        let command = Command::batch([retry, Command::message(1).without_redraw()]);
+        let command = Command::batch([retry, Command::message(1).without_redraw().into()]);
         assert_eq!(command.effect.leaf_count(), 2);
         assert!(!command.requests_redraw());
 
@@ -492,7 +496,7 @@ mod tests {
             |result| result,
         );
 
-        let error = final_result(command)
+        let error = final_result(command.into())
             .await
             .expect_err("attempt should fail");
         assert_eq!(error.attempts().get(), 2);

@@ -11,7 +11,6 @@
 //! Run with: cargo run --example websocket --features ws,rustls
 
 use std::io;
-use std::num::NonZeroU32;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -64,7 +63,7 @@ impl EchoChat {
     /// Handle keyboard input and return appropriate commands
     fn handle_key(&mut self, code: KeyCode) -> Command<Msg> {
         match code {
-            KeyCode::Char('q') => Command::message(Msg::Quit),
+            KeyCode::Char('q') => Command::message(Msg::Quit).into(),
             KeyCode::Char(c) => {
                 self.input.push(c);
                 Command::none()
@@ -252,8 +251,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run the application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<EchoChat>::new((), frame_rate);
+    let runtime = Runtime::<EchoChat>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

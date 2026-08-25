@@ -89,18 +89,6 @@ impl TraceRecorder {
         self.state.events.load(Ordering::SeqCst)
     }
 
-    /// Returns all bool values recorded for the named event field.
-    #[must_use]
-    pub fn bool_values(&self, field: &str) -> Vec<bool> {
-        self.state
-            .bool_fields
-            .lock()
-            .expect("trace recorder bool field log mutex should not be poisoned")
-            .get(field)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Returns all unsigned-integer values recorded for the named event field
     /// (covers `u64` and `usize` fields).
     #[must_use]

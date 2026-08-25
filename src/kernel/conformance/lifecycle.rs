@@ -326,7 +326,7 @@ fn a_blocked_sender_is_reclaimed_by_termination_without_ever_committing() {
             holding_effect(reclaimed.clone()),
             quitting_effect(),
         ])),
-        config().app_channel_capacity(cap(1)),
+        config().data_lane_capacity(cap(1)),
     );
     let report = driver.boot();
     let (flood, quitter) = (report.started[0].clone(), report.started[2].clone());

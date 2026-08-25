@@ -53,8 +53,8 @@ Three decisions, ordered by urgency:
    received, an effect stream never driven to completion — fails the
    test at `receive`, `finish`, or drop; `send` does not block on
    pending output, so a scripted `send` can supersede or cancel an
-   earlier step's not-yet-received keyed output the way the runtime's
-   shared-first schedule does (§6). The one carve-out mirrors the
+   earlier step's not-yet-received keyed output — an ordering the runtime
+   once guaranteed through shared-first pull and no longer does (§6). The one carve-out mirrors the
    runtime's shutdown contract: output remaining after an observed quit
    is legally discarded. A non-exhaustive mode is deliberately not
    designed here (open question 2).
@@ -314,8 +314,8 @@ generic) are implementation latitude.
   polls no pending leaf for output; pending deliverable output is left
   in place for a later `receive*` (or caught by `finish`/drop, §6),
   which lets a scripted `send` supersede or cancel an earlier step's
-  not-yet-received keyed output as the runtime's shared-first schedule
-  allows (§6). Its only poll is the keyed-intake reconciliation of §5.1,
+  not-yet-received keyed output — the store's own linearization, no
+  longer backed by a runtime schedule (§6). Its only poll is the keyed-intake reconciliation of §5.1,
   and only when the returned command is keyed under
   `CancelPolicy::KeepInFlight`; it never delivers output, which happens
   only in `receive*` calls.
@@ -351,11 +351,23 @@ generic) are implementation latitude.
   saying so (quit is asserted only via `receive_quit`). If nothing is
   deliverable, both fail with a diagnostic that distinguishes "no
   pending effects" from "effects pending but not ready" (§4.3).
-- **`receive_quit`** asserts the next deliverable output is a quit
-  request. After it succeeds, the store is in the quit state: `send`,
-  `advance`, `receive`, `receive_matching`, and `receive_quit` all
-  fail; `state`, `redraw_requested`, `subscription_ids`, and `finish`
-  remain callable.
+- **`receive_quit`** observes a quit by either route. A quit an
+  `update` returned was applied at that dispatch, synchronously, and
+  does not travel as output — `receive_quit` observes the application
+  and requires nothing to be deliverable. A producer-originated quit
+  does travel, so for that route `receive_quit` asserts the next
+  deliverable output is a quit request. After it succeeds, the store is
+  in the quit state: `send`, `advance`, `receive`, `receive_matching`,
+  and `receive_quit` all fail; `state`, `redraw_requested`,
+  `subscription_ids`, and `finish` remain callable.
+- **A dispatch-applied quit is terminal before it is observed.** The
+  application stopped when the quit applied, not when the test noticed,
+  so `send`, `advance`, `receive`, and `receive_matching` fail from that
+  dispatch onward — a store that accepted a further input there would be
+  scripting an execution the runtime cannot produce, since no later
+  input intervenes between the update that returned a quit and
+  termination. `receive_quit` is the one driving call that stays
+  available, because observing it is how the state is left.
 - **`subscription_ids`** calls `Application::subscriptions` and returns
   the declared IDs in declaration order, deduplicated by RFC 0005 §3.5's
   first-occurrence-stable rule: for equal full IDs in the declared list,
@@ -494,9 +506,11 @@ clause never applies to the store's own operations (INV-T12).
 - **Negative space, stated deliberately**: the canonical cross-leaf
   order is *TestStore's* contract, not the runtime's. The runtime folds
   a command's leaves through an unordered select and pins no cross-leaf
-  delivery order (RFC 0003's ordering-adjacent invariants — INV-10's
-  one-item dispatch and INV-14's shared-first app-input scheduling —
-  order dispatch and pull points, not sibling leaves).
+  delivery order (RFC 0003 INV-10's one-item dispatch orders dispatch
+  points, not sibling leaves; INV-14's shared-first app-input scheduling
+  ordered pull points and is superseded — RFC 0014 §3.2 replaces the two
+  delivery classes with one FIFO lane, so there is no second class to
+  prefer).
   A test that asserts an interleaving across sibling leaves is asserting
   TestStore's linearization and remains valid as a TestStore test, but
   must not be cited as evidence of runtime ordering. Whether a
@@ -666,26 +680,33 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   (§4.3). Any poll that is issued follows §4.1's budget.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
-- When one command carries both explicit cancels and its own keyed
-  spawn, the store applies RFC 0003's fixed order (RFC 0003 §5.1): the
-  explicit cancels apply first, then the keyed spawn's admission
-  decision — so a command can cancel its own occupant and immediately
-  reclaim the id in one step.
-  `Command::batch([Command::cancel(id), work]).cancellable(id)` drops
-  the old occupant's undelivered output exactly as the bullet above
-  describes, then admits `work` under `id`; the old run's output is
-  gone, and only `work`'s output is thereafter deliverable at `id`. An
-  implementation that instead admitted the new spawn before applying
-  the batch's own cancel would cancel `work` itself and leave `id`
-  empty — the wrong outcome — so this ordering is load-bearing, not
-  incidental, and is asserted directly rather than left to fall out of
-  the two bullets above.
+- When one command carries both explicit cancels and a keyed spawn, the
+  store applies the fixed phase order (RFC 0003 §5.1 as RFC 0014 §3.4
+  extends it): the cancel phase — explicit cancels and teardown
+  prefixes — applies before *every* spawn of the same command, so a
+  command can cancel its own occupant and immediately reclaim the id in
+  one step.
+  `Command::batch([Command::cancel(id), work.cancellable(id).into()])`
+  drops the old occupant's undelivered output exactly as the bullet
+  above describes, then admits `work` under `id`; the old run's output
+  is gone, and only `work`'s output is thereafter deliverable at `id`.
+  The key rides the carrier rather than the command around it, which is
+  what makes the shape expressible at all — a key attaches to one effect
+  carrier, so there is no batch-level key to write. An implementation
+  that instead admitted the spawn before applying the command's own
+  cancel would cancel `work` itself and leave `id` empty — the wrong
+  outcome — so this ordering is load-bearing, not incidental, and is
+  asserted directly rather than left to fall out of the two bullets
+  above.
 - Unkeyed commands are unaffected by any of the above (INV-1's default
   path).
-- `Command::batch`'s child-key folding needs no restatement: the store
-  consumes real `Command` values, so batch has already discarded child
-  keys and folded cancels before the store sees the parts (RFC 0003
-  INV-11).
+- `Command::batch`'s children each keep their own spawn key: a key
+  attaches to one effect carrier, so batching neither folds keys nor
+  discards them (RFC 0014 §3.4, superseding RFC 0003 INV-11). The store
+  consumes real `Command` values, so it sees exactly the per-carrier
+  keys the runtime does, and two same-key children in one command apply
+  in declaration order as two consecutive admissions — the second a
+  replacement under its own policy.
 
 These are the deterministic core of RFC 0003 — what may still be
 delivered, and when an id releases — restated over the store's pending
@@ -751,18 +772,25 @@ Exhaustive assertion is the only mode. The rules, by call site:
   a test script a `send` that supersedes or cancels an earlier step's
   not-yet-received *keyed* output — the sequence
   `send(Start); send(Cancel)` cancels a keyed effect before its output
-  is received — which is exactly the runtime's shared-first schedule:
-  a shared input (the next message) is processed ahead of a keyed
-  effect's already-ready output (RFC 0003 INV-14, §4.2;
-  `src/runtime/app_input.rs`). Ordering a `send` ahead of *unkeyed*
-  pending output is **not** a runtime guarantee: unkeyed command output
-  travels the shared channel in FIFO order alongside other shared
-  traffic (a `send`'s message does not jump it), so a `send` scripted
-  before unkeyed output is TestStore's own linearization, not evidence
-  of runtime scheduling (§4.2's citation rule). Undelivered output is
+  is received. **This was runtime parity and is now the store's own
+  linearization.** It read off shared-first pull — a shared input
+  processed ahead of a keyed effect's already-ready output (RFC 0003
+  INV-14) — and RFC 0014 §3.2 supersedes that: keyed, unkeyed and
+  subscription output share one FIFO lane, so a `send`'s message is
+  ordered against pending output by arrival, not by class. The
+  historical reading stands as the record of why `send` was made
+  non-blocking; the scripting freedom it justified is unchanged, and
+  what changes is that scripting it is no longer evidence of runtime
+  ordering for *either* key class (§4.2's citation rule) — which is what
+  the unkeyed half of this bullet already said, now true of both. Undelivered output is
   not lost track of either way: it stays subject to the `receive*`,
   `finish`, and drop checks below, which remain exhaustive. `send` still
-  fails after an observed quit (§5.3).
+  fails after a quit, applied or observed (§5.3).
+- **An applied quit that was never observed fails the `finish` and drop
+  checks**, with the same standing as output that was never received:
+  the run ended somewhere the test did not say it ended, and a script
+  that omits it reads as though it ran to completion. Only an *observed*
+  quit reaches the carve-out below.
 - **`receive` / `receive_matching` / `receive_quit`** fail on a
   mismatch, on quit-versus-message confusion, or when nothing is
   deliverable — each with a diagnostic that names the actual value
@@ -774,10 +802,20 @@ Exhaustive assertion is the only mode. The rules, by call site:
   a leaf, and, like `send`, `advance` still fails after an observed
   quit (§5.3).
 - **`finish`** (and the drop check, §3.2) fails if quit was not
-  observed and either (a) a deliverable message or quit request remains,
-  or (b) any pending leaf has not been driven to completion — an
+  observed and any of: (a) a deliverable message or quit request
+  remains; (b) any pending leaf has not been driven to completion — an
   in-flight effect the test never accounted for is a leak even if it
-  never produced a message. A time-gated leaf the test never advanced
+  never produced a message; (c) a cleanup registration is still armed,
+  never fired by a teardown; or (d) a cleanup run started by a teardown
+  has not finished. The last two are the same omission as the first two
+  read over hooks: a finalizer's external side effects are its whole
+  purpose, so a script that ends with one unfired ended without doing
+  the thing it set up, and one the store cannot attest finished is not a
+  hook it can report as run. Class (d) is recoverable exactly as an
+  unfinished leaf is — the run is held, `advance`'s anchoring scan and
+  this check both poll it again, and a finalizer waiting on the
+  controlled clock completes once the clock reaches it — so the
+  diagnostic says so rather than only naming the leak. A time-gated leaf the test never advanced
   to its deadline is exactly such an unfinished leaf: exhaustiveness
   makes declared time effects part of the accounting. After an observed
   quit, `finish` and the drop check poll nothing and pass
@@ -785,7 +823,11 @@ Exhaustive assertion is the only mode. The rules, by call site:
   quit cannot fail them, because §4.3's failure requires a poll.
 - Every exhaustiveness failure names the leaked messages via `Debug`;
   unfinished leaves that have produced no value are reported by count
-  and enqueue position (there is no value to print).
+  and enqueue position (there is no value to print). Cleanup classes
+  report the same way, by count and by the position their registration
+  was armed at: a hook has no value to print either, and its scope is
+  structurally erased, so the arming order is what identifies *which*
+  registration a failure means.
 
 Rationale for exhaustive-only: the harness exists to make effect flow
 *fully* explicit — TCA's experience is that the exhaustive mode is where
@@ -940,8 +982,7 @@ Enforcement classes follow the pre-review checklist's definitions
   hold over the store's pending output as RFC 0003's INV-3, INV-4,
   INV-5, INV-6, INV-7, and INV-9 state them for deliverable output.
   Behavioral: one test per behavior, including
-  quit suppression (a superseded keyed quit is never observable via
-  `receive_quit`) and the two reconciliation edges: a `KeepInFlight`
+  quit suppression and the two reconciliation edges: a `KeepInFlight`
   command arriving after the occupant's leaves are exhausted is
   admitted, and one arriving while the reconciliation poll yields a
   buffered item is discarded with that item still deliverable at its
@@ -955,8 +996,8 @@ Enforcement classes follow the pre-review checklist's definitions
   retention tests deliberately do *not* cancel, since a cancelled
   output cannot be retained. The same-command cancel-then-spawn test
   (RFC 0003 §5.1) `send`s `Command::batch([Command::cancel(id),
-  work]).cancellable(id)` over an occupied id and asserts both halves
-  at once: the occupant's
+  work.cancellable(id).into()])` over an occupied id and asserts both
+  halves at once: the occupant's
   undelivered output is unobservable via any `receive*` (as the
   explicit-cancel test already establishes) *and* a following `receive`
   at `id` yields `work`'s message — an implementation that admits the
@@ -964,6 +1005,15 @@ Enforcement classes follow the pre-review checklist's definitions
   though it could still pass the supersede and explicit-cancel tests in
   isolation, since neither of those combines a cancel and a spawn in one
   command.
+  **Quit suppression is stated over the producer-originated route.** A
+  keyed run that emits a quit has its output revoked with the run, so a
+  cancelled keyed producer quit is never observable via `receive_quit` —
+  that is the behavior tested. The `update`-returned route carries no
+  such row, and not because it was dropped: a quit returned from
+  `update` applies at its own dispatch and names no run, so it takes no
+  key and there is nothing for a later cancel to reach (RFC 0014 §3.3,
+  §3.4). The suppression claim is therefore scoped to the route that can
+  still be suppressed, rather than asserted of quits in general.
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
@@ -979,13 +1029,16 @@ Enforcement classes follow the pre-review checklist's definitions
   assertable by a later `receive` — one over a **keyed** occupant's
   output using a *non-cancelling* `send` (a message that does not target
   the occupant's id, e.g. `send(Start); send(Unrelated)`) so the keyed
-  output survives: the shared-first ordering is runtime parity (RFC 0003
-  INV-14), and the output is then `receive`d — and one over **unkeyed**
-  output (which asserts only that `send` does not block on it; the
-  ordering is TestStore's linearization, not runtime parity, §6). The
-  keyed-only test would pass an implementation that wrongly fails `send`
-  on unkeyed pending output; the unkeyed-only test would miss a broken
-  keyed shared-first path — so both are required. Each of these two
+  output survives, and the output is then `receive`d — and one over
+  **unkeyed** output. Both assert the same thing now: that `send` does
+  not block on pending output, and that the output survives it. The
+  ordering is TestStore's linearization in both cases, not runtime
+  parity — the keyed half used to be parity via RFC 0003 INV-14 and is
+  not since RFC 0014 §3.2 (§6). Both are still required, because they
+  fail different implementations: the keyed-only test would pass one
+  that wrongly fails `send` on unkeyed pending output, and the
+  unkeyed-only test would miss one that drops keyed output at a
+  non-cancelling `send`. Each of these two
   tests is duplicated with the pending output sourced from the *init*
   command instead of a step's — an unkeyed init effect surviving a
   first, unrelated `send`, and a keyed init effect surviving a first,
@@ -998,9 +1051,10 @@ Enforcement classes follow the pre-review checklist's definitions
   origins are required alongside both key classes. The `send`-carried
   supersede/cancel case (where the pending output is *removed*, not
   retained) is INV-T7's, not a retention test.
-- **INV-T9**: quit terminality and carve-out — after `receive_quit`,
-  `send`/`advance`/`receive*` fail on the quit state without polling
-  any leaf,
+- **INV-T9**: quit terminality and carve-out — from the moment a quit
+  applies, `send`/`advance`/`receive`/`receive_matching` fail on the
+  quit state without polling any leaf, and after `receive_quit` so does
+  `receive_quit`;
   and the `finish` and drop checks poll nothing and pass regardless of
   remaining output. Behavioral: a test quits with output still
   pending — including an I/O-dependent leaf, which the post-quit
@@ -2201,6 +2255,20 @@ Writing those edits before the kernel lands would state a contract
 this crate does not implement, which is why they are delegated rather
 than made here; nothing in stages 1–2 changes until then.
 
+**Discharged.** The kernel-side lowering has landed and all three are
+made. A teardown entry selects the store's pending leaves by scope
+prefix, over every kind, as §5.1 now states. A cleanup registration
+arms against its scope and is run by the teardown that selects it: the
+store spawns no task, so it starts the finalizer where the contract
+says it starts and reports what it observed — an unfired registration
+and an unfinished cleanup run are both leak classes in §6, since a
+hook's external side effects are its whole purpose and a script that
+ends without them ended somewhere it did not say. Termination remains
+not a teardown: an observed quit discards unfired registrations with
+everything else the shutdown discards. The INV-11 and INV-14 readings
+are re-stated as historical throughout, in the places this list
+enumerated.
+
 ### 9.11 Coverage, models, and excluded claims
 
 **Surface–invariant coverage.** This section introduces no invariant.
@@ -2478,8 +2546,14 @@ begins at the send gate (§9.6).
   observes.
 - RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation,
   its §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
-  INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10, INV-11, INV-14
-  (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
+  INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10 (cited in §§4.1,
+  4.2, 5.1, 5.3 of this document). Two of the invariants this document
+  once read parity off are superseded and are cited historically where
+  they appear: INV-11's batch child-key folding (RFC 0014 §3.4 — each
+  child keeps its own key) and INV-14's shared-first pull (RFC 0014
+  §3.2 — one FIFO lane, no second class to prefer). Neither changes what
+  the store does; both change what a test scripted over it may be cited
+  as evidence of.
 - RFC 0005 — structural lifecycle identity: `SubscriptionId`, the
   declared-set semantics `subscription_ids` observes; with `CommandId`,
   the two identity types §9.4's run names carry.

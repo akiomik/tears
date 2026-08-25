@@ -10,10 +10,8 @@
 //! - [`Command`] - For side effects and runtime directives
 //! - [`Subscription`] - For handling event sources
 //! - [`Runtime`] - The runtime for running applications
-//! - [`FrameRate`] - Validated runtime frame rate
 
 pub use crate::application::Application;
 pub use crate::command::core::Command;
 pub use crate::runtime::Runtime;
-pub use crate::runtime::frame_rate::FrameRate;
 pub use crate::subscription::core::Subscription;

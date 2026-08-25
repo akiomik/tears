@@ -20,7 +20,7 @@
 //! - Press Ctrl+C to quit
 
 use std::io;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
@@ -81,7 +81,8 @@ impl Application for App {
                         fetch(Duration::from_millis(200), "fast data"),
                         Message::Loaded,
                     )
-                    .timeout(Duration::from_secs(1), || Message::TimedOut);
+                    .timeout(Duration::from_secs(1), || Message::TimedOut)
+                    .into();
                 }
                 KeyCode::Char('s') => {
                     self.log
@@ -90,21 +91,23 @@ impl Application for App {
                         fetch(Duration::from_secs(3), "slow data"),
                         Message::Loaded,
                     )
-                    .timeout(Duration::from_millis(800), || Message::TimedOut);
+                    .timeout(Duration::from_millis(800), || Message::TimedOut)
+                    .into();
                 }
                 KeyCode::Char('r') => {
                     self.log
                         .push("Recovering fetch: started (3 attempts)".to_owned());
                     let policy = RetryPolicy::new(NonZeroUsize::new(3).expect("non-zero"))
                         .with_fixed_backoff(Duration::from_millis(300));
-                    return Command::retry(policy, recovering_fetch, Message::RetryFinished);
+                    return Command::retry(policy, recovering_fetch, Message::RetryFinished).into();
                 }
                 KeyCode::Char('x') => {
                     self.log
                         .push("Exhausting fetch: started (2 attempts)".to_owned());
                     let policy = RetryPolicy::new(NonZeroUsize::new(2).expect("non-zero"))
                         .with_fixed_backoff(Duration::from_millis(300));
-                    return Command::retry(policy, always_failing_fetch, Message::RetryFinished);
+                    return Command::retry(policy, always_failing_fetch, Message::RetryFinished)
+                        .into();
                 }
                 _ => {}
             },
@@ -221,8 +224,7 @@ async fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
 
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<App>::new((), frame_rate);
+    let runtime = Runtime::<App>::new(());
     let result = runtime.run(&mut terminal).await;
 
     ratatui::restore();

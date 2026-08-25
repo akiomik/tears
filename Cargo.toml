@@ -83,17 +83,8 @@ tracing = "0.1"
 reqwest = { version = "0.13", features = ["json", "query"] }
 
 [target.'cfg(unix)'.dev-dependencies]
-# Peak-RSS measurement (`getrusage`) in `benches/runtime_load.rs`.
+# Load-average sampling (`getloadavg`) in `benches/kernel_load.rs`.
 libc = "0.2"
-
-[[bench]]
-name = "subscription"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "runtime_load"
-harness = false
 
 [[bench]]
 name = "gauge"
@@ -101,8 +92,9 @@ harness = false
 required-features = ["bench-internals"]
 
 # The kernel's load-acceptance re-derivation (RFC 0014 §13.5). Reaches the
-# kernel through the `bench-internals` handles; `benches/runtime_load.rs` is
-# the superseded topology's harness and stays as the before column.
+# kernel through the `bench-internals` handles. It is the only load harness:
+# the superseded topology's harness went with the topology, and its numbers
+# survive as the recorded before column in RFC 0006 §5.
 [[bench]]
 name = "kernel_load"
 harness = false

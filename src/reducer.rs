@@ -16,16 +16,24 @@
 //! inside the root view over the root state — pane and modal layout, draw
 //! order, and area allocation are application code (RFC 0014 §2.1).
 
-// Nothing runs a `Program` yet: the kernel that would is still being
-// scaffolded, so the traits and the adapter have no caller.
-#![allow(
-    dead_code,
-    reason = "the core protocol lands before the kernel that executes it"
-)]
+// The three submodules are file organization, not a hierarchy a user needs
+// to navigate: everything public in them is re-exported here, so each item
+// has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
+// Path" and "Module Visibility").
+pub(crate) mod adapter;
+pub(crate) mod collection;
+pub(crate) mod combinator;
+// `Exit` is `ProgramRuntime::run`'s success type, so it shares its owner's
+// home at the crate root rather than sitting on this module's path — the
+// companion rule in `docs/api-guidelines.md`. Its module is `pub(crate)` so
+// the root re-export is the only public way to it, which is the same
+// private-inner-module pattern `command::core` uses for `Command`.
+pub(crate) mod exit;
 
-pub mod adapter;
-pub mod collection;
-pub mod combinator;
+pub use adapter::AppProgram;
+pub use collection::{Keyed, ScopeValue, Slot};
+pub use combinator::{ForEach, IntoProgram, Presented, ReducerExt, Scoped};
+pub(crate) use exit::Exit;
 
 use ratatui::Frame;
 
@@ -50,23 +58,6 @@ pub trait Reducer {
     fn subscriptions(&self, _state: &Self::State) -> Vec<Subscription<Self::Message>> {
         Vec::new()
     }
-}
-
-/// How a run of a [`Program`] ended, when it ended in the controlled way.
-///
-/// The production result is `Result<Exit, E>` over the backend's error
-/// (RFC 0014 §2.3): a controlled quit — of either physical route — is the
-/// `Ok` side, and a render failure is the `Err` side carrying the backend's
-/// own error (RFC 0011 INV-LC5's classification, preserved). One variant is
-/// deliberate: the two quit routes reach the same end, and the kernel keeps
-/// no second controlled reason to report — and `#[non_exhaustive]` keeps
-/// that a decision this crate can revisit without a breaking change, which
-/// is the form RFC 0014 §2.3 declares.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum Exit {
-    /// A controlled quit.
-    Quit,
 }
 
 /// A reducer that can be run: it can produce its initial state and render.

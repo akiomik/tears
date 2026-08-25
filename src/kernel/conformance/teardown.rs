@@ -43,9 +43,9 @@ fn a_prefix_teardown_selects_every_run_kind_under_it_and_nothing_outside() {
                 holding_effect(child_anon.clone()),
             ])
             .scoped("pane"),
-            holding_effect(root_keyed.clone()).cancellable(local),
-            holding_effect(root_anon.clone()),
-            parking_effect([1]),
+            holding_effect(root_keyed.clone()).cancellable(local).into(),
+            holding_effect(root_anon.clone()).into(),
+            parking_effect([1]).into(),
         ]))
         .replying([Command::teardown("pane")])
         .feeding([
@@ -130,7 +130,7 @@ fn a_teardown_and_a_same_prefix_spawn_start_the_successor_fresh() {
         ]))
         .replying([Command::batch([
             Command::teardown("pane"),
-            holding_effect(successor.clone()).cancellable(local),
+            holding_effect(successor.clone()).cancellable(local).into(),
         ])
         .scoped("pane")]),
         config().batch_max_messages(cap(1)),
@@ -238,7 +238,8 @@ fn a_scoped_run_under_a_root_global_key_is_reachable_by_prefix_and_by_id() {
                 Command::teardown("pane"),
                 holding_effect(by_id.clone())
                     .scoped("pane")
-                    .cancellable(global.clone()),
+                    .cancellable(global.clone())
+                    .into(),
             ]),
             // The cancel names the key, which the boundary never qualified.
             Command::cancel(global),

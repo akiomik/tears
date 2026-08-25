@@ -20,7 +20,6 @@
 //! Run with: `cargo run --example panic_hook`
 
 use std::io;
-use std::num::NonZeroU32;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
@@ -95,8 +94,7 @@ async fn main() -> Result<()> {
     tears::install_panic_hook();
 
     // Run the application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<PanicDemo>::new((), frame_rate);
+    let runtime = Runtime::<PanicDemo>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal (normal exit path)

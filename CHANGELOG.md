@@ -7,10 +7,216 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ProgramRuntime<P>` — the entry point for a `Program`, which is what a stack
+  of composition combinators closes into. `Runtime<App>` is now this type with
+  the `Application` adapter applied, so both run the same kernel over the same
+  lanes
+- The reducer-first core, at `tears::reducer`: the `Reducer` and `Program`
+  traits, the `ReducerExt` combinators (`scope`, `for_each`,
+  `presented`, `into_program`) with their `Scoped` / `ForEach` / `Presented` /
+  `IntoProgram` results, the `Keyed` and `Slot` collections and the
+  `ScopeValue` bound their segments satisfy, and `AppProgram`, the adapter the
+  facade applies
+- `EffectCommand<Msg>` at the crate root — one effect carrier, and what every
+  effect constructor now returns
+- `Exit` at the crate root — `ProgramRuntime::run`'s success type, beside the
+  entry point that returns it
+- `Command::teardown` and `Command::on_teardown`: tear down every run placed
+  under a scope prefix, and register a finalizer that runs when one is
+
 ### Changed
 
+- **Breaking:** the frame rate is gone, and with it `FrameRate`,
+  `FrameRateError`, and the second parameter of `Runtime::new`
+
+  Render cadence is bounded by the pass now, not by a configured period: the
+  loop renders when a pass leaves the view dirty and parks when it has no
+  work, so it neither wakes at a rate with nothing to draw nor defers a draw
+  to the next tick. There is no rate left to configure, and accepting one to
+  ignore it would be a control that silently does nothing.
+
+  Before:
+
+  ```rust
+  let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
+  let runtime = Runtime::<MyApp>::new(flags, frame_rate);
+  ```
+
+  After:
+
+  ```rust
+  let runtime = Runtime::<MyApp>::new(flags);
+  ```
+
+- **Breaking:** `RuntimeConfig::app_channel_capacity` is renamed
+  `data_lane_capacity`, `RuntimeConfig::keyed_channel_capacity` is removed, and
+  `RuntimeConfig::new` takes no arguments
+
+  All producer output — keyed command output, unkeyed command output,
+  subscription output — travels one lane now, tagged with the run that
+  produced it. The surviving capacity control is renamed with the object it
+  sizes, and no alias is kept: the old name would misstate what it bounds.
+  There is no per-key channel left for a second control to size.
+
+  **This is a property loss worth stating plainly.** One key's backlog now
+  delays admission for every other producer. The isolation the private
+  channels gave — one command's full channel never delaying another's — is
+  not preserved, and no configuration restores it.
+
+  Before:
+
+  ```rust
+  let config = RuntimeConfig::new(frame_rate)
+      .app_channel_capacity(NonZeroUsize::new(1024).expect("non-zero"))
+      .keyed_channel_capacity(NonZeroUsize::new(16).expect("non-zero"));
+  ```
+
+  After:
+
+  ```rust
+  let config = RuntimeConfig::new()
+      .data_lane_capacity(NonZeroUsize::new(1024).expect("non-zero"));
+  ```
+
+- **Breaking:** `RuntimeConfig::batch_max_messages` left unset now means the
+  kernel's own count cap, not an uncapped batch
+
+  The 100µs window that used to cap a batch is gone with the wall-clock reads
+  it needed. A batch is finite under every configuration; this control only
+  replaces the default count.
+
+- **Breaking:** effect constructors return `EffectCommand<Msg>`, and
+  `cancellable` / `cancellable_with` move onto it
+
+  `Command::perform`, `future`, `stream`, `run`, `message`, `retry` and
+  `retry_if` keep their names and return one effect carrier. The two keying
+  modifiers exist on that type alone, so keying a batch — one key reaching
+  several carriers, a shape with no meaning to lower — no longer builds, and
+  neither does keying `Command::quit()`, which names no run. `map`, `scoped`,
+  `timeout` and `without_redraw` exist on both types and return their own, so
+  every modifier ordering that built before still builds.
+
+  A carrier converts into a `Command` and not back. Where a `Command` is
+  required — an `update` returning one, a mixed `batch` — add `.into()`; the
+  compiler names every site.
+
+  Two shapes the compiler reports less obviously. An empty
+  `Command::batch(vec![])` no longer infers its item type and fails with
+  `E0283`; name it, as `Command::batch(Vec::<Command<Msg>>::new())`. And
+  `.cancellable(..)` is gone from commands that carry no effect —
+  `Command::none()`, `Command::cancel(id)`, `Command::quit()` — because a
+  spawn key names a run and those start none; a command that both cancels an
+  id and starts keyed work under it is a `batch` of the two, with the key on
+  the carrier.
+
+  Before:
+
+  ```rust
+  fn update(&mut self, msg: Message) -> Command<Message> {
+      Command::perform(fetch(), Message::Loaded).cancellable(CommandId::new("load"))
+  }
+  ```
+
+  After:
+
+  ```rust
+  fn update(&mut self, msg: Message) -> Command<Message> {
+      Command::perform(fetch(), Message::Loaded)
+          .cancellable(CommandId::new("load"))
+          .into()
+  }
+  ```
+
+- **Breaking:** `Command::batch` honours each child's spawn key
+
+  A batched child's key used to be discarded with a warning; each child now
+  lowers to its own keyed entry, and the warning is gone with the fold it
+  described. Two same-key children in one batch apply in declaration order as
+  two consecutive dispatches, the second replacing the first under its own
+  policy. `batch` also takes anything convertible into a command, so a batch
+  of carriers needs no conversion and a mixed one converts its carriers.
+
+- **Breaking:** a quit returned from `update` is applied synchronously
+
+  It no longer travels a channel, so no later input, cancel, or arbitration
+  can intervene between the update that returned it and termination. The
+  observation order changes: an unkeyed quit used to be an effect-stream item
+  whose delivery arbitrated with other branches.
+
+  Two consequences for existing code. A quit returned in a `batch` applies at
+  that dispatch's completion, and siblings the same command spawned are torn
+  down by termination rather than skipped. And a quit can no longer be
+  suppressed after the fact — there is no window in which a cancel could
+  reach it, because there is no buffered quit to reach.
+
+  An application that wants "deliver this, then quit" returns the quit from
+  the `update` that observes the final message. That order is now pinned by
+  construction rather than by channel timing.
+
+- **Breaking:** a producer-originated quit no longer orders against its own
+  run's earlier output
+
+  A quit emitted by a running effect takes a dedicated control lane, drained
+  before every batch and never bounded, while that run's messages take the
+  data lane. A run emitting `[Message(saved), Quit]` therefore no longer
+  guarantees that `saved` reaches `update` before termination. In exchange the
+  quit is backlog-independent — it is not queued behind a full lane — and
+  stays revocable until applied: cancelling its run still suppresses it.
+
+  The replacement for the old guarantee is the synchronous route above.
+
+- **Breaking:** shared-first delivery precedence is not preserved
+
+  With one lane there is no second class of input to prefer. Delivery is FIFO
+  over the lane, and the broad cancel-opportunity property that shared-first
+  pull incidentally provided — a keyed command's output waiting behind ready
+  shared input, leaving a window to cancel it — is gone with it.
+
+- **Breaking:** `TestStore::receive_quit` observes a quit applied at a
+  dispatch, and an applied quit is terminal before it is observed
+
+  A quit returned from `update` no longer travels as output, so `receive_quit`
+  no longer requires it to be the next deliverable item, and a message the
+  same command produced is not a failure there. In exchange the store stops
+  accepting work after that dispatch: `send`, `advance`, `receive` and
+  `receive_matching` fail from the moment the quit applies, which is what "no
+  later input can intervene" means on the test side. An applied quit that no
+  `receive_quit` observed now fails `finish` and the drop check, with the same
+  standing as output that was never received.
+
+  A producer-originated quit still travels as output and is still asserted the
+  same way.
+
+- **Breaking:** `TestStore` runs cleanup hooks, and exhaustiveness gained two
+  leak classes
+
+  `Command::on_teardown` registrations reached the store and were dropped;
+  they are now armed against their scope and run by the teardown that selects
+  them, at most once. Two consequences for existing tests. A registration
+  still armed when the test ends fails `finish` and the drop check, the way
+  undelivered output does — tear the scope down, or end with a quit, which
+  discards unfired hooks as termination does. And a finalizer that has not
+  finished fails them too; it is recoverable rather than lost, because the
+  store holds the run and re-polls it at `advance` and at the checks, so a
+  hook waiting on the controlled clock completes once `advance` reaches its
+  deadline.
+
+  Registrations must be scoped to be reachable: `Command::teardown` always
+  prefixes at least one segment, so a root-anchored hook has no prefix that
+  selects it.
+
+- **Breaking:** the capacity-wait event's `channel` field takes one value,
+  `"data"`
+
+  Field names and the rest of the schema are unchanged, deliberately: a
+  renamed telemetry field breaks dashboards and alert rules silently, off the
+  compiler's path. `"shared"` and `"keyed"` retire with the channels they
+  named, and `shared_pending` now reads as the data lane's residual occupancy.
+
 - **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; `Debug`, `Eq`,
-  and `PartialEq` remain, and `FrameRate` keeps its `Copy` (RFC 0007 §2.1)
+  and `PartialEq` remain (RFC 0007 §2.1)
   - The type is the aggregation point for future runtime knobs, so a `Copy`
     config would turn the first non-`Copy` field added later into a breaking
     derive removal deferred onto whoever adds it; taking the removal now, while
@@ -23,16 +229,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before:
 
   ```rust
-  let config = RuntimeConfig::new(frame_rate);
-  let bounded = config.app_channel_capacity(capacity);
+  let config = RuntimeConfig::new();
+  let bounded = config.data_lane_capacity(capacity);
   let runtime = Runtime::<MyApp>::with_config((), config);
   ```
 
   After:
 
   ```rust
-  let config = RuntimeConfig::new(frame_rate);
-  let bounded = config.clone().app_channel_capacity(capacity);
+  let config = RuntimeConfig::new();
+  let bounded = config.clone().data_lane_capacity(capacity);
   let runtime = Runtime::<MyApp>::with_config((), config);
   ```
 

@@ -317,7 +317,7 @@ supersession (§9 row 4), not a facade decision.
 ### 2.5 Composition combinators
 
 ```rust
-pub trait ScopeValue: PartialEq + Eq + Hash + Clone + Send + Sync + 'static {}
+pub trait ScopeValue: Eq + Hash + Clone + Send + Sync + 'static {}
 
 pub struct Keyed<K: ScopeValue, V> { /* map + removal journal */ }
 pub struct Slot<S> { /* Option<S> + dismissal journal */ }
@@ -400,7 +400,11 @@ Contract:
   qualification, read through the boundary's shared projection so the
   aggregation needs nothing beyond the `&Self::State` its caller holds.
   User code writes no `.scoped(...)` and cannot omit or
-  double-apply one. RFC 0005's scope laws (INV-14–INV-21) hold through
+  double-apply one. Qualifying identity carriers is the whole of what a
+  boundary adds: the runtime directives a child's command carries — its
+  redraw request, a returned quit — cross unqualified, because a
+  directive names no run for a segment to place. They are the update's,
+  not the boundary's. RFC 0005's scope laws (INV-14–INV-21) hold through
   the combinators — the laws' bodies are unchanged; the two clauses
   that must be amended to *cover* the new carriers (teardown prefixes
   under INV-18, `batch` under INV-20) are §9's rows 6 and 3.
@@ -574,7 +578,25 @@ in §11:
   IDs, teardown prefixes, and cleanup registrations are all qualified
   (the INV-18/INV-20 amendments, §9).
 - A spawn key attaches to a single effect carrier only; keying a batch
-  itself is not constructible in the new API.
+  itself is not constructible in the new API, and the type system is
+  what makes it so. Every effect constructor returns
+  `EffectCommand<Msg>` — one carrier, by construction — and
+  `cancellable`/`cancellable_with` are methods on that type alone, so
+  `batch`, which takes and returns `Command<Msg>`, has no key to spread
+  across its children and no way to acquire one. The conversion
+  `From<EffectCommand<Msg>> for Command<Msg>` is published in that
+  direction only; there is no route back, because a `Command` is exactly
+  the thing that may hold more than one carrier. `EffectCommand`'s
+  canonical public path is the crate root, a companion of `Command` in
+  the sense the API guidelines give the word, and it is outside the
+  prelude: skeleton code chains it without ever naming it.
+- Keying interacts with the two quit routes by the same rule, which is
+  the §3.3 split read through the constructors. `quit()` is not an
+  effect constructor — it returns `Command<Msg>`, so a synchronous quit
+  takes no key, and there is none to take: it names no run. A
+  producer-originated quit is emitted by an ordinary effect carrier and
+  is therefore keyed or anonymous like any other run, which is what
+  leaves it revocable until applied.
 - Two same-key spawns in one batch apply in declaration order as two
   consecutive dispatches: the second is a replacement under its
   `CancelPolicy`.

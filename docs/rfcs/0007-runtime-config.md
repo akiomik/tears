@@ -231,7 +231,7 @@ impl<App: Application> Runtime<App> {
   always writes `FrameRate::new(...)`, unconditionally). Should load
   control become a minimal skeleton's default path in some future RFC,
   adding `RuntimeConfig` to the prelude then is additive.
-- The bench harness (`benches/runtime_load.rs`) constructs its bounded runs
+- The bench harness (`benches/kernel_load.rs`) constructs its bounded runs
   through this public surface only; `bench-internals` gains no
   config-related items.
 
@@ -302,8 +302,11 @@ Documented starting values, each with its basis stated:
 - **`app_channel_capacity = 1024`.** A measurement-informed margin choice,
   not a value the measurements pin uniquely. The harness measurements give
   a lower-bound signal, not a proof of sufficiency: `steady_200k`'s queue
-  depth, sampled every 5ms by the harness's depth sampler
-  (`benches/runtime_load.rs`), reaches at most 400 among its samples — the
+  depth, sampled every 5ms by the depth sampler of the harness those
+  measurements were taken with (`benches/runtime_load.rs`, retired with the
+  topology it drove — RFC 0006 §2 keeps the run as historical evidence, and
+  re-measuring it means checking out a revision that still carries the
+  superseded runtime), reaches at most 400 among its samples — the
   largest *sampled* depth, not a proven instantaneous maximum, since a
   peak narrower than the 5ms sampling interval can fall between samples
   unrecorded. 1024 carries roughly 2.5× headroom over that largest
@@ -426,6 +429,15 @@ scoped to the RFC 0006 §2 reference machine (Apple M1 Max, 10 cores, rustc
 1.97.0), and CI gates on none of them — both rules are RFC 0006's and are
 restated here only for locality.
 
+Every parameter below is stated over the harness that ran RFC 0006 §5.1's
+bounded column, `benches/runtime_load.rs`, which is no longer in the tree:
+it was retired with the delivery topology it drove, so re-running any row
+as written means checking out a revision that still carries the superseded
+runtime, and the sections below keep naming it wherever they name a
+mechanism that was its. The same acceptance question on the successor
+topology is re-derived, on its own harness and against its own instrument,
+in RFC 0006 §5.3.
+
 ### 5.1 Configuration under test
 
 One configuration is used for every bounded row:
@@ -547,23 +559,22 @@ channel occupancy, per the note on that distinction below the table:
   contract.** Every predicate that reads `blocked` (the `quit_blocked_*`
   and `quit_keyed_bounded` rows) reads the *current* value of the
   `blocked` gauge at the quit instant, and the harness's teardown barrier
-  (`await_quiescence`, `benches/runtime_load.rs`) reads the current gauge
+  (`await_quiescence`, `benches/kernel_load.rs`) reads the current gauge
   sum returning to zero. "Current value" is RFC 0006 §4.4's contract term,
   and it is per runtime instance: the value on the gauge event with the
   greatest `seq` *among events carrying that instance's `runtime_id`*,
   not the value on
   the most recently *arrived* event — the schema does not order gauge
   events by arrival, and a general consumer partitions by `runtime_id`
-  before taking the greatest `seq`. This harness runs one runtime at a
-  time and its teardown barrier completes before the next runtime
-  starts, so exactly one partition is ever active; its scalar
-  high-water read is the single-partition degenerate form of that rule,
-  and parsing `runtime_id` is unnecessary here
-  (`benches/runtime_load.rs`). The harness therefore consumes these
-  gauges by
-  greatest `seq` within the one active instance, discarding any event
-  whose `seq` does not advance, so a
-  reordered stale gauge event can corrupt neither a predicate reading nor
+  before taking the greatest `seq`. The harness
+  (`benches/kernel_load.rs`) is that general consumer rather than a
+  degenerate case of one: it keeps a high-water `seq` **per
+  `runtime_id`** and discards any gauge event that does not advance its
+  own partition's mark. It happens to run one runtime at a time, with
+  its teardown barrier completing before the next starts, so only one
+  partition is ever active — but the reading does not depend on that,
+  which is what keeps it correct if a row ever runs two. A reordered
+  stale gauge event can therefore corrupt neither a predicate reading nor
   the barrier. This dependency is stated explicitly because it is
   otherwise easy to miss: gauge events are dispatched off the runtime's
   gauge lock (RFC 0006 §4.4), so the schema does not guarantee their
@@ -626,12 +637,13 @@ channel occupancy, per the note on that distinction below the table:
   a row can no longer retry forever waiting on a rare predicate — the
   actual failure mode this rule exists to close. It is not itself a
   bound on the row's total wall time, and `10 × trials × max_wall`
-  overstates what is guarded: `max_wall` (`benches/runtime_load.rs`)
-  times out only the `runtime.run(&mut terminal)` call inside a single
-  attempt (`run_quit_trial`), not the `Runtime`/`Terminal` construction
-  before it, the sample extraction after it, or the per-attempt loop
+  overstates what is guarded: `max_wall` (`benches/kernel_load.rs`)
+  times out only the `kernel.drive(&mut terminal)` call inside a single
+  attempt (`run_kernel`, reached from `run_quit_trial`), not the kernel
+  and terminal construction before it, the settle and sample extraction
+  after it, or the per-attempt loop
   overhead in `run_quit_scenario` — so `10 × trials × max_wall` bounds
-  only the cumulative time those `runtime.run` calls can spend across
+  only the cumulative time those `drive` calls can spend across
   the capped attempts, not the row's actual wall time. A strict
   wall-clock ceiling on the whole row would need a separate, row-level
   aggregate timeout wrapping every attempt together, which this RFC does
@@ -722,12 +734,16 @@ scenarios stay out of CI: they run as
 deliberate acceptance or regression runs (§5), on any machine, with RFC
 0006 §5.1's scoping unchanged — a full run carries acceptance force only
 on the reference machine, and runs on other machines are
-regression-informative, never acceptance. The job's `subscription` bench
-invocation is unchanged.
+regression-informative, never acceptance. The job's other bench invocation
+is the registry scan; the subscription bench it also ran went with the
+subscription manager it measured, whose reconciliation the kernel's run
+registry now owns.
 
-**The recipe carries two profiles.** RFC 0014 §13.5 adds a second load
-harness (`benches/kernel_load.rs`) for the reducer-first kernel beside
-this one, and `just bench-smoke` runs both. The second is this
+**The recipe carries the kernel harness's profile.** RFC 0014 §13.5's
+load harness for the reducer-first kernel (`benches/kernel_load.rs`) is
+what `just bench-smoke` runs; the harness this section was first written
+over went with the delivery topology it drove (RFC 0006 §2), so the
+recipe carries one profile where it carried two. That profile is this
 section's form applied to that harness, not a second definition of it:
 the same `--smoke` argument, the same two assertion classes — the
 scripted-sequence gate on its draining rows, completion alone on its
@@ -765,7 +781,7 @@ over either.
   after the drain, that the processed messages are exactly the scripted
   sequence — every `Msg::Load` sequence number in `0..total` observed once
   and in order — not merely that `produced == processed == total`. The
-  sequence numbers already ride on `Msg::Load` (`benches/runtime_load.rs`),
+  sequence numbers already ride on `Msg::Load` (`benches/kernel_load.rs`),
   and the single flood producer feeds the shared FIFO channel in seq order,
   so a lossless drain's processed seqs must form the contiguous run
   `0, 1, …, total − 1` (first `0`, each step `+1`, last `total − 1`); a
@@ -793,10 +809,12 @@ over either.
   percentile is compared against
   anything — the profile carries no latency assertion. One wall-clock
   condition remains: every smoke scenario carries the harness's
-  per-scenario completion guard (`max_wall` in `benches/runtime_load.rs`)
-  at 30 s — the existing `steady_20k` and `quit_idle_bounded` keep their
-  current value, and the new bounded burst and `quit_blocked_1` (§5.2) take the
-  same — and the smoke run fails when any scenario times out. That
+  per-scenario completion guard (`max_wall` in `benches/kernel_load.rs`),
+  and the smoke run fails when any scenario times out. The successor
+  harness sets it per row class rather than uniformly — 60 s on the load
+  rows, 30 s on the quit rows — which is the split the two shapes of row
+  justify: a load row drives a configured message total to completion, a
+  quit row only as far as the quit it measures. That
   timeout-failure rule is part of the profile's definition, and the two
   paths divide it: on the full-run path, quit trials fail the run on
   timeout while a timed-out load scenario stays report-only; the smoke
@@ -814,10 +832,15 @@ over either.
   the case a per-attempt timeout alone cannot catch (§5.2's rationale for
   the cap). Both quit scenarios also inherit §5.2's quit-contract-failure
   class independent of the cap: any attempt that times out or completes
-  with no recorded quit-delivery event fails the run outright — the harness
-  already fails on either (`benches/runtime_load.rs`) — reported as the
-  timeout / missing-delivery class, never folded into a predicate-miss
-  retry or into attempt-cap exhaustion. The three failure classes stay
+  with no recorded quit instant fails the run outright — the harness
+  already fails on either (`benches/kernel_load.rs`) — reported as the
+  timeout / missing-instant class, never folded into a predicate-miss
+  retry or into attempt-cap exhaustion. The distinction is not
+  bookkeeping: folding a violation into the retry would leave an
+  *intermittent* one invisible, since the replacement attempt can complete
+  the row inside the cap, and the run would then report success over
+  evidence that the contract broke. The cap catches a violation that
+  repeats; only this class catches one that does not. The three failure classes stay
   distinct in the smoke run exactly as §5.2 defines them.
 - **What it is not**: not an acceptance run, not a regression baseline, and
   its numbers are not recorded anywhere. It exists to prove a harness
@@ -1020,6 +1043,9 @@ them.
 - RFC 0014 — reducer-first core: §2.4's constructor decision, §6.3's
   removal of configured frame pacing, §3.5's count cap, and the
   supersession register §9 whose row 4 names this RFC.
-- `benches/runtime_load.rs` — the harness every §5 parameter configures.
+- `benches/kernel_load.rs` — the load harness in the tree, whose §6 smoke
+  profile `just bench-smoke` runs (RFC 0014 §13.5).
+- `benches/runtime_load.rs` — the retired harness every §5 parameter was
+  pinned for; gone with the topology it drove (RFC 0006 §2).
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions used
   in §7.

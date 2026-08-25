@@ -268,7 +268,7 @@ fn a_cleanup_run_counts_in_no_gauge_field() {
     let started = Beacon::default();
     let (mut driver, _journal) = driver_with(
         Script::new(Command::batch([
-            parking_effect([1]),
+            parking_effect([1]).into(),
             Command::on_teardown({
                 let started = started.clone();
                 async move {
@@ -377,7 +377,7 @@ fn blocked_send_channel(
     let (mut driver, _journal) = driver_with(
         script,
         config()
-            .app_channel_capacity(cap(1))
+            .data_lane_capacity(cap(1))
             .batch_max_messages(cap(1)),
     );
     let report = driver.boot();

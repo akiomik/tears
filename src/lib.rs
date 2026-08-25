@@ -102,7 +102,7 @@ pub(crate) mod kernel;
 pub(crate) mod noop_waker;
 pub(crate) mod panic;
 pub mod prelude;
-pub(crate) mod reducer;
+pub mod reducer;
 pub(crate) mod runtime;
 mod structural_key;
 pub mod subscription;
@@ -115,29 +115,34 @@ pub mod testing;
 // Re-export commonly used types
 pub use application::Application;
 pub use command::core::Command;
+// `Command`'s companion: every effect constructor returns one, so the type
+// sits at the crate root beside its owner, under the companion rule in
+// docs/api-guidelines.md "Root Promotion Criteria". It stays out of the
+// prelude because skeleton code chains it without ever writing the name.
+pub use command::effect_command::EffectCommand;
 // Re-exported because implementing `SubscriptionSource::stream` requires
 // writing this type out in the return position; see docs/api-guidelines.md
 // "External Crate Re-exports".
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
-pub use runtime::Runtime;
+// `ProgramRuntime::run`'s success type, at the crate root beside the entry
+// point that returns it (docs/api-guidelines.md, "Root Promotion Criteria"
+// on companion types). Not in the prelude: the facade's `run` returns
+// `Result<(), _>`, so a minimal skeleton never names it.
+pub use reducer::exit::Exit;
+pub use runtime::{ProgramRuntime, Runtime};
 // `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app
 // calling `Runtime::new` never names it (RFC 0007 §2.3, INV-C4).
 pub use runtime::config::RuntimeConfig;
-// `FrameRate` lives under `runtime` (it is a scheduling input); re-exported here
-// as `tears::FrameRate` so it keeps a single canonical public path. See
-// docs/api-guidelines.md for the module visibility / root promotion rules
-// this follows.
-pub use runtime::frame_rate::{FrameRate, FrameRateError};
 pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 // Bench-only re-export exposing the producer-gauge observer to
 // `benches/gauge.rs`, which compiles as a separate crate and only sees the
 // public API. `runtime` is `pub(crate)`, so without this re-export the bench
 // could not name `LoadObserver` at all. Gated behind `bench-internals`, which
 // is not part of the public API and carries no semver guarantees; do not
-// enable it for normal builds. See `BenchSubscriptionManager` for the same
-// pattern applied to the subscription reconciliation hot path.
+// enable it for normal builds. `kernel::bench_support` is the same pattern
+// applied to the kernel's own internals.
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use runtime::load::LoadObserver;

@@ -21,7 +21,7 @@ use super::load::{self, Channel, LoadObserver};
 ///
 /// `pub` rather than `pub(crate)` only to satisfy `clippy::redundant_pub_crate`:
 /// the enclosing `runtime` module is `pub(crate)`, so this type's effective
-/// reachability is capped at the crate regardless (see `frame_rate`).
+/// reachability is capped at the crate regardless.
 pub enum Sender<T> {
     Unbounded(mpsc::UnboundedSender<T>),
     Bounded {
@@ -63,7 +63,7 @@ pub enum Receiver<T> {
 /// subscriber, not the observer). Every runtime-owned channel is built through
 /// [`channel_observed`] with the real observer.
 ///
-/// The bounded label is fixed to [`Channel::Shared`]; a test that asserts on
+/// The bounded label is fixed to [`Channel::Data`]; a test that asserts on
 /// the capacity-wait event's `channel` field (e.g. a keyed case) must use
 /// [`channel_observed`] with the intended label instead.
 #[cfg(test)]
@@ -71,7 +71,7 @@ pub fn channel<T>(capacity: Option<NonZeroUsize>) -> (Sender<T>, Receiver<T>) {
     build(
         capacity,
         SendObs {
-            channel: Channel::Shared,
+            channel: Channel::Data,
             observer: LoadObserver::default(),
         },
     )
@@ -151,7 +151,7 @@ impl<T> Sender<T> {
     }
 
     /// Non-awaiting send used only by tests to inject into the (default,
-    /// unbounded) shared channel synchronously. The runtime's own producer path
+    /// unbounded) data lane synchronously. The runtime's own producer path
     /// always uses [`send`](Self::send) so its backpressure and no-drop
     /// behavior is exercised as in production.
     #[cfg(test)]
@@ -162,19 +162,6 @@ impl<T> Sender<T> {
                 .map_err(|SendError(value)| mpsc::error::TrySendError::Closed(value)),
             Self::Bounded { tx, .. } => tx.try_send(value),
         }
-    }
-
-    /// Wraps an existing unbounded sender.
-    ///
-    /// Used by the `bench-internals` `BenchSubscriptionManager` wrapper (RFC
-    /// 0007 §2.3: bench-internals gains no config-related items, and the
-    /// subscription bench keeps measuring the unbounded path) and by
-    /// `SubscriptionManager`'s own tests, which drive the unbounded forwarding
-    /// path. Excluded from normal library builds, where nothing constructs a
-    /// `Sender` this way.
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub const fn from_unbounded(tx: mpsc::UnboundedSender<T>) -> Self {
-        Self::Unbounded(tx)
     }
 }
 
@@ -204,6 +191,11 @@ impl<T> Receiver<T> {
     }
 
     /// Whether every sender has been dropped.
+    ///
+    /// Test-only: the kernel holds a sender clone for its whole lifetime, so
+    /// production has no closed lane to observe — that is the ownership
+    /// invariant `lane` documents, and this is what asserts it.
+    #[cfg(test)]
     pub fn is_closed(&self) -> bool {
         match self {
             Self::Unbounded(rx) => rx.is_closed(),
@@ -325,7 +317,7 @@ mod tests {
         let _guard = recorder.set_default();
 
         let (tx, mut rx) =
-            channel_observed::<i32>(Some(cap(1)), Channel::Shared, LoadObserver::default());
+            channel_observed::<i32>(Some(cap(1)), Channel::Data, LoadObserver::default());
 
         // Fills the only slot; accepted immediately, so it fires no event.
         tx.send(1).await.expect("first send fits the empty slot");
@@ -344,8 +336,8 @@ mod tests {
 
         assert_eq!(
             recorder.str_values("channel"),
-            vec!["shared".to_owned()],
-            "exactly one capacity-wait event, naming the shared channel"
+            vec!["data".to_owned()],
+            "exactly one capacity-wait event, naming the data lane"
         );
         let waits = recorder.u64_values("wait_us");
         assert_eq!(waits.len(), 1, "the immediate first send fired no event");
@@ -381,7 +373,7 @@ mod tests {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
         let _guard = recorder.set_default();
 
-        let (tx, _rx) = channel_observed::<i32>(None, Channel::Shared, LoadObserver::default());
+        let (tx, _rx) = channel_observed::<i32>(None, Channel::Data, LoadObserver::default());
         for value in 0..1_000 {
             tx.send(value)
                 .await
@@ -412,7 +404,7 @@ mod tests {
         let _guard = recorder.set_default();
 
         let (tx, _rx) =
-            channel_observed::<i32>(Some(cap(1)), Channel::Keyed, LoadObserver::default());
+            channel_observed::<i32>(Some(cap(1)), Channel::Data, LoadObserver::default());
         tx.send(1).await.expect("first send fills the only slot");
 
         // The second send blocks (no slot). Abort its task before any slot frees.

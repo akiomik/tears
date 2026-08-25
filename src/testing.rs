@@ -105,13 +105,15 @@ use std::task::Poll;
 use std::thread;
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time;
 
 use crate::application::Application;
-use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts};
+use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
+use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
 
 /// One undelivered effect leaf, held at its enqueue position.
@@ -125,11 +127,45 @@ struct PendingLeaf<Msg> {
     /// yield) and `advance`'s anchoring scan (which skips already-buffered
     /// leaves), and delivery scans take the buffer before polling again.
     buffered: Option<Action<Msg>>,
-    /// The cancellation id this leaf's command runs under, if keyed.
+    /// The cancellation id this carrier runs under, if keyed.
     key: Option<CommandId>,
+    /// Where the carrier is placed — what a teardown prefix selects it by
+    /// (RFC 0014 §4.1). Every carrier has one; an unscoped carrier's is the
+    /// root, which only a root-wide teardown covers.
+    scope: ScopePath,
     /// Zero-based enqueue position over the store's lifetime, for
     /// diagnostics.
     position: usize,
+}
+
+/// A cleanup run in flight: the finalizer the teardown started, and the
+/// scope it was registered against for diagnostics.
+struct ArmedCleanup {
+    /// Zero-based arming position over the store's lifetime. The sibling of
+    /// a leaf's enqueue position, and there for the same reason: a scope
+    /// path is structurally erased, so it cannot name *which* registration a
+    /// diagnostic means, while the order they were armed in can.
+    position: usize,
+    /// The scope this hook is anchored at — what a teardown prefix has to
+    /// cover to select it.
+    scope: ScopePath,
+    finalizer: BoxFuture<'static, ()>,
+}
+
+/// A cleanup run in flight, identified by the position its registration was
+/// armed at.
+struct RunningCleanup {
+    position: usize,
+    finalizer: BoxFuture<'static, ()>,
+}
+
+impl RunningCleanup {
+    /// Polls the finalizer once under §4.1's budget, reporting whether it
+    /// finished.
+    fn poll_once(&mut self) -> bool {
+        let mut context = noop_context();
+        self.finalizer.as_mut().poll(&mut context).is_ready()
+    }
 }
 
 impl<Msg: Send + 'static> PendingLeaf<Msg> {
@@ -185,7 +221,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///
 ///     fn new(initial: u32) -> (Self, Command<Message>) {
 ///         let load = Command::perform(async { 41 }, Message::Loaded);
-///         (Counter { value: initial }, load)
+///         (Counter { value: initial }, load.into())
 ///     }
 ///
 ///     fn update(&mut self, msg: Message) -> Command<Message> {
@@ -194,7 +230,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///                 self.value = value;
 ///                 Command::none()
 ///             }
-///             Message::Refresh => Command::message(Message::Loaded(42)),
+///             Message::Refresh => Command::message(Message::Loaded(42)).into(),
 ///         }
 ///     }
 ///
@@ -227,10 +263,26 @@ where
     context: Runtime,
     /// Undelivered effect leaves in enqueue order.
     pending: Vec<PendingLeaf<App::Message>>,
+    /// Armed cleanup registrations in arming order. A registration starts
+    /// nothing; a later teardown whose prefix covers its scope is what runs
+    /// it (RFC 0014 §4.4).
+    armed: Vec<ArmedCleanup>,
+    /// Cleanup runs a teardown started that have not finished yet, held so
+    /// they can be driven further. A run leaves this set by completing, so
+    /// the set shrinks as the test makes progress — a count could only grow.
+    running_cleanups: Vec<RunningCleanup>,
     redraw_requested: bool,
-    quit_observed: bool,
+    /// Where the store is between running and a quit the test has assented
+    /// to. Three states rather than two booleans, because the middle one is
+    /// real: a quit applies at its dispatch and is only *observed* later, and
+    /// the two facts constrain different calls. Two independent flags could
+    /// represent "observed but never applied", which is not a state this
+    /// store has.
+    quit: QuitState,
     /// Total leaves ever enqueued; the next leaf's enqueue position.
     enqueued_leaves: usize,
+    /// Total registrations ever armed; the next one's arming position.
+    armed_registrations: usize,
     /// Set by [`TestStore::finish`] so the drop check does not run twice.
     finished: bool,
 }
@@ -282,11 +334,14 @@ where
             app,
             context,
             pending: Vec::new(),
+            armed: Vec::new(),
+            running_cleanups: Vec::new(),
             // Placeholder only: enqueue_command below overwrites this with
             // the init command's folded directive (§5.2).
             redraw_requested: true,
-            quit_observed: false,
+            quit: QuitState::Running,
             enqueued_leaves: 0,
+            armed_registrations: 0,
             finished: false,
         };
         store.enqueue_command(init_command.into_runtime_parts());
@@ -364,6 +419,11 @@ where
                     leaf.buffered = Some(action);
                 }
             }
+            // In-flight cleanup runs anchor on the same scan. A finalizer
+            // registers its timer on this poll and completes on the one
+            // after the clock moves, which is the leaf rule applied to the
+            // one producer kind that yields no output.
+            self.running_cleanups.retain_mut(|run| !run.poll_once());
         }
         self.pending
             .retain(|leaf| leaf.stream.is_some() || leaf.buffered.is_some());
@@ -434,15 +494,39 @@ where
     /// [`subscription_ids`](Self::subscription_ids), and
     /// [`finish`](Self::finish) remain callable.
     ///
+    /// # The two quit routes
+    ///
+    /// A quit an `update` returned was already applied, synchronously, at
+    /// the dispatch that returned it (RFC 0014 §3.3) — this observes that
+    /// application, and does not require the quit to be the next deliverable
+    /// output, because it never queued behind any. A message the same
+    /// command produced is therefore *not* a failure here, and still
+    /// deliverable afterwards only in the sense that shutdown legally
+    /// discards it.
+    ///
+    /// A producer-originated quit — one a spawned run emitted — does travel
+    /// as output, so for that route this still requires the quit to be next.
+    ///
     /// # Panics
     ///
-    /// Fails the test if the next deliverable output is a message, if
-    /// nothing is deliverable, or if quit has already been observed.
+    /// Fails the test if no quit was applied at a dispatch and the next
+    /// deliverable output is a message, if neither is present, or if quit
+    /// has already been observed.
     #[track_caller]
     pub fn receive_quit(&mut self) {
-        self.assert_running("receive_quit");
+        // A second observation is a post-quit call like any other, and says
+        // so in the same words, so a test asserting the family's diagnostic
+        // does not have to special-case this one.
+        assert!(
+            self.quit != QuitState::QuitObserved,
+            "TestStore::receive_quit: the application has quit; remaining output is discarded and no further steps run"
+        );
+        if self.quit == QuitState::QuitApplied {
+            self.quit = QuitState::QuitObserved;
+            return;
+        }
         match self.next_deliverable("receive_quit") {
-            Action::Quit => self.quit_observed = true,
+            Action::Quit => self.quit = QuitState::QuitObserved,
             Action::Message(msg) => panic!(
                 "TestStore::receive_quit: expected a quit request, but the next deliverable output is a message: {msg:?}"
             ),
@@ -514,49 +598,115 @@ where
         self.enqueue_command(command.into_runtime_parts());
     }
 
-    /// Accepts one command through the same decomposition boundary the
-    /// runtime consumes (RFC 0008 INV-T3): directives, explicit cancels, the
-    /// keyed admission decision, then the leaves in flattened declaration
-    /// order.
+    /// Accepts one command through the decomposition boundary the kernel
+    /// consumes (RFC 0008 INV-T3), applying RFC 0014 §3.4's phase order:
+    /// directives, then the cancel phase (explicit cancels and teardown
+    /// prefixes) before *every* spawn of the same command, then the spawn
+    /// phase in flattened declaration order, then the quit if one was
+    /// carried.
     fn enqueue_command(&mut self, parts: RuntimeCommandParts<App::Message>) {
-        self.redraw_requested = parts.requests_redraw();
-        let (cancels, key, leaves) = parts.into_execution_parts();
+        let parts = parts.into_kernel_parts();
+        self.redraw_requested = parts.redraw;
 
-        // RFC 0003 semantics over the pending set (RFC 0008 §5.1): explicit
-        // cancels apply before the keyed spawn decision, as in the runtime.
-        for id in &cancels {
+        for id in &parts.cancels {
             self.cancel_id(id);
         }
-
-        if leaves.is_empty() {
-            // The runtime spawns nothing for a stream-less command, so its
-            // key (if any) occupies nothing here either.
-            return;
+        for prefix in &parts.teardowns {
+            self.teardown_under(prefix);
         }
 
-        match key {
-            None => self.push_leaves(None, leaves),
-            Some(key) => match key.policy {
-                CancelPolicy::CancelInFlight => {
-                    // Supersede: the occupant's undelivered output — buffered
-                    // messages and quit requests alike — can no longer be
-                    // delivered (RFC 0003 INV-3, INV-6, INV-9). No
-                    // reconciliation poll: the outcome does not depend on the
-                    // occupant's state, which also lets a reactor-dependent
-                    // occupant be superseded without polling it.
-                    self.cancel_id(&key.id);
-                    self.push_leaves(Some(&key.id), leaves);
+        for spawn in parts.spawns {
+            self.admit(spawn);
+        }
+        // Arming happens in the spawn phase, after this command's own
+        // teardowns: a command that tears a scope down and registers again
+        // consumes the old occupant's hooks and leaves the new registration
+        // armed (RFC 0014 §3.4, §4.4).
+        for registration in parts.cleanups {
+            let position = self.armed_registrations;
+            self.armed_registrations += 1;
+            self.armed.push(ArmedCleanup {
+                position,
+                scope: registration.scope,
+                finalizer: registration.finalizer,
+            });
+        }
+
+        if parts.quit_now {
+            self.quit = QuitState::QuitApplied;
+        }
+    }
+
+    /// One carrier's admission decision, made per carrier rather than per
+    /// command: a batch's children each lower to their own keyed entry, so
+    /// two same-key children in one command apply in declaration order as
+    /// two consecutive dispatches, the second replacing the first under its
+    /// own policy (RFC 0014 §3.4).
+    fn admit(&mut self, spawn: SpawnEntry<App::Message>) {
+        let Some(key) = spawn.key else {
+            self.push_leaf(None, spawn.scope, spawn.stream);
+            return;
+        };
+
+        match key.policy {
+            CancelPolicy::CancelInFlight => {
+                // Supersede: the occupant's undelivered output — buffered
+                // messages and quit requests alike — can no longer be
+                // delivered (RFC 0003 INV-3, INV-6, INV-9 as RFC 0014 §3.1's
+                // revocation succeeds them). No reconciliation poll: the
+                // outcome does not depend on the occupant's state, which also
+                // lets a reactor-dependent occupant be superseded without
+                // polling it.
+                self.cancel_id(&key.id);
+                self.push_leaf(Some(&key.id), spawn.scope, spawn.stream);
+            }
+            CancelPolicy::KeepInFlight => {
+                // Keyed-intake reconciliation: the admission decision reads
+                // the reconciled occupancy (RFC 0003 INV-5, INV-7).
+                if self.reconcile_is_occupied(&key.id) {
+                    drop(spawn.stream);
+                } else {
+                    self.push_leaf(Some(&key.id), spawn.scope, spawn.stream);
                 }
-                CancelPolicy::KeepInFlight => {
-                    // Keyed-intake reconciliation: the admission decision
-                    // reads the reconciled occupancy (RFC 0003 INV-5, INV-7).
-                    if self.reconcile_is_occupied(&key.id) {
-                        drop(leaves);
-                    } else {
-                        self.push_leaves(Some(&key.id), leaves);
-                    }
-                }
-            },
+            }
+        }
+    }
+
+    /// Drops every carrier placed under `prefix`, of every kind and
+    /// regardless of key — the store's half of RFC 0014 §4.1's selection.
+    fn teardown_under(&mut self, prefix: &ScopePath) {
+        self.pending.retain(|leaf| !leaf.scope.starts_with(prefix));
+
+        // The selected registrations are consumed here and run here. "At
+        // most once" is why they are removed before being driven: a second
+        // teardown over the same prefix finds nothing, which is the
+        // idempotence INV-RC8 states, and a finalizer that re-entered this
+        // path could not find itself either.
+        //
+        // A cleanup produces no runtime-visible output of any kind, so there
+        // is nothing for this to deliver, buffer, or account — the store
+        // drives the finalizer for its external side effects, which are the
+        // whole point of a hook, and has nothing else to observe.
+        let selected: Vec<_> = self
+            .armed
+            .extract_if(.., |registration| registration.scope.starts_with(prefix))
+            .collect();
+        // Started here, and kept if it does not finish here. The store
+        // spawns no task, so "runs concurrently with the torn-down runs'
+        // quiescence" (RFC 0014 §4.4) has no concurrent thing to be: the
+        // store drives the finalizer at its own scan points instead, exactly
+        // as it drives a leaf. A hook parked on the controlled clock is
+        // therefore recoverable — `advance` moves the clock and re-polls it —
+        // rather than lost at the instant it was started.
+        let _context = self.context.enter();
+        for registration in selected {
+            let mut run = RunningCleanup {
+                position: registration.position,
+                finalizer: registration.finalizer,
+            };
+            if !run.poll_once() {
+                self.running_cleanups.push(run);
+            }
         }
     }
 
@@ -605,29 +755,35 @@ where
         false
     }
 
-    fn push_leaves(
+    fn push_leaf(
         &mut self,
         key: Option<&CommandId>,
-        leaves: Vec<BoxStream<'static, Action<App::Message>>>,
+        scope: ScopePath,
+        stream: BoxStream<'static, Action<App::Message>>,
     ) {
-        for stream in leaves {
-            let position = self.enqueued_leaves;
-            self.enqueued_leaves += 1;
-            self.pending.push(PendingLeaf {
-                stream: Some(stream),
-                buffered: None,
-                key: key.cloned(),
-                position,
-            });
-        }
+        let position = self.enqueued_leaves;
+        self.enqueued_leaves += 1;
+        self.pending.push(PendingLeaf {
+            stream: Some(stream),
+            buffered: None,
+            key: key.cloned(),
+            scope,
+            position,
+        });
     }
 
     #[track_caller]
     fn assert_running(&self, method: &str) {
-        assert!(
-            !self.quit_observed,
-            "TestStore::{method}: the application has quit; remaining output is discarded and no further steps run"
-        );
+        match self.quit {
+            QuitState::Running => {}
+            QuitState::QuitApplied => panic!(
+                "TestStore::{method}: a quit was applied at its dispatch and no later input can \
+                 intervene before termination; observe it with TestStore::receive_quit"
+            ),
+            QuitState::QuitObserved => panic!(
+                "TestStore::{method}: the application has quit; remaining output is discarded and no further steps run"
+            ),
+        }
     }
 
     #[track_caller]
@@ -689,8 +845,54 @@ where
             Unfinished { position: usize },
         }
 
-        if self.quit_observed {
-            return;
+        match self.quit {
+            // Terminal: shutdown legally discards what is left, so this
+            // polls nothing and passes (INV-T9).
+            QuitState::QuitObserved => return,
+            // Applied but never observed. The application stopped and the
+            // test never said so, which is the same class of omission as
+            // output that was never received — and the more misleading one,
+            // because the test reads as though it ran to completion.
+            QuitState::QuitApplied => panic!(
+                "TestStore::{site}: a quit was applied at its dispatch and never observed; \
+                 assert it with TestStore::receive_quit"
+            ),
+            QuitState::Running => {}
+        }
+
+        // A hook the test armed and never fired, and one it fired that never
+        // finished. Both are the same omission undelivered output is: the
+        // script set something up and ended without exercising it, and a
+        // cleanup's whole purpose is its external side effects, so an
+        // unfired hook means those never happened.
+        //
+        // The two are established differently, which is why they are not one
+        // check. An armed registration is settled without a poll — nothing
+        // has started, so there is nothing to ask. An in-flight run is not:
+        // it may have become ready since the scan that last drove it, so it
+        // gets one more poll here before being judged, exactly as a pending
+        // leaf does below.
+        if let Some(first) = self.armed.first() {
+            let position = first.position;
+            panic!(
+                "TestStore::{site}: {} cleanup registration(s) never fired; first armed at \
+                 position {position}; tear down the scope it is registered against, or end the \
+                 test with a quit",
+                self.armed.len()
+            );
+        }
+        {
+            let _context = self.context.enter();
+            self.running_cleanups.retain_mut(|run| !run.poll_once());
+        }
+        if let Some(first) = self.running_cleanups.first() {
+            let position = first.position;
+            panic!(
+                "TestStore::{site}: {} cleanup run(s) not driven to completion; first still \
+                 running from the registration armed at position {position}; if a finalizer is \
+                 waiting on time, advance the clock so it can complete",
+                self.running_cleanups.len()
+            );
         }
 
         let mut leak = None;
@@ -754,6 +956,27 @@ where
     }
 }
 
+/// How far a quit has got.
+///
+/// A quit is applied by the dispatch that returns it and observed by the test
+/// afterwards, and everything in between is a state the store has to be able
+/// to name: the application has stopped, but the test has not yet said so.
+/// Calls that would drive the application further fail from
+/// [`QuitApplied`](QuitState::QuitApplied) onward — that is what "no later
+/// input can intervene between the update that returned it and termination"
+/// means on this side of the seam — while the exhaustiveness checks treat an
+/// unobserved quit as a leak, exactly as they treat undelivered output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitState {
+    /// No quit has been applied.
+    Running,
+    /// A dispatch applied a quit; no `receive_quit` has observed it yet.
+    QuitApplied,
+    /// The test observed the quit. The store is terminal and the
+    /// exhaustiveness checks pass without polling.
+    QuitObserved,
+}
+
 /// Renders one action for a leak diagnostic; messages via `Debug`, quit
 /// requests by name.
 fn render_action<Msg: Debug>(action: &Action<Msg>) -> String {
@@ -791,6 +1014,7 @@ mod tests {
     use tokio::net::UdpSocket;
     use tracing::Level;
 
+    use crate::command::effect_command::EffectCommand;
     use crate::command::{Command, RetryPolicy};
     use crate::subscription::core::Subscription;
     use crate::subscription::mock::MockSource;
@@ -858,6 +1082,8 @@ mod tests {
         Unrelated,
         Loud,
         StartQuit,
+        Arm,
+        Tear,
     }
 
     /// Registers an I/O resource with the runtime's I/O driver — the step
@@ -901,7 +1127,7 @@ mod tests {
     /// time-only context fails the test (RFC 0008 §4.3), so it stands in
     /// for the would-fail-if-polled class.
     #[cfg(not(loom))]
-    fn io_command() -> Command<Msg> {
+    fn io_command() -> EffectCommand<Msg> {
         Command::perform(async { register_with_io_driver() }, |()| {
             unreachable!("the I/O-dependent leaf must fail the test before completing")
         })
@@ -910,7 +1136,9 @@ mod tests {
     /// A `Command::timeout` leaf over a never-ready future: deliverable
     /// only once the store's virtual clock reaches its deadline.
     fn timeout_command(secs: u64) -> Command<Msg> {
-        Command::future(pending()).timeout(Duration::from_secs(secs), || Msg::N(99))
+        Command::future(pending())
+            .timeout(Duration::from_secs(secs), || Msg::N(99))
+            .into()
     }
 
     fn failure_message<T>(result: Result<T, Box<dyn Any + Send>>) -> String {
@@ -938,7 +1166,7 @@ mod tests {
     #[test]
     fn store_bounds_are_debug_only() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Opaque::Ping => Command::message(Opaque::Pong),
+            Opaque::Ping => Command::message(Opaque::Pong).into(),
             Opaque::Pong => Command::none(),
         });
         store.send(Opaque::Ping);
@@ -959,7 +1187,8 @@ mod tests {
             ]),
             move |msg| match msg {
                 Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                    .cancellable(id.clone()),
+                    .cancellable(id.clone())
+                    .into(),
                 Msg::Cancel => Command::cancel(id.clone()),
                 _ => Command::none(),
             },
@@ -1035,7 +1264,7 @@ mod tests {
     #[test]
     fn one_leaf_delivers_in_stream_order() {
         let mut store = store_with(
-            Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])),
+            Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])).into(),
             |_| Command::none(),
         );
         store.receive(Msg::N(1));
@@ -1093,8 +1322,11 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
-            Msg::Restart => Command::message(Msg::Keyed(9)).cancellable(id.clone()),
+                .cancellable(id.clone())
+                .into(),
+            Msg::Restart => Command::message(Msg::Keyed(9))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1112,8 +1344,10 @@ mod tests {
     fn cancel_in_flight_supersedes_an_io_dependent_occupant() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => io_command().cancellable(id.clone()),
-            Msg::Restart => Command::message(Msg::Keyed(9)).cancellable(id.clone()),
+            Msg::Start => io_command().cancellable(id.clone()).into(),
+            Msg::Restart => Command::message(Msg::Keyed(9))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1130,9 +1364,11 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
+                .cancellable(id.clone())
+                .into(),
             Msg::TryKeep => Command::message(Msg::Keyed(9))
-                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight),
+                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight)
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1151,9 +1387,12 @@ mod tests {
     fn keep_in_flight_is_admitted_after_occupant_exhaustion() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::message(Msg::Keyed(1)).cancellable(id.clone()),
+            Msg::Start => Command::message(Msg::Keyed(1))
+                .cancellable(id.clone())
+                .into(),
             Msg::TryKeep => Command::message(Msg::Keyed(2))
-                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight),
+                .cancellable_with(id.clone(), CancelPolicy::KeepInFlight)
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1172,7 +1411,9 @@ mod tests {
     fn explicit_cancel_is_strict_and_idempotent() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
             Msg::Cancel => Command::cancel(id.clone()),
             _ => Command::none(),
         });
@@ -1193,11 +1434,14 @@ mod tests {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
             Msg::Start => Command::stream(stream::iter([Msg::Keyed(1), Msg::Keyed(2)]))
-                .cancellable(id.clone()),
-            Msg::Restart => {
-                Command::batch([Command::cancel(id.clone()), Command::message(Msg::Keyed(9))])
+                .cancellable(id.clone())
+                .into(),
+            Msg::Restart => Command::batch([
+                Command::cancel(id.clone()),
+                Command::message(Msg::Keyed(9))
                     .cancellable(id.clone())
-            }
+                    .into(),
+            ]),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1208,29 +1452,23 @@ mod tests {
         store.finish();
     }
 
-    // INV-T7: unkeyed commands are unaffected by keyed lifecycle operations
-    // (RFC 0003 INV-1).
+    // INV-T7: a keyed producer quit is revoked with its run, so a cancel
+    // reaches it and `receive_quit` never sees it (RFC 0003 INV-9 as
+    // RFC 0014 §3.1's origin revocation succeeds it).
+    //
+    // The route matters. A quit returned from `update` applies at its own
+    // dispatch and names no run, so it takes no key and nothing can suppress
+    // it; the row that used to drive that shape had no subject left. This one
+    // drives the route that still has one — a spawned run emitting a quit —
+    // which is what INV-9's successor is stated over.
+    #[cfg(not(loom))]
     #[test]
-    fn unkeyed_output_is_unaffected_by_cancellation() {
-        let id = CommandId::new("k");
-        let mut store = store_with(Command::message(Msg::N(1)), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
-            Msg::Cancel => Command::cancel(id.clone()),
-            _ => Command::none(),
-        });
-        store.send(Msg::Start);
-        store.send(Msg::Cancel);
-        store.receive(Msg::N(1));
-        store.finish();
-    }
-
-    // INV-T7: a superseded keyed quit is never observable via `receive_quit`
-    // (RFC 0003 INV-9); the store never enters the quit state.
-    #[test]
-    fn cancelled_keyed_quit_is_suppressed() {
+    fn cancelled_keyed_producer_quit_is_suppressed() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::StartQuit => Command::quit().cancellable(id.clone()),
+            Msg::StartQuit => Command::actions(stream::once(async { Action::Quit }))
+                .cancellable(id.clone())
+                .into(),
             Msg::Cancel => Command::cancel(id.clone()),
             _ => Command::none(),
         });
@@ -1242,8 +1480,195 @@ mod tests {
             failure_message(failure).contains("no pending effects"),
             "the suppressed quit must not be deliverable"
         );
-        // The store is still running (quit was suppressed, not observed).
+        // The store is still running: the quit was revoked before it could be
+        // applied, so nothing terminated.
         store.send(Msg::Unrelated);
+        store.finish();
+    }
+
+    // RFC 0014 INV-RC8, over the store: a registration arms and starts
+    // nothing, and the teardown whose prefix covers its scope is what runs
+    // it. The flag is the observation — a cleanup produces no
+    // runtime-visible output, so its external side effects are the only
+    // thing there is to see.
+    #[cfg(not(loom))]
+    #[test]
+    fn a_teardown_runs_the_cleanup_registered_under_it() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+
+        store.send(Msg::Arm);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "arming starts nothing (RFC 0014 §4.4)"
+        );
+
+        store.send(Msg::Tear);
+        assert!(ran.load(Ordering::SeqCst), "the teardown ran it");
+
+        // At most once: a second teardown over the same prefix finds the
+        // registration consumed and has nothing to re-run.
+        ran.store(false, Ordering::SeqCst);
+        store.send(Msg::Tear);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "a consumed hook is not re-run (INV-RC8 idempotence)"
+        );
+        store.finish();
+    }
+
+    // P1: a finalizer that waits on the controlled clock is recoverable, not
+    // lost. The teardown starts it, that poll registers the timer, `advance`
+    // moves the clock and re-polls it, and it completes — the same two-scan
+    // shape a time-gated leaf has. Holding the future is what makes this
+    // possible; a hook started and dropped could never finish.
+    #[cfg(not(loom))]
+    #[test]
+    fn advance_completes_a_finalizer_waiting_on_the_clock() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    time::sleep(Duration::from_secs(1)).await;
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+
+        store.send(Msg::Arm);
+        store.send(Msg::Tear);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "the finalizer is waiting on the clock, so starting it did not finish it"
+        );
+
+        store.advance(Duration::from_secs(1));
+        // `finish` re-polls the in-flight run, which is where it completes.
+        store.finish();
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "advancing the clock let the finalizer complete"
+        );
+    }
+
+    // P2: and one still waiting is a leak that says what to do about it.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(
+        expected = "1 cleanup run(s) not driven to completion; first still running from the \
+                    registration armed at position 0"
+    )]
+    fn an_unfinished_cleanup_run_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::on_teardown(async { time::sleep(Duration::from_secs(1)).await })
+                .scoped("pane-1"),
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.send(Msg::Tear);
+        store.finish();
+    }
+
+    // A hook the test armed and never fired is a leak, for the reason
+    // undelivered output is: the script ended without exercising something it
+    // set up, and a cleanup's side effects are its whole purpose.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "1 cleanup registration(s) never fired; first armed at position 0")]
+    fn an_unfired_cleanup_registration_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::on_teardown(async {}).scoped("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.finish();
+    }
+
+    // The position identifies *which* registration, which a scope path
+    // cannot: `ScopePath` is structurally erased, so printing it gives a
+    // reader an opaque token rather than a way back to the line that armed
+    // the hook. Two hooks armed in order, the first one torn down, and the
+    // diagnostic names the second by the position it was armed at.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "1 cleanup registration(s) never fired; first armed at position 1")]
+    fn the_unfired_diagnostic_names_the_registration_by_arming_position() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::batch([
+                Command::on_teardown(async {}).scoped("pane-1"),
+                Command::on_teardown(async {}).scoped("pane-2"),
+            ]),
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        // Consumes the first registration only; the second is still armed.
+        store.send(Msg::Tear);
+        store.finish();
+    }
+
+    // Termination is not a teardown and fires no hooks: unfired
+    // registrations are discarded with everything else the shutdown
+    // discards, so `finish` passes (RFC 0014 §4.4's termination clause).
+    #[cfg(not(loom))]
+    #[test]
+    fn an_observed_quit_discards_unfired_registrations() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.send(Msg::StartQuit);
+        store.receive_quit();
+        store.finish();
+
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "termination fires no hooks (RFC 0014 §4.4)"
+        );
+    }
+
+    // INV-T7: unkeyed commands are unaffected by keyed lifecycle operations
+    // (RFC 0003 INV-1).
+    #[test]
+    fn unkeyed_output_is_unaffected_by_cancellation() {
+        let id = CommandId::new("k");
+        let mut store = store_with(Command::message(Msg::N(1)).into(), move |msg| match msg {
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
+            Msg::Cancel => Command::cancel(id.clone()),
+            _ => Command::none(),
+        });
+        store.send(Msg::Start);
+        store.send(Msg::Cancel);
+        store.receive(Msg::N(1));
         store.finish();
     }
 
@@ -1252,7 +1677,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "deliverable output was never received: N(7)")]
     fn finish_fails_on_an_unreceived_ready_message() {
-        let store = store_with(Command::message(Msg::N(7)), |_| Command::none());
+        let store = store_with(Command::message(Msg::N(7)).into(), |_| Command::none());
         store.finish();
     }
 
@@ -1263,7 +1688,7 @@ mod tests {
         expected = "1 effect leaf(s) not driven to completion; first still pending at enqueue position 0"
     )]
     fn finish_fails_on_an_unfinished_leaf() {
-        let store = store_with(Command::stream(stream::pending::<Msg>()), |_| {
+        let store = store_with(Command::stream(stream::pending::<Msg>()).into(), |_| {
             Command::none()
         });
         store.finish();
@@ -1273,7 +1698,7 @@ mod tests {
     #[test]
     fn drop_without_finish_fails_on_leaked_output() {
         let failure = catch_unwind(AssertUnwindSafe(|| {
-            let store = store_with(Command::message(Msg::N(7)), |_| Command::none());
+            let store = store_with(Command::message(Msg::N(7)).into(), |_| Command::none());
             drop(store);
         }));
         let message = failure_message(failure);
@@ -1291,7 +1716,9 @@ mod tests {
     fn send_does_not_block_on_pending_keyed_output() {
         let id = CommandId::new("k");
         let mut store = store_with(Command::none(), move |msg| match msg {
-            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id.clone()),
+            Msg::Start => Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id.clone())
+                .into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1304,7 +1731,7 @@ mod tests {
     // (the ordering there is the store's own linearization, RFC 0008 §6).
     #[test]
     fn send_does_not_block_on_pending_unkeyed_output() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.send(Msg::Unrelated);
         store.receive(Msg::N(1));
         store.finish();
@@ -1318,7 +1745,9 @@ mod tests {
     fn send_does_not_block_on_keyed_init_output() {
         let id = CommandId::new("k");
         let mut store = store_with(
-            Command::stream(stream::iter([Msg::Keyed(1)])).cancellable(id),
+            Command::stream(stream::iter([Msg::Keyed(1)]))
+                .cancellable(id)
+                .into(),
             |_| Command::none(),
         );
         store.send(Msg::Unrelated);
@@ -1330,7 +1759,7 @@ mod tests {
     #[test]
     fn send_does_not_block_on_unkeyed_step_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::Start => Command::message(Msg::N(1)),
+            Msg::Start => Command::message(Msg::N(1)).into(),
             _ => Command::none(),
         });
         store.send(Msg::Start);
@@ -1356,7 +1785,7 @@ mod tests {
     #[test]
     fn quit_is_terminal_and_discards_remaining_output() {
         let mut store = store_with(Command::none(), |msg| match msg {
-            Msg::StartQuit => Command::batch([Command::quit(), io_command()]),
+            Msg::StartQuit => Command::batch([Command::quit(), io_command().into()]),
             _ => Command::none(),
         });
         store.send(Msg::StartQuit);
@@ -1383,12 +1812,50 @@ mod tests {
         store.finish();
     }
 
+    // RFC 0008 §5.3, the applied-but-unobserved state. Both rows below were
+    // silent before the quit state was one value instead of two booleans: the
+    // store recorded the applied quit but nothing consulted it until
+    // `receive_quit` did, so a test that never asked, or that kept driving,
+    // passed.
+
+    // A quit the dispatch applied and the test never observed is a leak, and
+    // for the same reason undelivered output is: the run ended somewhere the
+    // test did not say it ended. Without this the script reads as though it
+    // ran to completion.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "a quit was applied at its dispatch and never observed")]
+    fn an_unobserved_applied_quit_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartQuit);
+        store.finish();
+    }
+
+    // And nothing runs after it. "No later input can intervene between the
+    // update that returned it and termination" is the property the
+    // synchronous route buys (RFC 0014 §3.3); a store that accepted a further
+    // `send` here would be scripting an execution the runtime cannot produce.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "no later input can intervene before termination")]
+    fn a_send_after_an_applied_quit_fails() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartQuit);
+        store.send(Msg::Unrelated);
+    }
+
     // RFC 0008 §5.2: `redraw_requested` reports the init command's folded
     // directive before the first step — `Command` introspection, not a
     // first-render prediction.
     #[test]
     fn redraw_reports_the_init_directive_before_the_first_step() {
-        let defaulted = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let defaulted = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         assert!(
             defaulted.redraw_requested(),
             "constructors default to redraw"
@@ -1407,7 +1874,7 @@ mod tests {
     // `receive` is a step, and `receive_quit` is not.
     #[test]
     fn redraw_tracks_steps_and_receive_quit_is_not_a_step() {
-        let mut store = store_with(Command::message(Msg::N(1)), |msg| match msg {
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |msg| match msg {
             Msg::N(_) => Command::none().without_redraw(),
             Msg::StartQuit => Command::quit().without_redraw(),
             _ => Command::none(),
@@ -1587,22 +2054,28 @@ mod tests {
     #[test]
     #[should_panic(expected = "message mismatch")]
     fn receive_fails_on_a_mismatch() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive(Msg::N(2));
     }
 
-    // Diagnostics: quit-versus-message confusion in both directions.
+    // Diagnostics: quit-versus-message confusion in both directions. The
+    // quit here is producer-originated — the route that still travels as
+    // deliverable output; an `update`-returned quit applies at its dispatch
+    // and never reaches a delivery scan (RFC 0014 §3.3).
     #[test]
     #[should_panic(expected = "assert it with TestStore::receive_quit")]
     fn receive_fails_when_the_next_output_is_a_quit_request() {
-        let mut store = store_with(Command::<Msg>::quit(), |_| Command::none());
+        let mut store = store_with(
+            Command::<Msg>::actions(stream::once(async { Action::Quit })).into(),
+            |_| Command::none(),
+        );
         store.receive(Msg::N(1));
     }
 
     #[test]
     #[should_panic(expected = "the next deliverable output is a message: N(1)")]
     fn receive_quit_fails_when_the_next_output_is_a_message() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive_quit();
     }
 
@@ -1618,7 +2091,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "no deliverable output: effects are pending but none is ready")]
     fn receive_fails_with_effects_pending_but_not_ready() {
-        let mut store = store_with(Command::stream(stream::pending::<Msg>()), |_| {
+        let mut store = store_with(Command::stream(stream::pending::<Msg>()).into(), |_| {
             Command::none()
         });
         store.receive(Msg::N(1));
@@ -1628,7 +2101,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "predicate rejected the delivered message: N(1)")]
     fn receive_matching_fails_when_the_predicate_rejects() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.receive_matching(|msg| matches!(msg, Msg::N(2)));
     }
 
@@ -1659,7 +2132,7 @@ mod tests {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Start => Command::batch([
                 timeout_command(60),
-                Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])),
+                Command::stream(stream::iter([Msg::N(1), Msg::N(2), Msg::N(3)])).into(),
             ]),
             _ => Command::none(),
         });
@@ -1688,7 +2161,7 @@ mod tests {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Start => Command::batch([
                 timeout_command(60),
-                Command::stream(stream::iter([Msg::N(1)])),
+                Command::stream(stream::iter([Msg::N(1)])).into(),
             ]),
             _ => Command::none(),
         });
@@ -1766,7 +2239,7 @@ mod tests {
     // canonical position instead of delivering or dropping it.
     #[test]
     fn advance_buffers_ready_output_without_delivering() {
-        let mut store = store_with(Command::message(Msg::N(1)), |_| Command::none());
+        let mut store = store_with(Command::message(Msg::N(1)).into(), |_| Command::none());
         store.advance(Duration::ZERO);
         store.receive(Msg::N(1));
         store.finish();

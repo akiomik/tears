@@ -28,6 +28,7 @@ mod cancellation;
 mod cleanup;
 pub(crate) mod core;
 mod effect;
+pub(crate) mod effect_command;
 mod kernel_parts;
 mod retry;
 mod runtime_directives;
@@ -39,7 +40,7 @@ pub(crate) use cleanup::CleanupRegistration;
 pub(crate) use core::Command;
 pub(crate) use kernel_parts::{KernelParts, SpawnEntry};
 pub use retry::{RetryBackoff, RetryContext, RetryError, RetryPolicy, RetryStopReason};
-pub(crate) use runtime_parts::{RuntimeCommandParts, fold_leaves};
+pub(crate) use runtime_parts::RuntimeCommandParts;
 
 /// An internal runtime directive produced by a command's effect stream.
 ///

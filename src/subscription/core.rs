@@ -2,7 +2,7 @@
 //! `subscription.rs` so the parent module can stay `pub` (hosting the
 //! `http`/`mock`/`signal`/`terminal`/`time`/`websocket` submodules) while
 //! closing the `subscription::{Subscription, SubscriptionId,
-//! SubscriptionSource}` paths. See `runtime::frame_rate` for the same
+//! SubscriptionSource}` paths. See `command::core` for the same
 //! pattern applied to `Runtime`'s scheduling input.
 
 use std::any::{TypeId, type_name};

@@ -934,7 +934,15 @@ collision-safe equality is mandatory — Phase B recorded the comparison
 on the Criterion subscription benchmark (`benches/subscription.rs`:
 steady, churn, and scoped reconcile).
 
-The existing Criterion subscription benchmark remains the primary comparison:
+**That benchmark is no longer in the tree, and its rows are historical
+evidence.** It measured `SubscriptionManager::update`, and RFC 0014's
+kernel replaces that manager with one run registry shared by every
+producer kind; the reconciliation the rows timed is not the code that
+runs now. The measurement stands as the record of what structural
+erasure cost when it landed — reproducing it means checking out a
+revision that still has the manager — and the scan costs of the
+successor are `benches/kernel_scan.rs`'s. The rows below are quoted in
+that light:
 
 - `subscription_reconcile_steady`: identical desired IDs while tasks continue;
 - `subscription_reconcile_churn`: disjoint desired sets that abort and spawn;
@@ -962,7 +970,10 @@ Phase B added the separate scoped steady-state case
 (`subscription_reconcile_steady_scoped`, `benches/subscription.rs`),
 comparing the unscoped baseline, a single composition boundary, and
 representative nested scope paths without making a particular path
-representation public.
+representation public. It is historical evidence for the reason above:
+the benchmark retired with the manager it measured, and no successor row
+replaces it — the registry's own walks are measured by scan, not by
+reconciliation shape.
 
 ## 8. Implementation guide
 
@@ -1241,7 +1252,8 @@ awaiting implementation:
 - `src/command/cancellation.rs`
 - `src/command/core.rs`
 - `src/runtime/keyed_commands.rs`
-- `benches/subscription.rs`
+- `benches/subscription.rs` (retired with the subscription manager; §7's
+  rows are historical evidence)
 - `docs/rfcs/0001-http-module-redesign.md`
 - `docs/rfcs/0003-command-cancellation.md`
 - `docs/rfcs/0013-scope-teardown.md` (the teardown prefixes INV-18 covers)

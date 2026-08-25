@@ -134,8 +134,11 @@ impl Reducer for Pane {
         match message {
             PaneMsg::Work => holding_effect(state.keyed.clone())
                 .map(|_| PaneMsg::Work)
-                .cancellable(CommandId::new("work")),
-            PaneMsg::Anon => holding_effect(state.anon.clone()).map(|_| PaneMsg::Work),
+                .cancellable(CommandId::new("work"))
+                .into(),
+            PaneMsg::Anon => holding_effect(state.anon.clone())
+                .map(|_| PaneMsg::Work)
+                .into(),
         }
     }
 
@@ -204,6 +207,7 @@ impl Reducer for Root {
                     .map(|_| Msg::Act(0))
                     .cancellable(CommandId::new("work"))
                     .scoped(key)
+                    .into()
             }
             Some(Act::Dismiss) => {
                 state.modal.dismiss();
@@ -312,7 +316,7 @@ fn init(setup: Setup) -> (RootState, Command<Msg>) {
     }
     (
         state,
-        Command::stream(stream::iter(trigger).chain(stream::pending())),
+        Command::stream(stream::iter(trigger).chain(stream::pending())).into(),
     )
 }
 

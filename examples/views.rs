@@ -17,7 +17,7 @@
 //!
 //! Run with: cargo run --example views
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -186,10 +186,10 @@ impl App {
             Message::MenuDown => *selected = (*selected + 1).min(3),
             Message::MenuSelect => {
                 return match *selected {
-                    0 => Command::message(Message::GoToCounter),
-                    1 => Command::message(Message::GoToInput),
-                    2 => Command::message(Message::GoToList),
-                    3 => Command::message(Message::Quit),
+                    0 => Command::message(Message::GoToCounter).into(),
+                    1 => Command::message(Message::GoToInput).into(),
+                    2 => Command::message(Message::GoToList).into(),
+                    3 => Command::message(Message::Quit).into(),
                     _ => Command::none(),
                 };
             }
@@ -253,29 +253,29 @@ impl App {
 fn handle_key_event(view: &View, key: KeyEvent) -> Command<Message> {
     match view {
         View::Menu { .. } => match key.code {
-            KeyCode::Up => Command::message(Message::MenuUp),
-            KeyCode::Down => Command::message(Message::MenuDown),
-            KeyCode::Enter => Command::message(Message::MenuSelect),
-            KeyCode::Char('q') => Command::message(Message::Quit),
+            KeyCode::Up => Command::message(Message::MenuUp).into(),
+            KeyCode::Down => Command::message(Message::MenuDown).into(),
+            KeyCode::Enter => Command::message(Message::MenuSelect).into(),
+            KeyCode::Char('q') => Command::message(Message::Quit).into(),
             _ => Command::none(),
         },
         View::Counter { .. } => match key.code {
-            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu),
-            KeyCode::Char('q') => Command::message(Message::Quit),
+            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu).into(),
+            KeyCode::Char('q') => Command::message(Message::Quit).into(),
             _ => Command::none(),
         },
         View::Input { .. } => match key.code {
-            KeyCode::Char(c) => Command::message(Message::InputChar(c)),
-            KeyCode::Backspace => Command::message(Message::InputBackspace),
-            KeyCode::Enter => Command::message(Message::InputSubmit),
-            KeyCode::Esc => Command::message(Message::GoToMenu),
+            KeyCode::Char(c) => Command::message(Message::InputChar(c)).into(),
+            KeyCode::Backspace => Command::message(Message::InputBackspace).into(),
+            KeyCode::Enter => Command::message(Message::InputSubmit).into(),
+            KeyCode::Esc => Command::message(Message::GoToMenu).into(),
             _ => Command::none(),
         },
         View::List { .. } => match key.code {
-            KeyCode::Up => Command::message(Message::ListUp),
-            KeyCode::Down => Command::message(Message::ListDown),
-            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu),
-            KeyCode::Char('q') => Command::message(Message::Quit),
+            KeyCode::Up => Command::message(Message::ListUp).into(),
+            KeyCode::Down => Command::message(Message::ListDown).into(),
+            KeyCode::Char('b') | KeyCode::Esc => Command::message(Message::GoToMenu).into(),
+            KeyCode::Char('q') => Command::message(Message::Quit).into(),
             _ => Command::none(),
         },
     }
@@ -377,8 +377,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<App>::new((), frame_rate);
+    let runtime = Runtime::<App>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal

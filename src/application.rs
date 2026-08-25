@@ -73,7 +73,7 @@ pub trait Application: Sized {
     /// #     type Flags = String;
     /// fn new(config: String) -> (Self, Command<Message>) {
     ///     let cmd = Command::perform(async { /* async init */ }, |_| Message::Init);
-    ///     (MyApp, cmd)
+    ///     (MyApp, cmd.into())
     /// }
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
@@ -100,7 +100,7 @@ pub trait Application: Sized {
     /// #     fn new(_: ()) -> (Self, Command<Message>) { (MyApp, Command::none()) }
     /// fn update(&mut self, msg: Message) -> Command<Message> {
     ///     match msg {
-    ///         Message::Save => Command::perform(async { /* save */ }, |_| Message::Quit),
+    ///         Message::Save => Command::perform(async { /* save */ }, |_| Message::Quit).into(),
     ///         Message::Quit => Command::quit(),
     ///     }
     /// }
@@ -311,7 +311,7 @@ mod tests {
 
         fn new(_flags: ()) -> (Self, Command<Self::Message>) {
             let cmd = Command::future(async { "initialized".to_owned() });
-            (Self, cmd)
+            (Self, cmd.into())
         }
 
         fn update(&mut self, _msg: Self::Message) -> Command<Self::Message> {

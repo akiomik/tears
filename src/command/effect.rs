@@ -5,8 +5,10 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use futures::FutureExt;
 use futures::{
-    FutureExt, Stream, StreamExt,
+    Stream, StreamExt,
     stream::{self, BoxStream},
 };
 use tokio::time::{Sleep, sleep};
@@ -161,11 +163,12 @@ pub(super) enum LeafKind {
 /// One effect carrier: its stream plus the identity metadata that travels
 /// with it through `Command` composition.
 ///
-/// `key` is the carrier's spawn key. It is `None` on construction — a
-/// top-level `cancellable` call still records the key on the command — and
-/// is filled in when [`Command::batch`](super::Command::batch) pushes a
-/// child's key down to the child's own carriers, which is what lets each
-/// child lower to an independent keyed entry (RFC 0014 §3.4).
+/// `key` is the carrier's spawn key, written by
+/// [`EffectCommand::cancellable`](super::EffectCommand::cancellable) while
+/// the carrier is still on its own. Each carrier therefore arrives at
+/// [`Command::batch`](super::Command::batch) already naming its own run,
+/// which is what lets each child lower to an independent keyed entry
+/// (RFC 0014 §3.4).
 ///
 /// `scope` is the carrier's composition-boundary attribution, applied by
 /// [`Command::scoped`](super::Command::scoped). A carrier with no key still
@@ -175,30 +178,68 @@ pub(super) struct Leaf<Msg: Send + 'static> {
     pub(super) key: Option<CancellableCommand>,
     pub(super) scope: ScopePath,
     pub(super) kind: LeafKind,
-    /// What the key *attachment* that filled this leaf reached, as
-    /// `(effect carriers, immediate-quit carriers)` — `(0, 0)` while the
-    /// leaf has no key of its own.
-    ///
-    /// Provenance, and it has to be recorded here because the leaves cannot
-    /// be told apart afterwards. Two children each keyed with the same id is
-    /// a legal shape (RFC 0014 §3.4: consecutive dispatches, the second a
-    /// replacement under its own policy); *one* key pushed across two
-    /// carriers is not. After the push the two look identical — same id,
-    /// same carriers — so the distinction is which attachment put it there,
-    /// which only the attachment knows.
-    #[cfg(debug_assertions)]
-    pub(super) key_reach: (usize, usize),
     pub(super) stream: BoxStream<'static, Action<Msg>>,
 }
 
 impl<Msg: Send + 'static> Leaf<Msg> {
+    /// The single ordinary carrier every effect constructor produces.
+    ///
+    /// [`EffectCommand`](super::EffectCommand) holds one of these rather than
+    /// an [`Effect`], which is what makes "a spawn key attaches to a single
+    /// effect carrier only" (RFC 0014 §3.4) a fact about the type instead of
+    /// a rule the constructors have to keep.
+    pub(super) fn effect(stream: BoxStream<'static, Action<Msg>>) -> Self {
+        Self::new(LeafKind::Effect, stream)
+    }
+
+    /// Qualifies this carrier's spawn key and scope attribution with one
+    /// already-erased boundary segment — [`Effect::apply_scope`] for a single
+    /// carrier, and the body it walks its leaves with.
+    pub(super) fn scoped(&mut self, segment: &StructuralKey) {
+        self.key = self.key.take().map(|cancellable| CancellableCommand {
+            id: cancellable.id.scoped_with(segment.clone()),
+            policy: cancellable.policy,
+        });
+        self.scope = self.scope.prefixed_key(segment.clone());
+    }
+
+    /// Adds an overall deadline to this carrier, starting when it is first
+    /// polled.
+    ///
+    /// [`Effect::timeout`] shares one `on_timeout` across every carrier so a
+    /// batch emits at most one timeout message; with a single carrier that
+    /// sharing has nothing to reach, so the cell is built here and the
+    /// observable behaviour is the same.
+    pub(super) fn timeout(
+        self,
+        duration: Duration,
+        on_timeout: impl FnOnce() -> Msg + Send + 'static,
+    ) -> Self {
+        let on_timeout = Arc::new(Mutex::new(Some(on_timeout)));
+        self.relay(|stream| TimeoutLeaf::new(stream, duration, on_timeout).boxed())
+    }
+
+    /// Rewraps this carrier's messages at a new type, keeping its identity
+    /// metadata (RFC 0003 INV-12, RFC 0005 INV-17).
+    ///
+    /// The single-carrier case of [`Effect::map`], which is why `f` moves
+    /// straight into the closure with no shared-ownership cost.
+    pub(super) fn map<T: Send + 'static>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Leaf<T> {
+        self.relay(|stream| {
+            stream
+                .map(move |action| match action {
+                    Action::Message(msg) => Action::Message(f(msg)),
+                    Action::Quit => Action::Quit,
+                })
+                .boxed()
+        })
+    }
+
     fn new(kind: LeafKind, stream: BoxStream<'static, Action<Msg>>) -> Self {
         Self {
             key: None,
             scope: ScopePath::empty(),
             kind,
-            #[cfg(debug_assertions)]
-            key_reach: (0, 0),
             stream,
         }
     }
@@ -216,8 +257,6 @@ impl<Msg: Send + 'static> Leaf<Msg> {
             key: self.key,
             scope: self.scope,
             kind: self.kind,
-            #[cfg(debug_assertions)]
-            key_reach: self.key_reach,
             stream: wrap(self.stream),
         }
     }
@@ -243,18 +282,35 @@ impl<Msg: Send + 'static> Effect<Msg> {
         Self { leaves: Vec::new() }
     }
 
-    pub(super) fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
-        Self {
-            leaves: vec![Leaf::new(LeafKind::Effect, stream)],
-        }
+    /// The effect one already-built carrier makes — the conversion
+    /// [`EffectCommand`](super::EffectCommand) takes on its way to a
+    /// [`Command`](super::Command).
+    pub(super) fn from_leaf(leaf: Leaf<Msg>) -> Self {
+        Self { leaves: vec![leaf] }
     }
 
+    // Scaffolding for this module's own tests. Production carriers are built
+    // by `EffectCommand`, which wraps one `Leaf` directly; the tests below
+    // exercise `Effect`'s multi-carrier operations and still need a short way
+    // to make one.
+    #[cfg(test)]
+    pub(super) fn from_stream(stream: BoxStream<'static, Action<Msg>>) -> Self {
+        Self::from_leaf(Leaf::effect(stream))
+    }
+
+    #[cfg(test)]
     pub(super) fn future(future: impl Future<Output = Msg> + Send + 'static) -> Self {
         Self::from_stream(future.into_stream().map(Action::Message).boxed())
     }
 
+    #[cfg(test)]
     pub(super) fn action(action: Action<Msg>) -> Self {
         Self::from_stream(stream::once(async move { action }).boxed())
+    }
+
+    #[cfg(test)]
+    pub(super) fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
+        Self::from_stream(stream.map(Action::Message).boxed())
     }
 
     /// The carrier behind [`Command::quit`](super::Command::quit): the same
@@ -268,10 +324,6 @@ impl<Msg: Send + 'static> Effect<Msg> {
                 stream::once(async { Action::Quit }).boxed(),
             )],
         }
-    }
-
-    pub(super) fn stream(stream: impl Stream<Item = Msg> + Send + 'static) -> Self {
-        Self::from_stream(stream.map(Action::Message).boxed())
     }
 
     pub(super) fn batch(effects: impl IntoIterator<Item = Self>) -> Self {
@@ -302,43 +354,6 @@ impl<Msg: Send + 'static> Effect<Msg> {
         Self { leaves }
     }
 
-    /// Pushes a spawn key down onto every carrier that does not already have
-    /// one, so a batched child's key reaches the child's own carriers rather
-    /// than the batch (RFC 0014 §3.4).
-    ///
-    /// Carriers that already hold a key keep it: the key nearest the effect
-    /// is the one that names its run.
-    pub(super) fn attach_key(&mut self, key: &CancellableCommand) {
-        // What this one attachment is about to reach, read before it
-        // reaches anything. Recorded on each carrier it fills so the
-        // lowering can tell one key spread across several carriers from
-        // several carriers each keyed on their own — a distinction the
-        // carriers themselves stop carrying the moment the push is done.
-        #[cfg(debug_assertions)]
-        let reach = (
-            self.carriers_without_keys(LeafKind::Effect),
-            self.carriers_without_keys(LeafKind::ImmediateQuit),
-        );
-        for leaf in &mut self.leaves {
-            if leaf.key.is_none() {
-                leaf.key = Some(key.clone());
-                #[cfg(debug_assertions)]
-                {
-                    leaf.key_reach = reach;
-                }
-            }
-        }
-    }
-
-    /// How many carriers of `kind` are still waiting for a key.
-    #[cfg(debug_assertions)]
-    fn carriers_without_keys(&self, kind: LeafKind) -> usize {
-        self.leaves
-            .iter()
-            .filter(|leaf| leaf.key.is_none() && leaf.kind == kind)
-            .count()
-    }
-
     /// Qualifies every carrier's spawn key and scope attribution with one
     /// already-erased composition-boundary segment.
     ///
@@ -347,11 +362,7 @@ impl<Msg: Send + 'static> Effect<Msg> {
     /// scope for a prefix teardown to select (RFC 0014 INV-RC7).
     pub(super) fn apply_scope(&mut self, segment: &StructuralKey) {
         for leaf in &mut self.leaves {
-            leaf.key = leaf.key.take().map(|cancellable| CancellableCommand {
-                id: cancellable.id.scoped_with(segment.clone()),
-                policy: cancellable.policy,
-            });
-            leaf.scope = leaf.scope.prefixed_key(segment.clone());
+            leaf.scoped(segment);
         }
     }
 

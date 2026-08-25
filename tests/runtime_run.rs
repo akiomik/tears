@@ -10,7 +10,7 @@ mod trace_recorder;
 
 use std::{
     future::pending,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -23,11 +23,6 @@ use tears::command::RetryPolicy;
 use tears::prelude::*;
 use tokio::time::{Duration, timeout};
 use trace_recorder::TraceRecorder;
-
-fn frame_rate(value: u32) -> FrameRate {
-    FrameRate::new(NonZeroU32::new(value).expect("frame rate must be non-zero"))
-        .expect("frame rate must be valid")
-}
 
 // Helper: Simple counter app
 #[derive(Debug)]
@@ -121,7 +116,7 @@ async fn test_runtime_run_end_to_end_basic() -> Result<()> {
     // End-to-end: Basic application lifecycle
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<CounterApp>::new(0, frame_rate(60)); // Quit immediately
+    let runtime = Runtime::<CounterApp>::new(0); // Quit immediately
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -157,7 +152,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
                 Message::Quit
             });
 
-            (Self, cmd)
+            (Self, cmd.into())
         }
 
         fn update(&mut self, _msg: Message) -> Command<Message> {
@@ -182,12 +177,12 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
     // below before the Timer subscription gets a chance to send Quit. Silence
     // the hook for the panic this test triggers; see docs/testing.md.
     let recorder = TraceRecorder::new()
-        .with_target("tears::runtime")
+        .with_target("tears::kernel")
         .with_level(tracing::Level::ERROR);
     let _guard = recorder.set_default();
 
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<PanicCommandApp>::new((), frame_rate(60));
+    let runtime = Runtime::<PanicCommandApp>::new(());
 
     let run_result = panic_hook::with_silent_panic_hook(timeout(
         Duration::from_secs(5),
@@ -198,7 +193,7 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
 
     assert!(
         recorder.event_count() >= 1,
-        "a panicking command task should log a tears::runtime error event"
+        "a panicking command task should log a tears::kernel error event"
     );
 
     Ok(())
@@ -242,7 +237,7 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
 
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<MessageApp>::new((), frame_rate(60));
+    let runtime = Runtime::<MessageApp>::new(());
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 
@@ -323,7 +318,7 @@ async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Res
 
     let observed = Arc::new(AtomicUsize::new(0));
     let mut terminal = common::test_terminal()?;
-    let runtime = Runtime::<LifecycleApp>::new(Arc::clone(&observed), frame_rate(60));
+    let runtime = Runtime::<LifecycleApp>::new(Arc::clone(&observed));
 
     timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await??;
 
@@ -337,7 +332,7 @@ async fn test_runtime_run_end_to_end_with_subscriptions() -> Result<()> {
     // End-to-end: Subscription message processing
     let mut terminal = common::test_terminal()?;
 
-    let runtime = Runtime::<SubApp>::new((), frame_rate(60));
+    let runtime = Runtime::<SubApp>::new(());
 
     let result = timeout(Duration::from_secs(1), runtime.run(&mut terminal)).await?;
 

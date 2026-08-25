@@ -71,7 +71,7 @@
 //!
 //! `pub` items rather than `pub(crate)`: the enclosing `runtime` module is
 //! already `pub(crate)`, so effective reachability is capped at the crate
-//! (see `channel`/`frame_rate`), while `pub` avoids the redundant-`pub(crate)`
+//! (see `channel`), while `pub` avoids the redundant-`pub(crate)`
 //! lint.
 
 use std::collections::VecDeque;
@@ -82,23 +82,22 @@ use std::time::Duration;
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The runtime channel a bounded send blocked on — the capacity-wait event's
-/// `channel` field (`"shared"`, `"keyed"`, or `"data"`).
+/// `channel` field.
+///
+/// One value, deliberately kept as an enum: the field name and its schema
+/// position are what an observability consumer depends on, and the type is
+/// where a second lane would have to declare itself. The two values that
+/// named the retired private channels went with them (RFC 0014 §9 row 9).
 #[derive(Clone, Copy)]
 pub enum Channel {
-    Shared,
-    Keyed,
-    /// The kernel's single data lane, which every producer shares (RFC 0014
-    /// §3.1). Once the kernel owns the production path this is the only
-    /// value the field takes, and `"shared"`/`"keyed"` retire with the
-    /// channels they name (RFC 0014 §9 row 9).
+    /// The kernel's single data lane, which every producer shares
+    /// (RFC 0014 §3.1).
     Data,
 }
 
 impl Channel {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Shared => "shared",
-            Self::Keyed => "keyed",
             Self::Data => "data",
         }
     }
@@ -106,8 +105,10 @@ impl Channel {
 
 /// Emits the batch event (RFC 0006 §4.4): `pulled` inputs taken this batch
 /// (opening input included, INV-L12's counted unit), `updated` of them that
-/// invoked `update`, and `shared_pending` shared-channel occupancy at batch
-/// end. A quit-terminated batch does not call this — the loop exits instead.
+/// invoked `update`, and `shared_pending` — the data lane's residual
+/// occupancy at batch end, which is what that field name reads as now
+/// (RFC 0014 §9 row 9). A quit-terminated batch does not call this — the loop
+/// exits instead.
 ///
 /// A free function, not a [`LoadObserver`] method: the batch event carries no
 /// gauge state.
@@ -418,8 +419,8 @@ impl LoadObserver {
     /// neither span nor event, while `event_enabled!` matches what
     /// [`GaugeSnapshot::dispatch`]'s `tracing::debug!` will actually query
     /// with. A subscriber that filters on `Metadata::is_event()` (a common
-    /// and reasonable thing to do — `benches/runtime_load.rs`'s own
-    /// `QuitDeliverySubscriber` does) sees `enabled!`'s query as neither, so
+    /// and reasonable thing to do — `benches/kernel_load.rs`'s own
+    /// `LoadSubscriber` does) sees `enabled!`'s query as neither, so
     /// its `enabled()` returns `false` unconditionally regardless of target
     /// or level, permanently silencing every gauge event even though a real
     /// `tears::runtime::load` DEBUG event fired moments later would have been
@@ -826,7 +827,7 @@ mod tests {
     // general `enabled!`: they build different `Metadata` to query with, and
     // `enabled!`'s reports as neither span nor event. A subscriber that
     // filters on `Metadata::is_event()` — a common, reasonable thing to do,
-    // and exactly what `benches/runtime_load.rs`'s `QuitDeliverySubscriber`
+    // and exactly what `benches/kernel_load.rs`'s `LoadSubscriber`
     // does — would see `enabled!`'s query as neither and answer `enabled()`
     // `false` unconditionally, permanently silencing every gauge event even
     // though the real DEBUG event that follows would have been accepted.
@@ -944,11 +945,11 @@ mod tests {
         // Capacity-wait event: DEBUG, not TRACE.
         {
             let _guard = at_debug.set_default();
-            capacity_wait(Channel::Shared, Duration::from_micros(1));
+            capacity_wait(Channel::Data, Duration::from_micros(1));
         }
         assert_eq!(
             at_debug.str_values("channel"),
-            vec!["shared".to_owned()],
+            vec!["data".to_owned()],
             "capacity-wait event is DEBUG"
         );
 

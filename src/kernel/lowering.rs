@@ -2,81 +2,17 @@
 //!
 //! The command layer owns the decomposition
 //! ([`RuntimeCommandParts::into_kernel_parts`]); this module is where the
-//! kernel reads it, and where the two shapes RFC 0014 §3.4 declares **not
-//! constructible** in the new API are asserted against until the API
-//! shape that makes them unconstructible lands:
-//!
-//! - *Keying a batch.* "A spawn key attaches to a single effect carrier
-//!   only." Today's `cancellable` is a `Command` method, so
-//!   `Command::batch([..]).cancellable(id)` builds — one key reaching
-//!   several carriers, which would open the same identity twice in one
-//!   dispatch, the second replacing the first under its policy.
-//! - *Keying a quit.* An `update`-returned quit applies synchronously at
-//!   the dispatch's completion (RFC 0014 §3.3), so there is no run for a
-//!   key to name and nothing for a later cancel to suppress.
-//!
-//! Both are `debug_assert!`s rather than errors on purpose: they are
-//! placeholders for a type-level split, and turning a constructible public
-//! call into a release-mode panic would be the worse of the two failures.
-//! The rejected third option is a fallback — log and lower the first
-//! carrier — which would pick a meaning for a shape that has none, silently,
-//! and that is the failure class RFC 0007 INV-C5 exists to prevent.
-//!
-//! **Their lifecycle, stated so the assertions are not read as a standing
-//! hazard.** Before the switch they are unreachable from an application:
-//! nothing outside this crate constructs the kernel, so no user's debug
-//! build runs this lowering at all. The switch does not arrive on its own —
-//! it lands together with the effect-constructor split that makes both
-//! shapes unconstructible in the first place, after which these two
-//! assertions are structurally dead and are deleted with the placeholders
-//! they stand in for. Neither half of that pairing is optional: landing the
-//! switch without the split would expose exactly the debug-build panic the
-//! choice above rejects.
+//! kernel reads it.
 //!
 //! [`RuntimeCommandParts::into_kernel_parts`]: crate::command::RuntimeCommandParts::into_kernel_parts
 
 use crate::command::{
-    CancelPolicy, CancellableCommand, CleanupRegistration, CommandId, KernelParts,
-    RuntimeCommandParts, SpawnEntry,
+    CancelPolicy, CancellableCommand, CleanupRegistration, CommandId, KernelParts, SpawnEntry,
 };
 use crate::structural_key::ScopePath;
 
 use super::lane::RunToken;
 use super::registry::ScopeRegistry;
-
-/// Lowers one command into the phase buckets a dispatch applies: the cancel
-/// phase (explicit cancels and teardown prefixes) before every spawn of the
-/// same command, then the spawn phase in declaration order (RFC 0014 §3.4).
-///
-/// **A spawn's scope and its key's scope are two paths, not one.** The
-/// spawn's `scope` is where the run is *placed* — what a prefix teardown
-/// selects it by (RFC 0014 §4.1) — and the key's own scope path is part of
-/// the *cancel identity* a boundary qualifies (RFC 0005 §4.3). One
-/// `Command::scoped` call qualifies both, so the common shapes make them
-/// coincide, but nothing requires it and the surface deliberately admits a
-/// shape where they diverge: `work.scoped(s).cancellable(id)` places the run
-/// under `s` while giving it a root-global key, which
-/// [`Command::scoped`](crate::command::Command::scoped) documents as an
-/// intentional composition — a scoped effect participating in an
-/// application-wide slot. Such a run is reachable from both directions, by
-/// the prefix and by the id, and neither reading is derived from the other.
-pub fn lower<Msg: Send + 'static>(parts: RuntimeCommandParts<Msg>) -> KernelParts<Msg> {
-    #[cfg(debug_assertions)]
-    for (effect_carriers, quit_carriers) in parts.key_reaches() {
-        debug_assert!(
-            effect_carriers <= 1,
-            "a spawn key attaches to a single effect carrier only; keying a batch is not a \
-             lowering shape (RFC 0014 §3.4)"
-        );
-        debug_assert_eq!(
-            quit_carriers, 0,
-            "an update-returned quit applies synchronously at its dispatch, so a spawn key \
-             names no run (RFC 0014 §3.3)"
-        );
-    }
-
-    parts.into_kernel_parts()
-}
 
 /// One step of a dispatch.
 ///
@@ -135,6 +71,19 @@ pub struct DispatchPlan<Msg: Send + 'static> {
 /// cleanup registrations commute for a different reason: a spawn neither
 /// reads nor writes the cleanup ledger, and arming a registration starts
 /// nothing, so no observation separates the two orders.
+///
+/// **A spawn's scope and its key's scope are two paths, not one.** The
+/// spawn's `scope` is where the run is *placed* — what a prefix teardown
+/// selects it by (RFC 0014 §4.1) — and the key's own scope path is part of
+/// the *cancel identity* a boundary qualifies (RFC 0005 §4.3). One
+/// `Command::scoped` call qualifies both, so the common shapes make them
+/// coincide, but nothing requires it and the surface deliberately admits a
+/// shape where they diverge: `work.scoped(s).cancellable(id)` places the run
+/// under `s` while giving it a root-global key, which
+/// [`EffectCommand::scoped`](crate::EffectCommand::scoped) documents as an
+/// intentional composition — a scoped effect participating in an
+/// application-wide slot. Such a run is reachable from both directions, by
+/// the prefix and by the id, and neither reading is derived from the other.
 pub fn dispatch_plan<Msg: Send + 'static>(parts: KernelParts<Msg>) -> DispatchPlan<Msg> {
     let KernelParts {
         redraw,
@@ -205,7 +154,7 @@ mod tests {
     use crate::runtime::load::LoadObserver;
 
     fn lowered(command: Command<i32>) -> KernelParts<i32> {
-        lower(command.into_runtime_parts())
+        command.into_runtime_parts().into_kernel_parts()
     }
 
     fn planned(command: Command<i32>) -> Vec<&'static str> {
@@ -222,32 +171,13 @@ mod tests {
             .collect()
     }
 
-    // The two placeholder shapes, reached through an outer batch. Nesting is
-    // what moved them past the probe before: `Command::batch` pushes a
-    // child's key onto the child's own carriers, so the outer command holds
-    // no key of its own and a probe that asked the command rather than the
-    // leaves saw nothing at all.
-    #[test]
-    #[should_panic(expected = "a spawn key attaches to a single effect carrier only")]
-    fn a_nested_keyed_batch_is_still_not_a_lowering_shape() {
-        drop(lowered(Command::batch([Command::batch([
-            Command::message(1),
-            Command::message(2),
-        ])
-        .cancellable(CommandId::new("load"))])));
-    }
-
-    #[test]
-    #[should_panic(expected = "a spawn key")]
-    fn a_nested_keyed_quit_is_still_not_a_lowering_shape() {
-        drop(lowered(Command::batch([
-            Command::quit().cancellable(CommandId::new("load"))
-        ])));
-    }
-
     #[test]
     fn a_keyed_effect_lowers_to_one_keyed_entry() {
-        let parts = lowered(Command::message(1).cancellable(CommandId::new("load")));
+        let parts = lowered(
+            Command::message(1)
+                .cancellable(CommandId::new("load"))
+                .into(),
+        );
 
         assert_eq!(parts.spawns.len(), 1);
         assert_eq!(
@@ -319,31 +249,13 @@ mod tests {
     fn a_quit_beside_a_keyed_sibling_lowers_cleanly() {
         let parts = lowered(Command::batch([
             Command::quit(),
-            Command::message(1).cancellable(CommandId::new("load")),
+            Command::message(1)
+                .cancellable(CommandId::new("load"))
+                .into(),
         ]));
 
         assert!(parts.quit_now);
         assert_eq!(parts.spawns.len(), 1);
-    }
-
-    // The two shapes RFC 0014 §3.4 declares not constructible. They still
-    // build through today's `Command` surface, so the placeholders are what
-    // reports them until the constructors are split.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "keying a batch")]
-    fn keying_a_batch_trips_the_placeholder() {
-        let _ = lowered(
-            Command::batch([Command::message(1), Command::message(2)])
-                .cancellable(CommandId::new("whole")),
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "names no run")]
-    fn keying_a_quit_trips_the_placeholder() {
-        let _ = lowered(Command::quit().cancellable(CommandId::new("whole")));
     }
 
     // The dispatch order (RFC 0014 §3.4).
@@ -351,9 +263,13 @@ mod tests {
     #[test]
     fn the_cancel_phase_precedes_every_spawn_of_the_same_command() {
         let steps = planned(Command::batch([
-            Command::message(1).cancellable(CommandId::new("left")),
+            Command::message(1)
+                .cancellable(CommandId::new("left"))
+                .into(),
             Command::cancel(CommandId::new("other")),
-            Command::message(2).cancellable(CommandId::new("right")),
+            Command::message(2)
+                .cancellable(CommandId::new("right"))
+                .into(),
             Command::teardown("pane-1"),
         ]));
 
@@ -379,7 +295,9 @@ mod tests {
         let steps = planned(
             Command::batch([
                 Command::teardown("pane-1"),
-                Command::message(1).cancellable(CommandId::new("load")),
+                Command::message(1)
+                    .cancellable(CommandId::new("load"))
+                    .into(),
             ])
             .scoped("pane-1"),
         );
@@ -415,7 +333,9 @@ mod tests {
     fn the_quit_applies_at_the_dispatch_completion() {
         let steps = planned(Command::batch([
             Command::quit(),
-            Command::message(1).cancellable(CommandId::new("load")),
+            Command::message(1)
+                .cancellable(CommandId::new("load"))
+                .into(),
             Command::cancel(CommandId::new("other")),
         ]));
 
@@ -468,7 +388,7 @@ mod tests {
         let steps = planned(Command::batch([
             Command::quit(),
             Command::on_teardown(async {}),
-            Command::message(1),
+            Command::message(1).into(),
         ]));
 
         assert_eq!(steps, vec!["spawn", "cleanup", "quit"]);
