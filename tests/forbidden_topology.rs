@@ -1,6 +1,6 @@
 //! The superseded topology, asserted absent.
 //!
-//! RFC 0014 §14.6's second condition is that the old architecture is not
+//! RFC 0014 §9's supersessions leave the old architecture not
 //! constructible. Deleting it is what makes that true; this is what keeps it
 //! true, because the failure mode is not a deletion that did not happen — it
 //! is a *reintroduction* months later, by someone restoring a name from a

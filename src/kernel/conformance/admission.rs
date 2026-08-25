@@ -10,10 +10,10 @@
 //!
 //! | Row | Owner | What it holds here |
 //! | --- | --- | --- |
-//! | INV-SE1 | RFC 0012 §8 | the spawner runs once per admitted run, at the admission, and not at all for a declaration the barrier deferred |
-//! | INV-SE2 | RFC 0012 §8 | a continuing identity is neither stopped nor respawned by a re-evaluation, including one whose removed set is still quiescing |
-//! | INV-SE3 | RFC 0012 §8 | a re-evaluation with no outstanding stop admits immediately |
-//! | INV-SE4 | RFC 0012 §8 | the mandated `{A}` → `{B}` → `{C}` sequence: C is admitted and B's spawner is never invoked |
+//! | INV-SE1 | RFC 0012 §11 | the spawner runs once per admitted run, at the admission, and not at all for a declaration the barrier deferred |
+//! | INV-SE2 | RFC 0012 §11 | a continuing identity is neither stopped nor respawned by a re-evaluation, including one whose removed set is still quiescing |
+//! | INV-SE3 | RFC 0012 §11 | a re-evaluation with no outstanding stop admits immediately |
+//! | INV-SE4 | RFC 0012 §11 | the mandated `{A}` → `{B}` → `{C}` sequence: C is admitted and B's spawner is never invoked |
 //!
 //! **INV-SE4 has two rows, and only one of them is the mandated sequence.**
 //! The owner's sequence turns on a middle state — `{C}` installed while A's
