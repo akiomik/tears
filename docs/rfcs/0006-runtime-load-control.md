@@ -1853,14 +1853,25 @@ decomposed by varying them, which is the point of those rows and the
 reason both belong in the matrix rather than only the first.
 
 What section 5.1's rule assigns to RFC 0007 §6 — fixing the bounded
-run's configuration under test — is **deferred to the switch-over**
+run's configuration under test — was **deferred to the switch-over**
 for two of its three fields: `app_channel_capacity` and
-`keyed_channel_capacity` are the superseded topology's controls, and
-the successor's single control is `data_lane_capacity`, which is that
-rename's own landing (section 5.2; RFC 0014 §9 row 2). The obligation
-is unchanged, and RFC 0007 restates it against the field that exists
-once the field exists. `batch_max_messages` needs no deferral — it
-survives the rename and is pinned above.
+`keyed_channel_capacity` were the superseded topology's controls, and
+the successor's single control is `data_lane_capacity`, which was that
+rename's own landing (section 5.2; RFC 0014 §9 row 2).
+`batch_max_messages` needed no deferral — it survives the rename and is
+pinned above.
+
+**The switch-over has happened, and the deferral is discharged.** The
+field exists, and both halves of the obligation are met without either
+document acquiring the other's: the matrix above pins
+`data_lane_capacity` per row — unset for the unbounded rows, set for
+the bounded ones — and RFC 0007 §7.1 reads that RFC's own §5
+parameters against the conditions stated here. What does not carry
+over is a *pair* of capacities to fix, because the successor has one
+delivery control where the superseded topology had two; the
+configuration block in RFC 0007 §5.1 stays as the record of what the
+superseded runs were configured with, which is what its rows
+measured.
 
 **Producer-originated route — the INV-L4 successor.** The criterion is
 no longer one absolute threshold. RFC 0014 §3.3 gives this route a
