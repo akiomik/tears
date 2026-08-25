@@ -140,24 +140,20 @@ struct PendingLeaf<Msg> {
     position: usize,
 }
 
-/// Starts one finalizer at the teardown that selected it, polling it once
-/// under §4.1's budget.
-///
-/// The store spawns no task, so "runs concurrently with the torn-down runs'
-/// quiescence" (RFC 0014 §4.4) has no concurrent thing to be. What the store
-/// can honestly do is start the hook where the contract says it starts and
-/// report what it observed: `true` if the finalizer completed on that poll,
-/// `false` if it is still running. The second case is not a pass — the store
-/// cannot attest a hook finished — so it is carried to the exhaustiveness
-/// checks, exactly as an unfinished leaf is.
-///
-/// Driving it to completion in a loop instead would be the wrong shape: a
-/// finalizer parked on the controlled clock would spin forever, and the
-/// store's whole discipline is that observation is bounded and a step that
-/// cannot finish is reported rather than waited out.
-fn start_finalizer(mut finalizer: BoxFuture<'static, ()>) -> bool {
-    let mut context = noop_context();
-    finalizer.as_mut().poll(&mut context).is_ready()
+/// A cleanup run in flight: the finalizer the teardown started, and the
+/// scope it was registered against for diagnostics.
+struct RunningCleanup {
+    scope: ScopePath,
+    finalizer: BoxFuture<'static, ()>,
+}
+
+impl RunningCleanup {
+    /// Polls the finalizer once under §4.1's budget, reporting whether it
+    /// finished.
+    fn poll_once(&mut self) -> bool {
+        let mut context = noop_context();
+        self.finalizer.as_mut().poll(&mut context).is_ready()
+    }
 }
 
 impl<Msg: Send + 'static> PendingLeaf<Msg> {
@@ -259,9 +255,10 @@ where
     /// nothing; a later teardown whose prefix covers its scope is what runs
     /// it (RFC 0014 §4.4).
     armed: Vec<CleanupRegistration>,
-    /// Cleanup runs started by a teardown that had not finished on the poll
-    /// that started them.
-    unfinished_cleanups: usize,
+    /// Cleanup runs a teardown started that have not finished yet, held so
+    /// they can be driven further. A run leaves this set by completing, so
+    /// the set shrinks as the test makes progress — a count could only grow.
+    running_cleanups: Vec<RunningCleanup>,
     redraw_requested: bool,
     /// Where the store is between running and a quit the test has assented
     /// to. Three states rather than two booleans, because the middle one is
@@ -324,7 +321,7 @@ where
             context,
             pending: Vec::new(),
             armed: Vec::new(),
-            unfinished_cleanups: 0,
+            running_cleanups: Vec::new(),
             // Placeholder only: enqueue_command below overwrites this with
             // the init command's folded directive (§5.2).
             redraw_requested: true,
@@ -407,6 +404,11 @@ where
                     leaf.buffered = Some(action);
                 }
             }
+            // In-flight cleanup runs anchor on the same scan. A finalizer
+            // registers its timer on this poll and completes on the one
+            // after the clock moves, which is the leaf rule applied to the
+            // one producer kind that yields no output.
+            self.running_cleanups.retain_mut(|run| !run.poll_once());
         }
         self.pending
             .retain(|leaf| leaf.stream.is_some() || leaf.buffered.is_some());
@@ -666,10 +668,21 @@ where
             .armed
             .extract_if(.., |registration| registration.scope.starts_with(prefix))
             .collect();
+        // Started here, and kept if it does not finish here. The store
+        // spawns no task, so "runs concurrently with the torn-down runs'
+        // quiescence" (RFC 0014 §4.4) has no concurrent thing to be: the
+        // store drives the finalizer at its own scan points instead, exactly
+        // as it drives a leaf. A hook parked on the controlled clock is
+        // therefore recoverable — `advance` moves the clock and re-polls it —
+        // rather than lost at the instant it was started.
         let _context = self.context.enter();
         for registration in selected {
-            if !start_finalizer(registration.finalizer) {
-                self.unfinished_cleanups += 1;
+            let mut run = RunningCleanup {
+                scope: registration.scope,
+                finalizer: registration.finalizer,
+            };
+            if !run.poll_once() {
+                self.running_cleanups.push(run);
             }
         }
     }
@@ -836,10 +849,22 @@ where
              tear down the scope they are registered against, or drop them with a quit",
             self.armed.len()
         );
-        assert_eq!(
-            self.unfinished_cleanups, 0,
-            "TestStore::{site}: {} cleanup run(s) did not finish on the poll that started them",
-            self.unfinished_cleanups
+        // Drive the in-flight runs once more before judging them: this is a
+        // scan site like any other, and a hook that became ready since the
+        // last one has finished, not leaked.
+        {
+            let _context = self.context.enter();
+            self.running_cleanups.retain_mut(|run| !run.poll_once());
+        }
+        assert!(
+            self.running_cleanups.is_empty(),
+            "TestStore::{site}: {} cleanup run(s) have not finished; if a finalizer is waiting \
+             on time, advance the clock so it can complete (scope: {:?})",
+            self.running_cleanups.len(),
+            self.running_cleanups
+                .iter()
+                .map(|run| &run.scope)
+                .collect::<Vec<_>>()
         );
 
         let mut leak = None;
@@ -1472,6 +1497,61 @@ mod tests {
             !ran.load(Ordering::SeqCst),
             "a consumed hook is not re-run (INV-RC8 idempotence)"
         );
+        store.finish();
+    }
+
+    // P1: a finalizer that waits on the controlled clock is recoverable, not
+    // lost. The teardown starts it, that poll registers the timer, `advance`
+    // moves the clock and re-polls it, and it completes — the same two-scan
+    // shape a time-gated leaf has. Holding the future is what makes this
+    // possible; a hook started and dropped could never finish.
+    #[cfg(not(loom))]
+    #[test]
+    fn advance_completes_a_finalizer_waiting_on_the_clock() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    time::sleep(Duration::from_secs(1)).await;
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+
+        store.send(Msg::Arm);
+        store.send(Msg::Tear);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "the finalizer is waiting on the clock, so starting it did not finish it"
+        );
+
+        store.advance(Duration::from_secs(1));
+        // `finish` re-polls the in-flight run, which is where it completes.
+        store.finish();
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "advancing the clock let the finalizer complete"
+        );
+    }
+
+    // P2: and one still waiting is a leak that says what to do about it.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "advance the clock so it can complete")]
+    fn an_unfinished_cleanup_run_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::on_teardown(async { time::sleep(Duration::from_secs(1)).await })
+                .scoped("pane-1"),
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.send(Msg::Tear);
         store.finish();
     }
 
