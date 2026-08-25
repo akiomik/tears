@@ -100,6 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required — an `update` returning one, a mixed `batch` — add `.into()`; the
   compiler names every site.
 
+  Two shapes the compiler reports less obviously. An empty
+  `Command::batch(vec![])` no longer infers its item type and fails with
+  `E0283`; name it, as `Command::batch(Vec::<Command<Msg>>::new())`. And
+  `.cancellable(..)` is gone from commands that carry no effect —
+  `Command::none()`, `Command::cancel(id)`, `Command::quit()` — because a
+  spawn key names a run and those start none; a command that both cancels an
+  id and starts keyed work under it is a `batch` of the two, with the key on
+  the carrier.
+
   Before:
 
   ```rust
@@ -162,6 +171,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the lane, and the broad cancel-opportunity property that shared-first
   pull incidentally provided — a keyed command's output waiting behind ready
   shared input, leaving a window to cancel it — is gone with it.
+
+- **Breaking:** `TestStore::receive_quit` observes a quit applied at a
+  dispatch, and an applied quit is terminal before it is observed
+
+  A quit returned from `update` no longer travels as output, so `receive_quit`
+  no longer requires it to be the next deliverable item, and a message the
+  same command produced is not a failure there. In exchange the store stops
+  accepting work after that dispatch: `send`, `advance`, `receive` and
+  `receive_matching` fail from the moment the quit applies, which is what "no
+  later input can intervene" means on the test side. An applied quit that no
+  `receive_quit` observed now fails `finish` and the drop check, with the same
+  standing as output that was never received.
+
+  A producer-originated quit still travels as output and is still asserted the
+  same way.
 
 - **Breaking:** the capacity-wait event's `channel` field takes one value,
   `"data"`
