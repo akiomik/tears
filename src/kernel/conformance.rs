@@ -1,8 +1,8 @@
 //! The kernel conformance suite: RFC 0014 §13.1's twelve series.
 //!
 //! The series live here rather than in `tests/` because they drive the
-//! kernel directly through the stage-3 driver, which is crate-private until
-//! the switch. The shared fixtures — the scripted program, its journal, the
+//! kernel directly through the stage-3 driver, which is crate-private: its
+//! public surface is RFC 0008 §9's and has not landed. The shared fixtures — the scripted program, its journal, the
 //! probe source, the gated effects, and the bounded waits — live in
 //! [`support`], and the series files are named for the property they hold.
 //!
