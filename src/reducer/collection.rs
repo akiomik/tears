@@ -70,8 +70,8 @@ use std::mem;
 ///
 /// This is RFC 0005's segment-value contract restated as a bound, and it
 /// carries no invariant of its own: `Eq + Hash` are what structural segment
-/// identity is defined over, `Send + Sync + 'static` are what erasure into a
-/// [`StructuralKey`](crate::structural_key::StructuralKey) requires, and
+/// identity is defined over, `Send + Sync + 'static` are what erasure into
+/// the crate's type-erased segment key requires, and
 /// `Clone` is what lets one boundary apply its segment to several carriers
 /// and to several updates.
 ///

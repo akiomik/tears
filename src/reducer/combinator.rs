@@ -351,8 +351,8 @@ where
     /// parent's `update` is the only place a row is removed *during* a
     /// reduce, and that branch drains what it just recorded. What the drain
     /// on the child branch is for is an entry recorded **before** this
-    /// reduce — by a mutation outside one, which the module note on
-    /// [`collection`](super::collection) discourages but nothing prevents.
+    /// reduce — by a mutation outside one, which [`Keyed`](super::Keyed)
+    /// discourages but nothing prevents.
     /// Such an entry is owed its teardown whichever branch the next message
     /// takes, and draining once per reduce is what pays it.
     ///

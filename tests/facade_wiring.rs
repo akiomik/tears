@@ -26,6 +26,7 @@
 
 mod common;
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use color_eyre::eyre::Result;
@@ -34,7 +35,7 @@ use ratatui::Frame;
 use ratatui::widgets::Paragraph;
 use tears::prelude::*;
 use tears::reducer::{Exit, Program, Reducer, ScopeValue};
-use tears::{BoxStream, EffectCommand, ProgramRuntime, SubscriptionSource};
+use tears::{BoxStream, EffectCommand, ProgramRuntime, RuntimeConfig, SubscriptionSource};
 use tokio::time::{Duration, timeout};
 
 /// What both entry points write, in the order the kernel drives them.
@@ -235,6 +236,42 @@ async fn the_facade_drives_every_stage_and_classifies_the_quit() -> Result<()> {
     assert!(
         entries.iter().any(|entry| entry.starts_with("view:")),
         "the view ran: {entries:?}"
+    );
+    Ok(())
+}
+
+/// The configured entry point runs the same script to the same end.
+///
+/// `with_config` had no test at all: every row above builds through
+/// `Runtime::new`, so the bounded construction path — the one that reaches
+/// the lane capacity control — was public API nothing exercised. A bounded
+/// lane changes when a producer waits, not what the application observes, so
+/// the assertion is that the journal is the one `new` produces.
+#[tokio::test]
+async fn the_configured_entry_point_runs_the_same_script() -> Result<()> {
+    let default_journal = Journal::default();
+    let mut terminal = common::test_terminal()?;
+    timeout(
+        Duration::from_secs(5),
+        Runtime::<FacadeApp>::new(default_journal.clone()).run(&mut terminal),
+    )
+    .await
+    .expect("the default run should end before the timeout")?;
+
+    let bounded_journal = Journal::default();
+    let config = RuntimeConfig::new().data_lane_capacity(NonZeroUsize::new(8).expect("non-zero"));
+    let mut terminal = common::test_terminal()?;
+    timeout(
+        Duration::from_secs(5),
+        Runtime::<FacadeApp>::with_config(bounded_journal.clone(), config).run(&mut terminal),
+    )
+    .await
+    .expect("the bounded run should end before the timeout")?;
+
+    assert_eq!(
+        default_journal.entries(),
+        bounded_journal.entries(),
+        "a bounded lane changes when a producer waits, not what the application sees"
     );
     Ok(())
 }
