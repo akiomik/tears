@@ -54,8 +54,8 @@ third piece of that split. Six decisions:
 4. **Source-side injection only** (§6). The template is the injection
    surface: a mock source conforms by satisfying it. TestStore's public
    API is not touched — RFC 0008's non-execution contract (§1.2,
-   INV-T11) is preserved as stated, and a subscription-driving store is
-   a future RFC 0008 amendment layered on this contract.
+   INV-T11) is preserved as stated, and the stage-3 driver is
+   RFC 0008 §9's, layered on this contract.
 5. **Source-internal state, and no more** (§7). Owning and managing
    mutable state *inside* a source's boundary is a legal template
    clause. Mutating external state from `update` through a public
@@ -380,11 +380,10 @@ stage-3 driver (§12).
 TestStore's contract is unchanged and deliberately preserved:
 TestStore never starts, polls, or restarts a subscription source
 (RFC 0008 §1.2), and `subscription_ids` observes the declared set only
-(RFC 0008 INV-T11). Nothing in this RFC amends either statement. A
-subscription-driving store — an opt-in stage-3 driver API — is a
-future RFC 0008 amendment that would *consume* this RFC's execution
-and injection contract; it is layered work, owned there, gated on this
-RFC's acceptance.
+(RFC 0008 INV-T11). Nothing in this RFC amends either statement. The
+stage-3 driver — RFC 0008 §9's opt-in driving API — *consumes* this
+RFC's execution and injection contract; it is layered work, owned
+there, and its surface has not entered the crate.
 
 ## 7. Source-internal state
 
@@ -637,9 +636,9 @@ INV-SE3's checks.
 2. **Mock-source integration.** A public `MockSource` already exists
    (`src/subscription/mock.rs`: construction, `emit`,
    `receiver_count`) and serves as §6.1's reference conforming seam.
-   What remains open is only the stage-3 integration shape — how a
-   driving TestStore consumes such a source — which RFC 0008's future
-   amendment designs against this contract. Resolves there.
+   What remains open is only the stage-3 integration shape — how the
+   stage-3 driver of RFC 0008 §9 consumes such a source. Resolves
+   there.
 
 ## 13. References
 
@@ -656,8 +655,8 @@ INV-SE3's checks.
 - RFC 0007 — RuntimeConfig: §4 (no restart-rate field — the standing
   position §8 keeps).
 - RFC 0008 — TestStore: §1.2 (non-execution), INV-T11 (declaration
-  observation) — both preserved unchanged; the future stage-3
-  amendment §6.2 delegates.
+  observation) — both preserved unchanged; §9, the stage-3 driver
+  amendment §6.2 delegates to.
 - RFC 0009 — Clock DI: the time-axis rejection §9 distinguishes
   itself from.
 - RFC 0011 — runtime lifecycle: §2/INV-LC1 (re-evaluation as a
