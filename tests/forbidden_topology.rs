@@ -159,6 +159,24 @@ fn the_retired_channel_labels_have_not_grown_back() {
     assert_absent_from(&emitters, "\"keyed\"", reason);
 }
 
+/// The types the retired harnesses reached through, and the harnesses
+/// themselves.
+///
+/// The first pass of this scan missed these: it named the topology's types
+/// but not the test-only handles that reached them, so six comments went on
+/// pointing at a manager, a bench wrapper and a harness that no longer exist.
+/// A reference the compiler cannot check is exactly what this file is for, so
+/// the needles now cover the class rather than the half of it that happened
+/// to be listed.
+#[test]
+fn the_retired_test_surfaces_have_not_grown_back() {
+    let reason = "subscription reconciliation is the kernel registry's, and the harnesses that \
+                  reached the old one are gone with it";
+    assert_absent_from_src("SubscriptionManager", reason);
+    assert_absent_from_src("BenchSubscriptionManager", reason);
+    assert_absent_from_src("runtime_load", reason);
+}
+
 /// The command layer's two readings of one lowering.
 ///
 /// `into_execution_parts` existed so the superseded runtime could fold a
