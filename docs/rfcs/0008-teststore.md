@@ -678,26 +678,33 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   (§4.3). Any poll that is issued follows §4.1's budget.
 - `Command::cancel(id)` drops the occupant's stream and undelivered
   output, and is idempotent (INV-4).
-- When one command carries both explicit cancels and its own keyed
-  spawn, the store applies RFC 0003's fixed order (RFC 0003 §5.1): the
-  explicit cancels apply first, then the keyed spawn's admission
-  decision — so a command can cancel its own occupant and immediately
-  reclaim the id in one step.
-  `Command::batch([Command::cancel(id), work]).cancellable(id)` drops
-  the old occupant's undelivered output exactly as the bullet above
-  describes, then admits `work` under `id`; the old run's output is
-  gone, and only `work`'s output is thereafter deliverable at `id`. An
-  implementation that instead admitted the new spawn before applying
-  the batch's own cancel would cancel `work` itself and leave `id`
-  empty — the wrong outcome — so this ordering is load-bearing, not
-  incidental, and is asserted directly rather than left to fall out of
-  the two bullets above.
+- When one command carries both explicit cancels and a keyed spawn, the
+  store applies the fixed phase order (RFC 0003 §5.1 as RFC 0014 §3.4
+  extends it): the cancel phase — explicit cancels and teardown
+  prefixes — applies before *every* spawn of the same command, so a
+  command can cancel its own occupant and immediately reclaim the id in
+  one step.
+  `Command::batch([Command::cancel(id), work.cancellable(id).into()])`
+  drops the old occupant's undelivered output exactly as the bullet
+  above describes, then admits `work` under `id`; the old run's output
+  is gone, and only `work`'s output is thereafter deliverable at `id`.
+  The key rides the carrier rather than the command around it, which is
+  what makes the shape expressible at all — a key attaches to one effect
+  carrier, so there is no batch-level key to write. An implementation
+  that instead admitted the spawn before applying the command's own
+  cancel would cancel `work` itself and leave `id` empty — the wrong
+  outcome — so this ordering is load-bearing, not incidental, and is
+  asserted directly rather than left to fall out of the two bullets
+  above.
 - Unkeyed commands are unaffected by any of the above (INV-1's default
   path).
-- `Command::batch`'s child-key folding needs no restatement: the store
-  consumes real `Command` values, so batch has already discarded child
-  keys and folded cancels before the store sees the parts (RFC 0003
-  INV-11).
+- `Command::batch`'s children each keep their own spawn key: a key
+  attaches to one effect carrier, so batching neither folds keys nor
+  discards them (RFC 0014 §3.4, superseding RFC 0003 INV-11). The store
+  consumes real `Command` values, so it sees exactly the per-carrier
+  keys the runtime does, and two same-key children in one command apply
+  in declaration order as two consecutive admissions — the second a
+  replacement under its own policy.
 
 These are the deterministic core of RFC 0003 — what may still be
 delivered, and when an id releases — restated over the store's pending
@@ -957,8 +964,7 @@ Enforcement classes follow the pre-review checklist's definitions
   hold over the store's pending output as RFC 0003's INV-3, INV-4,
   INV-5, INV-6, INV-7, and INV-9 state them for deliverable output.
   Behavioral: one test per behavior, including
-  quit suppression (a superseded keyed quit is never observable via
-  `receive_quit`) and the two reconciliation edges: a `KeepInFlight`
+  quit suppression and the two reconciliation edges: a `KeepInFlight`
   command arriving after the occupant's leaves are exhausted is
   admitted, and one arriving while the reconciliation poll yields a
   buffered item is discarded with that item still deliverable at its
@@ -972,8 +978,8 @@ Enforcement classes follow the pre-review checklist's definitions
   retention tests deliberately do *not* cancel, since a cancelled
   output cannot be retained. The same-command cancel-then-spawn test
   (RFC 0003 §5.1) `send`s `Command::batch([Command::cancel(id),
-  work]).cancellable(id)` over an occupied id and asserts both halves
-  at once: the occupant's
+  work.cancellable(id).into()])` over an occupied id and asserts both
+  halves at once: the occupant's
   undelivered output is unobservable via any `receive*` (as the
   explicit-cancel test already establishes) *and* a following `receive`
   at `id` yields `work`'s message — an implementation that admits the
@@ -981,6 +987,15 @@ Enforcement classes follow the pre-review checklist's definitions
   though it could still pass the supersede and explicit-cancel tests in
   isolation, since neither of those combines a cancel and a spawn in one
   command.
+  **Quit suppression is stated over the producer-originated route.** A
+  keyed run that emits a quit has its output revoked with the run, so a
+  cancelled keyed producer quit is never observable via `receive_quit` —
+  that is the behavior tested. The `update`-returned route carries no
+  such row, and not because it was dropped: a quit returned from
+  `update` applies at its own dispatch and names no run, so it takes no
+  key and there is nothing for a later cancel to reach (RFC 0014 §3.3,
+  §3.4). The suppression claim is therefore scoped to the route that can
+  still be suppressed, rather than asserted of quits in general.
 - **INV-T8**: exhaustiveness — each leak class in §6 fails at its named
   call site, with a diagnostic naming the leaked values for the
   message classes and the count and enqueue position for the
