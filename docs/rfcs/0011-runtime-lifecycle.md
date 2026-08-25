@@ -45,9 +45,9 @@ down. This RFC is the owner of that contract. Five decisions:
    its side effects, and a panic inside it happens before a runtime
    exists and is outside this contract.
 3. **Termination** (§4, INV-LC5–INV-LC7). Termination has two routes —
-   controlled (unkeyed quit, keyed quit, render error: the loop exits
-   with a reason and the shutdown postconditions hold by `run()`'s
-   return) and abrupt (drop of the `run` future, a panic unwinding
+   controlled (a quit returned from a transition, a producer-originated
+   quit, render error: the loop exits with a reason and the shutdown
+   postconditions hold by `run()`'s return) and abrupt (drop of the `run` future, a panic unwinding
    through `run` from application code on the driving task, drop of a
    never-run runtime value: ownership teardown and cancellation
    requests complete synchronously by `Drop`; task futures follow on
@@ -56,11 +56,12 @@ down. This RFC is the owner of that contract. Five decisions:
    terminating operation's completion, and a quiescent stage once the
    executor has processed the requested cancellations — task
    cancellation is a request, not an event that completes inline.
-4. **Panic containment** (§5, INV-LC8). A panic inside a runtime-owned
-   producer task — an unkeyed command task, a keyed command task, or a
-   subscription forwarder — never terminates the application. A panic in
-   the application's own code on the driving task is deliberately
-   fail-fast (the abrupt route above).
+4. **Panic containment** (§5, INV-LC8). A panic inside any
+   runtime-owned task — an effect run of either keying, a subscription
+   forwarder, a cleanup run — never terminates the application, because
+   containment belongs to the task body all of them are spawned
+   through. A panic in the application's own code on the driving task is
+   deliberately fail-fast (the abrupt route above).
 5. **Driver exclusivity** (§6, INV-LC9). At most one owner drives a
    runtime instance at a time, and the state transitions —
    `update`, `view`, `subscriptions` — execute serially and
@@ -278,16 +279,17 @@ by whether control is still inside the event loop; both converge on the
 
 ### 4.1 Controlled termination
 
-Causes: an unkeyed quit (dedicated-channel delivery), a keyed quit
-(in-band delivery through its run's private channel), a render error.
-The delivery semantics of the two quit forms are RFC 0003's and
-RFC 0006's contract (INV-9, INV-L4, INV-L10/INV-L11) and are not
+Causes: a quit returned from a transition (applied synchronously at
+its dispatch), a producer-originated quit (delivered on the control
+lane), a render error. The delivery semantics of the two quit routes
+are RFC 0003's and RFC 0006's contract as RFC 0014 §3.3 restates it
+(INV-9, INV-L4, and the successor of INV-L10/INV-L11), and are not
 restated here; what this RFC pins is what happens next.
 
 Contract (INV-LC5): every controlled cause exits the loop with its
 reason; the immediate postcondition (§4.4) holds when `run()` returns,
 and the return value classifies the reason — `Ok(())` for either quit
-form, `Err` carrying the render error. `run` consumes the runtime, so
+route, `Err` carrying the render error. `run` consumes the runtime, so
 the terminating operation — the loop exit, any explicit shutdown, and
 the value's teardown — completes inside the call; whether a given cause
 reaches the postcondition through the explicit shutdown routine or
@@ -295,15 +297,16 @@ through the consumed value's drop is mechanism (§4.2).
 
 ### 4.2 Render error: no divergence on contract surface
 
-Today the quit exits run the explicit shutdown while the render-error
-exit returns early without it (`src/runtime.rs`). The contract question
-is whether that difference is observable; it is not, on any pinned
-surface: `run` takes the runtime by value, so the early return
-drops the runtime inside the call, and the value's drop requests
-cancellation of every runtime-owned task — the unkeyed and keyed task
-sets abort on drop, and the subscription manager aborts its forwarders
-on drop — before the caller can observe the `Err`. Both §4.4 stages are
-therefore reached at the same boundaries as on the quit exits; the
+The question this section settled was whether a render error could
+reach the caller by a different route than a quit and be observable for
+it. It cannot, and the implementation has since closed the gap
+outright: termination settles before `run` returns under either
+classification, so the two routes reach both §4.4 stages at the same
+boundaries and only the return value distinguishes them (§9's second
+resolved question). Even without that, `run` takes the runtime by
+value, so an early return drops it inside the call and the drop
+requests cancellation of every runtime-owned task before the caller can
+observe the `Err`; the
 producer gauges fire only on change (RFC 0006 §4.4), so deduplicated
 teardown emissions do not distinguish the paths either, and what
 remains distinct is unpinned diagnostics (§5.1). A caller cannot hold
@@ -551,20 +554,29 @@ Enforcement classes follow the pre-review checklist's definitions.
   to anchor on (§3.3). Behavioral for the eligibility half, at the
   runtime layer: a freshly constructed runtime's first frame pass
   renders with no message processed.
-- **INV-LC5**: each controlled cause — unkeyed quit, keyed quit, render
-  error — exits the loop, and the §4.4 immediate postcondition holds
-  when `run()` returns, with the return value classifying the reason
-  (`Ok(())` for the quits, `Err` for the render error); whether a cause
-  reaches the postcondition through the explicit shutdown routine or
-  through the consumed runtime value's drop is mechanism (§4.1, §4.2).
-  Behavioral, one row per cause at the integration layer, each row
-  asserting the return classification, that no further
-  `update`/`view`/`subscriptions` call is observed afterward, and —
-  through the INV-LC7 settle loop — that producers wind down:
-  - an unkeyed quit under running producers;
-  - a keyed quit under running producers;
+- **INV-LC5**: each controlled cause — a quit returned from a
+  transition, a producer-originated quit, render error — exits the
+  loop, and the §4.4 immediate postcondition holds when `run()`
+  returns, with the return value classifying the reason (`Ok(())` for
+  the quits, `Err` for the render error); whether a cause reaches the
+  postcondition through the explicit shutdown routine or through the
+  consumed runtime value's drop is mechanism (§4.1, §4.2). Behavioral,
+  one row per cause, each row asserting the return classification, that
+  no further `update`/`view`/`subscriptions` call is observed
+  afterward, and — through the INV-LC7 settle loop — that producers
+  wind down:
+  - a quit returned from a transition, under running producers, at the
+    integration layer;
+  - a producer-originated quit, under running producers. The keying of
+    such a quit is not this invariant's subject: a quit returned from a
+    transition names no run at all, and a producer's rides its own run
+    like any other output, so there is one quit route per origin rather
+    than a keyed and an unkeyed one (RFC 0014 §3.3, §3.4). No public
+    surface emits a producer-originated quit, so this row is scripted
+    at the kernel's conformance layer rather than the integration one.
   - a render error (injected failing render), asserting the `Err`
-    return plus the same settle-loop quiescence as the quit rows.
+    return plus the same settle-loop quiescence as the quit rows, at
+    the integration layer.
 - **INV-LC6**: each abrupt cause — drop of the `run` future, a panic
   unwinding through `run` from application code on the driving task
   (`update`, `view`, `subscriptions` at either call site, or a
@@ -617,23 +629,30 @@ Enforcement classes follow the pre-review checklist's definitions.
   model: asserting gauge zero immediately after `run()` returns —
   excluded by the two-stage split, since abort is a request and guard
   drops ride later polls.)
-- **INV-LC8**: a panic inside a runtime-owned producer task (unkeyed
-  command task, keyed command task, subscription forwarder) does not
-  terminate the application: the loop keeps running, and other
-  producers are not cancelled by it — their subsequent output remains
-  deliverable and is delivered under the ordinary delivery contracts,
-  with no schedule or ordering claim (§5). The containment property is
-  pinned here for all three kinds; RFC 0003's keyed-panic requirement
-  is that the log event fires (§7.3), not that the application
-  continues, so the keyed row below is not redundant with its test, and
-  no new diagnostic schema is pinned (§5.1).
-  Behavioral at the integration layer, one row per task kind — a
-  panicking unkeyed effect, a panicking keyed effect, and a
-  subscription whose source constructor succeeds and whose stream
-  panics while the forwarder task polls it (distinct from INV-LC6's
-  constructor-panic row, which unwinds on the driving task) — each
-  running alongside a surviving producer whose later messages must
-  still arrive at `update`, with the run then quitting normally.
+- **INV-LC8**: a panic inside **any** runtime-owned task — an
+  anonymous effect run, a keyed effect run, a subscription forwarder,
+  or a cleanup run — does not terminate the application: the loop keeps
+  running, and other runs are not cancelled by it — their subsequent
+  output remains deliverable and is delivered under the ordinary
+  delivery contracts, with no schedule or ordering claim (§5). The
+  quantifier is over runtime-owned tasks rather than over a fixed list
+  of kinds, because containment is a property of the task body every
+  kind is spawned through, not of any kind's own code; a kind added
+  later inherits it by using that body, and a kind that did not would
+  be the defect. RFC 0003's keyed-panic requirement is that the log
+  event fires (§7.3), not that the application continues, so the keyed
+  row below is not redundant with its test, and no new diagnostic
+  schema is pinned (§5.1).
+  Behavioral at the integration layer, one row per kind reachable from
+  the public surface — a panicking anonymous effect, a panicking keyed
+  effect, and a subscription whose source constructor succeeds and
+  whose stream panics while the forwarder task polls it (distinct from
+  INV-LC6's constructor-panic row, which unwinds on the driving task) —
+  each running alongside a surviving producer whose later messages must
+  still arrive at `update`, with the run then quitting normally. The
+  cleanup kind carries no row of its own here: it is spawned through
+  the same task body as the rest, and that sharing is structural at the
+  construction site (RFC 0014 INV-RC8).
 - **INV-LC9**: at most one owner drives a runtime instance at a time,
   and `update`/`view`/`subscriptions` execute serially and
   non-reentrantly; a future driving surface is additive iff it preserves
@@ -764,6 +783,16 @@ RFC 0014 §12's.
    catch-and-resume form is acceptable only as exactly that — fail-fast
    is not up for revision. Resolves at implementation
    design, in this RFC's body.
+
+   **Resolved: `Drop`-based cleanup, with the panic unwinding through.**
+   No `catch_unwind` sits on the driving path; the kernel's `Drop`
+   aborts every run it still owns when it is dropped without having
+   settled (`src/kernel.rs`). The panic payload is therefore preserved
+   by never being caught, rather than by being caught and resumed, and
+   INV-LC6's synchronous ownership teardown is the `Drop` itself —
+   which runs inside the unwind, where the invariant asks for it. The
+   cost this trades away is the one the question named: cleanup code
+   sits in a destructor rather than on the controlled path.
 2. **Controlled-route quiescence.** Should the controlled route
    guarantee the quiescent postcondition by `run()`'s return — a join
    barrier on runtime-owned tasks before returning? If adopted, the
@@ -773,6 +802,18 @@ RFC 0014 §12's.
    routes keep the uniform two-stage form of §4.4. INV-LC5/INV-LC7 hold
    under either resolution. Resolves at implementation design, in this
    RFC's body.
+
+   **Resolved: adopted, and in the stronger direction the question did
+   not ask about.** `run` drives to termination and then settles before
+   returning, so the quiescent postcondition holds at return — a join
+   barrier on every runtime-owned task, exactly the guarantee the
+   question offered. What makes it stronger than the question's own
+   framing is that it does not depend on the classification: a render
+   error settles on the way out just as a quit does, and only the
+   return value distinguishes them (`src/kernel.rs`). The asymmetry the
+   question described therefore does not arise between the two
+   controlled outcomes; it remains between controlled termination and
+   the abrupt route, which is where §4.4 states it.
 
 ## 10. References
 

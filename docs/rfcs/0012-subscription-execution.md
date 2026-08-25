@@ -633,6 +633,18 @@ INV-SE3's checks.
    reconcile — never producing the dirt or the wake that would trigger
    one — does not conform. Resolves at implementation design, in this
    RFC's body.
+
+   **Resolved: join handles, observed by a pass stage of their own.**
+   Every runtime-owned task is held in one join set, and a stage at the
+   head of each pass reflects every exit the executor has completed
+   before the pass does anything else, marking subscriptions dirty for
+   the ones a steady-state stop revoked (`src/kernel/pass.rs`,
+   `src/kernel/registry.rs`). The join set is also one of the sources
+   that can wake a parked runtime, which is what makes the dirt reach
+   an idle driver rather than only a busy one — the conformance the
+   question's non-conforming shape fails. The stage reflects *every*
+   available exit rather than one, so which quiescence facts the rest
+   of the pass sees does not depend on how many exits happened to land.
 2. **Mock-source integration.** A public `MockSource` already exists
    (`src/subscription/mock.rs`: construction, `emit`,
    `receiver_count`) and serves as §6.1's reference conforming seam.
