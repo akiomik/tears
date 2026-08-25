@@ -22,15 +22,17 @@ needs to understand.
   organization — an implementation detail of how the source happens to be
   laid out, not a concept the user needs to know about. Re-export the
   public items with `pub use` from wherever they conceptually belong.
-  `runtime::frame_rate` is private for this reason; `FrameRate` and
-  `FrameRateError` are re-exported at the crate root instead.
+  `command::core` is `pub(crate)` for this reason; `Command` is
+  re-exported at the crate root instead.
 
 A module can need both at once: stay public for opt-in domain items while
 one specific item inside it is root-promoted skeleton vocabulary. In that
 case, give the root-promoted item its own private (or `pub(crate)`) inner
-submodule — the `runtime::frame_rate` pattern — so the domain module keeps
-its public submodules while the promoted item still resolves to exactly
-one public path (the crate root), not two.
+submodule — the `subscription::core` pattern, whose `Subscription` is
+root-promoted while `subscription::time` and `subscription::websocket`
+stay public — so the domain module keeps its public submodules while the
+promoted item still resolves to exactly one public path (the crate root),
+not two.
 
 ## Single Canonical Path
 
@@ -81,10 +83,11 @@ grab bag instead of a skeleton vocabulary.
 
 Companion types — most commonly the error type returned by a fallible
 constructor — share their owner's home even though they fail both tests
-individually. `FrameRateError` is at the crate root only because
-`FrameRate::new` returns `Result<Self, FrameRateError>`. The "written out
-literally" test still applies to companions, but it decides prelude
-membership (see "Prelude Membership"), not placement.
+individually. `RuntimeConfig` is at the crate root only because
+`Runtime::with_config` takes one, and `Exit` only because
+`ProgramRuntime::run` returns one. The "written out literally" test still
+applies to companions, but it decides prelude membership (see "Prelude
+Membership"), not placement.
 
 ## External Crate Re-exports
 
@@ -110,12 +113,13 @@ subset of root-level vocabulary a minimal skeleton names *by writing the
 item out literally*, not through `?` or `.expect(...)`. An item can be
 correct at the crate root and still not belong in the prelude.
 
-Example: `FrameRate` is in the prelude because skeleton code writes
-`FrameRate::new(...)`. `FrameRateError` is not, even though it is
-re-exported at the crate root — skeleton code handles it with `?` or
-`.expect(...)` without ever spelling the type name, so importing it via
-`prelude::*` buys nothing and only adds unused-import noise for apps that
-never inspect the error.
+Example: `Runtime` is in the prelude because skeleton code writes
+`Runtime::<App>::new(...)`. `RuntimeConfig` is not, even though it is
+re-exported at the crate root — a skeleton app calls `Runtime::new` and
+never spells the config type, so importing it via `prelude::*` buys
+nothing and only adds unused-import noise for apps that never opt into
+the delivery controls. `EffectCommand` fails the same test from the other
+side: skeleton code chains it constantly and names it never.
 
 Keep the prelude's "What's included" doc comment (`src/prelude.rs`) in
 sync with its actual re-exports; don't let it drift into a superset or

@@ -114,8 +114,10 @@ separately-opted-out subscription-skip is possible but out of scope (§9).
   builds). This RFC does whole-frame suppression only; partial memoization is a
   heavier, separable future step (§9).
 - **Subscription re-evaluation skipping.** Out of scope by non-negotiable (B).
-- **Adaptive / capped frame rate.** `FrameRate` already exists; tuning it is an
-  application concern and orthogonal to this RFC.
+- **Adaptive / capped frame rate.** `FrameRate` existed when this was
+  written, and tuning it was an application concern orthogonal to this
+  RFC. Configured pacing is gone (RFC 0014 §9 row 4); render cadence is
+  bounded by the pass, which this RFC's suppression still gates.
 
 ## 4. Why the signal is a `Command` modifier (not an `Action`)
 

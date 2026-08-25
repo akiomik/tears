@@ -562,9 +562,11 @@ impl<E: std::error::Error + 'static> std::error::Error for RetryError<E>;
   expressed by the `NonZeroUsize` parameter type itself, so there is no
   fallible `try_new(usize) -> Option<Self>` convenience constructor. This
   matches `Timer::new(NonZeroU64)`, which is likewise the sole constructor.
-  `FrameRate::new(NonZeroU32) -> Result<Self, FrameRateError>` stays fallible
-  because it additionally validates an upper bound that `NonZero*` cannot
-  express.
+  The one fallible precedent this rule was written against,
+  `FrameRate::new(NonZeroU32) -> Result<Self, FrameRateError>`, was
+  fallible because it additionally validated an upper bound that
+  `NonZero*` cannot express; it is gone with the frame pacing
+  (RFC 0014 §9 row 4), and the rule stands on `Timer::new` alone.
 - `RetryBackoff` and its field-bearing variants are `#[non_exhaustive]`.
   Enum variant fields share the enum's visibility, so variant-level
   `#[non_exhaustive]` permits downstream matching with patterns such as
@@ -772,6 +774,6 @@ contexts.
 - [`src/command/core.rs`](../../src/command/core.rs) and
   [`src/command/effect.rs`](../../src/command/effect.rs) — the `Command`
   and `Effect` representation.
-- [`src/subscription/time.rs`](../../src/subscription/time.rs) and
-  [`src/runtime/frame_rate.rs`](../../src/runtime/frame_rate.rs) — validation
-  API precedents.
+- [`src/subscription/time.rs`](../../src/subscription/time.rs) — the
+  validation API precedent. A second one, `FrameRate`, is gone with the
+  configured frame pacing it validated (RFC 0014 §9 row 4).
