@@ -105,12 +105,15 @@ use std::task::Poll;
 use std::thread;
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time;
 
 use crate::application::Application;
-use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
+use crate::command::{
+    Action, CancelPolicy, CleanupRegistration, CommandId, RuntimeCommandParts, SpawnEntry,
+};
 use crate::noop_waker::noop_context;
 use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
@@ -135,6 +138,26 @@ struct PendingLeaf<Msg> {
     /// Zero-based enqueue position over the store's lifetime, for
     /// diagnostics.
     position: usize,
+}
+
+/// Starts one finalizer at the teardown that selected it, polling it once
+/// under §4.1's budget.
+///
+/// The store spawns no task, so "runs concurrently with the torn-down runs'
+/// quiescence" (RFC 0014 §4.4) has no concurrent thing to be. What the store
+/// can honestly do is start the hook where the contract says it starts and
+/// report what it observed: `true` if the finalizer completed on that poll,
+/// `false` if it is still running. The second case is not a pass — the store
+/// cannot attest a hook finished — so it is carried to the exhaustiveness
+/// checks, exactly as an unfinished leaf is.
+///
+/// Driving it to completion in a loop instead would be the wrong shape: a
+/// finalizer parked on the controlled clock would spin forever, and the
+/// store's whole discipline is that observation is bounded and a step that
+/// cannot finish is reported rather than waited out.
+fn start_finalizer(mut finalizer: BoxFuture<'static, ()>) -> bool {
+    let mut context = noop_context();
+    finalizer.as_mut().poll(&mut context).is_ready()
 }
 
 impl<Msg: Send + 'static> PendingLeaf<Msg> {
@@ -232,6 +255,13 @@ where
     context: Runtime,
     /// Undelivered effect leaves in enqueue order.
     pending: Vec<PendingLeaf<App::Message>>,
+    /// Armed cleanup registrations in arming order. A registration starts
+    /// nothing; a later teardown whose prefix covers its scope is what runs
+    /// it (RFC 0014 §4.4).
+    armed: Vec<CleanupRegistration>,
+    /// Cleanup runs started by a teardown that had not finished on the poll
+    /// that started them.
+    unfinished_cleanups: usize,
     redraw_requested: bool,
     /// Where the store is between running and a quit the test has assented
     /// to. Three states rather than two booleans, because the middle one is
@@ -293,6 +323,8 @@ where
             app,
             context,
             pending: Vec::new(),
+            armed: Vec::new(),
+            unfinished_cleanups: 0,
             // Placeholder only: enqueue_command below overwrites this with
             // the init command's folded directive (§5.2).
             redraw_requested: true,
@@ -569,6 +601,11 @@ where
         for spawn in parts.spawns {
             self.admit(spawn);
         }
+        // Arming happens in the spawn phase, after this command's own
+        // teardowns: a command that tears a scope down and registers again
+        // consumes the old occupant's hooks and leaves the new registration
+        // armed (RFC 0014 §3.4, §4.4).
+        self.armed.extend(parts.cleanups);
 
         if parts.quit_now {
             self.quit = QuitState::QuitApplied;
@@ -614,6 +651,27 @@ where
     /// regardless of key — the store's half of RFC 0014 §4.1's selection.
     fn teardown_under(&mut self, prefix: &ScopePath) {
         self.pending.retain(|leaf| !leaf.scope.starts_with(prefix));
+
+        // The selected registrations are consumed here and run here. "At
+        // most once" is why they are removed before being driven: a second
+        // teardown over the same prefix finds nothing, which is the
+        // idempotence INV-RC8 states, and a finalizer that re-entered this
+        // path could not find itself either.
+        //
+        // A cleanup produces no runtime-visible output of any kind, so there
+        // is nothing for this to deliver, buffer, or account — the store
+        // drives the finalizer for its external side effects, which are the
+        // whole point of a hook, and has nothing else to observe.
+        let selected: Vec<_> = self
+            .armed
+            .extract_if(.., |registration| registration.scope.starts_with(prefix))
+            .collect();
+        let _context = self.context.enter();
+        for registration in selected {
+            if !start_finalizer(registration.finalizer) {
+                self.unfinished_cleanups += 1;
+            }
+        }
     }
 
     /// Drops every leaf keyed under `id`, discarding streams and buffered
@@ -765,6 +823,24 @@ where
             ),
             QuitState::Running => {}
         }
+
+        // A hook the test armed and never fired, and one it fired that never
+        // finished. Both are the same omission undelivered output is: the
+        // script set something up and ended without exercising it, and a
+        // cleanup's whole purpose is its external side effects, so an
+        // unfired hook means those never happened. Checked before the leaf
+        // scan because neither needs a poll to establish.
+        assert!(
+            self.armed.is_empty(),
+            "TestStore::{site}: {} cleanup registration(s) were never fired; \
+             tear down the scope they are registered against, or drop them with a quit",
+            self.armed.len()
+        );
+        assert_eq!(
+            self.unfinished_cleanups, 0,
+            "TestStore::{site}: {} cleanup run(s) did not finish on the poll that started them",
+            self.unfinished_cleanups
+        );
 
         let mut leak = None;
         let _context = self.context.enter();
@@ -953,6 +1029,8 @@ mod tests {
         Unrelated,
         Loud,
         StartQuit,
+        Arm,
+        Tear,
     }
 
     /// Registers an I/O resource with the runtime's I/O driver — the step
@@ -1353,6 +1431,93 @@ mod tests {
         // applied, so nothing terminated.
         store.send(Msg::Unrelated);
         store.finish();
+    }
+
+    // RFC 0014 INV-RC8, over the store: a registration arms and starts
+    // nothing, and the teardown whose prefix covers its scope is what runs
+    // it. The flag is the observation — a cleanup produces no
+    // runtime-visible output, so its external side effects are the only
+    // thing there is to see.
+    #[cfg(not(loom))]
+    #[test]
+    fn a_teardown_runs_the_cleanup_registered_under_it() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+
+        store.send(Msg::Arm);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "arming starts nothing (RFC 0014 §4.4)"
+        );
+
+        store.send(Msg::Tear);
+        assert!(ran.load(Ordering::SeqCst), "the teardown ran it");
+
+        // At most once: a second teardown over the same prefix finds the
+        // registration consumed and has nothing to re-run.
+        ran.store(false, Ordering::SeqCst);
+        store.send(Msg::Tear);
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "a consumed hook is not re-run (INV-RC8 idempotence)"
+        );
+        store.finish();
+    }
+
+    // A hook the test armed and never fired is a leak, for the reason
+    // undelivered output is: the script ended without exercising something it
+    // set up, and a cleanup's side effects are its whole purpose.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "cleanup registration(s) were never fired")]
+    fn an_unfired_cleanup_registration_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::on_teardown(async {}).scoped("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.finish();
+    }
+
+    // Termination is not a teardown and fires no hooks: unfired
+    // registrations are discarded with everything else the shutdown
+    // discards, so `finish` passes (RFC 0014 §4.4's termination clause).
+    #[cfg(not(loom))]
+    #[test]
+    fn an_observed_quit_discards_unfired_registrations() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&ran);
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::Arm => {
+                let ran = Arc::clone(&armed);
+                Command::on_teardown(async move {
+                    ran.store(true, Ordering::SeqCst);
+                })
+                .scoped("pane-1")
+            }
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        store.send(Msg::StartQuit);
+        store.receive_quit();
+        store.finish();
+
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "termination fires no hooks (RFC 0014 §4.4)"
+        );
     }
 
     // INV-T7: unkeyed commands are unaffected by keyed lifecycle operations
