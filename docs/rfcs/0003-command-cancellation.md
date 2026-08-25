@@ -956,10 +956,11 @@ the delivery decision point by the producing run's liveness, and a
 producer-originated quit travels a dedicated control lane while an
 `update`-returned quit applies synchronously at its dispatch (RFC 0014 §3.1,
 §3.3). The register that decides this correspondence is RFC 0014 §9 rows 1–3,
-landed with that RFC's acceptance; the clauses above state the contract in
-force until mainlining closes RFC 0014 §13.1's open tier, and each becomes the
-following there. The successor's own enforcement classes are RFC 0014 §12's — this
-correspondence records what each clause becomes and adds no check of its own.
+landed with that RFC's acceptance. That kernel is now the crate's runtime
+core, so the clauses above record the contract the superseded topology
+carried and the correspondence below is the operative reading of each. The
+successor's own enforcement classes are RFC 0014 §12's — this correspondence
+records what each clause became and adds no check of its own.
 
 - **INV-1 — superseded.** No separate shared path remains: an unkeyed
   command's messages travel the same origin-tagged lane as every other

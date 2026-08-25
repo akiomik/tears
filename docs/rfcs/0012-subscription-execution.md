@@ -1,6 +1,6 @@
 # RFC 0012: Subscription Execution
 
-- Status: Accepted
+- Status: Implemented
 - Target: 0.11.0 — one behavior change with two faces (restart and
   replacement admission waits for the stopped task's quiescence, and
   subscription re-evaluation gains a message-independent trigger, §4);
@@ -17,14 +17,14 @@
   only after every previously stopped subscription task has quiesced
   (§4). Re-evaluations with no outstanding stopped task — pure
   additions, and restarts of already-finished subscriptions — admit
-  immediately as today, and continuing subscriptions are unaffected.
+  immediately as before, and continuing subscriptions are unaffected.
   Subscription re-evaluation also gains a message-independent trigger:
   the quiescence of a task stopped by a steady-state cause (§4.2)
   marks subscriptions dirty, so `subscriptions()` can run — and a
   finished,
   still-declared subscription restart — on a frame pass with no new
-  message (§4.3); the `Application::subscriptions` rustdoc is updated
-  to match. Lands with the implementation.
+  message (§4.3); the `Application::subscriptions` rustdoc states both
+  triggers. Landed with the implementation.
 
 ## Summary
 
@@ -44,10 +44,11 @@ third piece of that split. Six decisions:
    new or restarted subscription starts while any stopped task has not
    yet quiesced, for every subscription alike, with four admission
    rules (INV-SE2–INV-SE5) closing the stale-generation races. The
-   current manager does not conform — the conformance change is this
-   RFC's `Changed` entry.
+   manager this RFC was written over did not conform; the kernel that
+   replaced it does, and the conformance change is this RFC's `Changed`
+   entry.
 3. **`subscriptions()` purity** (§5, INV-SE6). The purity obligation,
-   today stated only in `Application` rustdoc, gets an owner: the
+   which the `Application` rustdoc alone had stated, gets an owner: the
    declared set is a pure function of application state. The runtime's
    dirty-frame re-evaluation gating (RFC 0011 §2) and TestStore's
    determinism (RFC 0008 INV-T11) already rest on it.
@@ -98,8 +99,8 @@ policy RFC owns rates (§8).
   INV-LC1/INV-LC2). This RFC contributes one thing to that contract —
   the subscription-lifecycle-completion dirty source RFC 0011 §2.1
   records — and its admission rules are otherwise constrained by it.
-- **TestStore's public API.** Owned by RFC 0008; a stage-3 driving API
-  is a future amendment there (§6.2).
+- **TestStore's public API.** Owned by RFC 0008; the stage-3 driving
+  API is that RFC's §9 (§6.2).
 - **Restart rate policy.** A future opt-in RFC (§8).
 - **Composition.** An aggregating adapter's obligations are the
   composition RFC's; §4.4 states only that this contract is transparent
@@ -294,10 +295,10 @@ execution, including the INV-SE4 sequence.
 
 ### 4.3 Conformance and INV-13
 
-The current manager does not conform: `SubscriptionManager::update`
-(`src/subscription.rs`) aborts removed tasks and invokes new spawners
-in the same synchronous pass, without awaiting the aborted tasks'
-termination — stop requested and restart admitted are collapsed. The
+The manager this RFC was written over did not conform: its reconcile
+aborted removed tasks and invoked new spawners in the same synchronous
+pass, without awaiting the aborted tasks' termination — stop requested
+and restart admitted were collapsed. The successor kernel conforms; the
 conformance change is this RFC's `Changed` entry, and its scope is
 two-fold, stated honestly: (1) *admission timing* — new and restarted
 subscriptions wait for outstanding stopped tasks' quiescence; and
@@ -383,7 +384,7 @@ TestStore never starts, polls, or restarts a subscription source
 (RFC 0008 INV-T11). Nothing in this RFC amends either statement. The
 stage-3 driver — RFC 0008 §9's opt-in driving API — *consumes* this
 RFC's execution and injection contract; it is layered work, owned
-there, and its surface has not entered the crate.
+there, and it is in the crate at `tears::testing` (RFC 0008 §9.1).
 
 ## 7. Source-internal state
 
@@ -486,11 +487,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   admitted run, at admission — never at declaration, never at identity
   comparison (the never-invoked cases are RFC 0005 INV-12's), and
   never before the §4 barrier admits the run. Behavioral at the
-  manager layer (`SubscriptionManager::update`,
-  `src/subscription.rs`): recording spawners assert one invocation per
-  admitted run, zero before admission (a spawner pending on the
-  barrier has not run), alongside RFC 0005's existing lazy-spawn
-  suite.
+  admission seam (the kernel's reconcile stage and its run registry):
+  recording spawners assert one invocation per admitted run, zero
+  before admission (a spawner pending on the barrier has not run),
+  alongside RFC 0005's existing lazy-spawn suite.
 - **INV-SE2**: a continuing ID — present in consecutive desired sets
   with a live task — is never stopped, never awaited, and never
   respawned by a re-evaluation, including one whose removed set is
@@ -504,13 +504,18 @@ Enforcement classes follow the pre-review checklist's definitions.
   re-evaluation that issued stop requests admits nothing in its own
   pass even if one of them quiesces during it; a re-evaluation with no
   outstanding stopped task admits immediately. Behavioral at the
-  manager layer on a
-  single-threaded test executor, where the quiescence gap is
-  deterministic: after a re-evaluation that stops A and adds B, assert
-  B's spawner has not run before the executor processes A's
-  cancellation, then drive the executor through A's quiescence and the
-  next frame-pass re-evaluation and assert B is admitted there; the
-  pure-addition and finished-restart cases assert immediate admission.
+  admission seam, driven a pass at a time: after a re-evaluation that
+  stops A and adds B, assert B's spawner has not run before A's
+  cancellation is processed, then drive through A's quiescence and the
+  next re-evaluation and assert B is admitted there; the pure-addition
+  and finished-restart cases assert immediate admission. The executor
+  is not part of this clause. It was written for a single-threaded one,
+  where the quiescence gap is deterministic — but on that executor a
+  stop resolves within one turn, so the gap the row needs to observe is
+  not constructible there at all, and the row that needs it runs on a
+  multi-worker driver holding the dismantling at a script-controlled
+  gate. The window is then the script's rather than the scheduler's,
+  which is what a deterministic executor was being asked for.
   The same-pass clause is structural at the same call sites INV-SE5
   reviews — the reconcile path makes no second admission attempt after
   issuing its stops, so a quiescence observed while the pass runs has
@@ -530,12 +535,19 @@ Enforcement classes follow the pre-review checklist's definitions.
   behavioral.
 - **INV-SE4**: only the newest desired set is admitted; a superseded
   generation's pending spawners are discarded un-invoked. Behavioral
-  at the manager layer — the mandated sequence: `{A}` → `{B}` (stop
+  at the admission seam — the mandated sequence: `{A}` → `{B}` (stop
   requested for A) → before A quiesces, `{C}` → A quiesces, marking
   subscriptions dirty → the next frame pass re-evaluates against the
   then-current state (`{C}`) and admits C; B's spawner is never
   invoked at any point. This sequence, including its post-quiescence
-  frame-pass stage, is a required test, not an example.
+  frame-pass stage, is a required test, not an example — and it takes
+  two rows rather than one. Its middle state, `{C}` installed while A's
+  stop is outstanding, cannot be built on a current-thread executor; a
+  collapsed face runs there and witnesses the supersession without the
+  window, and the mandated face runs on the multi-worker driver that
+  can hold the window open under script control. Neither face cites any
+  part of RFC 0014 INV-RC14's determinism claim, whose verified range
+  is the current-thread executor (RFC 0008 §9.8).
 - **INV-SE5**: admissions execute only at a subscription
   re-evaluation — the bootstrap reconcile (RFC 0011 §3.2) or a
   frame-pass re-evaluation — against the then-current state, and
@@ -548,10 +560,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   triggered directly from a task-exit event, and the stopping
   re-evaluation does not block awaiting quiescence to admit inline
   (§4.2 — that shape makes INV-SE4's sequence unsatisfiable).
-  Structural: review of the admission call sites — the manager admits
-  only from the reconcile path (`update_subscriptions` / bootstrap,
-  `src/runtime.rs`), the quiescence handler only marks dirt, and no
-  await sits between a reconcile's stop requests and its return; a
+  Structural: review of the admission call sites — the kernel admits
+  only from the reconcile path (the bootstrap reconcile and the frame
+  step's), the exit-reflection stage only marks dirt, and no await sits
+  between a reconcile's stop requests and its return; a
   behavioral test cannot prove the absence of a bypass site, and the
   INV-SE4 sequence is the behavioral neighbor exercising the deferred
   flow end to end.
@@ -567,10 +579,10 @@ occurrence is INV-SE5's observable requirement; the mechanism, and
 which task records the dirt, are unpinned — what the gate checks is
 that the completion reaches the idle driver as a wake-capable input.
 This gate exists because a completion that updates state without
-waking the driver passes every manager-layer check while the
-production loop parks forever — the current scheduler's parking
-comment records exactly that hazard
-(`src/runtime/frame_scheduler.rs`; RFC 0011 §7's parking premise).
+waking the driver passes every seam-level check while the production
+loop parks forever — the hazard RFC 0011 §7's parking premise names,
+and what the successor kernel answers by making the join set one of
+the sources that can wake a parked pass (RFC 0014 INV-RC16).
 
 - **INV-SE6**: `subscriptions()` purity (§5) — same state, same
   declared set; no side effects; no reads of external mutable state;
@@ -648,9 +660,13 @@ INV-SE3's checks.
 2. **Mock-source integration.** A public `MockSource` already exists
    (`src/subscription/mock.rs`: construction, `emit`,
    `receiver_count`) and serves as §6.1's reference conforming seam.
-   What remains open is only the stage-3 integration shape — how the
-   stage-3 driver of RFC 0008 §9 consumes such a source. Resolves
-   there.
+   **Resolved at RFC 0008 §9.** The stage-3 driver consumes a source
+   the way the runtime does, because it drives the production kernel:
+   a source declared by the program under test is started, polled and
+   stopped through this RFC's template, with no store-side integration
+   shape of its own. A `MockSource` is therefore driven rather than
+   adapted, and this question needed the surface to exist before it
+   could be answered that way.
 
 ## 13. References
 
@@ -680,14 +696,13 @@ INV-SE3's checks.
   (the teardown stop cause and its dirt classification), §5.3 (the
   stopping-pass defer), and the amendment register §9 whose row 5 names
   this RFC.
-- `src/subscription.rs` (`SubscriptionManager::update`,
-  `spawn_subscription` — the admission seam and the current
-  nonconformance), `src/subscription/core.rs` (the spawner that
-  consumes the `Source` at stream construction, §3),
+- `src/kernel/pass.rs` (the reconcile stage INV-SE5 names and the
+  exit reflection that marks its dirt), `src/kernel/registry.rs` (the
+  run bookkeeping the barrier reads), `src/subscription/core.rs` (the
+  spawner that consumes the `Source` at stream construction, §3),
   `src/subscription/websocket.rs` / `src/subscription/signal.rs`
   (poll-time resource acquisition, §2), `src/subscription/mock.rs`
   (the reference conforming seam, §6.1), `src/application.rs` (the
-  purity rustdoc INV-SE6 canonicalizes), `src/runtime.rs`
-  (`update_subscriptions`, the reconcile path INV-SE5 names),
-  `tests/api_surface.rs` (INV-SE8's regression neighbor).
+  purity rustdoc INV-SE6 canonicalizes), `tests/api_surface.rs`
+  (INV-SE8's regression neighbor).
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.

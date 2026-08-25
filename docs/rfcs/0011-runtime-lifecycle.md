@@ -1,6 +1,6 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Accepted
+- Status: Implemented
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
@@ -453,7 +453,10 @@ Nothing in this section is contract. It records, first, the premises
 that other RFCs' invariants rest on — so a lifecycle-motivated change to
 any of them is recognized as touching those invariants, not as free
 mechanism churn — and second, the mechanism inventory a reimplementation
-is free to replace.
+is free to replace. The reimplementation happened: §8.1's last bullet
+re-derives every premise below on the reducer-first kernel, which is
+where each one now holds or is recorded as gone, so read this section
+as the inventory that re-derivation was made against.
 
 Premises:
 
@@ -693,10 +696,11 @@ phase machine, and its §6.1 re-checks rather than restates what this
 document pins: construction inertness for both entry types, the
 steady-state phase order, the two-stage termination postconditions with
 the bounded settle discipline, the panic split, and driver exclusivity.
-What changes is named by RFC 0014 §9 row 8, landed with that RFC's
-acceptance; this document states the contract in force until mainlining
-closes RFC 0014 §13.1's open tier, and each clause below becomes what
-it says there, with the successor's own enforcement classes staying
+What changes is named by RFC 0014 §9 row 8 — with the dirt-source
+clause below resting on row 5 instead, which is RFC 0012's — both
+landed with that RFC's acceptance. That kernel is the crate's runtime
+core, so each clause below is the operative reading of the clause it
+names, with the successor's own enforcement classes staying
 RFC 0014 §12's.
 
 - **§2.3's negative space narrows.** A steady-state pass on that kernel
@@ -719,17 +723,18 @@ RFC 0014 §12's.
   render pending unconditionally — but an init command whose
   `Command::quit()` part is present terminates deterministically
   *during* the init dispatch, before the initial reconcile runs and
-  before any subscription source starts (RFC 0014 §6.2). Under this
-  document's contract that outcome is one legal result of bootstrap
-  arbitration; on the successor it is pinned, and the arbitration clause
+  before any subscription source starts (RFC 0014 §6.2). Under the
+  arbitration this document states, that outcome was one legal result
+  among several; the successor pins it, and the arbitration clause
   covers the init effect's output, initial subscription output, and the
   first render.
 - **INV-LC5's classification is stated per entry point.** At the
   `Runtime<App>` entry point this document is written over, it holds
-  verbatim: RFC 0014 §2.4 preserves that entry point, its `run`
-  signature, and its result contract — `Ok(())` for either quit form,
-  `Err` carrying the render error. The advanced entry that RFC adds
-  beside it classifies the same causes over its own result type — a quit
+  verbatim on both quit routes: RFC 0014 §2.4 preserves that entry
+  point, its `run` signature, and its result contract — `Ok(())` for
+  either quit route, `Err` carrying the render error. The advanced entry
+  that RFC adds beside it classifies the same causes over its own result
+  type — a quit
   of either route returns `Ok(Exit::Quit)`, a render error returns `Err`
   (RFC 0014 §2.3). The controlled causes themselves are re-spelled by the
   successor's two quit routes — an `update`-returned quit applied at its
@@ -752,7 +757,7 @@ RFC 0014 §12's.
   among ready wake sources; its production policy stays unbiased
   selection and is normative there rather than a premise, with per
   occasion choice and fairness still unclaimed (RFC 0014 §3.5).
-  Frame-branch pacing and gating go entirely, replaced by the frame
+  Frame-branch pacing and gating are gone, replaced by the frame
   step's fixed position in every pass (RFC 0014 §6.3), and synchronous
   producer creation on the driving task is unchanged — both stay
   informative, here and there.

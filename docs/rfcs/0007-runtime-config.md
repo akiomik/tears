@@ -949,10 +949,10 @@ frame rate therefore leaves this type and the constructors that carry it.
 Two register rows decide this section: RFC 0014 §9 row 4, the pacing
 cluster, and row 2, under which the per-command capacity leaves with
 the private keyed channels it sized. Both landed with that RFC's
-acceptance; every clause above states the surface in force until
-mainlining closes RFC 0014 §13.1's open tier, and each becomes the
-following there, with the successor's own enforcement classes staying
-RFC 0014 §12's.
+acceptance, and the surface they describe is the one §2 now states.
+This section is the clause-by-clause record of what each of this
+document's statements became, with the successor's own enforcement
+classes staying RFC 0014 §12's.
 
 - **INV-C5 is superseded.** With no frame-rate configuration there is no
   scheduler for a config to disagree with, so the mismatch this invariant
@@ -1028,10 +1028,11 @@ RFC 0014 §12's.
 - **§5's bounded-run parameters and §6's smoke profile follow RFC 0006's
   named prerequisite.** They configure a harness measured on the
   superseded topology; re-deriving the acceptance formulation and its
-  scenario set is owned by RFC 0006 (its §5.2, tracked as RFC 0014
-  §13.5), and the parameters this RFC fixes are re-fixed against
-  whatever that re-derivation defines. §4's restart-rate position is
-  unaffected: rate policy stays subscription-level (RFC 0012 §8).
+  scenario set is owned by RFC 0006 §5.3 — which §5.2 delegates it to,
+  and which RFC 0014 §13.5 records as resolved — so the parameters this
+  RFC fixes are read against the conditions stated there. §4's
+  restart-rate position is unaffected: rate policy stays
+  subscription-level (RFC 0012 §8).
 
 ## 8. Open questions
 

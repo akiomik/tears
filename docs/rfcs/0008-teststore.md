@@ -1,8 +1,7 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
-- Status: Implemented for stages 1–2. Stage 3 (§9) is contract only:
-  its surface enters the crate with the reducer-first kernel, after
-  RFC 0014 §13.1's open tier closes
+- Status: Implemented — stages 1–2 with the store, stage 3 (§9) with
+  the reducer-first kernel, at the paths §9.1 places it
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
@@ -167,12 +166,12 @@ claims is RFC 0014 §7.3's.
 The API body — the concrete `TestDriver` surface — is §9: the
 additive section RFC 0014 §9 row 11 records and RFC 0012 §6.2
 reserves. It expresses RFC 0014 §7.2's contract as API and adds no
-driving guarantee beyond it; the surface itself enters the crate when
-mainlining closes RFC 0014 §13.1's open tier (§9.1).
+driving guarantee beyond it; the surface is in the crate at the paths
+§9.1 places it.
 
-The same landing extends this store's command intake: the lowered
-parts it consumes gain teardown entries and independently keyed batch
-children (RFC 0014 §3.4, §7.1). §9.10 states what that costs this
+The same landing extended this store's command intake: the lowered
+parts it consumes carry teardown entries and independently keyed batch
+children (RFC 0014 §3.4, §7.1). §9.10 states what that cost this
 document.
 
 ## 2. The `Message` boundary
@@ -1193,19 +1192,17 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   `tears::testing::TestDriver` and `tears::testing::ParkProbe`.
   §3.3's rules carry over unchanged: no crate-root re-export, no
   prelude membership, no feature flag.
-- **Gating.** This surface is contract, not code. It enters the crate
-  with the reducer-first kernel, after RFC 0014 §13.1's open tier
-  closes, and its `Added` CHANGELOG entry ships with that release —
-  the same form RFC 0014's own header states for it. Sibling
-  documents that reserve this surface keep pointing at it as future
-  work until then, deliberately: RFC 0014 §13.2, RFC 0012 §6.2 and
-  its §12's second question, and RFC 0010's TS-1, TS-3, and TS-6
-  condition rows all close their status at the landing, not at this
-  section — a contract stated is not a surface delivered, and those
-  rows are conditioned on the delivery. The crate's own
-  types in §9.3 divide in three, and no statement here asserts that
-  anything in the first or third division exists in the crate today.
-  The partition covers those and nothing else. Two groups of names
+- **Placement, delivered.** This surface entered the crate with the
+  reducer-first kernel, and its `Added` CHANGELOG entry ships with that
+  release — the same form RFC 0014's own header states for it. The
+  documents that reserved it pointed at it as future work until that
+  delivery, deliberately, because a contract stated is not a surface
+  delivered: RFC 0014 §13.2, RFC 0012 §6.2 and its §12's second
+  question, and RFC 0010's TS-1, TS-3 and TS-6 rows were all
+  conditioned on the delivery rather than on this section, and each
+  closes at it. The crate's own types in §9.3 divided in three when
+  this section was written, and all three divisions are in the crate
+  now. The partition covers those and nothing else. Two groups of names
   appear in this section without belonging to it: `Backend` and
   `ratatui::Terminal`, which are the host UI library's, and `Future`,
   `Pin`, `Poll`, and `NonZeroUsize`, which are `std`'s. Neither group
@@ -2231,14 +2228,14 @@ away (RFC 0014 §3.4, §7.1).
 INV-T3 needs no restatement for that: it is stated over the shared
 decomposition boundary rather than over that boundary's current
 member list, so the new entries are inside it as written. Its
-structural review re-runs at the store's intake site once the parts
-carry them.
+structural review re-runs at the store's intake site now that the
+parts carry them.
 
-The rest of the extension is a **named delegation**, recorded here
-rather than drafted here. Its owner is the change that lands the
-kernel-side lowering; the store's half lands in that same change and
-not before it, so this document and the kernel never state different
-lowering semantics at once. What that change must fix, in full:
+The rest of the extension was a **named delegation**, recorded here
+rather than drafted here, and its owner was the change that landed the
+kernel-side lowering — the store's half landing in that same change and
+not before it, so this document and the kernel never stated different
+lowering semantics at once. What that change had to fix, in full:
 
 - the store's own behavior for each new entry class — what a teardown
   entry selects over the store's pending set, and what a cleanup
@@ -2251,11 +2248,11 @@ lowering semantics at once. What that change must fix, in full:
   §4.2's negative space, §6's `send` rationale, INV-T8's keyed
   retention test, and the RFC 0003 entry in §11.
 
-Writing those edits before the kernel lands would state a contract
-this crate does not implement, which is why they are delegated rather
-than made here; nothing in stages 1–2 changes until then.
+Writing those edits before the kernel landed would have stated a
+contract the crate did not implement, which is why they were delegated
+rather than made when this section was written.
 
-**Discharged.** The kernel-side lowering has landed and all three are
+**Discharged.** The kernel-side lowering landed and all three are
 made. A teardown entry selects the store's pending leaves by scope
 prefix, over every kind, as §5.1 now states. A cleanup registration
 arms against its scope and is run by the teardown that selects it: the

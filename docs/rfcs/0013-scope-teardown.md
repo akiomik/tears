@@ -1,10 +1,10 @@
 # RFC 0013: Scope Teardown
 
-- Status: Accepted — co-designed with RFC 0014 (the reducer-first
+- Status: Implemented — co-designed with RFC 0014 (the reducer-first
   core), whose §4 states the kernel side of the same operation. The
-  owner-document edits this contract requires land with that RFC's
-  acceptance (§8); the implementation waits, with the rest of that
-  kernel, on RFC 0014 §13.1's implementation-acceptance tier.
+  owner-document edits this contract requires landed with that RFC's
+  acceptance (§8), and the implementation landed with that kernel,
+  after RFC 0014 §13.1's implementation-acceptance tier closed.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
   RFC 0014's breaking changes, recorded there.
@@ -21,7 +21,7 @@
 - Feature flag: none
 - CHANGELOG: `Added` — `Command::teardown`, a prefix-teardown
   operation over scoped effect lifecycles (§3). Its cleanup companion
-  `Command::on_teardown` is RFC 0014 §4.4's surface. Both land with
+  `Command::on_teardown` is RFC 0014 §4.4's surface. Both landed with
   the RFC 0014 implementation, after that RFC's §13.1 gate.
 
 ## Summary
