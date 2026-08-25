@@ -105,7 +105,7 @@ pub enum GateMode {
     Scripted,
 }
 
-/// Refusal from [`SendGate::issue_grant`]: a grant is already outstanding on
+/// Refusal from the send gate's grant call: a grant is already outstanding on
 /// this gate.
 ///
 /// The rule is **driver-wide**, not per-origin: while one grant is

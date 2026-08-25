@@ -95,10 +95,18 @@
 //! [`Command::batch`]: crate::Command::batch
 //! [`Command::timeout`]: crate::Command::timeout
 
-// The stage-3 driving surface (RFC 0008 §9, RFC 0014 §7.2). It drives the
-// reducer-first kernel, so it stays crate-private for as long as that kernel
-// does; the non-executing store above is unaffected by it.
+// The stage-3 driving surface (RFC 0008 §9, RFC 0014 §7.2). The module is
+// crate-visible — the kernel reaches its gate recorders — and its surface is
+// re-exported here, so every item has exactly one *public* path — `tears::testing::TestDriver`, as §9.1 places it — with no
+// crate-root re-export and no prelude membership. The non-executing store
+// above is unaffected by it: the driver sits beside the store, never inside
+// it (§1.3).
 pub(crate) mod driver;
+
+pub use driver::{
+    AcceptanceLedger, Confirmed, GrantOutstanding, GrantToken, IntentLedger, Lane, NotReady,
+    ParkProbe, RunKind, RunName, SendRecord, StepReport, TestDriver, WakeSource,
+};
 
 use std::fmt::Debug;
 use std::task::Poll;

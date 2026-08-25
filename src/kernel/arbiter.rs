@@ -64,7 +64,8 @@ pub enum WakeSource {
 impl WakeSource {
     /// The armed set, in a fixed listing order that is *not* a selection
     /// order: this is what a readiness sweep iterates, while the choice
-    /// among the ready ones is made by the unbiased site in
-    /// [`Kernel::park`](super::Kernel::park).
-    pub const ALL: [Self; 3] = [Self::Data, Self::Control, Self::ProducerExit];
+    /// among the ready ones is made by the unbiased park site. Crate-only:
+    /// RFC 0008 §9.3 states the three variants and no member, so the type
+    /// enters the public surface without this.
+    pub(crate) const ALL: [Self; 3] = [Self::Data, Self::Control, Self::ProducerExit];
 }

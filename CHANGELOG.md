@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   effect constructor now returns
 - `Exit` at the crate root — `ProgramRuntime::run`'s success type, beside the
   entry point that returns it
+- The stage-3 driving layer, at `tears::testing`: `TestDriver` drives the
+  production kernel a pass at a time — the same construction path, the same
+  runtime-owned tasks, the same lanes — with the driving difference confined
+  to naming which armed source begins a pass and releasing one producer send
+  at a time through a grant handshake. `ParkProbe` scripts the park boundary.
+  `WakeSource`, `RunName`, `RunKind`, `SendRecord`, `Lane`, `StepReport`,
+  `GrantToken`, `Confirmed`, `GrantOutstanding`, `NotReady`,
+  `AcceptanceLedger` and `IntentLedger` come with them. No crate-root
+  re-export and no prelude membership: this is an opt-in surface for tests
+  that need the kernel itself rather than the non-executing store beside it
+  (RFC 0008 §9)
+
 - `Command::teardown` and `Command::on_teardown`: tear down every run placed
   under a scope prefix, and register a finalizer that runs when one is
 
