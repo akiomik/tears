@@ -251,6 +251,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order; the batch and capacity-wait events are unchanged and carry neither
   field
 
+- Constructing a `Runtime` no longer starts the init command's effect. The
+  command `Application::new` returns is dispatched inside `run()`, ahead of the
+  first subscription reconcile, so a runtime that is constructed and never run
+  spawns no task and runs no effect. The order between the init command and the
+  first reconcile is unchanged, and public signatures are untouched — only code
+  that constructs a runtime without running it, or that observes an init
+  effect's side effects before `run()`, can tell the difference (RFC 0011 §3.4,
+  INV-LC3)
+
+- A new or restarted subscription is admitted only after every previously
+  stopped subscription task has quiesced. A re-evaluation that removes or
+  replaces a subscription requests its task's cancellation and waits for that
+  task to finish before starting the replacement, so a source holding an
+  exclusive resource — a socket, a file lock — is never live twice under one
+  ID. Re-evaluations with no outstanding stopped task admit immediately as
+  before: pure additions, restarts of already-finished subscriptions, and
+  continuing subscriptions are all unaffected (RFC 0012 §4)
+
+- Subscription re-evaluation gained a message-independent trigger. The
+  quiescence of a task stopped by a steady-state cause — an ID leaving the
+  declared set, a restart, or a scope teardown selecting the run — marks
+  subscriptions dirty by itself, so the reconcile the admission wait deferred
+  runs on the pass that observes the quiescence instead of waiting for the next
+  message. A source that merely finishes marks nothing: it restarts at the next
+  re-evaluation, as it did before (RFC 0012 §4.2, INV-SE5)
+
 ### Fixed
 
 - `install_panic_hook` no longer restores the terminal for panics the runtime
