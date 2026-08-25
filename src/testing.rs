@@ -1321,6 +1321,40 @@ mod tests {
         store.finish();
     }
 
+    // INV-T7: a keyed producer quit is revoked with its run, so a cancel
+    // reaches it and `receive_quit` never sees it (RFC 0003 INV-9 as
+    // RFC 0014 §3.1's origin revocation succeeds it).
+    //
+    // The route matters. A quit returned from `update` applies at its own
+    // dispatch and names no run, so it takes no key and nothing can suppress
+    // it; the row that used to drive that shape had no subject left. This one
+    // drives the route that still has one — a spawned run emitting a quit —
+    // which is what INV-9's successor is stated over.
+    #[cfg(not(loom))]
+    #[test]
+    fn cancelled_keyed_producer_quit_is_suppressed() {
+        let id = CommandId::new("k");
+        let mut store = store_with(Command::none(), move |msg| match msg {
+            Msg::StartQuit => Command::actions(stream::once(async { Action::Quit }))
+                .cancellable(id.clone())
+                .into(),
+            Msg::Cancel => Command::cancel(id.clone()),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartQuit);
+        store.send(Msg::Cancel);
+
+        let failure = catch_unwind(AssertUnwindSafe(|| store.receive_quit()));
+        assert!(
+            failure_message(failure).contains("no pending effects"),
+            "the suppressed quit must not be deliverable"
+        );
+        // The store is still running: the quit was revoked before it could be
+        // applied, so nothing terminated.
+        store.send(Msg::Unrelated);
+        store.finish();
+    }
+
     // INV-T7: unkeyed commands are unaffected by keyed lifecycle operations
     // (RFC 0003 INV-1).
     #[test]
