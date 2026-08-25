@@ -6,7 +6,7 @@
 //!    still holds the command sender.
 //!
 //! 2. **Outer task abort** — the task that drives the stream (as
-//!    `SubscriptionManager::shutdown()` does via `handle.abort()`) is
+//!    the runtime does when it aborts a subscription run's task) is
 //!    aborted.  The old channel-based design kept the TCP connection alive in
 //!    a separate `run_subscription_loop` background task; if the Tokio
 //!    runtime tore down before that task was scheduled, the connection was
@@ -99,7 +99,7 @@ async fn websocket_closes_connection_when_stream_dropped() {
 
 #[tokio::test]
 async fn websocket_closes_connection_when_outer_task_is_aborted() {
-    // Regression test: simulate what SubscriptionManager::shutdown() does.
+    // Regression test: simulate what the runtime's shutdown does.
     // Previously, stream() spawned a background `run_subscription_loop` task
     // that held the TCP handles.  When the outer consumer task was aborted,
     // that background task needed to be scheduled to react — but during Tokio
@@ -127,7 +127,7 @@ async fn websocket_closes_connection_when_outer_task_is_aborted() {
     let url = format!("ws://{addr}");
     let ws = WebSocket::new(url);
 
-    // Spawn the stream inside a separate task, mirroring SubscriptionManager.
+    // Spawn the stream inside a separate task, mirroring the runtime.
     let (connected_tx, connected_rx) = oneshot::channel::<()>();
     let mut connected_tx = Some(connected_tx);
     let mut stream = ws.stream();
@@ -146,7 +146,7 @@ async fn websocket_closes_connection_when_outer_task_is_aborted() {
         .expect("connected within timeout")
         .expect("connected signal received");
 
-    // Abort the outer task (as SubscriptionManager::shutdown() does).
+    // Abort the outer task (as the runtime's shutdown does).
     task.abort();
     let _ = task.await;
 

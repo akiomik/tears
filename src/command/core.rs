@@ -277,10 +277,11 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// it composes through [`Command::scoped`] exactly as an explicit
     /// cancel id does (RFC 0013 INV-ST2).
     ///
-    /// Crate-private for now: the runtime that applies it is the kernel of
-    /// RFC 0014, and a public constructor whose effect the current runtime
-    /// would accept and ignore is precisely the silent mismatch RFC 0007
-    /// INV-C5 prohibits.
+    /// The runtime applies it in the cancel phase, before every spawn of the
+    /// same command, so a teardown and a same-prefix spawn in one command
+    /// tear the old runs down and start the new one fresh (RFC 0014 §3.4).
+    /// Selection is by prefix over every run kind — keyed, anonymous,
+    /// subscription and cleanup alike — not by key (RFC 0014 §4.1).
     pub fn teardown<Scope>(scope: Scope) -> Self
     where
         Scope: Eq + Hash + Send + Sync + 'static,
@@ -341,10 +342,11 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// its whole purpose and are not restricted; what is closed is the path
     /// back into the runtime.
     ///
-    /// Crate-private for now, for the reason [`Command::teardown`] is: the
-    /// runtime that starts a finalizer is the kernel of RFC 0014, and a
-    /// public constructor the current runtime would accept and ignore is the
-    /// silent mismatch RFC 0007 INV-C5 prohibits.
+    /// The registration is armed in the spawn phase — after the same
+    /// command's cancel phase — so a command that tears a scope down and
+    /// registers again consumes the old occupant's hooks and leaves the new
+    /// registration armed (RFC 0014 §3.4, §4.4). Arming starts nothing: the
+    /// finalizer runs when a teardown selects its scope.
     pub fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
             cleanups: vec![CleanupRegistration::new(finalizer)],
@@ -990,18 +992,20 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_folds_cancels_and_discards_child_keys() {
+    fn test_batch_folds_cancels_and_leaves_a_child_key_on_its_carrier() {
         let first = CommandId::new("first");
         let second = CommandId::new("second");
+        let kept = CommandId::new("kept");
         let command: Command<i32> = Command::batch([
             Command::<i32>::cancel(first.clone()),
             Command::cancel(second.clone()),
-            Command::message(1)
-                .cancellable(CommandId::new("ignored"))
-                .into(),
+            Command::message(1).cancellable(kept.clone()).into(),
         ]);
 
         assert_eq!(command.cancellation.cancels, vec![first, second]);
+        // The child's key is not discarded — it stayed where it was
+        // attached, which is the carrier (RFC 0014 §3.4).
+        assert_eq!(carrier_keys(command), vec![Some(kept)]);
     }
 
     // RFC 0014 §9 row 3: a batch no longer discards a child's key, so there

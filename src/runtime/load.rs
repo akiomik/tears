@@ -105,8 +105,10 @@ impl Channel {
 
 /// Emits the batch event (RFC 0006 §4.4): `pulled` inputs taken this batch
 /// (opening input included, INV-L12's counted unit), `updated` of them that
-/// invoked `update`, and `shared_pending` shared-channel occupancy at batch
-/// end. A quit-terminated batch does not call this — the loop exits instead.
+/// invoked `update`, and `shared_pending` — the data lane's residual
+/// occupancy at batch end, which is what that field name reads as now
+/// (RFC 0014 §9 row 9). A quit-terminated batch does not call this — the loop
+/// exits instead.
 ///
 /// A free function, not a [`LoadObserver`] method: the batch event carries no
 /// gauge state.
@@ -417,8 +419,8 @@ impl LoadObserver {
     /// neither span nor event, while `event_enabled!` matches what
     /// [`GaugeSnapshot::dispatch`]'s `tracing::debug!` will actually query
     /// with. A subscriber that filters on `Metadata::is_event()` (a common
-    /// and reasonable thing to do — `benches/runtime_load.rs`'s own
-    /// `QuitDeliverySubscriber` does) sees `enabled!`'s query as neither, so
+    /// and reasonable thing to do — `benches/kernel_load.rs`'s own
+    /// `LoadSubscriber` does) sees `enabled!`'s query as neither, so
     /// its `enabled()` returns `false` unconditionally regardless of target
     /// or level, permanently silencing every gauge event even though a real
     /// `tears::runtime::load` DEBUG event fired moments later would have been
@@ -825,7 +827,7 @@ mod tests {
     // general `enabled!`: they build different `Metadata` to query with, and
     // `enabled!`'s reports as neither span nor event. A subscriber that
     // filters on `Metadata::is_event()` — a common, reasonable thing to do,
-    // and exactly what `benches/runtime_load.rs`'s `QuitDeliverySubscriber`
+    // and exactly what `benches/kernel_load.rs`'s `LoadSubscriber`
     // does — would see `enabled!`'s query as neither and answer `enabled()`
     // `false` unconditionally, permanently silencing every gauge event even
     // though the real DEBUG event that follows would have been accepted.

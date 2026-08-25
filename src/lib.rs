@@ -136,8 +136,8 @@ pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 // public API. `runtime` is `pub(crate)`, so without this re-export the bench
 // could not name `LoadObserver` at all. Gated behind `bench-internals`, which
 // is not part of the public API and carries no semver guarantees; do not
-// enable it for normal builds. See `BenchSubscriptionManager` for the same
-// pattern applied to the subscription reconciliation hot path.
+// enable it for normal builds. `kernel::bench_support` is the same pattern
+// applied to the kernel's own internals.
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use runtime::load::LoadObserver;

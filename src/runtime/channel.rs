@@ -151,7 +151,7 @@ impl<T> Sender<T> {
     }
 
     /// Non-awaiting send used only by tests to inject into the (default,
-    /// unbounded) shared channel synchronously. The runtime's own producer path
+    /// unbounded) data lane synchronously. The runtime's own producer path
     /// always uses [`send`](Self::send) so its backpressure and no-drop
     /// behavior is exercised as in production.
     #[cfg(test)]
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(
             recorder.str_values("channel"),
             vec!["data".to_owned()],
-            "exactly one capacity-wait event, naming the shared channel"
+            "exactly one capacity-wait event, naming the data lane"
         );
         let waits = recorder.u64_values("wait_us");
         assert_eq!(waits.len(), 1, "the immediate first send fired no event");
