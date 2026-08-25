@@ -347,6 +347,14 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// registers again consumes the old occupant's hooks and leaves the new
     /// registration armed (RFC 0014 §3.4, §4.4). Arming starts nothing: the
     /// finalizer runs when a teardown selects its scope.
+    ///
+    /// **Scope it, or nothing can select it.** A registration anchors at the
+    /// scope of the boundary it is built at, and an unscoped one anchors at
+    /// the root. [`Command::teardown`] always prefixes at least one segment,
+    /// so no teardown a caller can construct covers the root — a hook
+    /// registered without [`Command::scoped`] (or a combinator boundary,
+    /// which scopes it for you) has no prefix that reaches it. Register it
+    /// under the same scope the runs it cleans up after are placed in.
     pub fn on_teardown(finalizer: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
             cleanups: vec![CleanupRegistration::new(finalizer)],

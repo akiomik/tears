@@ -187,6 +187,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A producer-originated quit still travels as output and is still asserted the
   same way.
 
+- **Breaking:** `TestStore` runs cleanup hooks, and exhaustiveness gained two
+  leak classes
+
+  `Command::on_teardown` registrations reached the store and were dropped;
+  they are now armed against their scope and run by the teardown that selects
+  them, at most once. Two consequences for existing tests. A registration
+  still armed when the test ends fails `finish` and the drop check, the way
+  undelivered output does — tear the scope down, or end with a quit, which
+  discards unfired hooks as termination does. And a finalizer that has not
+  finished fails them too; it is recoverable rather than lost, because the
+  store holds the run and re-polls it at `advance` and at the checks, so a
+  hook waiting on the controlled clock completes once `advance` reaches its
+  deadline.
+
+  Registrations must be scoped to be reachable: `Command::teardown` always
+  prefixes at least one segment, so a root-anchored hook has no prefix that
+  selects it.
+
 - **Breaking:** the capacity-wait event's `channel` field takes one value,
   `"data"`
 

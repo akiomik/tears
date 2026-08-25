@@ -807,11 +807,15 @@ Exhaustive assertion is the only mode. The rules, by call site:
   in-flight effect the test never accounted for is a leak even if it
   never produced a message; (c) a cleanup registration is still armed,
   never fired by a teardown; or (d) a cleanup run started by a teardown
-  did not finish on the poll that started it. The last two are the same
-  omission as the first two read over hooks: a finalizer's external side
-  effects are its whole purpose, so a script that ends with one unfired
-  ended without doing the thing it set up, and one the store cannot
-  attest finished is not a hook it can report as run. A time-gated leaf the test never advanced
+  has not finished. The last two are the same omission as the first two
+  read over hooks: a finalizer's external side effects are its whole
+  purpose, so a script that ends with one unfired ended without doing
+  the thing it set up, and one the store cannot attest finished is not a
+  hook it can report as run. Class (d) is recoverable exactly as an
+  unfinished leaf is — the run is held, `advance`'s anchoring scan and
+  this check both poll it again, and a finalizer waiting on the
+  controlled clock completes once the clock reaches it — so the
+  diagnostic says so rather than only naming the leak. A time-gated leaf the test never advanced
   to its deadline is exactly such an unfinished leaf: exhaustiveness
   makes declared time effects part of the accounting. After an observed
   quit, `finish` and the drop check poll nothing and pass
