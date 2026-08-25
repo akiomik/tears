@@ -6,9 +6,14 @@
 //!
 //! The steady-state phase-order invariants (INV-LC1/INV-LC2) and the
 //! first-render eligibility half of INV-LC4 are white-box and live with the
-//! pass that orders them, in `src/kernel.rs` and `src/kernel/pass.rs`. INV-LC9, the ordering half of INV-LC4, and the synchrony
-//! half of INV-LC6 are structural checks (RFC 0011 §8): they have no behavioral
-//! seam a test can anchor on.
+//! kernel that orders them: the conformance rows are in
+//! `src/kernel/conformance/lifecycle.rs`, and `src/kernel.rs` carries the
+//! bootstrap row and a phase-order row of its own. (`src/kernel/pass.rs`
+//! holds the pass implementation those rows drive, not rows.)
+//!
+//! INV-LC9, the ordering half of INV-LC4, and the synchrony half of INV-LC6
+//! are structural checks (RFC 0011 §8): they have no behavioral seam a test
+//! can anchor on.
 
 mod common;
 #[path = "common/panic_hook.rs"]
