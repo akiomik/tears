@@ -837,9 +837,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// Whether the grant `token` names has reached a terminal yet, without
     /// consuming the token, spending a turn, or clearing the grant.
     ///
-    /// It exists because the rest of the surface has no non-destructive way
-    /// to ask the
-    /// question: [`confirm`](Self::confirm) consumes the token and fails on
+    /// It exists because the rest of the surface has no non-destructive
+    /// way to ask the question: [`confirm`](Self::confirm) consumes the
+    /// token and fails on
     /// its budget, so a row that wants to assert "this release has *not*
     /// committed yet" and then go on driving has nothing to assert with —
     /// and a row that instead reads the acceptance ledger asserts nothing at

@@ -94,10 +94,12 @@
 pub(crate) mod application;
 pub(crate) mod cadence;
 pub mod command;
-// The reducer-first core (RFC 0014). Crate-private while the production
-// entry point still runs the older topology: a public constructor whose
-// effect nothing applies is the silent mismatch RFC 0007 INV-C5 prohibits,
-// so nothing here is reachable from outside the crate until the switch.
+// The reducer-first core (RFC 0014): what the production entry point runs.
+// The module stays crate-private because its registries, lanes and
+// accounting are the mechanism §10 calls informative rather than surface.
+// Three of its types are public anyway, and only through the stage-3
+// driver that scripts them: `WakeSource`, `Lane` and `GrantOutstanding`
+// reach the outside as `tears::testing::*` and by no other path.
 pub(crate) mod kernel;
 pub(crate) mod noop_waker;
 pub(crate) mod panic;

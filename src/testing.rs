@@ -96,11 +96,12 @@
 //! [`Command::timeout`]: crate::Command::timeout
 
 // The stage-3 driving surface (RFC 0008 §9, RFC 0014 §7.2). The module is
-// crate-visible — the kernel reaches its gate recorders — and its surface is
-// re-exported here, so every item has exactly one *public* path — `tears::testing::TestDriver`, as §9.1 places it — with no
-// crate-root re-export and no prelude membership. The non-executing store
-// above is unaffected by it: the driver sits beside the store, never inside
-// it (§1.3).
+// crate-visible — the kernel reaches its gate recorders — and its surface
+// is re-exported here, so every item has exactly one *public* path:
+// `tears::testing::TestDriver`, as §9.1 places it, with no crate-root
+// re-export and no prelude membership. The non-executing store above is
+// unaffected by it: the driver sits beside the store, never inside it
+// (§1.3).
 pub(crate) mod driver;
 
 pub use driver::{
