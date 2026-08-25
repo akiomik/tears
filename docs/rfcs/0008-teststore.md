@@ -351,11 +351,23 @@ generic) are implementation latitude.
   saying so (quit is asserted only via `receive_quit`). If nothing is
   deliverable, both fail with a diagnostic that distinguishes "no
   pending effects" from "effects pending but not ready" (§4.3).
-- **`receive_quit`** asserts the next deliverable output is a quit
-  request. After it succeeds, the store is in the quit state: `send`,
-  `advance`, `receive`, `receive_matching`, and `receive_quit` all
-  fail; `state`, `redraw_requested`, `subscription_ids`, and `finish`
-  remain callable.
+- **`receive_quit`** observes a quit by either route. A quit an
+  `update` returned was applied at that dispatch, synchronously, and
+  does not travel as output — `receive_quit` observes the application
+  and requires nothing to be deliverable. A producer-originated quit
+  does travel, so for that route `receive_quit` asserts the next
+  deliverable output is a quit request. After it succeeds, the store is
+  in the quit state: `send`, `advance`, `receive`, `receive_matching`,
+  and `receive_quit` all fail; `state`, `redraw_requested`,
+  `subscription_ids`, and `finish` remain callable.
+- **A dispatch-applied quit is terminal before it is observed.** The
+  application stopped when the quit applied, not when the test noticed,
+  so `send`, `advance`, `receive`, and `receive_matching` fail from that
+  dispatch onward — a store that accepted a further input there would be
+  scripting an execution the runtime cannot produce, since no later
+  input intervenes between the update that returned a quit and
+  termination. `receive_quit` is the one driving call that stays
+  available, because observing it is how the state is left.
 - **`subscription_ids`** calls `Application::subscriptions` and returns
   the declared IDs in declaration order, deduplicated by RFC 0005 §3.5's
   first-occurrence-stable rule: for equal full IDs in the declared list,
@@ -762,7 +774,12 @@ Exhaustive assertion is the only mode. The rules, by call site:
   of runtime scheduling (§4.2's citation rule). Undelivered output is
   not lost track of either way: it stays subject to the `receive*`,
   `finish`, and drop checks below, which remain exhaustive. `send` still
-  fails after an observed quit (§5.3).
+  fails after a quit, applied or observed (§5.3).
+- **An applied quit that was never observed fails the `finish` and drop
+  checks**, with the same standing as output that was never received:
+  the run ended somewhere the test did not say it ended, and a script
+  that omits it reads as though it ran to completion. Only an *observed*
+  quit reaches the carve-out below.
 - **`receive` / `receive_matching` / `receive_quit`** fail on a
   mismatch, on quit-versus-message confusion, or when nothing is
   deliverable — each with a diagnostic that names the actual value
@@ -998,9 +1015,10 @@ Enforcement classes follow the pre-review checklist's definitions
   origins are required alongside both key classes. The `send`-carried
   supersede/cancel case (where the pending output is *removed*, not
   retained) is INV-T7's, not a retention test.
-- **INV-T9**: quit terminality and carve-out — after `receive_quit`,
-  `send`/`advance`/`receive*` fail on the quit state without polling
-  any leaf,
+- **INV-T9**: quit terminality and carve-out — from the moment a quit
+  applies, `send`/`advance`/`receive`/`receive_matching` fail on the
+  quit state without polling any leaf, and after `receive_quit` so does
+  `receive_quit`;
   and the `finish` and drop checks poll nothing and pass regardless of
   remaining output. Behavioral: a test quits with output still
   pending — including an I/O-dependent leaf, which the post-quit
