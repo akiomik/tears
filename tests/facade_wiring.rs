@@ -34,8 +34,8 @@ use futures::stream;
 use ratatui::Frame;
 use ratatui::widgets::Paragraph;
 use tears::prelude::*;
-use tears::reducer::{Exit, Program, Reducer, ScopeValue};
-use tears::{BoxStream, EffectCommand, ProgramRuntime, RuntimeConfig, SubscriptionSource};
+use tears::reducer::{Program, Reducer, ScopeValue};
+use tears::{BoxStream, EffectCommand, Exit, ProgramRuntime, RuntimeConfig, SubscriptionSource};
 use tokio::time::{Duration, timeout};
 
 /// What both entry points write, in the order the kernel drives them.

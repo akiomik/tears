@@ -14,13 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `Application` adapter applied, so both run the same kernel over the same
   lanes
 - The reducer-first core, at `tears::reducer`: the `Reducer` and `Program`
-  traits, `Exit`, the `ReducerExt` combinators (`scope`, `for_each`,
+  traits, the `ReducerExt` combinators (`scope`, `for_each`,
   `presented`, `into_program`) with their `Scoped` / `ForEach` / `Presented` /
   `IntoProgram` results, the `Keyed` and `Slot` collections and the
   `ScopeValue` bound their segments satisfy, and `AppProgram`, the adapter the
   facade applies
 - `EffectCommand<Msg>` at the crate root — one effect carrier, and what every
   effect constructor now returns
+- `Exit` at the crate root — `ProgramRuntime::run`'s success type, beside the
+  entry point that returns it
 - `Command::teardown` and `Command::on_teardown`: tear down every run placed
   under a scope prefix, and register a finalizer that runs when one is
 

@@ -105,6 +105,7 @@ use load::LoadObserver;
 ///
 /// * `P` - the program to run, typically the result of
 ///   [`ReducerExt::into_program`](crate::reducer::ReducerExt::into_program)
+#[must_use = "a runtime is inert until it is run; call .run(terminal) to execute the program"]
 pub struct ProgramRuntime<P: Program> {
     program: P,
     flags: P::Flags,
@@ -176,6 +177,7 @@ impl<P: Program> ProgramRuntime<P> {
 /// # Examples
 ///
 /// See the [crate-level documentation](crate) for a complete example.
+#[must_use = "a runtime is inert until it is run; call .run(terminal) to execute the application"]
 pub struct Runtime<App: Application> {
     inner: ProgramRuntime<AppProgram<App>>,
 }

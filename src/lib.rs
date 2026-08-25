@@ -125,6 +125,11 @@ pub use command::effect_command::EffectCommand;
 // "External Crate Re-exports".
 pub use futures::stream::BoxStream;
 pub use panic::install_panic_hook;
+// `ProgramRuntime::run`'s success type, at the crate root beside the entry
+// point that returns it (docs/api-guidelines.md, "Root Promotion Criteria"
+// on companion types). Not in the prelude: the facade's `run` returns
+// `Result<(), _>`, so a minimal skeleton never names it.
+pub use reducer::exit::Exit;
 pub use runtime::{ProgramRuntime, Runtime};
 // `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app
