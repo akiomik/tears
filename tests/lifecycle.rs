@@ -1,13 +1,12 @@
 //! Integration tests for RFC 0011's runtime lifecycle contract at the layer
 //! its invariants place them: the controlled and abrupt termination routes and
 //! their two-stage postconditions (INV-LC5/INV-LC6/INV-LC7), panic containment
-//! for runtime-owned producer tasks (INV-LC8), and the construction-inertness
-//! contract whose behavior change lands with the 0.11.0 lifecycle work
+//! for runtime-owned producer tasks (INV-LC8), and construction inertness
 //! (INV-LC3, RFC 0011 §3.4).
 //!
 //! The steady-state phase-order invariants (INV-LC1/INV-LC2) and the
-//! first-render eligibility half of INV-LC4 are white-box and live in
-//! `src/runtime.rs`. INV-LC9, the ordering half of INV-LC4, and the synchrony
+//! first-render eligibility half of INV-LC4 are white-box and live with the
+//! pass that orders them, in `src/kernel.rs` and `src/kernel/pass.rs`. INV-LC9, the ordering half of INV-LC4, and the synchrony
 //! half of INV-LC6 are structural checks (RFC 0011 §8): they have no behavioral
 //! seam a test can anchor on.
 
@@ -829,10 +828,10 @@ async fn drain_executor() {
 
 // INV-LC3: constructing a `Runtime` spawns no runtime-owned task, polls no
 // command effect, and starts no subscription source — construction is inert
-// (RFC 0011 §3.1). Today the constructor dispatches the init command itself, so
-// this asserts the post-conformance contract of the §3.4 deliverable.
+// (RFC 0011 §3.1). The constructor holds its flags and does nothing with them;
+// `run` is what initializes the application and dispatches the init command,
+// so there is no work for this to observe.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "RFC 0011 §3.4 conformance lands with the 0.11.0 lifecycle change"]
 async fn constructing_a_runtime_starts_no_effect_and_no_subscription_source() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
@@ -858,11 +857,11 @@ async fn constructing_a_runtime_starts_no_effect_and_no_subscription_source() {
     drop(runtime);
 }
 
-// INV-LC6 (never-run-drop row): with the §3.4 change landed there is nothing to
-// wind down when a constructed-but-never-run runtime is dropped, and this row
-// asserts exactly that, reusing INV-LC3's recorder setup (RFC 0011 §8).
+// INV-LC6 (never-run-drop row): nothing starts at construction, so there is
+// nothing to wind down when a constructed-but-never-run runtime is dropped.
+// This row asserts exactly that, reusing INV-LC3's recorder setup
+// (RFC 0011 §8).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-#[ignore = "RFC 0011 §3.4 conformance lands with the 0.11.0 lifecycle change"]
 async fn dropping_a_never_run_runtime_winds_down_nothing() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
