@@ -1163,9 +1163,9 @@ invariants of §12 are.
 ## 11. Adversarial models considered
 
 - *Facade special-casing* — a kernel with an `Application` fast path
-  passes API-level tests; excluded by INV-RC1's inventory walk (every
-  owner row and phase step identical) and the shared-path behavioral
-  checks.
+  passes API-level tests; excluded by INV-RC1's inventory walk — its
+  own concern list and every §6 phase step identical on both paths —
+  and the shared-path behavioral checks.
 - *Diff-based removal detection* — same-update remove-and-reinsert of
   one key produces no state diff, so the old instance's runs leak;
   excluded by the journal contract (INV-RC3 records removals, not
