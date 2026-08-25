@@ -111,9 +111,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time;
 
 use crate::application::Application;
-use crate::command::{
-    Action, CancelPolicy, CleanupRegistration, CommandId, RuntimeCommandParts, SpawnEntry,
-};
+use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
 use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
@@ -142,8 +140,22 @@ struct PendingLeaf<Msg> {
 
 /// A cleanup run in flight: the finalizer the teardown started, and the
 /// scope it was registered against for diagnostics.
-struct RunningCleanup {
+struct ArmedCleanup {
+    /// Zero-based arming position over the store's lifetime. The sibling of
+    /// a leaf's enqueue position, and there for the same reason: a scope
+    /// path is structurally erased, so it cannot name *which* registration a
+    /// diagnostic means, while the order they were armed in can.
+    position: usize,
+    /// The scope this hook is anchored at — what a teardown prefix has to
+    /// cover to select it.
     scope: ScopePath,
+    finalizer: BoxFuture<'static, ()>,
+}
+
+/// A cleanup run in flight, identified by the position its registration was
+/// armed at.
+struct RunningCleanup {
+    position: usize,
     finalizer: BoxFuture<'static, ()>,
 }
 
@@ -254,7 +266,7 @@ where
     /// Armed cleanup registrations in arming order. A registration starts
     /// nothing; a later teardown whose prefix covers its scope is what runs
     /// it (RFC 0014 §4.4).
-    armed: Vec<CleanupRegistration>,
+    armed: Vec<ArmedCleanup>,
     /// Cleanup runs a teardown started that have not finished yet, held so
     /// they can be driven further. A run leaves this set by completing, so
     /// the set shrinks as the test makes progress — a count could only grow.
@@ -269,6 +281,8 @@ where
     quit: QuitState,
     /// Total leaves ever enqueued; the next leaf's enqueue position.
     enqueued_leaves: usize,
+    /// Total registrations ever armed; the next one's arming position.
+    armed_registrations: usize,
     /// Set by [`TestStore::finish`] so the drop check does not run twice.
     finished: bool,
 }
@@ -327,6 +341,7 @@ where
             redraw_requested: true,
             quit: QuitState::Running,
             enqueued_leaves: 0,
+            armed_registrations: 0,
             finished: false,
         };
         store.enqueue_command(init_command.into_runtime_parts());
@@ -607,7 +622,15 @@ where
         // teardowns: a command that tears a scope down and registers again
         // consumes the old occupant's hooks and leaves the new registration
         // armed (RFC 0014 §3.4, §4.4).
-        self.armed.extend(parts.cleanups);
+        for registration in parts.cleanups {
+            let position = self.armed_registrations;
+            self.armed_registrations += 1;
+            self.armed.push(ArmedCleanup {
+                position,
+                scope: registration.scope,
+                finalizer: registration.finalizer,
+            });
+        }
 
         if parts.quit_now {
             self.quit = QuitState::QuitApplied;
@@ -678,7 +701,7 @@ where
         let _context = self.context.enter();
         for registration in selected {
             let mut run = RunningCleanup {
-                scope: registration.scope,
+                position: registration.position,
                 finalizer: registration.finalizer,
             };
             if !run.poll_once() {
@@ -841,31 +864,36 @@ where
         // finished. Both are the same omission undelivered output is: the
         // script set something up and ended without exercising it, and a
         // cleanup's whole purpose is its external side effects, so an
-        // unfired hook means those never happened. Checked before the leaf
-        // scan because neither needs a poll to establish.
-        assert!(
-            self.armed.is_empty(),
-            "TestStore::{site}: {} cleanup registration(s) were never fired; \
-             tear down the scope they are registered against, or drop them with a quit",
-            self.armed.len()
-        );
-        // Drive the in-flight runs once more before judging them: this is a
-        // scan site like any other, and a hook that became ready since the
-        // last one has finished, not leaked.
+        // unfired hook means those never happened.
+        //
+        // The two are established differently, which is why they are not one
+        // check. An armed registration is settled without a poll — nothing
+        // has started, so there is nothing to ask. An in-flight run is not:
+        // it may have become ready since the scan that last drove it, so it
+        // gets one more poll here before being judged, exactly as a pending
+        // leaf does below.
+        if let Some(first) = self.armed.first() {
+            let position = first.position;
+            panic!(
+                "TestStore::{site}: {} cleanup registration(s) never fired; first armed at \
+                 position {position}; tear down the scope it is registered against, or end the \
+                 test with a quit",
+                self.armed.len()
+            );
+        }
         {
             let _context = self.context.enter();
             self.running_cleanups.retain_mut(|run| !run.poll_once());
         }
-        assert!(
-            self.running_cleanups.is_empty(),
-            "TestStore::{site}: {} cleanup run(s) have not finished; if a finalizer is waiting \
-             on time, advance the clock so it can complete (scope: {:?})",
-            self.running_cleanups.len(),
-            self.running_cleanups
-                .iter()
-                .map(|run| &run.scope)
-                .collect::<Vec<_>>()
-        );
+        if let Some(first) = self.running_cleanups.first() {
+            let position = first.position;
+            panic!(
+                "TestStore::{site}: {} cleanup run(s) not driven to completion; first still \
+                 running from the registration armed at position {position}; if a finalizer is \
+                 waiting on time, advance the clock so it can complete",
+                self.running_cleanups.len()
+            );
+        }
 
         let mut leak = None;
         let _context = self.context.enter();
@@ -1542,7 +1570,10 @@ mod tests {
     // P2: and one still waiting is a leak that says what to do about it.
     #[cfg(not(loom))]
     #[test]
-    #[should_panic(expected = "advance the clock so it can complete")]
+    #[should_panic(
+        expected = "1 cleanup run(s) not driven to completion; first still running from the \
+                    registration armed at position 0"
+    )]
     fn an_unfinished_cleanup_run_fails_the_exhaustiveness_check() {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Arm => Command::on_teardown(async { time::sleep(Duration::from_secs(1)).await })
@@ -1560,13 +1591,36 @@ mod tests {
     // set up, and a cleanup's side effects are its whole purpose.
     #[cfg(not(loom))]
     #[test]
-    #[should_panic(expected = "cleanup registration(s) were never fired")]
+    #[should_panic(expected = "1 cleanup registration(s) never fired; first armed at position 0")]
     fn an_unfired_cleanup_registration_fails_the_exhaustiveness_check() {
         let mut store = store_with(Command::none(), |msg| match msg {
             Msg::Arm => Command::on_teardown(async {}).scoped("pane-1"),
             _ => Command::none(),
         });
         store.send(Msg::Arm);
+        store.finish();
+    }
+
+    // The position identifies *which* registration, which a scope path
+    // cannot: `ScopePath` is structurally erased, so printing it gives a
+    // reader an opaque token rather than a way back to the line that armed
+    // the hook. Two hooks armed in order, the first one torn down, and the
+    // diagnostic names the second by the position it was armed at.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "1 cleanup registration(s) never fired; first armed at position 1")]
+    fn the_unfired_diagnostic_names_the_registration_by_arming_position() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::Arm => Command::batch([
+                Command::on_teardown(async {}).scoped("pane-1"),
+                Command::on_teardown(async {}).scoped("pane-2"),
+            ]),
+            Msg::Tear => Command::teardown("pane-1"),
+            _ => Command::none(),
+        });
+        store.send(Msg::Arm);
+        // Consumes the first registration only; the second is still armed.
+        store.send(Msg::Tear);
         store.finish();
     }
 

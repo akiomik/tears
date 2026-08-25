@@ -823,7 +823,11 @@ Exhaustive assertion is the only mode. The rules, by call site:
   quit cannot fail them, because §4.3's failure requires a poll.
 - Every exhaustiveness failure names the leaked messages via `Debug`;
   unfinished leaves that have produced no value are reported by count
-  and enqueue position (there is no value to print).
+  and enqueue position (there is no value to print). Cleanup classes
+  report the same way, by count and by the position their registration
+  was armed at: a hook has no value to print either, and its scope is
+  structurally erased, so the arming order is what identifies *which*
+  registration a failure means.
 
 Rationale for exhaustive-only: the harness exists to make effect flow
 *fully* explicit — TCA's experience is that the exhaustive mode is where
