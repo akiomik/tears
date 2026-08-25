@@ -219,12 +219,6 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 /// assert_eq!(store.state().value, 42);
 /// store.finish();
 /// ```
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent one-bit facts about one store — redraw request, \
-              quit observed, dispatch quit, finished — with no state they \
-              could be folded into without inventing one"
-)]
 pub struct TestStore<App: Application>
 where
     App::Message: Debug,
@@ -239,14 +233,13 @@ where
     /// Undelivered effect leaves in enqueue order.
     pending: Vec<PendingLeaf<App::Message>>,
     redraw_requested: bool,
-    quit_observed: bool,
-    /// A quit the dispatch applied synchronously, waiting to be observed.
-    ///
-    /// It is *not* deliverable output and does not queue behind any: an
-    /// `update`-returned quit applies at its dispatch's completion, before
-    /// the next input is pulled (RFC 0014 §3.3), so it cannot be overtaken
-    /// by a message the same command produced.
-    dispatch_quit: bool,
+    /// Where the store is between running and a quit the test has assented
+    /// to. Three states rather than two booleans, because the middle one is
+    /// real: a quit applies at its dispatch and is only *observed* later, and
+    /// the two facts constrain different calls. Two independent flags could
+    /// represent "observed but never applied", which is not a state this
+    /// store has.
+    quit: QuitState,
     /// Total leaves ever enqueued; the next leaf's enqueue position.
     enqueued_leaves: usize,
     /// Set by [`TestStore::finish`] so the drop check does not run twice.
@@ -303,8 +296,7 @@ where
             // Placeholder only: enqueue_command below overwrites this with
             // the init command's folded directive (§5.2).
             redraw_requested: true,
-            quit_observed: false,
-            dispatch_quit: false,
+            quit: QuitState::Running,
             enqueued_leaves: 0,
             finished: false,
         };
@@ -473,14 +465,19 @@ where
     /// has already been observed.
     #[track_caller]
     pub fn receive_quit(&mut self) {
-        self.assert_running("receive_quit");
-        if self.dispatch_quit {
-            self.dispatch_quit = false;
-            self.quit_observed = true;
+        // A second observation is a post-quit call like any other, and says
+        // so in the same words, so a test asserting the family's diagnostic
+        // does not have to special-case this one.
+        assert!(
+            self.quit != QuitState::QuitObserved,
+            "TestStore::receive_quit: the application has quit; remaining output is discarded and no further steps run"
+        );
+        if self.quit == QuitState::QuitApplied {
+            self.quit = QuitState::QuitObserved;
             return;
         }
         match self.next_deliverable("receive_quit") {
-            Action::Quit => self.quit_observed = true,
+            Action::Quit => self.quit = QuitState::QuitObserved,
             Action::Message(msg) => panic!(
                 "TestStore::receive_quit: expected a quit request, but the next deliverable output is a message: {msg:?}"
             ),
@@ -574,7 +571,7 @@ where
         }
 
         if parts.quit_now {
-            self.dispatch_quit = true;
+            self.quit = QuitState::QuitApplied;
         }
     }
 
@@ -683,10 +680,16 @@ where
 
     #[track_caller]
     fn assert_running(&self, method: &str) {
-        assert!(
-            !self.quit_observed,
-            "TestStore::{method}: the application has quit; remaining output is discarded and no further steps run"
-        );
+        match self.quit {
+            QuitState::Running => {}
+            QuitState::QuitApplied => panic!(
+                "TestStore::{method}: a quit was applied at its dispatch and no later input can \
+                 intervene before termination; observe it with TestStore::receive_quit"
+            ),
+            QuitState::QuitObserved => panic!(
+                "TestStore::{method}: the application has quit; remaining output is discarded and no further steps run"
+            ),
+        }
     }
 
     #[track_caller]
@@ -748,8 +751,19 @@ where
             Unfinished { position: usize },
         }
 
-        if self.quit_observed {
-            return;
+        match self.quit {
+            // Terminal: shutdown legally discards what is left, so this
+            // polls nothing and passes (INV-T9).
+            QuitState::QuitObserved => return,
+            // Applied but never observed. The application stopped and the
+            // test never said so, which is the same class of omission as
+            // output that was never received — and the more misleading one,
+            // because the test reads as though it ran to completion.
+            QuitState::QuitApplied => panic!(
+                "TestStore::{site}: a quit was applied at its dispatch and never observed; \
+                 assert it with TestStore::receive_quit"
+            ),
+            QuitState::Running => {}
         }
 
         let mut leak = None;
@@ -811,6 +825,27 @@ where
         }
         self.check_exhaustive("drop check");
     }
+}
+
+/// How far a quit has got.
+///
+/// A quit is applied by the dispatch that returns it and observed by the test
+/// afterwards, and everything in between is a state the store has to be able
+/// to name: the application has stopped, but the test has not yet said so.
+/// Calls that would drive the application further fail from
+/// [`QuitApplied`](QuitState::QuitApplied) onward — that is what "no later
+/// input can intervene between the update that returned it and termination"
+/// means on this side of the seam — while the exhaustiveness checks treat an
+/// unobserved quit as a leak, exactly as they treat undelivered output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuitState {
+    /// No quit has been applied.
+    Running,
+    /// A dispatch applied a quit; no `receive_quit` has observed it yet.
+    QuitApplied,
+    /// The test observed the quit. The store is terminal and the
+    /// exhaustiveness checks pass without polling.
+    QuitObserved,
 }
 
 /// Renders one action for a leak diagnostic; messages via `Debug`, quit
@@ -1442,6 +1477,44 @@ mod tests {
         let _ = store.subscription_ids();
         assert!(store.redraw_requested(), "the quit step requested a redraw");
         store.finish();
+    }
+
+    // RFC 0008 §5.3, the applied-but-unobserved state. Both rows below were
+    // silent before the quit state was one value instead of two booleans: the
+    // store recorded the applied quit but nothing consulted it until
+    // `receive_quit` did, so a test that never asked, or that kept driving,
+    // passed.
+
+    // A quit the dispatch applied and the test never observed is a leak, and
+    // for the same reason undelivered output is: the run ended somewhere the
+    // test did not say it ended. Without this the script reads as though it
+    // ran to completion.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "a quit was applied at its dispatch and never observed")]
+    fn an_unobserved_applied_quit_fails_the_exhaustiveness_check() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartQuit);
+        store.finish();
+    }
+
+    // And nothing runs after it. "No later input can intervene between the
+    // update that returned it and termination" is the property the
+    // synchronous route buys (RFC 0014 §3.3); a store that accepted a further
+    // `send` here would be scripting an execution the runtime cannot produce.
+    #[cfg(not(loom))]
+    #[test]
+    #[should_panic(expected = "no later input can intervene before termination")]
+    fn a_send_after_an_applied_quit_fails() {
+        let mut store = store_with(Command::none(), |msg| match msg {
+            Msg::StartQuit => Command::quit(),
+            _ => Command::none(),
+        });
+        store.send(Msg::StartQuit);
+        store.send(Msg::Unrelated);
     }
 
     // RFC 0008 §5.2: `redraw_requested` reports the init command's folded
