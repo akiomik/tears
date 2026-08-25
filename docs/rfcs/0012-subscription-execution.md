@@ -163,7 +163,7 @@ builds on:
   fact rather than a pending request. After quiescence the run-owned
   stream and execution state are no longer polled and have been
   dropped. The declaration-side `Source` value's own drop point is
-  *not* pinned: today's spawner consumes it when the stream is built
+  *not* pinned: the spawner consumes it when the stream is built
   (`src/subscription/core.rs`), and a declaring layer must not rely on
   the value living until quiescence — or on any particular drop
   moment. (This is RFC 0011's request/quiescent two-stage model
@@ -309,12 +309,12 @@ preceded. An observable consequence of
 (2): if subscription A's stream finishes naturally while stopped B is
 still quiescing, B's quiescence dirties the next frame pass, whose
 re-evaluation restarts the still-declared A with no new message having
-been processed — where today A would wait for the next message. The
-`Application::subscriptions` rustdoc currently pins the
-single-trigger world ("re-evaluates subscriptions only after a
-message is processed"; a finished source restarts "after the next
-message" — `src/application.rs`); updating that rustdoc to the
-two-trigger contract is an implementation deliverable of this RFC,
+been processed — where under the single-trigger world A waited for the
+next message. **Delivered.** The `Application::subscriptions` rustdoc
+pinned that world ("re-evaluates subscriptions only after a message is
+processed"; a finished source restarts "after the next message"); it now
+names both dirty sources and says which one needs no message
+(`src/application.rs`), which was this RFC's documentation deliverable
 alongside the conformance change itself.
 
 RFC 0005 INV-13 — a finished subscription that remains desired under
@@ -352,11 +352,12 @@ adapter and composed reducers reach the same reconciliation through the
 same declared set (RFC 0014 §2.1, §9 row 12 — the register row that
 records this generalization). Neither site restates it.
 
-This obligation exists today only as `Application` rustdoc
-(`src/application.rs`); this RFC is its owner of record, and the
-rustdoc carries the same contract, citing this RFC (a documentation
-deliverable landing with the implementation). Two consumers already
-lean on it: the runtime re-evaluates only on dirty frame passes
+This obligation was stated only as `Application` rustdoc when this RFC
+was written; this RFC is its owner of record, and both declaration sites
+now carry it citing this RFC — `Application::subscriptions` and
+`Reducer::subscriptions` alike (`src/application.rs`, `src/reducer.rs`),
+which INV-SE6 quantifies over. Two consumers lean on it: the runtime
+re-evaluates only on dirty frame passes
 (RFC 0011 §2) — sound only if declarations depend on state alone — and
 RFC 0008 INV-T11's `subscription_ids` determinism is the same
 assumption observed from the store side.
@@ -440,7 +441,7 @@ immediately" is unconditional and stays so; and a subscription outside
 the adopted policy's target set keeps every promptness clause — a
 policy touches no schedule but its targets'. The promptness clauses
 are stated for policy-off
-operation — the only mode that exists today — and the rate-policy
+operation — the only mode that exists — and the rate-policy
 RFC's precondition is to amend exactly their re-admission half, in
 this RFC and in RFC 0005 (INV-13), to be explicitly scoped to
 policy-off operation before its delays become

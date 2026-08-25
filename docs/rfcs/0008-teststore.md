@@ -30,11 +30,11 @@
 > retry backoff) deliverable through ordinary `receive` flow (§4.3, §7).
 > `Timer`-based subscriptions are not staged here at all: TestStore
 > never executes subscription sources (§1.2), so lifting that is a
-> separate subscription-execution design, not stage 2. Stage 3 —
-> gated on RFC 0014 — is not a store stage: it is a separate driving
-> layer beside the store (§1.3, §9) that executes the production
-> kernel, subscription sources included, and leaves §1.2's
-> non-execution boundary exactly where it is.
+> separate subscription-execution design, not stage 2. Stage 3 — which
+> waited on RFC 0014's kernel and landed with it — is not a store stage
+> either: it is a separate driving layer beside the store (§1.3, §9)
+> that executes the production kernel, subscription sources included,
+> and leaves §1.2's non-execution boundary exactly where it is.
 
 ## Summary
 
@@ -372,20 +372,20 @@ generic) are implementation latitude.
   first-occurrence-stable rule: for equal full IDs in the declared list,
   only the first occurrence is kept, at its original position among the
   survivors (`[A, B, A]` → `[A, B]`, never `[B, A]` or any other
-  reordering). This is the same *desired-set* `SubscriptionManager::update`
-  computes before reconciling — not the set it spawns: `update` leaves an
-  already-running id in that set untouched and calls a source's
-  `stream()` only for an id newly entering it (`src/subscription.rs`).
+  reordering). This is the same *desired set* the runtime's reconcile
+  computes before admitting anything — not the set it starts: a
+  reconcile leaves an already-running id untouched and calls a source's
+  `stream()` only for an id newly entering the set
+  (`src/kernel/pass.rs`, `src/subscription/core.rs`).
   `subscription_ids` performs the same dedup without going anywhere near
   that machinery — it never calls `stream()` on any declared source and
-  never constructs or runs a `SubscriptionManager` (§1.2) — so its
-  return value predicts the reconciliation *input*, not which ids the
-  runtime spawns or which are currently live. For the same reason it
-  does not reproduce the
+  never runs a reconcile (§1.2) — so its return value predicts the
+  reconciliation *input*, not which ids the runtime starts or which are
+  currently live. For the same reason it does not reproduce the
   warning-level tracing event RFC 0005 §3.5 requires of the ignored
-  duplicate: that event is `SubscriptionManager::update`'s own side
-  effect, never triggered by a call that runs no `SubscriptionManager`
-  at all. `SubscriptionId` is already `Clone + Eq + Hash + Debug`, so
+  duplicate: that event is the reconcile's own side effect, never
+  triggered by a call that runs no reconcile at all. `SubscriptionId`
+  is already `Clone + Eq + Hash + Debug`, so
   the test asserts on the returned `Vec` directly. This is the
   observation the `subscriptions`-purity contract (`src/application.rs`)
   makes meaningful: the declared set is a pure function of state, so
@@ -742,8 +742,8 @@ The init-command reading is TestStore-specific introspection and does
 enqueues the init command directly and never consults its redraw
 directive at the first frame: the first render starts out eligible
 unconditionally, and when it happens it renders regardless of that
-directive — its occurrence itself is not promised (RFC 0011 §3.2)
-(`src/runtime/core.rs`, `src/runtime/pending_work.rs`). So
+directive — its occurrence itself is not promised (RFC 0011 §3.2,
+RFC 0014 §6.2). So
 `redraw_requested()` before the first step exposes the init command's
 folded directive as a `Command` property, not as a claim about whether
 the runtime would redraw its first frame — the only production redraw
@@ -1081,13 +1081,12 @@ Enforcement classes follow the pre-review checklist's definitions
   collapse to their first occurrence, at that occurrence's original
   position — `[A, B, A]` → `[A, B]`, never `[B, A]`), and produces it
   without calling `stream()` on any declared source or otherwise
-  constructing or running a `SubscriptionManager` (§1.2, §3.2). The
-  returned `Vec` is the reconciliation *input* `SubscriptionManager::update`
-  would compute, not a prediction of which ids it spawns or already has
-  running — `update` leaves an already-running id untouched and calls
-  `stream()` only for one newly entering the set
-  (`src/subscription.rs`). Structural: review of `subscription_ids`
-  for the absence of any `SubscriptionManager` construction or
+  running a reconcile (§1.2, §3.2). The returned `Vec` is the
+  reconciliation *input* a reconcile would compute, not a prediction of
+  which ids it starts or already has running — a reconcile leaves an
+  already-running id untouched and calls `stream()` only for one newly
+  entering the set (`src/kernel/pass.rs`). Structural: review of
+  `subscription_ids` for the absence of any reconcile or
   `Subscription::spawn`/`stream()` call. Behavioral: a duplicate-ID test
   asserting `[A, B, A]` dedups to `[A, B]`, not `[B, A]` or any other
   order — ruling out a last-occurrence or resorted implementation; a
@@ -1219,8 +1218,9 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
     from — and `RuntimeConfig`, which that landing revises: it loses
     the frame-rate field and `keyed_channel_capacity`, and
     `app_channel_capacity` becomes `data_lane_capacity` with no alias
-    (RFC 0014 §9 rows 2 and 4). `TestDriver::new`'s `config`
-    parameter is that revised type, never today's.
+    (RFC 0014 §9 rows 2 and 4). That revised type is the
+    `RuntimeConfig` the crate has, and it is `TestDriver::new`'s `config`
+    parameter.
 - **The store's boundary is unmoved.** Stages 1 and 2 keep §1.2's
   non-execution boundary exactly: the store still never starts,
   polls, or restarts a subscription source and never spawns a task,

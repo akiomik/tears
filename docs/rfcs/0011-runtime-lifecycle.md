@@ -13,8 +13,8 @@
 - Feature flag: none
 - CHANGELOG: `Changed` — constructing a `Runtime` no longer starts the
   init command's effect; it starts inside `run()` (§3.4), observable only
-  to code that constructs a runtime it does not run. The entry lands with
-  the implementation. The §2.1 subscription lifecycle-completion dirty
+  to code that constructs a runtime it does not run. The entry landed
+  with the implementation. The §2.1 subscription lifecycle-completion dirty
   source is a behavior change too (message-independent re-evaluation);
   its `Changed` entry is carried by RFC 0012, which owns that source's
   recording rule.
@@ -100,7 +100,7 @@ funnel, the single-task parking assumption — is recorded as informative
 - **Subscription reconciliation semantics.** Which subscriptions run,
   restart, or stop is RFC 0005 and the `Application::subscriptions`
   documentation; this RFC pins only *when* reconciliation happens.
-- **Graceful drain.** This RFC pins only that today's termination is
+- **Graceful drain.** This RFC pins only that the termination it states is
   the zero-grace degenerate form of a drain model (§4.5); a bounded
   grace period is future work with its own RFC.
 - **Supervision surface.** Typed task-exit causes and any supervision
@@ -261,15 +261,17 @@ intake half is exactly what it is evidence of.
 
 ### 3.4 Deliverable: construction-dispatch removal
 
-Today the constructor dispatches the init command itself
-(`RuntimeCore::with_capacities`, `src/runtime/core.rs`), so a
-constructed-but-never-run runtime spawns the init task and the init
-effect runs — violating INV-LC3. The implementation moves that dispatch
-into `run()`, ahead of the initial subscription reconcile, preserving
+The constructor this RFC was written over dispatched the init command
+itself, so a constructed-but-never-run runtime spawned the init task and
+ran the init effect — violating INV-LC3. **Delivered.** Construction
+holds the flags and starts nothing (`Runtime::new`/`with_config`,
+`src/runtime.rs`), and the dispatch happens inside `run()`, in the
+bootstrap that consumes those flags and ahead of the initial
+subscription reconcile (`Kernel::boot`, `src/kernel.rs`) — preserving
 the init-before-subscriptions relative order §3.2 pins. Public
 signatures are unchanged; the observable change is confined to code that
 constructs a runtime without running it (or observes effect side effects
-before `run()`), and carries this RFC's `Changed` entry.
+before `run()`), and it carries this RFC's `Changed` entry.
 
 ## 4. Termination
 
@@ -382,9 +384,10 @@ under either resolution the two postconditions above hold as stated.
 
 ### 4.5 Graceful drain: the zero-grace frame
 
-Today's termination is immediate: cancellation is requested at the
-terminating operation with no grace interval and no awaiting of
-in-flight effects — the degenerate, zero-grace form of a drain model.
+Termination is immediate: cancellation is requested at the terminating
+operation with no grace interval and no awaiting of in-flight effects —
+the degenerate, zero-grace form of a drain model, and the successor
+kernel keeps that frame.
 This RFC pins only that frame: a future graceful-drain feature is one
 that inserts a bounded grace interval between the terminating operation
 and the cancellation requests, and it must still reach both §4.4
@@ -429,7 +432,7 @@ amends RFC 0003 to do so. RFC 0006 INV-L13's load-event schema is
 likewise carved out, at its own stated scope. Beyond those owner-stated requirements, the tracing output
 accompanying a contained panic or a termination is diagnostic, not
 contract, and may not be matched on as a stable surface. A task's exit cause (stream end,
-panic, closed channel, abort) is likewise not contract surface today:
+panic, closed channel, abort) is likewise not contract surface:
 this RFC neither exposes causes nor pins their absence, leaving a
 future supervision surface free to expose them additively.
 
@@ -440,9 +443,9 @@ transitions — `update`, `view`, `subscriptions` — execute serially and
 non-reentrantly: no transition begins before the previous one returns,
 and none is invoked from inside another (INV-LC9).
 
-This is pinned as a *property*, not as the absence of an API. Today it
-is delivered by the single consuming `run(self)` entry point on one
-driving task; a future `step`-style or handle-based driving surface is additive
+This is pinned as a *property*, not as the absence of an API. It is
+delivered by the single consuming `run(self)` entry point on one driving
+task; a future `step`-style or handle-based driving surface is additive
 exactly as long as the property is preserved, and a change that breaks
 it — concurrent or reentrant transitions — is an amendment to this RFC
 regardless of what API introduces it.
@@ -475,10 +478,10 @@ Premises:
   dispatched before the next input is pulled and subscription
   reconciliation spawns forwarders inside the frame pass — the premise
   of RFC 0006 INV-L7/INV-L8's no-self-deadlock argument.
-- **Parking and wake sources.** The frame scheduler parks by returning
-  a never-ready future when no work is pending, and the parked future
-  registers no wake for later pending-flag changes
-  (`src/runtime/frame_scheduler.rs`) — parking is sound only while
+- **Parking and wake sources.** The scheduler this section inventoried
+  parked by returning a never-ready future when no work was pending, and
+  the parked future registered no wake for later pending-flag changes —
+  parking is sound only while
   every source of pending work reaches the driver through something
   that wakes it. The §2.1 lifecycle-completion dirty source originates
   off the driving task, so its contract is that the completion
@@ -491,14 +494,18 @@ Premises:
   write that wakes nothing. An external-driving design must revisit
   parking alongside INV-LC9.
 
-Mechanism inventory (free to change while the contract holds): the
-runtime owns three task kinds — unkeyed command tasks in a `JoinSet`
-(`src/runtime/core.rs`), keyed command tasks with typed exit
-bookkeeping (`src/runtime/keyed_commands.rs`), and subscription
-forwarders (`src/subscription.rs`); pending work is two flags consumed
-by the frame pass (`src/runtime/pending_work.rs`); gauge events flow
-through the off-lock funnel RFC 0006 §4.4 specifies
-(`src/runtime/load.rs`). None of these shapes is pinned here.
+Mechanism inventory (free to change while the contract holds), as it
+stood when this section was written: the runtime owned three task kinds
+in three structures — unkeyed command tasks in a `JoinSet`, keyed
+command tasks with typed exit bookkeeping, and subscription forwarders;
+pending work was two flags consumed by the frame pass; gauge events
+flowed through the off-lock funnel RFC 0006 §4.4 specifies. None of
+those shapes was pinned here, and the successor replaced all but the
+last: one join set holds every runtime-owned run whatever its kind
+(`src/kernel.rs`, `src/kernel/producer.rs`), the bookkeeping is one
+registry (`src/kernel/registry.rs`), readiness is a pass-level condition
+rather than a flag pair (`src/kernel/pass.rs`), and the gauge funnel is
+where it was (`src/runtime/load.rs`).
 
 ## 8. Invariants
 
@@ -510,12 +517,11 @@ Enforcement classes follow the pre-review checklist's definitions.
   subscription re-evaluation, consuming pending work recorded by
   preceding batches or by subscription lifecycle completions (§2.1;
   the second source's recording rule is RFC 0012's). Behavioral, at the
-  runtime layer (the
-  layer's existing white-box pattern): tests drive the batch and
-  frame-pass paths (`process_input_batch`, `process_frame_tick` in
-  `src/runtime.rs`) with a recording application and assert that a batch
-  processing several messages triggers no `view`/`subscriptions` call,
-  and that the following frame pass performs each at most once.
+  layer that owns the pass (its existing white-box pattern): tests drive
+  the batch and frame stages of a pass (`src/kernel/pass.rs`) with a
+  recording program and assert that a batch processing several messages
+  triggers no `view`/`subscriptions` call, and that the following frame
+  step performs each at most once.
 - **INV-LC2**: within one frame pass the render step precedes
   subscription re-evaluation, a frame pass never begins subscription
   re-evaluation while a redraw is pending, and both steps observe the
@@ -538,8 +544,8 @@ Enforcement classes follow the pre-review checklist's definitions.
   is made about `Application::new`'s own side effects, and an
   `Application::new` panic is outside this contract (§3.1). Primary
   check structural — review of the construction path
-  (`Runtime::new`/`with_config`, `RuntimeCore` construction in
-  `src/runtime/core.rs`) for the absence of spawn and dispatch sites —
+  (`Runtime::new`/`with_config` and the value they build,
+  `src/runtime.rs`) for the absence of spawn and dispatch sites —
   because a behavioral test cannot prove the absence of a task that
   performs no observable work. Behavioral regression check: construct a
   runtime with an init effect and a subscription source that record
@@ -589,10 +595,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   postcondition with no further call (task futures are dismantled
   afterward by the executor — the quiescent stage); a panic propagates
   to the caller (§4.3). Structural for the synchrony half: review of
-  the `Drop` owners that carry the teardown — the task-set and manager
-  structures whose drops issue the abort requests
-  (`src/runtime/core.rs`, `src/runtime/keyed_commands.rs`,
-  `src/subscription.rs`) — confirming every runtime-owned task is
+  the `Drop` owners that carry the teardown — the kernel, whose drop
+  aborts what it still owns when it has not settled, and the run registry
+  it holds (`src/kernel.rs`, `src/kernel/registry.rs`) — confirming
+  every runtime-owned task is
   reachable from a structure the runtime value's drop or the unwind
   reaches, with no teardown step deferred to a later call or task.
   Behavioral at the integration layer, one row per quantified cause and
@@ -849,11 +855,11 @@ RFC 0014 §12's.
   that narrow §2.3), §6.1–§6.3 (what this contract preserves, the
   bootstrap quit, the pacing removal), and the amendment register §9
   whose row 8 names this RFC; §8.1 carries the correspondence.
-- `src/runtime.rs` (`run`, `process_input_batch`, `process_frame_tick`),
-  `src/runtime/core.rs` (construction, dispatch, shutdown),
-  `src/runtime/keyed_commands.rs`, `src/subscription.rs` (the three
-  task kinds and their panic capture), `src/runtime/pending_work.rs`,
-  `src/runtime/frame_scheduler.rs` (pending-work flags and parking),
-  `src/runtime/load.rs` (gauges).
+- `src/runtime.rs` (the entry points and their inert construction),
+  `src/kernel.rs` (bootstrap, the driving loop, parking, settle, and the
+  `Drop` that aborts), `src/kernel/pass.rs` (the stages a pass runs in
+  order), `src/kernel/producer.rs` (the one task body every run kind is
+  spawned through, and its panic capture), `src/kernel/registry.rs` (run
+  bookkeeping), `src/runtime/load.rs` (gauges).
 - `tests/observability.rs` — the settle-loop pattern INV-LC7 adopts.
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.

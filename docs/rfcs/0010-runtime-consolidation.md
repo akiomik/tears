@@ -42,11 +42,12 @@ land on that architecture without replacing it.
   sets —
   1. the **existing contract corpus**: the bodies of RFCs 0001–0009 as
      they stand on this branch;
-  2. the **semantics-bearing Draft overlay**: RFC 0006, RFC 0007,
+  2. the **semantics-bearing overlay**: RFC 0006, RFC 0007,
      RFC 0011, and RFC 0012 — the documents whose amendments or new
      contracts change semantics, and which carried Draft status
-     through the audit for exactly that reason (transitioned together
-     at the bundle acceptance, per §1.8); and
+     through the audit for exactly that reason. They transitioned
+     together at the bundle acceptance (§1.8) and are Implemented
+     now; and
   3. the **semantics-neutral amendments** to Implemented documents,
      which keep their Status — each file's own Status header is the
      source of truth.
@@ -221,7 +222,7 @@ Accepted only when all of the following hold:
   composition work itself included) are baseline, not `B`.
 - **Bundle acceptance.** This RFC is Accepted only together with the
   bundle its Target names — RFC 0011, RFC 0012, and the blocking
-  amendments (the RFC 0006 and RFC 0007 Draft overlays) — and with any
+  amendments (the RFC 0006 and RFC 0007 halves of that overlay) — and with any
   delegation's contract document marked `blocks composition = yes`
   (none at present, so the bundle is exactly the Target's list). If an
   amendment's semantics change during the bundle review, the change is
@@ -550,7 +551,7 @@ admissibility and admission timing belong to their owners.
 **Conditions.** None remaining; reopening fairness is a new RFC
 amending RFC 0003 INV-14 (RFC 0006 §4.7's reopening rule).
 
-**Contract impact.** Carried by the RFC 0006 Draft overlay (§1.1):
+**Contract impact.** Carried by RFC 0006 as part of §1.1's overlay:
 the INV-L14/INV-L15 numberings and the INV-L8 rescope. The RFC 0003
 cross-reference sync is semantics-neutral.
 
@@ -644,7 +645,7 @@ invariants already hold under. Graceful drain is pinned only as the
 zero-grace degenerate form; its substance is future work outside this
 bundle (blocks composition: no).
 
-**Contract impact.** RFC 0011 (Draft overlay) owns the contract body
+**Contract impact.** RFC 0011, Implemented, owns the contract body
 and the construction-dispatch `Changed` entry; the second dirty
 source's behavior change is carried by RFC 0012's `Changed` entry
 (RFC 0011's header says so); the RFC 0003 §4.4 cross-reference and the
@@ -838,7 +839,7 @@ deviation), and the effect-DI negative space owned there (INV-SE8; the
 time axis stays RFC 0009's). The behavior change is two-faced —
 admission of new and restarted subscriptions waits for outstanding
 stopped tasks' quiescence (pure additions with no outstanding stops
-admit immediately as today), and re-evaluation gains a
+admit immediately as before), and re-evaluation gains a
 message-independent trigger — carried by RFC 0012's `Changed` entry at
 0.11.0.
 
@@ -855,10 +856,10 @@ RFC 0005 to policy-off scope. The stage-3
 driver API is delegated to RFC 0008 §9; its surface lands there (blocks
 composition: no).
 
-**Contract impact.** RFC 0012 (Draft overlay) owns the contract body;
-the RFC 0011 §2.1 dirty-source amendment is part of the same Draft
-overlay; the `Application::subscriptions` rustdoc update is an
-implementation deliverable RFC 0012 lists.
+**Contract impact.** RFC 0012, Implemented, owns the contract body;
+the RFC 0011 §2.1 dirty-source amendment is part of the same overlay;
+the `Application::subscriptions` rustdoc update RFC 0012 lists is
+delivered.
 
 **Reopen targets.** Source-execution or effect-DI boundary
 counterexamples reopen `root-D18`. Return #1 arose from RFC 0012's
@@ -1029,7 +1030,7 @@ document is the statement's normative owner, and 53 pointer rows (a
 document restating or importing another document's contract). Replay
 outcome, as in §2.4: **reaffirmed 522 / redesigned 9 / delegated 0 /
 open counterexamples 0**. Row notes write **Δ** as shorthand for the
-branch delta against §1.1's baseline corpus — the Draft overlay plus
+branch delta against §1.1's baseline corpus — that overlay plus
 the semantics-neutral syncs; a row's note may scope Δ to the
 sub-delta its replay round measured.
 
@@ -1829,8 +1830,8 @@ material under §1.8, not register entries.
 
 | Delegated document | Audit rows | Gates | Scope handed over |
 |---|---|---|---|
-| composition RFC — RFC 0014, Accepted; delegation discharged | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
-| `cancel_scope` RFC (`C-16`, §5.3) — RFC 0013, Accepted; delegation discharged | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5); met by co-design, both accepted together | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
+| composition RFC — RFC 0014, Implemented; delegation discharged | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
+| `cancel_scope` RFC (`C-16`, §5.3) — RFC 0013, Implemented; delegation discharged | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5); met by co-design, both accepted together | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
 | driving surface RFC (with its subordinate conformance kit) | N7, N15, N24, N45, N48, N49, P12 | no | external driving of the runtime: pacing/latency step mapping, parking premise, bootstrap/termination intake, backend/terminal separation, the contour declaration's inventory of signals the driving surface exclusively holds (POSIX signal handling), source/backend conformance kit |
 | RFC 0008 stage-3 driver amendment — RFC 0008 §9, delivered | TS-1, TS-3, TS-6 | no | stage-3 driver test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
 | graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, and what remains of the cleanup-hook seam now that RFC 0014 §4.4 takes the hook itself (registration, at-most-once firing at the teardown application point, termination discarding unfired hooks) — the drain window around it, the ordering of a cleanup against its scope's successor (§6.2's return), and any bound on cleanup completion |

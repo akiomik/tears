@@ -57,8 +57,8 @@
   `Command::on_teardown`, `ProgramRuntime`, and `Exit`. Two surfaces
   this RFC pins the contract for are entered by their owners rather
   than here: the `Command::teardown` these combinators invoke is
-  RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, landing in
-  that RFC's amendment (§13.2, §9 row 11). Lands with the
+  RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, entered by
+  that RFC's amendment (§13.2, §9 row 11). Landed with the
   implementation, after §13.1's gate.
 
 ## Summary
@@ -523,12 +523,13 @@ Two physical routes replace the previous two:
   dispatch of the returning update**, before the next input is pulled.
   It no longer travels any channel, so no later input, cancel, or
   arbitration can intervene between the update that returned it and
-  termination. The observation-order change is breaking: today an
-  unkeyed quit is an effect-stream item whose delivery arbitrates with
-  other branches.
+  termination. The observation-order change is breaking: under the
+  superseded topology an unkeyed quit was an effect-stream item whose
+  delivery arbitrated with other branches.
 - **Producer-originated quit** (a quit emitted by a keyed or anonymous
   effect task): travels a dedicated **control lane** — never bounded,
-  exactly as RFC 0006 R4 pins for today's dedicated quit channel —
+  exactly as RFC 0006 R4 pins for the dedicated quit channel it
+  replaces —
   drained as a **mandatory stage of every pass, before the pass's
   input batch** (§3.5), never behind the data lane's backlog or its
   capacity-wait queue (R4's backlog independence, preserved for this
@@ -567,8 +568,8 @@ acceptance on the new topology is §13.5.
 own independent keyed entry (superseding RFC 0003 INV-11's
 ignore-with-warning), cancel and teardown entries from all children
 apply in one cancel phase that precedes every spawn from the same
-command (RFC 0003 §4.3's phase order, extended), and directives fold
-as today. Interaction rules, each with its excluding counterexample
+command (RFC 0003 §4.3's phase order, extended), and directives fold as
+they did before. Interaction rules, each with its excluding counterexample
 in §11:
 
 - `map(f)` distributes over children and preserves identity metadata
@@ -965,8 +966,9 @@ same-topology claim; that claim belongs to the driver alone.
 ### 7.2 The stage-3 driver
 
 The `TestDriver` is the opt-in stage-3 driving surface RFC 0012 §6.2
-reserves as a future RFC 0008 amendment — this RFC defines its
-contract; its API body lands in that amendment. Contract:
+reserves — this RFC defines its contract, and its API body is
+RFC 0008 §9's, in the crate at the paths §9.1 places it (§13.2).
+Contract:
 
 - **Same topology (INV-RC13).** The driver constructs the runtime
   through the production construction path and drives the production
@@ -1577,7 +1579,8 @@ that satisfy them live.
   purity is §2.1's transfer and §9 row 12's object).
 - RFC 0013 — scope teardown: §3–§6, §9 (resolved questions),
   INV-ST1–ST8, R1–R9.
-- `src/runtime.rs`, `src/runtime/core.rs`,
-  `src/runtime/keyed_commands.rs`, `src/subscription.rs`,
-  `src/command/core.rs` — the surfaces §9's supersessions replace.
+- `src/runtime.rs`, `src/subscription.rs`, `src/command/core.rs` — the
+  surfaces §9's supersessions reach and that survive them. The two that
+  did not, a runtime core and a keyed-command module, are gone with the
+  topology they implemented.
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.
