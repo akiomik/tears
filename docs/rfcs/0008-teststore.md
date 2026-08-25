@@ -53,8 +53,8 @@ Three decisions, ordered by urgency:
    received, an effect stream never driven to completion — fails the
    test at `receive`, `finish`, or drop; `send` does not block on
    pending output, so a scripted `send` can supersede or cancel an
-   earlier step's not-yet-received keyed output the way the runtime's
-   shared-first schedule does (§6). The one carve-out mirrors the
+   earlier step's not-yet-received keyed output — an ordering the runtime
+   once guaranteed through shared-first pull and no longer does (§6). The one carve-out mirrors the
    runtime's shutdown contract: output remaining after an observed quit
    is legally discarded. A non-exhaustive mode is deliberately not
    designed here (open question 2).
@@ -314,8 +314,8 @@ generic) are implementation latitude.
   polls no pending leaf for output; pending deliverable output is left
   in place for a later `receive*` (or caught by `finish`/drop, §6),
   which lets a scripted `send` supersede or cancel an earlier step's
-  not-yet-received keyed output as the runtime's shared-first schedule
-  allows (§6). Its only poll is the keyed-intake reconciliation of §5.1,
+  not-yet-received keyed output — the store's own linearization, no
+  longer backed by a runtime schedule (§6). Its only poll is the keyed-intake reconciliation of §5.1,
   and only when the returned command is keyed under
   `CancelPolicy::KeepInFlight`; it never delivers output, which happens
   only in `receive*` calls.
@@ -506,9 +506,11 @@ clause never applies to the store's own operations (INV-T12).
 - **Negative space, stated deliberately**: the canonical cross-leaf
   order is *TestStore's* contract, not the runtime's. The runtime folds
   a command's leaves through an unordered select and pins no cross-leaf
-  delivery order (RFC 0003's ordering-adjacent invariants — INV-10's
-  one-item dispatch and INV-14's shared-first app-input scheduling —
-  order dispatch and pull points, not sibling leaves).
+  delivery order (RFC 0003 INV-10's one-item dispatch orders dispatch
+  points, not sibling leaves; INV-14's shared-first app-input scheduling
+  ordered pull points and is superseded — RFC 0014 §3.2 replaces the two
+  delivery classes with one FIFO lane, so there is no second class to
+  prefer).
   A test that asserts an interleaving across sibling leaves is asserting
   TestStore's linearization and remains valid as a TestStore test, but
   must not be cited as evidence of runtime ordering. Whether a
@@ -770,15 +772,17 @@ Exhaustive assertion is the only mode. The rules, by call site:
   a test script a `send` that supersedes or cancels an earlier step's
   not-yet-received *keyed* output — the sequence
   `send(Start); send(Cancel)` cancels a keyed effect before its output
-  is received — which is exactly the runtime's shared-first schedule:
-  a shared input (the next message) is processed ahead of a keyed
-  effect's already-ready output (RFC 0003 INV-14, §4.2;
-  `src/runtime/app_input.rs`). Ordering a `send` ahead of *unkeyed*
-  pending output is **not** a runtime guarantee: unkeyed command output
-  travels the shared channel in FIFO order alongside other shared
-  traffic (a `send`'s message does not jump it), so a `send` scripted
-  before unkeyed output is TestStore's own linearization, not evidence
-  of runtime scheduling (§4.2's citation rule). Undelivered output is
+  is received. **This was runtime parity and is now the store's own
+  linearization.** It read off shared-first pull — a shared input
+  processed ahead of a keyed effect's already-ready output (RFC 0003
+  INV-14) — and RFC 0014 §3.2 supersedes that: keyed, unkeyed and
+  subscription output share one FIFO lane, so a `send`'s message is
+  ordered against pending output by arrival, not by class. The
+  historical reading stands as the record of why `send` was made
+  non-blocking; the scripting freedom it justified is unchanged, and
+  what changes is that scripting it is no longer evidence of runtime
+  ordering for *either* key class (§4.2's citation rule) — which is what
+  the unkeyed half of this bullet already said, now true of both. Undelivered output is
   not lost track of either way: it stays subject to the `receive*`,
   `finish`, and drop checks below, which remain exhaustive. `send` still
   fails after a quit, applied or observed (§5.3).
@@ -798,10 +802,16 @@ Exhaustive assertion is the only mode. The rules, by call site:
   a leaf, and, like `send`, `advance` still fails after an observed
   quit (§5.3).
 - **`finish`** (and the drop check, §3.2) fails if quit was not
-  observed and either (a) a deliverable message or quit request remains,
-  or (b) any pending leaf has not been driven to completion — an
+  observed and any of: (a) a deliverable message or quit request
+  remains; (b) any pending leaf has not been driven to completion — an
   in-flight effect the test never accounted for is a leak even if it
-  never produced a message. A time-gated leaf the test never advanced
+  never produced a message; (c) a cleanup registration is still armed,
+  never fired by a teardown; or (d) a cleanup run started by a teardown
+  did not finish on the poll that started it. The last two are the same
+  omission as the first two read over hooks: a finalizer's external side
+  effects are its whole purpose, so a script that ends with one unfired
+  ended without doing the thing it set up, and one the store cannot
+  attest finished is not a hook it can report as run. A time-gated leaf the test never advanced
   to its deadline is exactly such an unfinished leaf: exhaustiveness
   makes declared time effects part of the accounting. After an observed
   quit, `finish` and the drop check poll nothing and pass
@@ -1011,13 +1021,16 @@ Enforcement classes follow the pre-review checklist's definitions
   assertable by a later `receive` — one over a **keyed** occupant's
   output using a *non-cancelling* `send` (a message that does not target
   the occupant's id, e.g. `send(Start); send(Unrelated)`) so the keyed
-  output survives: the shared-first ordering is runtime parity (RFC 0003
-  INV-14), and the output is then `receive`d — and one over **unkeyed**
-  output (which asserts only that `send` does not block on it; the
-  ordering is TestStore's linearization, not runtime parity, §6). The
-  keyed-only test would pass an implementation that wrongly fails `send`
-  on unkeyed pending output; the unkeyed-only test would miss a broken
-  keyed shared-first path — so both are required. Each of these two
+  output survives, and the output is then `receive`d — and one over
+  **unkeyed** output. Both assert the same thing now: that `send` does
+  not block on pending output, and that the output survives it. The
+  ordering is TestStore's linearization in both cases, not runtime
+  parity — the keyed half used to be parity via RFC 0003 INV-14 and is
+  not since RFC 0014 §3.2 (§6). Both are still required, because they
+  fail different implementations: the keyed-only test would pass one
+  that wrongly fails `send` on unkeyed pending output, and the
+  unkeyed-only test would miss one that drops keyed output at a
+  non-cancelling `send`. Each of these two
   tests is duplicated with the pending output sourced from the *init*
   command instead of a step's — an unkeyed init effect surviving a
   first, unrelated `send`, and a keyed init effect surviving a first,
@@ -2234,6 +2247,20 @@ Writing those edits before the kernel lands would state a contract
 this crate does not implement, which is why they are delegated rather
 than made here; nothing in stages 1–2 changes until then.
 
+**Discharged.** The kernel-side lowering has landed and all three are
+made. A teardown entry selects the store's pending leaves by scope
+prefix, over every kind, as §5.1 now states. A cleanup registration
+arms against its scope and is run by the teardown that selects it: the
+store spawns no task, so it starts the finalizer where the contract
+says it starts and reports what it observed — an unfired registration
+and an unfinished cleanup run are both leak classes in §6, since a
+hook's external side effects are its whole purpose and a script that
+ends without them ended somewhere it did not say. Termination remains
+not a teardown: an observed quit discards unfired registrations with
+everything else the shutdown discards. The INV-11 and INV-14 readings
+are re-stated as historical throughout, in the places this list
+enumerated.
+
 ### 9.11 Coverage, models, and excluded claims
 
 **Surface–invariant coverage.** This section introduces no invariant.
@@ -2511,8 +2538,14 @@ begins at the send gate (§9.6).
   observes.
 - RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation,
   its §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
-  INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10, INV-11, INV-14
-  (cited in §§4.1, 4.2, 5.1, 5.3 of this document).
+  INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10 (cited in §§4.1,
+  4.2, 5.1, 5.3 of this document). Two of the invariants this document
+  once read parity off are superseded and are cited historically where
+  they appear: INV-11's batch child-key folding (RFC 0014 §3.4 — each
+  child keeps its own key) and INV-14's shared-first pull (RFC 0014
+  §3.2 — one FIFO lane, no second class to prefer). Neither changes what
+  the store does; both change what a test scripted over it may be cited
+  as evidence of.
 - RFC 0005 — structural lifecycle identity: `SubscriptionId`, the
   declared-set semantics `subscription_ids` observes; with `CommandId`,
   the two identity types §9.4's run names carry.
