@@ -15,15 +15,18 @@
 //! - none is re-exported at the crate root;
 //! - none is in the prelude.
 //!
-//! The last two are absence claims, which a test cannot assert by running.
-//! They are asserted by construction instead: this file imports the prelude
-//! *and* the driving names, and every driving name is written with its
-//! `testing::` path spelled out. A crate-root re-export would make
-//! `tears::TestDriver` resolve, which `api_surface`'s single-path row
-//! already fails on; prelude membership would make the glob import below
-//! shadow-import these names, which that suite's prelude-subset row fails
-//! on. Those two rows are the enforcement; this file is what proves the
-//! positive half they are stated against.
+//! The last two are absence claims, and this file does not hold them —
+//! `api_surface` does, in a row each: a crate-root re-export makes
+//! `tears::TestDriver` resolve, which its single-path row fails on, and
+//! prelude membership fails its prelude-subset row. Neither would surface
+//! here. An explicit `use` of a name that is also in the prelude quietly
+//! shadows the glob, so this file compiles clean either way, and it is
+//! not the place to look for those two.
+//!
+//! What it adds is the positive half those rows are stated against: that
+//! the names resolve under `tears::testing` at all. Nothing else checks
+//! it, and it fails loudly — `E0603` on every name — the moment the
+//! module or its re-export list stops being public.
 
 use std::num::NonZeroUsize;
 
