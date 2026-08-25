@@ -34,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-export and no prelude membership: this is an opt-in surface for tests
   that need the kernel itself rather than the non-executing store beside it
   (RFC 0008 §9)
-
 - `Command::teardown` and `Command::on_teardown`: tear down every run placed
   under a scope prefix, and register a finalizer that runs when one is
 

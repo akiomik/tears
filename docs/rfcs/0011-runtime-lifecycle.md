@@ -47,12 +47,12 @@ down. This RFC is the owner of that contract. Five decisions:
 3. **Termination** (§4, INV-LC5–INV-LC7). Termination has two routes —
    controlled (a quit returned from a transition, a producer-originated
    quit, render error: the loop exits with a reason and the shutdown
-   postconditions hold by `run()`'s return) and abrupt (drop of the `run` future, a panic unwinding
-   through `run` from application code on the driving task, drop of a
-   never-run runtime value: ownership teardown and cancellation
-   requests complete synchronously by `Drop`; task futures follow on
-   the quiescent stage). Both routes reach
-   the same postconditions in two stages: an immediate stage at the
+   postconditions hold by `run()`'s return) and abrupt (drop of the `run`
+   future, a panic unwinding through `run` from application code on the
+   driving task, drop of a never-run runtime value: ownership teardown
+   and cancellation requests complete synchronously by `Drop`; task
+   futures follow on the quiescent stage). Both routes reach the same
+   postconditions in two stages: an immediate stage at the
    terminating operation's completion, and a quiescent stage once the
    executor has processed the requested cancellations — task
    cancellation is a request, not an event that completes inline.
