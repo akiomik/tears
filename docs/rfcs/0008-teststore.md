@@ -665,12 +665,14 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   the outcome is fixed — the occupant is superseded and its undelivered
   output discarded regardless of its state — so the store issues no
   reconciliation poll: superseding an exhausted occupant and spawning
-  into a released id are indistinguishable. The runtime does sample the
-  target receiver's facts before *every* `Spawn(policy)`, `CancelInFlight`
-  included (`reconcile_receiver` in `src/runtime/keyed_commands.rs`;
-  RFC 0003 §4.2), but that sample cannot change a `CancelInFlight`
-  admission outcome, and the store has no equivalent receiver snapshot to
-  reconcile — so skipping the poll preserves the delivery contract while
+  into a released id are indistinguishable. The runtime does read the
+  target slot's occupancy before *every* keyed `Spawn(policy)`,
+  `CancelInFlight` included (`spawn_decision` in
+  `src/kernel/lowering.rs`, applied by `Kernel::apply_spawn`;
+  RFC 0003 §4.2), but that read cannot change a `CancelInFlight`
+  admission outcome — occupied or not, the occupant is superseded and
+  the new stream starts — and the store has no equivalent snapshot to
+  reconcile, so skipping the poll preserves the delivery contract while
   matching the runtime's outcome, not its every step. Not polling also
   lets a `CancelInFlight` command supersede an occupant whose poll
   would fail the test without polling it — in stage 1 that made
