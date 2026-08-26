@@ -1,8 +1,9 @@
 # RFC 0006: Runtime Load Control
 
 - Status: Implemented (section 5.1 records the bounded acceptance
-  results; section 5.3 re-derives INV-L4's acceptance on the
-  reducer-first successor topology, which lands with that kernel)
+  results on the superseded topology; section 5.3 re-derives INV-L4's
+  acceptance on the reducer-first kernel that replaced it, and that
+  re-derivation is complete)
 - Target: release-gate decision for 0.10.0 (section 3); implementation after
   0.10.0 (additive); the gauge-event `runtime_id` schema addition lands
   at 0.11.0 (a schema change, hence a contract change under INV-L13 —
@@ -1020,11 +1021,12 @@ Consequences:
 
 ## 5. Invariants
 
-The invariants below are the load-control implementation contract. Each
-states its enforcement class (structural, behavioral, or statistical) and
-the check that realizes it; the implementation realizes those checks.
-Section 5.2 carries each invariant's successor correspondence under the
-kernel RFC 0014 defines, invariant by invariant.
+The invariants below were the load-control implementation contract, and
+each states its enforcement class (structural, behavioral, or
+statistical) and the check that realized it. They are stated over the
+delivery topology the reducer-first kernel replaced; section 5.2 carries
+each one's successor correspondence, invariant by invariant, and that
+correspondence is the operative reading of every clause here.
 
 - **INV-L1**: With `app_channel_capacity = n`, the shared channel buffers at
   most `n` messages, and each configured keyed channel buffers at most its
@@ -1549,9 +1551,9 @@ mandatory stage of every pass, before that pass's input batch; and an
 and bounded-mode capacity, blocking sends, and the capacity-wait
 observability stay this contract's, amended only as the clauses below
 state. The register that decides the correspondence is RFC 0014 §9 rows
-2, 4, 9, and 10, landed with that RFC's acceptance; every clause of this
-document states the contract in force until mainlining closes RFC 0014
-§13.1's open tier, and each becomes the following there. Three parts
+2, 4, 9, and 10, landed with that RFC's acceptance. That kernel is the
+crate's runtime core, so every clause of this document is read through
+the correspondence below rather than as the contract in force. Three parts
 are absent below because nothing reaches them independently. Section 3's
 release-gate verdict records a decision already taken, and R6 — no
 default-behavior change *in 0.10.0* — is that gate's own requirement,
@@ -1629,10 +1631,11 @@ own.
   public surface (RFC 0007 §7.1), the term leaves INV-L1's total, and
   **INV-L9's isolation is not preserved**: a producer blocked on the
   data lane's capacity delays every other producer awaiting that same
-  capacity, whatever key each belongs to, where today one key's full
-  channel delays neither another key's admission nor the shared
-  channel's. This is a user-visible property loss of the same class as
-  the shared-first one above, carried by RFC 0014's CHANGELOG
+  capacity, whatever key each belongs to, where under the superseded
+  topology one key's full channel delayed neither another key's
+  admission nor the shared channel's. This is a user-visible property
+  loss of the same class as the shared-first one above, carried by
+  RFC 0014's CHANGELOG
   (RFC 0014 §3.1; §9 row 2). What replaces the per-command bound is the
   one lane's own: INV-L1's data-lane capacity above, on the same
   application-owned producer-count premise.
@@ -1850,14 +1853,25 @@ decomposed by varying them, which is the point of those rows and the
 reason both belong in the matrix rather than only the first.
 
 What section 5.1's rule assigns to RFC 0007 §6 — fixing the bounded
-run's configuration under test — is **deferred to the switch-over**
+run's configuration under test — was **deferred to the switch-over**
 for two of its three fields: `app_channel_capacity` and
-`keyed_channel_capacity` are the superseded topology's controls, and
-the successor's single control is `data_lane_capacity`, which is that
-rename's own landing (section 5.2; RFC 0014 §9 row 2). The obligation
-is unchanged, and RFC 0007 restates it against the field that exists
-once the field exists. `batch_max_messages` needs no deferral — it
-survives the rename and is pinned above.
+`keyed_channel_capacity` were the superseded topology's controls, and
+the successor's single control is `data_lane_capacity`, which was that
+rename's own landing (section 5.2; RFC 0014 §9 row 2).
+`batch_max_messages` needed no deferral — it survives the rename and is
+pinned above.
+
+**The switch-over has happened, and the deferral is discharged.** The
+field exists, and both halves of the obligation are met without either
+document acquiring the other's: the matrix above pins
+`data_lane_capacity` per row — unset for the unbounded rows, set for
+the bounded ones — and RFC 0007 §7.1 reads that RFC's own §5
+parameters against the conditions stated here. What does not carry
+over is a *pair* of capacities to fix, because the successor has one
+delivery control where the superseded topology had two; the
+configuration block in RFC 0007 §5.1 stays as the record of what the
+superseded runs were configured with, which is what its rows
+measured.
 
 **Producer-originated route — the INV-L4 successor.** The criterion is
 no longer one absolute threshold. RFC 0014 §3.3 gives this route a

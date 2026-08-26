@@ -1,17 +1,17 @@
 # RFC 0014: Reducer-First Core
 
-- Status: Accepted (2026-08-16) — accepted at the **spike tier** §13.1
-  defines: the four kernel claims (the grant handshake, the
-  delivery-accounting soundness with its concurrency check, revocation
-  filtering, driver topology) are demonstrated on a prototype kernel,
-  and the twelve-series conformance suite is green and repeat-stable —
-  nine series pass-unit driven, three on the park-boundary probe §7.2
-  names. The remaining behavioral checks of §12 —
-  cleanup hooks, the full combinator surface, the observability
-  vocabulary, the production arbitration policy — are
-  **implementation acceptance criteria**: they gate implementation
-  mainlining, which this acceptance does not grant. The §9
-  supersessions and amendments to owner RFCs land with this
+- Status: Implemented — both tiers of §13.1's gate are met and the
+  kernel is the crate's runtime core. The **spike tier** that gated
+  acceptance was demonstrated on a prototype: the four kernel claims
+  (the grant handshake, the delivery-accounting soundness with its
+  concurrency check, revocation filtering, driver topology) and the
+  twelve-series conformance suite, nine series pass-unit driven and
+  three on the park-boundary probe §7.2 names. The
+  **implementation-acceptance tier** that gated mainlining — cleanup
+  hooks, the full combinator surface, the observability vocabulary, the
+  production arbitration policy, and the remaining §12 behavioral rows
+  — is closed, and its checks are the regression suite. The §9
+  supersessions and amendments landed on their owner documents at
   acceptance, in §13.1's order, ahead of that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8)
@@ -57,8 +57,8 @@
   `Command::on_teardown`, `ProgramRuntime`, and `Exit`. Two surfaces
   this RFC pins the contract for are entered by their owners rather
   than here: the `Command::teardown` these combinators invoke is
-  RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, landing in
-  that RFC's amendment (§13.2, §9 row 11). Lands with the
+  RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, entered by
+  that RFC's amendment (§13.2, §9 row 11). Landed with the
   implementation, after §13.1's gate.
 
 ## Summary
@@ -120,10 +120,9 @@ Eight decisions:
    turn, and application-side inputs.
 
 Mechanism — the kernel's registries, counters, and seam types — is
-informative (§10). The kernel exists today as the prototype §13.1's
-spike tier was demonstrated on, not as crate code; this RFC states the
-contract that tier verified, and §13.1 pins what still gates
-mainlining.
+informative (§10). The kernel is the crate's runtime core; this RFC
+states the contract it implements, and §13.1 records the two tiers its
+acceptance and its mainlining each passed.
 
 ## 1. Scope
 
@@ -524,12 +523,13 @@ Two physical routes replace the previous two:
   dispatch of the returning update**, before the next input is pulled.
   It no longer travels any channel, so no later input, cancel, or
   arbitration can intervene between the update that returned it and
-  termination. The observation-order change is breaking: today an
-  unkeyed quit is an effect-stream item whose delivery arbitrates with
-  other branches.
+  termination. The observation-order change is breaking: under the
+  superseded topology an unkeyed quit was an effect-stream item whose
+  delivery arbitrated with other branches.
 - **Producer-originated quit** (a quit emitted by a keyed or anonymous
   effect task): travels a dedicated **control lane** — never bounded,
-  exactly as RFC 0006 R4 pins for today's dedicated quit channel —
+  exactly as RFC 0006 R4 pins for the dedicated quit channel it
+  replaces —
   drained as a **mandatory stage of every pass, before the pass's
   input batch** (§3.5), never behind the data lane's backlog or its
   capacity-wait queue (R4's backlog independence, preserved for this
@@ -568,8 +568,8 @@ acceptance on the new topology is §13.5.
 own independent keyed entry (superseding RFC 0003 INV-11's
 ignore-with-warning), cancel and teardown entries from all children
 apply in one cancel phase that precedes every spawn from the same
-command (RFC 0003 §4.3's phase order, extended), and directives fold
-as today. Interaction rules, each with its excluding counterexample
+command (RFC 0003 §4.3's phase order, extended), and directives fold as
+they did before. Interaction rules, each with its excluding counterexample
 in §11:
 
 - `map(f)` distributes over children and preserves identity metadata
@@ -966,8 +966,9 @@ same-topology claim; that claim belongs to the driver alone.
 ### 7.2 The stage-3 driver
 
 The `TestDriver` is the opt-in stage-3 driving surface RFC 0012 §6.2
-reserves as a future RFC 0008 amendment — this RFC defines its
-contract; its API body lands in that amendment. Contract:
+reserves — this RFC defines its contract, and its API body is
+RFC 0008 §9's, in the crate at the paths §9.1 places it (§13.2).
+Contract:
 
 - **Same topology (INV-RC13).** The driver constructs the runtime
   through the production construction path and drives the production
@@ -1094,10 +1095,9 @@ the driver drives the kernel itself.
 
 ## 9. Supersessions and amendments
 
-The spike tier of §13.1 having passed, these rows land on their owner
-documents with this RFC's acceptance, ahead of the mainlining that
-tier's open half still gates. Each row names the owner document that
-edits in place.
+These rows landed on their owner documents with this RFC's
+acceptance, ahead of the mainlining §13.1's second tier gated. Each row
+names the owner document that edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
@@ -1163,9 +1163,9 @@ invariants of §12 are.
 ## 11. Adversarial models considered
 
 - *Facade special-casing* — a kernel with an `Application` fast path
-  passes API-level tests; excluded by INV-RC1's inventory walk (every
-  owner row and phase step identical) and the shared-path behavioral
-  checks.
+  passes API-level tests; excluded by INV-RC1's inventory walk — its
+  own concern list and every §6 phase step identical on both paths —
+  and the shared-path behavioral checks.
 - *Diff-based removal detection* — same-update remove-and-reinsert of
   one key produces no state diff, so the old instance's runs leak;
   excluded by the journal contract (INV-RC3 records removals, not
@@ -1255,8 +1255,8 @@ checks divide into two tiers (§13.1): the **spike tier** — the four
 kernel claims and the twelve-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
-below, which gates implementation mainlining, not acceptance. Both
-tiers remain the regression suite afterward.
+below, which gated implementation mainlining rather than acceptance.
+Both tiers are met, and both are the regression suite now.
 
 - **INV-RC1 — single execution path.** For every kernel concern —
   state ownership, lane topology, input delivery, quit delivery,
@@ -1459,7 +1459,7 @@ segment-value contract restated as a bound.
 
 ## 13. Open questions
 
-### 13.1 The acceptance gate: spike tier met, implementation tier open
+### 13.1 The acceptance gate: both tiers met
 
 *Spike tier* — the gate this RFC's acceptance passed, demonstrated on
 a prototype kernel, four claims plus the suite: the
@@ -1488,24 +1488,27 @@ alone, at the scope §7.2 states: `parked data-lane wake`;
 that invariant arms. The park boundary is unreachable by pass-unit
 driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
-both groups. *Implementation-acceptance tier* — open, and what it gates
-is mainlining, not acceptance: cleanup hooks (INV-RC8), the full
-combinator surface (INV-RC2–INV-RC4), the observability vocabulary
+both groups. *Implementation-acceptance tier* — what gated mainlining
+rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
+full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
-pass initiation, whose check is the structural review named there),
-and the remaining §12 behavioral rows.
-**Order**: the spike tier precedes acceptance, acceptance precedes
-every §9 edit, and the open tier precedes mainlining — so the §9
-supersessions stand on the owner documents while the kernel itself
-stays outside the crate until that tier closes. A failure in the open
-tier stops mainlining and reopens the design of whatever it failed;
-whether it also reaches the architecture selection is RFC 0010 §1.9's
-counterexample-grade question, as it is for any later finding.
+pass initiation, whose check is the structural review named there), and
+the remaining §12 behavioral rows.
+**Order**, as it ran: the spike tier preceded acceptance, acceptance
+preceded every §9 edit, and the second tier preceded mainlining — so
+the §9 supersessions stood on the owner documents before the kernel
+entered the crate, and every document those rows reach states the
+successor contract as the one in force. A failure in that tier would
+have stopped mainlining and reopened the design of whatever it failed;
+the same is true of a later regression, and whether one reaches the
+architecture selection is RFC 0010 §1.9's counterexample-grade
+question.
 
 ### 13.2 Driver API body
 
-The concrete `TestDriver` surface lands in the RFC 0008 stage-3
-amendment (§7.2 pins its contract; §9 row 11). Resolves there.
+**Resolved at RFC 0008 §9.** That section states the concrete
+`TestDriver` surface (§7.2 pins its contract; §9 row 11), and the
+surface is in the crate at the paths §9.1 places it.
 
 ### 13.3 Bounded-lane scripted determinism
 
@@ -1576,7 +1579,8 @@ that satisfy them live.
   purity is §2.1's transfer and §9 row 12's object).
 - RFC 0013 — scope teardown: §3–§6, §9 (resolved questions),
   INV-ST1–ST8, R1–R9.
-- `src/runtime.rs`, `src/runtime/core.rs`,
-  `src/runtime/keyed_commands.rs`, `src/subscription.rs`,
-  `src/command/core.rs` — the surfaces §9's supersessions replace.
+- `src/runtime.rs`, `src/subscription.rs`, `src/command/core.rs` — the
+  surfaces §9's supersessions reach and that survive them. The two that
+  did not, a runtime core and a keyed-command module, are gone with the
+  topology they implemented.
 - `docs/rfcs/pre-review-checklist.md` — enforcement-class definitions.

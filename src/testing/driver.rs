@@ -1,6 +1,6 @@
 //! The stage-3 driving surface (RFC 0008 §9).
 //!
-//! [`TestDriver`] drives the very same [`Kernel`] production does: the same
+//! [`TestDriver`] drives the very same kernel production does: the same
 //! construction path, the same runtime-owned tasks on the same join set, the
 //! same lanes, the same pass implementation, the same termination. The
 //! driving differential is confined to **two seams**, one recorded turn,
@@ -36,7 +36,7 @@
 //! (RFC 0008 §9.3). Both waiting calls — [`TestDriver::settle`] and
 //! [`TestDriver::confirm`] — take their budget from the caller, so both
 //! budgets are elements of the script; the one bound that stays the
-//! driver's own is the terminated kernel's settle drain ([`TURN_BUDGET`]),
+//! driver's own is the terminated kernel's settle drain,
 //! which no script reaches. Application-supplied effects sit outside that
 //! quantifier — an effect that sleeps times its own test.
 //!
@@ -45,16 +45,8 @@
 //! completion. Nothing but public primitives — a spawn and a join — and no
 //! scheduler instrumentation, which RFC 0014 §7.2 forbids outright.
 
-// The driver's callers are the conformance series, which land after it: only
-// this module's own tests exercise the surface today.
-#![allow(
-    dead_code,
-    reason = "the stage-3 driver lands before the conformance series that drive it"
-)]
-
 use std::collections::HashMap;
 use std::future::{Future, ready};
-#[cfg(test)]
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -186,6 +178,7 @@ impl Records {
     }
 
     /// How many records name `origin`.
+    #[cfg(test)]
     fn count_for(&self, origin: RunToken) -> usize {
         self.snapshot()
             .iter()
@@ -243,11 +236,6 @@ impl AcceptanceRecorder {
     pub fn snapshot(&self) -> Vec<GatedSend> {
         self.0.snapshot()
     }
-
-    /// How many of `origin`'s sends were accepted.
-    pub fn count_for(&self, origin: RunToken) -> usize {
-        self.0.count_for(origin)
-    }
 }
 
 impl IntentRecorder {
@@ -270,6 +258,7 @@ impl IntentRecorder {
 
     /// How many send-intents `origin` has reached — the derived form of the
     /// count the gate deliberately does not keep.
+    #[cfg(test)]
     pub fn count_for(&self, origin: RunToken) -> usize {
         self.0.count_for(origin)
     }
@@ -370,7 +359,7 @@ impl SendRecord {
 /// of grants — and is nobody's claim about a production order (RFC 0014 §3.3
 /// declines to order a run's control-lane quit against its earlier data-lane
 /// output at all).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptanceLedger {
     records: Vec<SendRecord>,
 }
@@ -380,7 +369,7 @@ pub struct AcceptanceLedger {
 ///
 /// A test may read this to see that a producer reached the gate; it may not
 /// derive an order or a completeness claim from it.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntentLedger {
     records: Vec<SendRecord>,
 }
@@ -399,6 +388,7 @@ impl AcceptanceLedger {
     }
 
     /// The admitted sends, in gate order.
+    #[must_use]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &SendRecord> {
         self.records.iter()
     }
@@ -419,6 +409,7 @@ impl IntentLedger {
 
     /// The recorded intents, in append order — which records arrival at the
     /// gate and is not an order a test may conclude from.
+    #[must_use]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &SendRecord> {
         self.records.iter()
     }
@@ -543,12 +534,6 @@ pub struct TestDriver<P: Program, B: Backend> {
     names: HashMap<RunToken, RunName>,
 }
 
-#[expect(
-    clippy::needless_pass_by_ref_mut,
-    reason = "RFC 0008 §9.3's receivers are normative rather than a spelling: every driving call \
-              takes `&mut self`, which is what carries RFC 0011 INV-LC9's exclusivity and makes a \
-              borrowing grant token unrepresentable"
-)]
 impl<P: Program, B: Backend> TestDriver<P, B> {
     /// Inert construction from the production entry point's inputs
     /// (RFC 0014 §2.3), owning a terminal to render into.
@@ -577,11 +562,11 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// need a producer to commit while a pass is running.
     ///
     /// **This is harness plumbing, not a second seam.** The executor a
-    /// driver turns is mechanism: RFC 0008 §9.3's block fixes what exists on
-    /// the surface, and §9.8 scopes INV-RC14's determinism *claim* to a
-    /// current-thread executor — the verified range — rather than fixing the
-    /// driver's own construction. Nothing else differs: the same production
-    /// construction path, the same two seams, the same pass-unit stepping.
+    /// driver turns is mechanism: §9.8 scopes INV-RC14's determinism *claim*
+    /// to a current-thread executor — the verified range — rather than
+    /// fixing the driver's own construction. Nothing else differs: the same
+    /// production construction path, the same two seams, the same pass-unit
+    /// stepping.
     ///
     /// What it buys is the one window a single-threaded executor does not
     /// have. A pass is a synchronous region — RFC 0014 §3.5's four stages
@@ -603,9 +588,8 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// # Panics
     ///
     /// Panics when the multi-worker executor cannot be built.
-    #[cfg(test)]
     #[must_use]
-    pub(crate) fn on_worker_threads(
+    pub fn on_worker_threads(
         program: P,
         flags: P::Flags,
         config: RuntimeConfig,
@@ -853,10 +837,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// Whether the grant `token` names has reached a terminal yet, without
     /// consuming the token, spending a turn, or clearing the grant.
     ///
-    /// **Test-only internal, outside RFC 0008 §9.3's block**, on the same
-    /// footing as [`on_worker_threads`](Self::on_worker_threads). It exists
-    /// because the published surface has no non-destructive way to ask the
-    /// question: [`confirm`](Self::confirm) consumes the token and fails on
+    /// It exists because the rest of the surface has no non-destructive
+    /// way to ask the question: [`confirm`](Self::confirm) consumes the
+    /// token and fails on
     /// its budget, so a row that wants to assert "this release has *not*
     /// committed yet" and then go on driving has nothing to assert with —
     /// and a row that instead reads the acceptance ledger asserts nothing at
@@ -880,8 +863,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics outside the running state, and on a token this driver's gate
     /// no longer holds.
-    #[cfg(test)]
-    pub(crate) fn try_confirm(&self, token: &GrantToken) -> Option<Confirmed> {
+    pub fn try_confirm(&self, token: &GrantToken) -> Option<Confirmed> {
         self.assert_running("try_confirm");
         self.assert_own_token(token, "try_confirm");
         self.kernel.gate().peek_resolution(token.sequence)
@@ -908,7 +890,7 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// run's exit as the driver knows it, which reaches the driver only at a
     /// pass's first stage.
     ///
-    /// A **turn** is [`executor_turn`]'s construction: the driving task
+    /// A **turn** has one construction: the driving task
     /// spawns a fresh no-op task onto this driver's executor and awaits it.
     /// A turn is a unit of opportunity, not of progress — it says nothing
     /// about how far any task runs, in what order tasks are picked, or

@@ -94,9 +94,9 @@ to distinguish entries in that bucket. That API discarded the value
 needed for the second step, so the manager could not recover correctness after
 a collision.
 
-The impact was observable. `SubscriptionManager::update` builds one desired set
-from the IDs, retains the first subscription for each ID, removes running IDs
-that are no longer desired, and starts absent IDs — so a false equality could:
+The impact was observable. Reconciliation builds one desired set from the
+IDs, retains the first subscription for each ID, removes running IDs that are
+no longer desired, and starts absent IDs — so a false equality could:
 
 - suppress a distinct stream before it starts;
 - keep a prior stream when a different one is requested;
@@ -506,9 +506,9 @@ printing scope values. Equality and hashing, not `Debug`, define identity.
 
 ### 3.5 Duplicate desired IDs
 
-`SubscriptionManager::update` preserves its current deterministic rule: for
-equal full IDs in one desired set, keep the first declaration in input order and
-ignore later declarations.
+Reconciliation preserves its deterministic rule: for equal full IDs in one
+desired set, keep the first declaration in input order and ignore later
+declarations.
 
 The ignored duplicate must be observable through a warning-level tracing event
 with target `tears::subscription`. The event must not require the logical key to
@@ -597,8 +597,8 @@ The rule is stated over the lifecycle IDs present at that boundary, not over
 a fixed pair of them: RFC 0013's teardown prefixes and RFC 0014 §4.4's cleanup
 registrations are qualified the same way where a command carries them — the
 coverage extension RFC 0014 §9 row 6 records, landed with that RFC's
-acceptance; the rule above states the contract in force until mainlining
-closes RFC 0014 §13.1's open tier.
+acceptance. Both carriers are in the crate, so the boundary the rule quantifies
+over is the four-carrier one.
 
 It does not change the effect stream, message mapping, redraw directive, timeout
 or retry wrappers, cancellation policy, or application output.
@@ -665,13 +665,13 @@ applied at a boundary qualifies every lifecycle ID that boundary carries, and
 no ID escapes qualification by being batched. Which IDs a batch carries is
 RFC 0003's decision, not this RFC's.
 
-This RFC preserves RFC 0003 INV-11:
+This RFC preserved RFC 0003 INV-11, whose boundary was:
 
 - child explicit cancel lists are folded into the batch;
 - child spawn keys are ignored with a warning; and
 - a key applied to the resulting batch identifies the whole top-level batch.
 
-Consequently:
+Under it:
 
 ```rust
 Command::batch([
@@ -680,9 +680,10 @@ Command::batch([
 ])
 ```
 
-preserves scoped explicit cancels but does **not** preserve either child spawn
-key. Applying `scoped` to the resulting batch scopes its folded explicit
-cancels and any top-level key already present at that call boundary.
+preserved scoped explicit cancels but **not** either child spawn key, and
+applying `scoped` to the resulting batch scoped its folded explicit cancels and
+any top-level key already present at that call boundary. Under the lowering
+that replaced it, the same expression keeps both child keys.
 
 Preserving independently keyed child effects requires the runtime lowering to
 spawn multiple keyed tasks from one returned command — RFC 0003's deferred
@@ -692,8 +693,9 @@ per-effect cancellation work, which this RFC does not silently add. RFC 0014
 explicit cancel IDs, teardown prefixes, and cleanup registrations are
 qualified — the boundary carries more IDs, and the opening rule above reaches
 every one of them. That supersession is RFC 0014 §9 row 3, landed with that
-RFC's acceptance; the boundary above states the contract in force until
-mainlining closes RFC 0014 §13.1's open tier.
+RFC's acceptance, and the lowering it describes is the one the kernel
+implements — so the folding boundary above is the record of what the
+superseded lowering did, not a description of what `batch` does now.
 
 ### 4.5 Scoping is not teardown
 
@@ -846,22 +848,23 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   behaviorally equivalent.
 - **INV-18: command metadata coverage.** `Command::scoped` qualifies every
   carrier of lifecycle identity present at the call boundary. On the command
-  surface this RFC is stated over, those carriers are the keyed spawn ID and
-  every explicit cancel ID; the teardown prefixes RFC 0013 adds and the cleanup
-  registrations RFC 0014 §4.4 adds are qualified by the same rule, the
-  extension RFC 0014 §9 row 6 records — landed with that RFC's acceptance,
-  with the carriers arriving when mainlining closes RFC 0014 §13.1's open
-  tier.
+  surface, those carriers are four: the keyed spawn ID, every explicit cancel
+  ID, the teardown prefixes RFC 0013 adds, and the cleanup registrations
+  RFC 0014 §4.4 adds. The last two are qualified by the same rule rather than
+  by a clause of their own — the coverage extension RFC 0014 §9 row 6 records.
+  The two-carrier surface this RFC was first written over is the pre-kernel
+  form of the same invariant.
 - **INV-19: command cancellation isolation.** Cancelling or replacing a full ID
   under one scope cannot affect an equal local ID under a different scope.
 - **INV-20: batch compatibility.** Scoping does not bypass RFC 0003's batch
   boundary: a scope qualifies every lifecycle ID that boundary carries, and
-  none escapes qualification by being batched. Under the boundary RFC 0003
-  INV-11 states, that means child keys are still ignored while scoped explicit
-  cancels fold; under RFC 0014 §3.4's multi-keyed lowering the boundary carries
-  each child's own IDs and `scoped` distributes over them (RFC 0014 §9 row 3,
-  landed with that RFC's acceptance; the boundary it replaces holds until
-  mainlining closes RFC 0014 §13.1's open tier).
+  none escapes qualification by being batched. Under RFC 0014 §3.4's
+  multi-keyed lowering the boundary carries each child's own IDs and `scoped`
+  distributes over them (RFC 0014 §9 row 3, landed with that RFC's
+  acceptance). Under the boundary RFC 0003 INV-11 stated — the one that
+  lowering replaces — child keys were ignored while scoped explicit cancels
+  folded; the invariant held there too, over the smaller set of IDs that
+  boundary carried.
 - **INV-21: no implicit teardown.** Dropping a value returned by `scoped` or
   omitting one scoped command does not issue prefix cancellation beyond the
   lifecycle's existing ID-specific rules.

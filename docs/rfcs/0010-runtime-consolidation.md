@@ -42,11 +42,12 @@ land on that architecture without replacing it.
   sets —
   1. the **existing contract corpus**: the bodies of RFCs 0001–0009 as
      they stand on this branch;
-  2. the **semantics-bearing Draft overlay**: RFC 0006, RFC 0007,
+  2. the **semantics-bearing overlay**: RFC 0006, RFC 0007,
      RFC 0011, and RFC 0012 — the documents whose amendments or new
      contracts change semantics, and which carried Draft status
-     through the audit for exactly that reason (transitioned together
-     at the bundle acceptance, per §1.8); and
+     through the audit for exactly that reason. They transitioned
+     together at the bundle acceptance (§1.8) and are Implemented
+     now; and
   3. the **semantics-neutral amendments** to Implemented documents,
      which keep their Status — each file's own Status header is the
      source of truth.
@@ -221,7 +222,7 @@ Accepted only when all of the following hold:
   composition work itself included) are baseline, not `B`.
 - **Bundle acceptance.** This RFC is Accepted only together with the
   bundle its Target names — RFC 0011, RFC 0012, and the blocking
-  amendments (the RFC 0006 and RFC 0007 Draft overlays) — and with any
+  amendments (the RFC 0006 and RFC 0007 halves of that overlay) — and with any
   delegation's contract document marked `blocks composition = yes`
   (none at present, so the bundle is exactly the Target's list). If an
   amendment's semantics change during the bundle review, the change is
@@ -525,9 +526,9 @@ filtering at the delivery decision point, an `update`-returned quit
 applied synchronously at its dispatch, and producer-originated quits
 on a dedicated control lane; the superseding contract, with its
 per-invariant successor correspondence for RFC 0003 and RFC 0006, is
-RFC 0014 (§3.1, §3.3, §9), accepted at its staged spike's tier: the
-owner-document edits that correspondence names are landed, and
-implementation mainlining stays gated there (§13.1).
+RFC 0014 (§3.1, §3.3, §9), whose staged gate is met at both tiers: the
+owner-document edits that correspondence names landed at acceptance,
+and the kernel is mainlined (§13.1).
 
 ### 3.2 `root-SCHED` — verdict: reaffirmation, canonicalization, and two numberings
 
@@ -550,7 +551,7 @@ admissibility and admission timing belong to their owners.
 **Conditions.** None remaining; reopening fairness is a new RFC
 amending RFC 0003 INV-14 (RFC 0006 §4.7's reopening rule).
 
-**Contract impact.** Carried by the RFC 0006 Draft overlay (§1.1):
+**Contract impact.** Carried by RFC 0006 as part of §1.1's overlay:
 the INV-L14/INV-L15 numberings and the INV-L8 rescope. The RFC 0003
 cross-reference sync is semantics-neutral.
 
@@ -576,9 +577,9 @@ broad cancel-before-delivery opportunity as a deliberate property
 loss, and replaces configured pacing with pass-bounded render
 cadence; fairness stays resolved against any policy and bounded
 delivery stays non-default under the successor; the superseding
-contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), accepted at its
-staged spike's tier, with its owner-document edits landed and
-implementation mainlining still gated there (§13.1).
+contract is RFC 0014 (§3.1, §3.2, §3.5, §6.3, §9), whose staged gate
+is met at both tiers, with its owner-document edits landed at
+acceptance and the kernel mainlined (§13.1).
 
 The same counterexample carries one more grade-(i) face on this root:
 the private keyed channels go with shared-first pull, and per-command
@@ -592,8 +593,8 @@ for all producers, where the per-command channels coupled none. The
 ledger stays the snapshot §8.1 adopts, unamended; this entry is where
 the correction lives, and the superseding contract is RFC 0014 (§3.1,
 §9, whose row for the delivery-class supersession carries it), landed
-in the owner documents on that RFC's acceptance and gated there for
-mainlining (§13.1).
+in the owner documents on that RFC's acceptance and mainlined after
+its second tier closed (§13.1).
 
 **Return #8 (2026-08-16)**: one counterexample, returned on each root
 it reaches — here, on `root-CMP` as return #9 (§5.3), and on
@@ -644,7 +645,7 @@ invariants already hold under. Graceful drain is pinned only as the
 zero-grace degenerate form; its substance is future work outside this
 bundle (blocks composition: no).
 
-**Contract impact.** RFC 0011 (Draft overlay) owns the contract body
+**Contract impact.** RFC 0011, Implemented, owns the contract body
 and the construction-dispatch `Changed` entry; the second dirty
 source's behavior change is carried by RFC 0012's `Changed` entry
 (RFC 0011's header says so); the RFC 0003 §4.4 cross-reference and the
@@ -677,9 +678,9 @@ and before any source starts — a change to RFC 0011 §3.2's intake
 order; the added advanced entry point (`ProgramRuntime` with its
 `Exit` result) is additive surface beside the preserved one,
 recorded as no supersession; the amending contract is RFC 0014
-(§2.3, §2.4, §6.2, §9), accepted at its staged spike's tier, with its
-owner-document edits landed and implementation mainlining still gated
-there (§13.1).
+(§2.3, §2.4, §6.2, §9), whose staged gate is met at both tiers, with
+its owner-document edits landed at acceptance and the kernel mainlined
+(§13.1).
 
 ## 5. Identity and the composition axiom
 
@@ -748,9 +749,9 @@ as a single aggregate `Application` adapter to a reducer-first core
 substance survives in the successor (the composition layer owns the
 identity boundary; no second runtime, no second identity model), and
 the §5.2 requirements are discharged there item by item; the
-superseding contract is RFC 0014 (§2, §8), accepted at its staged
-spike's tier, with its owner-document edits landed and implementation
-mainlining still gated there (§13.1).
+superseding contract is RFC 0014 (§2, §8), whose staged gate is met at
+both tiers, with its owner-document edits landed at acceptance and the
+kernel mainlined (§13.1).
 
 **Return #9 (2026-08-16)**: the same counterexample as return #8
 (§3.2), on the root that owns the cleanup-hook seam. What changes here
@@ -818,9 +819,9 @@ backlog-independent delivery is met in strengthened form
 (synchronous application at the returning dispatch) and the
 cancellation-metadata lowering path holds, while keyed quit's
 in-band ordering half is superseded with the loss recorded as
-breaking; the successor statement is RFC 0014 (§3.3, §9), accepted at
-its staged spike's tier, with its owner-document edits landed and
-implementation mainlining still gated there (§13.1).
+breaking; the successor statement is RFC 0014 (§3.3, §9), whose staged
+gate is met at both tiers, with its owner-document edits landed at
+acceptance and the kernel mainlined (§13.1).
 
 ### 6.2 `root-D18` — verdict: redesign — a new owner contract for source execution
 
@@ -831,14 +832,14 @@ declaration, spawner-at-admission start, forwarder-paced polling), the
 three-boundary stop vocabulary with the uniform quiescence barrier and
 its admission rules, `subscriptions()` purity as owner of record
 (INV-SE6), the source-side injection contract with RFC 0008's
-non-execution boundary preserved (a driving store is a future RFC 0008
-amendment), source-internal state legalized **without** generalizing
+non-execution boundary preserved (the stage-3 driver is RFC 0008
+§9's), source-internal state legalized **without** generalizing
 update-side external mutation (RFC 0001 §5.5 stays that RFC's scoped
 deviation), and the effect-DI negative space owned there (INV-SE8; the
 time axis stays RFC 0009's). The behavior change is two-faced —
 admission of new and restarted subscriptions waits for outstanding
 stopped tasks' quiescence (pure additions with no outstanding stops
-admit immediately as today), and re-evaluation gains a
+admit immediately as before), and re-evaluation gains a
 message-independent trigger — carried by RFC 0012's `Changed` entry at
 0.11.0.
 
@@ -852,13 +853,13 @@ included) and every promptness clause of subscriptions outside the
 policy's target set are preserved under any policy — and only after
 that RFC amends the re-admission promptness clauses in RFC 0012 and
 RFC 0005 to policy-off scope. The stage-3
-driving-store API is delegated to a future RFC 0008 amendment gated on
-RFC 0012's acceptance (blocks composition: no).
+driver API is delegated to RFC 0008 §9; its surface lands there (blocks
+composition: no).
 
-**Contract impact.** RFC 0012 (Draft overlay) owns the contract body;
-the RFC 0011 §2.1 dirty-source amendment is part of the same Draft
-overlay; the `Application::subscriptions` rustdoc update is an
-implementation deliverable RFC 0012 lists.
+**Contract impact.** RFC 0012, Implemented, owns the contract body;
+the RFC 0011 §2.1 dirty-source amendment is part of the same overlay;
+the `Application::subscriptions` rustdoc update RFC 0012 lists is
+delivered.
 
 **Reopen targets.** Source-execution or effect-DI boundary
 counterexamples reopen `root-D18`. Return #1 arose from RFC 0012's
@@ -1029,7 +1030,7 @@ document is the statement's normative owner, and 53 pointer rows (a
 document restating or importing another document's contract). Replay
 outcome, as in §2.4: **reaffirmed 522 / redesigned 9 / delegated 0 /
 open counterexamples 0**. Row notes write **Δ** as shorthand for the
-branch delta against §1.1's baseline corpus — the Draft overlay plus
+branch delta against §1.1's baseline corpus — that overlay plus
 the semantics-neutral syncs; a row's note may scope Δ to the
 sub-delta its replay round measured.
 
@@ -1413,7 +1414,7 @@ changes a contract.
 | LG-0006-001 | owner | root-SCHED,leaf-K55 | unnumbered norm (R1) | R1: buffers of app-facing runtime-owned channels (shared + each keyed) can be bounded per-channel via configuration. Total buffer = `app_channel_capacity + m × keyed_channel_capacity` | reaffirmed | preserved_in=0006 §1.2/§4.1 | The behavioral anchor test for R1 is attributed to 0003 INV-7, not 0005 (corrected in RFC 0006's current text; the test exists and the contract content is unchanged — id release for a sender-closed empty receiver is owned by 0003 INV-7). R1's own requirement (backlog-independent delivery of unkeyed quit) and this row's verdict are unchanged |
 | LG-0006-002 | owner | root-K51J46,root-SCHED | negative space | R1 negative: the dedicated quit channel is outside R1 — it is never bounded and no occupancy claim is made (the R4 unbounded exception) | reaffirmed | preserved_in=0006 §1.2/§4.1 | The quit channel's unbounded exception (R4) remains owned by 0006 and unchanged even with 0011 §4 as the termination authority |
 | LG-0006-003 | owner | leaf-K55,root-SCHED | negative space | R1 negative: not a bound on total pending-work memory — a blocked producer holds 1 in-flight message outside the channel, and the producer count (including m) is an application-owned contract input | reaffirmed | preserved_in=0006 §1.2/§4.5 | - |
-| LG-0006-004 | pointer | leaf-K55,root-CMP | unnumbered norm | An "active CommandId" includes finished-but-undrained runs (counted in m until drained and the id released) | reaffirmed | preserved_in=0006 §1.2; resolved_via=LG-0003-064 | The owner of occupancy = deliverability is 0003 INV-6 (the release side is INV-7). The anchor test exists in src/runtime/keyed_commands.rs |
+| LG-0006-004 | pointer | leaf-K55,root-CMP | unnumbered norm | An "active CommandId" includes finished-but-undrained runs (counted in m until drained and the id released) | reaffirmed | preserved_in=0006 §1.2; resolved_via=LG-0003-064 | The owner of occupancy = deliverability is 0003 INV-6 (the release side is INV-7). The anchor test was in src/runtime/keyed_commands.rs, retired with that module; the successor holds occupancy on the run registry (`ScopeRegistry::keyed_occupant`, src/kernel/registry.rs) and its rows are the kernel conformance suite's |
 | LG-0006-005 | owner | root-SCHED | unnumbered norm (R2) | R2: a configured bound does not silently drop messages by default — the default overload response is backpressure | reaffirmed | preserved_in=0006 §1.2 | Enforced via INV-L2 |
 | LG-0006-006 | owner | root-SCHED,leaf-I42 | unnumbered norm (R3) | R3: input-to-screen latency must be observable, and under bounded configuration it is bounded by queue capacity (premised on a bounded number of producers) | reaffirmed | preserved_in=0006 §1.2 | Enforced via INV-L3 |
 | LG-0006-007 | owner | root-K51J46 | unnumbered norm (R4) | R4: a quit signal that has entered the dedicated quit channel is delivered with latency independent of the app backlog — the dedicated channel and the always-armed select branch must be maintained | reaffirmed | preserved_in=0006 §1.2 | 0011 §4 is the authority for the termination phase, but the 0006-owned quit delivery contract (dedicated channel + always-armed branch) is semantically unchanged |
@@ -1590,7 +1591,7 @@ changes a contract.
 | LG-0008-038 | owner | root-D18 | unnumbered norm | Placement: the single path `tears::testing::TestStore`; no re-export, not in the prelude, no feature flag | reaffirmed | preserved_in=0008 §3.3 | Unaffected — the single-path, no-re-export, no-feature-flag placement is also consistent with 0012 §6.2's "TestStore public API unchanged"; no change |
 | LG-0008-039 | owner | root-D18,leaf-K56 | negative space | §4.3 negative space: tasks spawned from within a leaf poll are outside the pending set; clock-manipulation effects void the contract; `tokio::time::pause` and nested-runtime blocking are loud failures | reaffirmed | preserved_in=0008 §4.3 | Unaffected — the §4.3 negative space (out-of-pending-set spawns, clock-manipulation voiding, pause/nested-runtime loud failure) is on the time axis; 0012 §9 also states the time axis stays with 0009, unchanged |
 | LG-0008-040 | owner | root-D18,leaf-K56 | unnumbered norm + negative space | I/O leaves: because the context is time-only, a leaf requiring the I/O reactor hits a missing-reactor panic on its first scan poll; for merely-pending leaves, `finish` is the only accountability | reaffirmed | preserved_in=0008 §4.3 | Unaffected — the missing-reactor panic for I/O leaves is a consequence of the time-only context, with no contact with the Δ |
-| LG-0008-041 | owner | root-D18 | negative space | Out of scope: no execution of subscription sources (start/poll/restart) in either stage 1 or stage 2; the resolution is not Clock DI but an independent subscription-execution design | reaffirmed | preserved_in=0008 §1.2 | Basis updated — the "independent subscription-execution design" this row points to has been drafted as RFC 0012, and 0012 §1.2/§6.2 state the TestStore non-execution contract (0008 §1.2, INV-T11) is preserved as stated. A stage-3 driving store is left to a future 0008 amendment (0012 §6.2, §12 open question 2), so this row's out-of-scope declaration (no execution in stages 1 and 2; a design separate from Clock DI) stands as-is |
+| LG-0008-041 | owner | root-D18 | negative space | Out of scope: no execution of subscription sources (start/poll/restart) in either stage 1 or stage 2; the resolution is not Clock DI but an independent subscription-execution design | reaffirmed | preserved_in=0008 §1.2 | Basis updated — the "independent subscription-execution design" this row points to has been drafted as RFC 0012, and 0012 §1.2/§6.2 state the TestStore non-execution contract (0008 §1.2, INV-T11) is preserved as stated. The stage-3 driver is stated at 0008 §9 and is in the crate at `tears::testing`, and 0012 §12's second question resolved there with it; neither reaches this row, because a driver that drives the production kernel is not the store executing anything. This row's out-of-scope declaration (no execution in stages 1 and 2; a design separate from Clock DI) therefore stands as-is, and 0008 §9.1 says so in its own words: the store's boundary is unmoved |
 | LG-0008-042 | owner | root-D18,root-SCHED | negative space | Out of scope: runtime integration contracts (channel capacity, backpressure, batching, scheduling) — passing TestStore is evidence of nothing (citation ban stated explicitly) | reaffirmed | preserved_in=0008 §1.2 | Unaffected — the citation ban (0008 §1.2) and its 0011 §2.3 counterpart are unchanged in the Δ. The second dirty source (0011 §2.1) is new runtime-scheduling behavior, but the store does not run the runtime, so "TestStore passage is no evidence of runtime integration" is if anything reinforced — no contradiction |
 | LG-0008-043 | owner | root-D18,root-CMP | negative space | Out of scope: reducer composition — a future composition API's adapter should reuse this store, but that is that RFC's obligation | reaffirmed | preserved_in=0008 §1.2 | Unaffected — the store-reuse obligation for composition adapters stays with the future RFC. 0012 §1.2 also scopes composition out, and §4.4 only states the barrier's composition transparency; this row's delegation structure is unchanged |
 | LG-0008-044 | pointer | root-D18 | unnumbered norm | Dependency direction: stage 2 consumes RFC 0009's contracts and resolves its §5.1's 3 design inputs; ownership of the Clock contract lies with 0009 (inversion forbidden) | reaffirmed | preserved_in=0008 §7; resolved_via=0009 §5.1 | Unaffected — the dependency direction (Clock contract owned by 0009; inversion forbidden) is unchanged. 0012 §9 likewise states the time axis remains 0009-owned and cites it only to mark the boundary, creating no inversion |
@@ -1622,7 +1623,7 @@ changes a contract.
 | LG-0009-023 | owner | root-D18 | negative space | Rejected alternatives (recorded): `Arc<dyn Clock>` via Flags / drive-time resolution / per-source injection / TCA-style dependency registry | reaffirmed | preserved_in=0009 §2.2 | Unaffected — the §2.2 rejected alternatives (including the TCA-style dependency registry) are rejections recorded in the time-axis context. 0012 §9's rejection of a non-time DI registry self-identifies as "a new decision of this RFC" and cites 0009 only as a boundary marker, neither restating nor extending it — no contradiction (0009 §2.2's non-time-goes-through-Flags remark is rationale, not an ownership claim). |
 | LG-0009-024 | owner | root-D18 | negative space | §3.4 negative space: equal-deadline firing order is unspecified (consumers needing an order linearize on their own — TestStore §4.2 is the worked example); no bound is pinned on real-time lateness; cross-context separation — no contract spans contexts | reaffirmed | preserved_in=0009 §3.4 | Unaffected — the §3.4 negative space (equal-deadline order, lateness bound, cross-context separation) is entirely on the time axis and does not overlap 0012 §9's non-time negative space. |
 | LG-0009-025 | owner | root-D18,leaf-K56 | unnumbered norm | §5.1 `test-util` decision: moves to unconditional `tokio` dependency features together with the first in-crate consumer (TestStore stage 2); no feature flag on tears itself | reaffirmed | preserved_in=0009 §5.1 | Unaffected — the unconditional-dependency-feature decision for test-util is a time-axis decision on the Cargo surface. The Δ touches neither Cargo.toml nor 0008 stage 2. |
-| LG-0009-026 | pointer | root-D18 | unnumbered norm/negative space | §5.1 Timer's stage-2 exclusion: `Timer` is a subscription source and does not enter the store's pending command set; delivery would require a full SubscriptionManager-equivalent design | reaffirmed | preserved_in=0009 §5.1; resolved_via=LG-0008-041 | Unaffected — the rationale for Timer's stage-2 exclusion (subscription execution lies outside the store) is maintained: 0012 §6.2 states the 0008 §1.2 non-execution contract is "unchanged and deliberately preserved". The execution contract needed for delivery is now owned by 0012, but stage-3 driving remains a future 0008 amendment; the exclusion itself and the pointer are unchanged. |
+| LG-0009-026 | pointer | root-D18 | unnumbered norm/negative space | §5.1 Timer's stage-2 exclusion: `Timer` is a subscription source and does not enter the store's pending command set; delivery would require a full SubscriptionManager-equivalent design | reaffirmed | preserved_in=0009 §5.1; resolved_via=LG-0008-041 | Unaffected — the rationale for Timer's stage-2 exclusion (subscription execution lies outside the store) is maintained: 0012 §6.2 states the 0008 §1.2 non-execution contract is "unchanged and deliberately preserved". The execution contract needed for delivery is owned by 0012, and the stage-3 driver's surface, stated at 0008 §9, is in the crate — but it drives the kernel rather than the store, so `Timer`'s stage-2 exclusion is untouched by it. The exclusion itself and the pointer are unchanged. |
 | LG-0009-027 | pointer | root-D18 | unnumbered norm | §5.1 records the 3 design inputs for stage 2 only — resolution belongs to RFC 0008 | reaffirmed | preserved_in=0009 §5.1; resolved_via=0008 §7 | Unaffected — the resolution target of the 3 design inputs, 0008 §7, is unchanged in the Δ, and 0009's record-only positioning is likewise unchanged. |
 | LG-0009-028 | owner | root-D18 | unnumbered norm | This RFC provides no clock value — what the store holds is a controlled time context | reaffirmed | preserved_in=0009 §5.1 | Unaffected — the no-clock-value provision (the store holds a controlled time context) is the consumption premise of 0008 INV-T12. 0012 §6.2 states 0008 is unchanged; the basis is unchanged. |
 | LG-0009-029 | owner | leaf-N57,root-D18 | negative space | §1.2 out of scope: calendar time (no `SystemTime` reads exist; date rendering is injected by the app itself via Flags) / randomness and jitter (future backoff-policy RFC) / TestStore's time-API shape / debounce/throttle and restart-rate semantics / real-time accuracy bounds | reaffirmed | preserved_in=0009 §1.2 | Unaffected — the out-of-scope enumeration remains accurate after the Δ: restart-rate is still delegated to a future opt-in RFC in 0012 §8 (the same standing position as 0007 §4/0006 open question 5), so 0009's deferral target has not disappeared. Calendar time via self-injected Flags is likewise cited by 0012 §9 as the same convention (a docs/examples concept, not an API surface) — consistent. |
@@ -1794,12 +1795,12 @@ simplification; interaction rows record `excluded_by=<fixture id>`.
 | ID | Fixture | Status | Verdict | Note |
 |---|---|---|---|---|
 | S8a | subscription restart rate control | active | **C** | Condition: delegation to an external RFC (a future opt-in rate policy RFC — 0012 §8 owns the frame; added delay is already spelled out as outside INV-L8). Owned task: draft the S8a RFC. owner: S8a rate policy RFC — blocks composition = no / gates the composition RFC = no. The randomness (backoff jitter) reproducibility verdict also belongs to that RFC (0009 §1.2 delegation, routing from TS-5). **INT-3 sharpening**: (a) if only a passive rate limit, state explicitly that automatic retry is not guaranteed / (b) if automatic retry is promised, own backoff-expiry dirty+wake as an opt-in third trigger (including an opt-in extension amendment to the closed set of 0011 §2.1) — an either-or design obligation. **Premise common to both forms**: an amendment restricting the **re-admission half** of the immediacy in 0005 INV-13 / 0012 INV-SE3, INV-SE5 (next-pass), and §4.3 to policy-off only (0012 §8 = its preserved/relaxable partition with the re-admission-only scope — the relaxation covers only policy-targeted re-admission (finished restart + explicit replacement); pure first admission (including bootstrap) and non-policy-targeted cases are preserved. Delay cannot be pushed outside the re-evaluation point). Storm bounding holds under (a) |
-| TS-1 | Cannot drive subscription-originated input | active | **C** | The foundational half (source-side injection contract) is already drafted in 0012 §6; condition for the remaining half = the RFC 0008 stage-3 driving-store amendment (the delegation frame of 0012 §6.2). owner: RFC 0008 stage-3 amendment — blocks composition = no / gates the composition RFC = no |
+| TS-1 | Cannot drive subscription-originated input | closed | **C** | The foundational half (source-side injection contract) is 0012 §6; the remaining half was conditioned on the RFC 0008 stage-3 driver's delivery (the delegation frame of 0012 §6.2), and that surface is in the crate — a driver drives the production kernel, so a subscription's input reaches `update` the way it does in production. owner: RFC 0008 §9 — blocks composition = no / gates the composition RFC = no |
 | TS-2 | No seam for swapping effect I/O | active | **A** | Expressible via the existing Flags/environment path — subscriptions use source-side injection (0012 §6); no non-time effect-DI surface is created (0012 §9/INV-SE8 negative space). 0012 §9 itself defines the remainder as a docs concern, not API surface — docs/example work for the Flags convention goes to the §10 non-gate follow-up. **TS-5 backlink**: the docs condition for app-level clock injection (Flags convention) is also closed in the same §10 follow-up (recipient of the residual routing from TS-5 X) |
-| TS-3 | HTTP Query cache behavior outside verification scope | active | **C** | Condition = the RFC 0008 stage-3 driving-store amendment only (the Flags side is already satisfied by TS-2 = A). owner: RFC 0008 stage-3 amendment — blocks composition = no / gates the composition RFC = no |
+| TS-3 | HTTP Query cache behavior outside verification scope | closed | **C** | Conditioned on the RFC 0008 stage-3 driver's delivery only (the Flags side was already satisfied by TS-2 = A), and that surface is in the crate. owner: RFC 0008 §9 — blocks composition = no / gates the composition RFC = no |
 | TS-4 | No view/render assertions | active | **A** | Independent additive helper — addable on the existing render-step seam (leaf-G36 settled) and requires no contract change |
 | TS-5 | App-level clock/randomness DI not in place | excluded | **X** | Explicit exclusion scope: **no general-purpose app-level Clock/Rng DI surface is provided** — DI for the non-time effect-execution surface is 0012 §9/INV-SE8 (not extended to the time axis); a time-axis Clock abstraction is already rejected in 0009 §2. Explicit routing of the remainder: (1) docs for app-level clock injection (Flags convention) = the §10 non-gate follow-up recorded on TS-2 (= A); (2) whether a calendar/wall-clock axis is needed = leaf-N57 (N57 row); (3) policy-local randomness reproducibility (retry/restart jitter) = judged on the P1 (0004 path) / S8a (rate RFC) side, per the 0009 §1.2 delegation |
-| TS-6 | Subscription lifecycle not verifiable | active | **C** | Same condition as TS-1 — condition = the RFC 0008 stage-3 driving-store amendment (0012 §6 + 0012 §6.2). owner: RFC 0008 stage-3 amendment — blocks composition = no / gates the composition RFC = no |
+| TS-6 | Subscription lifecycle not verifiable | closed | **C** | Same condition as TS-1 — the RFC 0008 stage-3 driver's delivery (0012 §6 + 0012 §6.2), now in the crate. owner: RFC 0008 §9 — blocks composition = no / gates the composition RFC = no |
 | TCA-1 | Where the quit directive lives | merged | **C** | resolved_via: B-8. root-B7, root-A1. Derived from the B-8 verdict (delegation of quit preservation to the composition RFC under 3 conditions — §6.1). owner: composition RFC — blocks composition = no / gates the composition RFC = no |
 | TCA-2 | Timing of Outcome exposure | merged | **C** | resolved_via: B-9. root-B7. Derived from the B-9 verdict (delegation of the Axis A terminal home to the composition RFC). owner: composition RFC — blocks composition = no / gates the composition RFC = no |
 | TCA-3 | subscription re-eval policy directive | merged | **C** | resolved_via: B-10. root-B7. Derived from the B-10 verdict (delegation to an RFC 0002 extension RFC). owner: RFC 0002 extension — blocks composition = no / gates the composition RFC = no |
@@ -1829,10 +1830,10 @@ material under §1.8, not register entries.
 
 | Delegated document | Audit rows | Gates | Scope handed over |
 |---|---|---|---|
-| composition RFC — RFC 0014, Accepted; delegation discharged | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
-| `cancel_scope` RFC (`C-16`, §5.3) — RFC 0013, Accepted; delegation discharged | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5); met by co-design, both accepted together | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
+| composition RFC — RFC 0014, Implemented; delegation discharged | N10, N41, N42, N43, N44, N55, P13, TCA-1, TCA-2, TCA-4, N40 (automatic-scope-application half) | no (vacuous — it is itself the gated document) | the §5.2 requirement set (a)–(f); parent-state/routing composition, scope application, the scope/lens canon, enum reducer composition, routing/broadcast, navigation/presentation state, multi-frontend seams; Axis A terminal home and quit surface (`B-8`/`B-9`, §6.1) |
+| `cancel_scope` RFC (`C-16`, §5.3) — RFC 0013, Implemented; delegation discharged | N30, N40 (teardown half; jointly with the composition RFC) | **yes** — must precede or accompany the composition RFC (RFC 0005 §4.5); met by co-design, both accepted together | scope-tree ownership, teardown ordering, the six deferred `cancel_scope` questions (RFC 0005 §4.5) |
 | driving surface RFC (with its subordinate conformance kit) | N7, N15, N24, N45, N48, N49, P12 | no | external driving of the runtime: pacing/latency step mapping, parking premise, bootstrap/termination intake, backend/terminal separation, the contour declaration's inventory of signals the driving surface exclusively holds (POSIX signal handling), source/backend conformance kit |
-| RFC 0008 stage-3 driving-store amendment | TS-1, TS-3, TS-6 | no | driving-store test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
+| RFC 0008 stage-3 driver amendment — RFC 0008 §9, delivered | TS-1, TS-3, TS-6 | no | stage-3 driver test surface for subscription-fed input, lifecycle verification, and HTTP query-cache coverage (RFC 0012 §6.2's slot) |
 | graceful-drain RFC | N23, N27, P6 | no | the RFC 0011 §4.5 drain slot: deadline-bounded shutdown, and what remains of the cleanup-hook seam now that RFC 0014 §4.4 takes the hook itself (registration, at-most-once firing at the teardown application point, termination discarding unfired hooks) — the drain window around it, the ordering of a cleanup against its scope's successor (§6.2's return), and any bound on cleanup completion |
 | supervision/rate RFC (the S8a slot) | N25, N36, S8a; the restart-storm half of N54 | no | opt-in restart-rate policy in RFC 0012 §8's delegation slot (one of the two recorded forms, with the immediacy-amendment precondition), startup-failure cause observation |
 | suspend-time contract RFC | N54 (production half) | no | production suspend-time behavior: fill or pin as negative space what RFC 0009 leaves open beyond monotonic passthrough |

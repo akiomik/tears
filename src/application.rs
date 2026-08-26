@@ -136,18 +136,38 @@ pub trait Application: Sized {
     /// # Contract
     ///
     /// This method must be a **pure function of the application state**: its result
-    /// may only change as a result of [`Application::update`]. The runtime
-    /// re-evaluates subscriptions only after a message is processed, so any change
-    /// driven by something else (wall-clock time, interior mutability, or background
-    /// tasks mutating shared state) that affects the returned subscription IDs may
-    /// not be detected. Express such changes as messages handled in `update` instead.
+    /// may only change as a result of [`Application::update`]. A change driven by
+    /// something else (wall-clock time, interior mutability, or background tasks
+    /// mutating shared state) may not be detected, because the runtime re-evaluates
+    /// only when it considers the declared set dirty and none of those events marks
+    /// it dirty. Express such changes as messages handled in `update` instead. This
+    /// obligation is RFC 0012's INV-SE6, stated on the same terms for
+    /// [`Reducer::subscriptions`](crate::reducer::Reducer::subscriptions).
+    ///
+    /// # When the set is re-evaluated
+    ///
+    /// Two things mark the declared set dirty, and either alone is enough:
+    ///
+    /// * a message reaching `update`; and
+    /// * the quiescence of a subscription task the runtime stopped for a
+    ///   steady-state reason — an ID leaving the returned set, a restart
+    ///   replacing a live task, or a scope teardown selecting the run
+    ///   (RFC 0012 §4.2).
+    ///
+    /// The second needs no message, so a reconcile that had to wait for a stopped
+    /// task to finish does not also wait for the next message to arrive. A source
+    /// that merely *finishes* marks nothing dirty on its own.
+    ///
+    /// A new or restarted subscription is admitted only after every previously
+    /// stopped task has quiesced (RFC 0012 §4); a re-evaluation with no outstanding
+    /// stopped task admits immediately.
     ///
     /// # Restart of finished subscriptions
     ///
     /// A subscription is identified by its ID. While an ID keeps appearing in the
     /// returned set, the runtime treats it as *requested*: if its stream has ended
     /// (a finite source completing, or a WebSocket disconnecting), the runtime
-    /// **restarts it** on the next re-evaluation (i.e. after the next message).
+    /// **restarts it** at the next re-evaluation, whenever that comes.
     /// To stop a source permanently once it finishes, drop it from the returned
     /// set — for example by tracking completion in state updated via `update` and
     /// returning `vec![]` (or omitting that subscription) thereafter. Keeping a

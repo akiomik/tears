@@ -136,24 +136,6 @@ impl ScopePath {
     /// returns `true`. A path is its own prefix, the empty path is a
     /// prefix of every path, and shorter, reordered, subset, and
     /// deeper-position paths are not selected.
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::allow_attributes,
-            reason = "`expect(dead_code)` is the fragile form here: whether this predicate is \
-                      judged dead in a non-test build is a transitive-reachability question — it \
-                      is reached only through the kernel registry's prefix selection, itself \
-                      unreachable from the crate's entry point until the switch — and a compiler \
-                      that answers it the other way turns an unfulfilled expectation into an \
-                      error under `-D warnings`"
-        ),
-        allow(
-            dead_code,
-            reason = "the kernel registry's prefix selection is this predicate's only caller, \
-                      and nothing reaches that until the switch wires the kernel to an entry \
-                      point"
-        )
-    )]
     pub fn starts_with(&self, prefix: &Self) -> bool {
         self.0.len() >= prefix.0.len() && self.0[..prefix.0.len()] == prefix.0[..]
     }

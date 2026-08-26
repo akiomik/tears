@@ -12,8 +12,11 @@
 - CHANGELOG: `Added` entries (`RuntimeConfig`, `Runtime::with_config`)
   landed at the load-control implementation release, not with this RFC.
   `Changed` (breaking) — `RuntimeConfig` no longer implements `Copy`;
-  `Clone`, `Debug`, `Eq`, and `PartialEq` remain, and `FrameRate` stays
-  `Copy`. Lands at 0.11.0 with the §2.1 derive-removal deliverable
+  `Clone`, `Debug`, `Eq`, and `PartialEq` remain, and `Default` is derived.
+  Lands at 0.11.0 with the §2.1 derive deliverable. The field changes that
+  land beside it — the frame rate's removal, `keyed_channel_capacity`'s,
+  and `app_channel_capacity`'s rename — are RFC 0014 §9 rows 2 and 4, and
+  that RFC's CHANGELOG carries them
 
 > **Decision scope.** This RFC fixes only what RFC 0006 delegated to it. The
 > load-control semantics themselves — what each control means, the
@@ -32,20 +35,21 @@ position (its open questions 1, 5, and the default-value half of 2), the
 section 5.1 bounded-run parameters, and the CI smoke-profile question. This
 RFC is that document. It decides:
 
-1. **Public API**: a `RuntimeConfig` struct carrying the frame rate and the
-   three load controls — private fields, `RuntimeConfig::new(frame_rate)`
-   as the sole constructor (no `Default`: the crate has no default frame
-   rate), three infallible consuming setters — consumed by
-   `Runtime::with_config(flags, config)`; `Runtime::new` is unchanged and
-   delegates to `with_config` with a load-control-unset configuration.
+1. **Public API**: a `RuntimeConfig` struct carrying the delivery controls
+   — private fields, `RuntimeConfig::new()` as the sole constructor, one
+   infallible consuming setter per field — consumed by
+   `Runtime::with_config(flags, config)`; `Runtime::new` delegates to
+   `with_config` with a controls-unset configuration. The type carried the
+   frame rate and a third control until RFC 0014 §9 rows 2 and 4 removed
+   the pacing they configured and the channels they sized (§2.1).
 2. **Recommended defaults**: documentation-only guidance — the runtime's
    defaults stay unbounded (`None`); the documented starting point for
-   applications that opt in is `app_channel_capacity = 1024` (a
+   applications that opt in is `data_lane_capacity = 1024` (a
    measurement-informed margin choice: the RFC 0006 section 2 measurements
    give a lower-bound signal and a latency estimate at that value, not a
-   uniquely pinned number), `keyed_channel_capacity = 16` (a margin
-   choice, not measurement-derived), and `batch_max_messages` unset
-   (evidenced by F5), each basis stated in full in section 3.1.
+   uniquely pinned number) and `batch_max_messages` unset (evidenced by
+   F5), each basis stated in full in section 3.1. The keyed capacity's
+   starting value retired with the control (section 3.1).
 3. **Restart-rate control**: stays subscription-level; `RuntimeConfig`
    carries no restart-rate field and reserves none.
 4. **Bounded acceptance-run parameters**: one configuration under test
@@ -88,55 +92,59 @@ of the three controls (RFC 0006 §4.1, INV-L12) and every acceptance
 ### 2.1 Type and construction
 
 ```rust
-/// Construction-time configuration for the runtime: the frame rate and
-/// the opt-in load controls (RFC 0006).
+/// Construction-time configuration for the runtime: the opt-in delivery
+/// controls (RFC 0006).
 ///
-/// With the load controls unset, the configuration reproduces the
-/// unbounded delivery mode exactly (RFC 0006 INV-L6).
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// With the controls unset, the configuration reproduces the unbounded
+/// delivery mode exactly (RFC 0006 INV-L6).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeConfig {
-    frame_rate: FrameRate,
-    app_channel_capacity: Option<NonZeroUsize>,
-    keyed_channel_capacity: Option<NonZeroUsize>,
+    data_lane_capacity: Option<NonZeroUsize>,
     batch_max_messages: Option<NonZeroUsize>,
 }
 
 impl RuntimeConfig {
     #[must_use]
-    pub const fn new(frame_rate: FrameRate) -> Self;
-    #[must_use = "app_channel_capacity consumes the config and returns the modified value"]
-    pub const fn app_channel_capacity(self, capacity: NonZeroUsize) -> Self;
-    #[must_use = "keyed_channel_capacity consumes the config and returns the modified value"]
-    pub const fn keyed_channel_capacity(self, capacity: NonZeroUsize) -> Self;
+    pub const fn new() -> Self;
+    #[must_use = "data_lane_capacity consumes the config and returns the modified value"]
+    pub const fn data_lane_capacity(self, capacity: NonZeroUsize) -> Self;
     #[must_use = "batch_max_messages consumes the config and returns the modified value"]
     pub const fn batch_max_messages(self, max: NonZeroUsize) -> Self;
 }
 ```
 
 - **Scope of the type**: `RuntimeConfig` is the runtime's construction-time
-  configuration, not a load-control namespace. The frame rate is, from the
-  caller's side, exactly a runtime setting — it already travels every
-  constructor call — so it lives in the type the name promises, and future
-  runtime knobs accrete here without growing `Runtime`'s constructor
-  signatures. RFC 0006's `with_config(flags, frame_rate, config)` was
-  explicitly an example ("for example", its §3.2), and its §4.1 delegates
-  regrouping to this RFC; the load-control semantics are untouched by the
-  grouping.
-- **Field set and names**: the frame rate plus exactly RFC 0006 §4.1's
-  three controls, under RFC 0006's working names, which this RFC adopts
-  unchanged. Adopting the working names keeps every cross-reference in RFC
-  0006 (INV-L1, INV-L3, INV-L6, INV-L12, §5.1) literal.
-- **Construction style**: `RuntimeConfig::new(frame_rate)` is the sole
-  constructor — it takes the one setting that has no meaningful default
-  and leaves the three load controls unset — followed by consuming setters
-  named after their fields, following the crate's existing combinator
-  convention (`Command::timeout`, `Command::cancellable` carry no `with_`
-  prefix). Each setter sets exactly its own field. There is deliberately
-  no `Default` impl: the crate has no default frame rate — `Runtime::new`
-  has always required an explicit, validated `FrameRate` — and inventing
-  one inside a `Default` would smuggle a policy value into a derive.
-  Should a default frame rate ever be adopted, adding `Default` then is
-  additive.
+  configuration, not a load-control namespace — future runtime knobs accrete
+  here without growing `Runtime`'s constructor signatures. It carried the
+  frame rate on the same reasoning while the runtime had one; the
+  reducer-first kernel bounds render cadence by the pass and reads no
+  configured period, so that field left the type with the pacing it
+  described (RFC 0014 §6.3, §9 row 4). RFC 0006's
+  `with_config(flags, frame_rate, config)` was explicitly an example ("for
+  example", its §3.2), and its §4.1 delegates regrouping to this RFC; the
+  load-control semantics are untouched by the grouping.
+- **Field set and names**: exactly the delivery controls RFC 0006 §4.1
+  leaves configurable, under RFC 0006's working names where those names
+  still describe their object. Two of §4.1's three no longer do.
+  `keyed_channel_capacity` is gone: it sized the private per-command
+  channels, and the successor topology has none to size.
+  `app_channel_capacity` is `data_lane_capacity`, with no alias, because it
+  stopped sizing the shared application-message channel and started sizing
+  the one lane every producer shares — a silently accepted old name would
+  misstate what it bounds. Both are RFC 0014 §9 row 2, and the surviving
+  cross-references in RFC 0006 (INV-L1, INV-L3, INV-L6, INV-L12, §5.1) are
+  read through that row.
+- **Construction style**: `RuntimeConfig::new()` is the sole constructor,
+  leaving both controls unset, followed by consuming setters named after
+  their fields, following the crate's existing combinator convention
+  (`Command::timeout`, `Command::cancellable` carry no `with_` prefix).
+  Each setter sets exactly its own field. `Default` is derived and agrees
+  with `new()` on every field. This RFC withheld `Default` while the type
+  carried a frame rate, because the crate had no default frame rate and
+  inventing one inside a derive would have smuggled in a policy value, and
+  recorded that adding it later would be additive; with the frame rate gone
+  every field's unset value is the documented one, so the derive states
+  nothing the constructor does not.
 - **Consuming-call misuse guard**: a setter call whose return value is
   discarded must never leave the caller silently running an unintended
   configuration. Without `Copy` (Derives below), the compiler closes
@@ -152,11 +160,9 @@ impl RuntimeConfig {
   `Runtime::with_config` carries `#[must_use]` too, matching
   `Runtime::new`'s existing attribute. Pinned as INV-C6 (§7).
 - **Validation style**: none, by construction. Every capacity is
-  `NonZeroUsize`, so a zero capacity is unrepresentable, and the frame
-  rate arrives as the already-validated `FrameRate` type — validation
-  stays at `FrameRate::new`, whose validity condition is a range a
-  `NonZeroU32` cannot express. No `RuntimeConfig` constructor, setter, or
-  consuming call returns a `Result`.
+  `NonZeroUsize`, so a zero capacity is unrepresentable. No
+  `RuntimeConfig` constructor, setter, or consuming call returns a
+  `Result`.
 - **Fields are private**: literal construction and struct-update syntax are
   unavailable outside the crate, so adding a field later is additive
   without `#[non_exhaustive]`. No getters are provided initially; adding
@@ -170,67 +176,53 @@ impl RuntimeConfig {
   config is small and the churn minimal; after it, config growth is
   non-breaking on this axis. What `Copy` bought — harness and test code
   free of explicit clones — is recoverable with `Clone` at the cost of
-  a visible `clone()`. `FrameRate` keeps `Copy`: it is word-sized with
-  no growth ambition (`src/runtime/frame_rate.rs`). `RuntimeConfig` does
-  not derive `Copy` (`src/runtime/config.rs`); its rustdoc describes a
-  move-and-return builder, and the public surface differs from the
-  `Copy` era only by that implementation's removal.
+  a visible `clone()`. `RuntimeConfig` does not derive `Copy`
+  (`src/runtime/config.rs`); its rustdoc describes a move-and-return
+  builder, and the public surface differs from the `Copy` era only by
+  that implementation's removal.
 
 ### 2.2 Constructor integration
 
 ```rust
 impl<App: Application> Runtime<App> {
-    #[must_use]
-    pub fn new(flags: App::Flags, frame_rate: FrameRate) -> Self;   // unchanged
-    #[must_use]
-    pub fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self;  // new
+    pub const fn new(flags: App::Flags) -> Self;
+    pub const fn with_config(flags: App::Flags, config: RuntimeConfig) -> Self;
 }
 ```
 
-- `Runtime::new` keeps its signature and semantics and is implemented as a
-  delegation to `Self::with_config(flags, RuntimeConfig::new(frame_rate))`.
-  The delegation is the structural seam RFC 0006's INV-L6 check goes
-  through: one code path constructs the channels, and the load-control-
-  unset configuration selects the unchanged unbounded construction within
-  it.
-- `with_config` builds the `FrameScheduler` from `config.frame_rate` at
-  that single construction site — the delegation above only relocates
-  where the frame rate is supplied from (a parameter to a config field);
-  it does not by itself guarantee the value flows through to the
-  scheduler. Pinned as INV-C5 (§7): a config carrying one frame rate must
-  not silently produce a scheduler paced at another.
-- Each constructor takes the frame rate exactly once: `new` as a
-  parameter, `with_config` inside the config. Rejected shapes, recorded:
-  - `with_config(flags, frame_rate, config)` with a load-control-only
-    config (RFC 0006's example shape): leaves the frame rate outside a
-    type named `RuntimeConfig`, misnaming the type from the caller's
-    perspective, and fixes a third constructor parameter forever while
-    every future knob still lands in the config (§2.1's scope rationale).
-  - An optional `frame_rate` field with a defaulted value (e.g. 60 FPS):
-    introduces a default frame rate the crate deliberately does not have,
-    and makes the two constructors disagree on whether the frame rate is
-    explicit (§2.1's no-`Default` rationale).
-- No other constructor is added and no existing signature changes,
-  preserving RFC 0006 §3.2's additivity verdict, which requires only that
-  `Runtime::new` stay unchanged.
+- `Runtime::new` is implemented as a delegation to
+  `Self::with_config(flags, RuntimeConfig::new())`. The delegation is the
+  structural seam RFC 0006's INV-L6 check goes through: one code path
+  constructs the lane, and the controls-unset configuration selects the
+  unbounded construction within it.
+- The `#[must_use]` that guarded these constructors now sits on `Runtime`
+  itself, with the reason a constructed runtime is inert until it is run —
+  the same warning at a wider scope, since the type has no use that
+  discards it.
+- `new` took the frame rate as a second parameter for as long as one
+  existed, and this section recorded two rejected alternatives that were
+  about where it lived: a three-parameter `with_config(flags, frame_rate,
+  config)` (RFC 0006's example shape), and an optional defaulted
+  `frame_rate` field. Both are moot — there is no frame rate to place —
+  and the reasoning that decided them survives as §2.1's scope rationale.
+- The frame-rate parameter's removal is the breaking change RFC 0014 §9
+  row 4 carries, recorded in that RFC's CHANGELOG rather than as an
+  additivity claim here. What remains true of RFC 0006 §3.2's verdict is
+  its substance: this RFC adds no constructor of its own beyond
+  `with_config`.
 
 ### 2.3 Placement
 
-- Module: `src/runtime/config.rs` (`pub mod config` under `runtime`),
-  matching `runtime::frame_rate`.
+- Module: `src/runtime/config.rs` (`pub mod config` under `runtime`).
 - Re-exports: `tears::RuntimeConfig` at the crate root, as
   `Runtime::with_config`'s companion type, but *not*
   `tears::prelude::RuntimeConfig`. Crate-root placement and prelude
   membership are different tests (`docs/api-guidelines.md`'s "Prelude
   Membership"): the prelude asks whether a *minimal* skeleton app writes
-  the item out literally, and a minimal app calling
-  `Runtime::new(flags, frame_rate)` never names `RuntimeConfig` — only an
-  app that opts into `with_config` does. That is the same reasoning that
-  keeps `FrameRateError` out of the prelude despite its crate-root
-  re-export, not the reasoning that puts `FrameRate` in it (a minimal app
-  always writes `FrameRate::new(...)`, unconditionally). Should load
-  control become a minimal skeleton's default path in some future RFC,
-  adding `RuntimeConfig` to the prelude then is additive.
+  the item out literally, and a minimal app calling `Runtime::new(flags)`
+  never names `RuntimeConfig` — only an app that opts into `with_config`
+  does. Should load control become a minimal skeleton's default path in
+  some future RFC, adding `RuntimeConfig` to the prelude then is additive.
 - The bench harness (`benches/kernel_load.rs`) constructs its bounded runs
   through this public surface only; `bench-internals` gains no
   config-related items.
@@ -251,8 +243,23 @@ trade, not measurement-bound, and carries no such consistency obligation.
 
 ### 3.1 Sizing rule and starting values
 
-The two capacities size by different rules, because the two channels drain
-differently. The latency estimate below is the *shared* channel's alone;
+**What of this section is current.** One capacity survives the successor
+topology: `app_channel_capacity`, under the name `data_lane_capacity`
+(§2.1). Its sizing rule survives with it, because the rule's premise is
+FIFO drain and the single lane drains FIFO — but what a newly accepted
+message waits behind is no longer only application input; every producer's
+output shares the lane, which is the isolation loss RFC 0014 §9 row 2
+records. The successor's own measured behaviour is RFC 0006 §5.3, and
+re-deriving a starting value on it is not something this section has done.
+`keyed_channel_capacity` and its starting value are retired with the
+private channels they sized. Both are kept below as the record of what
+those controls did and why no delivery-latency guarantee was ever attached
+to the keyed one; read every present tense in the rest of this section as
+describing the topology those measurements were taken on.
+
+The two capacities sized by different rules, because the two channels
+drained differently. The latency estimate below is the *shared* channel's
+alone;
 applying it to the keyed channel is a category error the keyed rule below
 names explicitly, and §3.2 keeps each rule on its own setter so neither
 reads as governing the other.
@@ -942,10 +949,10 @@ frame rate therefore leaves this type and the constructors that carry it.
 Two register rows decide this section: RFC 0014 §9 row 4, the pacing
 cluster, and row 2, under which the per-command capacity leaves with
 the private keyed channels it sized. Both landed with that RFC's
-acceptance; every clause above states the surface in force until
-mainlining closes RFC 0014 §13.1's open tier, and each becomes the
-following there, with the successor's own enforcement classes staying
-RFC 0014 §12's.
+acceptance, and the surface they describe is the one §2 now states.
+This section is the clause-by-clause record of what each of this
+document's statements became, with the successor's own enforcement
+classes staying RFC 0014 §12's.
 
 - **INV-C5 is superseded.** With no frame-rate configuration there is no
   scheduler for a config to disagree with, so the mismatch this invariant
@@ -1021,10 +1028,11 @@ RFC 0014 §12's.
 - **§5's bounded-run parameters and §6's smoke profile follow RFC 0006's
   named prerequisite.** They configure a harness measured on the
   superseded topology; re-deriving the acceptance formulation and its
-  scenario set is owned by RFC 0006 (its §5.2, tracked as RFC 0014
-  §13.5), and the parameters this RFC fixes are re-fixed against
-  whatever that re-derivation defines. §4's restart-rate position is
-  unaffected: rate policy stays subscription-level (RFC 0012 §8).
+  scenario set is owned by RFC 0006 §5.3 — which §5.2 delegates it to,
+  and which RFC 0014 §13.5 records as resolved — so the parameters this
+  RFC fixes are read against the conditions stated there. §4's
+  restart-rate position is unaffected: rate policy stays
+  subscription-level (RFC 0012 §8).
 
 ## 8. Open questions
 

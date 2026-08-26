@@ -34,13 +34,12 @@
 //! `lib.rs`, so items are declared `pub` rather than `pub(crate)` (the
 //! convention `runtime::channel` documents).
 
-// The kernel is complete but not yet wired to an entry point: the facade
-// that constructs and runs it lands with the switch, and the stage-3 driver
-// that scripts it lands beside it. Until then most of this surface has no
-// caller outside the tests below.
+// The entry facade constructs and runs the kernel, but it reaches only part
+// of this surface: the seams the stage-3 driver scripts, and the accounting
+// the conformance series read, have no caller outside the tests below.
 #![allow(
     dead_code,
-    reason = "kernel: the entry facade that constructs and runs it lands with the switch"
+    reason = "kernel: seams reached only by the stage-3 driver and the conformance series"
 )]
 
 pub mod accounting;

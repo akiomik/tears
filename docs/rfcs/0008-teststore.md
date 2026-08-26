@@ -1,8 +1,7 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
-- Status: Implemented for stages 1–2. Stage 3 (§9) is contract only:
-  its surface enters the crate with the reducer-first kernel, after
-  RFC 0014 §13.1's open tier closes
+- Status: Implemented — stages 1–2 with the store, stage 3 (§9) with
+  the reducer-first kernel, at the paths §9.1 places it
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
@@ -31,11 +30,11 @@
 > retry backoff) deliverable through ordinary `receive` flow (§4.3, §7).
 > `Timer`-based subscriptions are not staged here at all: TestStore
 > never executes subscription sources (§1.2), so lifting that is a
-> separate subscription-execution design, not stage 2. Stage 3 —
-> gated on RFC 0014 — is not a store stage: it is a separate driving
-> layer beside the store (§1.3, §9) that executes the production
-> kernel, subscription sources included, and leaves §1.2's
-> non-execution boundary exactly where it is.
+> separate subscription-execution design, not stage 2. Stage 3 — which
+> waited on RFC 0014's kernel and landed with it — is not a store stage
+> either: it is a separate driving layer beside the store (§1.3, §9)
+> that executes the production kernel, subscription sources included,
+> and leaves §1.2's non-execution boundary exactly where it is.
 
 ## Summary
 
@@ -167,12 +166,12 @@ claims is RFC 0014 §7.3's.
 The API body — the concrete `TestDriver` surface — is §9: the
 additive section RFC 0014 §9 row 11 records and RFC 0012 §6.2
 reserves. It expresses RFC 0014 §7.2's contract as API and adds no
-driving guarantee beyond it; the surface itself enters the crate when
-mainlining closes RFC 0014 §13.1's open tier (§9.1).
+driving guarantee beyond it; the surface is in the crate at the paths
+§9.1 places it.
 
-The same landing extends this store's command intake: the lowered
-parts it consumes gain teardown entries and independently keyed batch
-children (RFC 0014 §3.4, §7.1). §9.10 states what that costs this
+The same landing extended this store's command intake: the lowered
+parts it consumes carry teardown entries and independently keyed batch
+children (RFC 0014 §3.4, §7.1). §9.10 states what that cost this
 document.
 
 ## 2. The `Message` boundary
@@ -373,20 +372,20 @@ generic) are implementation latitude.
   first-occurrence-stable rule: for equal full IDs in the declared list,
   only the first occurrence is kept, at its original position among the
   survivors (`[A, B, A]` → `[A, B]`, never `[B, A]` or any other
-  reordering). This is the same *desired-set* `SubscriptionManager::update`
-  computes before reconciling — not the set it spawns: `update` leaves an
-  already-running id in that set untouched and calls a source's
-  `stream()` only for an id newly entering it (`src/subscription.rs`).
+  reordering). This is the same *desired set* the runtime's reconcile
+  computes before admitting anything — not the set it starts: a
+  reconcile leaves an already-running id untouched and calls a source's
+  `stream()` only for an id newly entering the set
+  (`src/kernel/pass.rs`, `src/subscription/core.rs`).
   `subscription_ids` performs the same dedup without going anywhere near
   that machinery — it never calls `stream()` on any declared source and
-  never constructs or runs a `SubscriptionManager` (§1.2) — so its
-  return value predicts the reconciliation *input*, not which ids the
-  runtime spawns or which are currently live. For the same reason it
-  does not reproduce the
+  never runs a reconcile (§1.2) — so its return value predicts the
+  reconciliation *input*, not which ids the runtime starts or which are
+  currently live. For the same reason it does not reproduce the
   warning-level tracing event RFC 0005 §3.5 requires of the ignored
-  duplicate: that event is `SubscriptionManager::update`'s own side
-  effect, never triggered by a call that runs no `SubscriptionManager`
-  at all. `SubscriptionId` is already `Clone + Eq + Hash + Debug`, so
+  duplicate: that event is the reconcile's own side effect, never
+  triggered by a call that runs no reconcile at all. `SubscriptionId`
+  is already `Clone + Eq + Hash + Debug`, so
   the test asserts on the returned `Vec` directly. This is the
   observation the `subscriptions`-purity contract (`src/application.rs`)
   makes meaningful: the declared set is a pure function of state, so
@@ -633,15 +632,19 @@ The store applies RFC 0003's delivery semantics to its pending set.
 Occupancy follows RFC 0003's own accounting (INV-6, INV-7): **an id is
 occupied while its current run may still deliver output, and is
 released once every one of the run's leaves has been observed
-exhausted.** Exhaustion is observable only by polling, so the store
-mirrors the runtime's pre-spawn reconciliation (before any
-`Spawn(policy)` decision the runtime reaps completed keyed tasks and
-samples the target receiver once — RFC 0003 §4.2) with **keyed-intake
-reconciliation**: when a keyed command arrives for an occupied id and
-its policy's admission decision depends on the occupant's state
-(`CancelPolicy::KeepInFlight`), the store reconciles before that
-decision. (`CancelInFlight`'s outcome does not depend on the occupant's
-state, so it reconciles nothing — see the per-policy bullets below.) If
+exhausted.** The runtime reads that fact from bookkeeping rather than
+by polling: a run holds its keyed slot until its queued output has
+drained, and the exits that end runs are reflected once at the head of
+every pass rather than sampled per dispatch
+(`ScopeRegistry::keyed_occupant`; RFC 0014 §3.1, and RFC 0003 §4.2's
+contract on the successor's accounting). The store keeps no such
+accounting, and exhaustion is observable to it only by polling, so it
+reaches the same fact by **keyed-intake reconciliation**: when a keyed
+command arrives for an occupied id and its policy's admission decision
+depends on the occupant's state (`CancelPolicy::KeepInFlight`), the
+store reconciles before that decision. (`CancelInFlight`'s outcome does
+not depend on the occupant's state, so it reconciles nothing — see the
+per-policy bullets below.) If
 the occupant already has buffered output, the id is occupied and nothing
 is polled; otherwise the store polls the occupant's remaining leaves in
 enqueue order, stopping at the first that shows the run still open — a
@@ -666,12 +669,15 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   the outcome is fixed — the occupant is superseded and its undelivered
   output discarded regardless of its state — so the store issues no
   reconciliation poll: superseding an exhausted occupant and spawning
-  into a released id are indistinguishable. The runtime does sample the
-  target receiver's facts before *every* `Spawn(policy)`, `CancelInFlight`
-  included (`reconcile_receiver` in `src/runtime/keyed_commands.rs`;
-  RFC 0003 §4.2), but that sample cannot change a `CancelInFlight`
-  admission outcome, and the store has no equivalent receiver snapshot to
-  reconcile — so skipping the poll preserves the delivery contract while
+  into a released id are indistinguishable. The runtime does read the
+  target slot's occupancy before *every* keyed `Spawn(policy)`,
+  `CancelInFlight` included (`spawn_decision` in
+  `src/kernel/lowering.rs`, applied by `Kernel::apply_spawn`;
+  RFC 0003 §4.2), but that read cannot change a `CancelInFlight`
+  admission outcome: an occupied slot means the occupant is superseded
+  first, an empty one means there is nothing to supersede, and the new
+  stream starts either way. The store has no equivalent occupancy to
+  read, so skipping the poll preserves the delivery contract while
   matching the runtime's outcome, not its every step. Not polling also
   lets a `CancelInFlight` command supersede an occupant whose poll
   would fail the test without polling it — in stage 1 that made
@@ -711,7 +717,8 @@ completes — the analogue of INV-7's sender-closed empty receiver.
 These are the deterministic core of RFC 0003 — what may still be
 delivered, and when an id releases — restated over the store's pending
 set, with keyed-intake reconciliation as the store's analogue of the
-runtime's pre-spawn reap-and-sample. The mechanics that exist only
+occupancy the runtime reads off its delivery accounting. The mechanics
+that exist only
 because the runtime is concurrent (stale-exit tokens, INV-8; bounded
 bookkeeping, INV-13) have no TestStore counterpart and are deliberately
 not modeled.
@@ -721,8 +728,8 @@ the store's proof of exhaustion is §4.1's single poll per leaf at
 intake. A leaf that needs further polls to complete (a self-waking
 future mid-completion) reads as still open and keeps the id occupied —
 deterministically — while at the runtime's decision point the same
-run's task may or may not have exited yet, a scheduling fact the
-runtime's reconciliation resolves whichever way it finds. In that
+run's exit may or may not have been reflected yet, a scheduling fact
+the pass boundary resolves whichever way it finds. In that
 window the store deterministically selects one of the runtime's legal
 outcomes; a test pinning a `KeepInFlight` discard there asserts the
 store's selection, not a runtime guarantee (§4.2's citation rule
@@ -743,8 +750,8 @@ The init-command reading is TestStore-specific introspection and does
 enqueues the init command directly and never consults its redraw
 directive at the first frame: the first render starts out eligible
 unconditionally, and when it happens it renders regardless of that
-directive — its occurrence itself is not promised (RFC 0011 §3.2)
-(`src/runtime/core.rs`, `src/runtime/pending_work.rs`). So
+directive — its occurrence itself is not promised (RFC 0011 §3.2,
+RFC 0014 §6.2). So
 `redraw_requested()` before the first step exposes the init command's
 folded directive as a `Command` property, not as a claim about whether
 the runtime would redraw its first frame — the only production redraw
@@ -1082,13 +1089,12 @@ Enforcement classes follow the pre-review checklist's definitions
   collapse to their first occurrence, at that occurrence's original
   position — `[A, B, A]` → `[A, B]`, never `[B, A]`), and produces it
   without calling `stream()` on any declared source or otherwise
-  constructing or running a `SubscriptionManager` (§1.2, §3.2). The
-  returned `Vec` is the reconciliation *input* `SubscriptionManager::update`
-  would compute, not a prediction of which ids it spawns or already has
-  running — `update` leaves an already-running id untouched and calls
-  `stream()` only for one newly entering the set
-  (`src/subscription.rs`). Structural: review of `subscription_ids`
-  for the absence of any `SubscriptionManager` construction or
+  running a reconcile (§1.2, §3.2). The returned `Vec` is the
+  reconciliation *input* a reconcile would compute, not a prediction of
+  which ids it starts or already has running — a reconcile leaves an
+  already-running id untouched and calls `stream()` only for one newly
+  entering the set (`src/kernel/pass.rs`). Structural: review of
+  `subscription_ids` for the absence of any reconcile or
   `Subscription::spawn`/`stream()` call. Behavioral: a duplicate-ID test
   asserting `[A, B, A]` dedups to `[A, B]`, not `[B, A]` or any other
   order — ruling out a last-occurrence or resorted implementation; a
@@ -1193,19 +1199,17 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
   `tears::testing::TestDriver` and `tears::testing::ParkProbe`.
   §3.3's rules carry over unchanged: no crate-root re-export, no
   prelude membership, no feature flag.
-- **Gating.** This surface is contract, not code. It enters the crate
-  with the reducer-first kernel, after RFC 0014 §13.1's open tier
-  closes, and its `Added` CHANGELOG entry ships with that release —
-  the same form RFC 0014's own header states for it. Sibling
-  documents that reserve this surface keep pointing at it as future
-  work until then, deliberately: RFC 0014 §13.2, RFC 0012 §6.2 and
-  its §12's second question, and RFC 0010's TS-1, TS-3, and TS-6
-  condition rows all close their status at the landing, not at this
-  section — a contract stated is not a surface delivered, and those
-  rows are conditioned on the delivery. The crate's own
-  types in §9.3 divide in three, and no statement here asserts that
-  anything in the first or third division exists in the crate today.
-  The partition covers those and nothing else. Two groups of names
+- **Placement, delivered.** This surface entered the crate with the
+  reducer-first kernel, and its `Added` CHANGELOG entry ships with that
+  release — the same form RFC 0014's own header states for it. The
+  documents that reserved it pointed at it as future work until that
+  delivery, deliberately, because a contract stated is not a surface
+  delivered: RFC 0014 §13.2, RFC 0012 §6.2 and its §12's second
+  question, and RFC 0010's TS-1, TS-3 and TS-6 rows were all
+  conditioned on the delivery rather than on this section, and each
+  closes at it. The crate's own types in §9.3 divided in three when
+  this section was written, and all three divisions are in the crate
+  now. The partition covers those and nothing else. Two groups of names
   appear in this section without belonging to it: `Backend` and
   `ratatui::Terminal`, which are the host UI library's, and `Future`,
   `Pin`, `Poll`, and `NonZeroUsize`, which are `std`'s. Neither group
@@ -1222,8 +1226,9 @@ guarantee beyond RFC 0014 §7.2, which it neither narrows nor widens.
     from — and `RuntimeConfig`, which that landing revises: it loses
     the frame-rate field and `keyed_channel_capacity`, and
     `app_channel_capacity` becomes `data_lane_capacity` with no alias
-    (RFC 0014 §9 rows 2 and 4). `TestDriver::new`'s `config`
-    parameter is that revised type, never today's.
+    (RFC 0014 §9 rows 2 and 4). That revised type is the
+    `RuntimeConfig` the crate has, and it is `TestDriver::new`'s `config`
+    parameter.
 - **The store's boundary is unmoved.** Stages 1 and 2 keep §1.2's
   non-execution boundary exactly: the store still never starts,
   polls, or restarts a subscription source and never spawns a task,
@@ -2231,14 +2236,14 @@ away (RFC 0014 §3.4, §7.1).
 INV-T3 needs no restatement for that: it is stated over the shared
 decomposition boundary rather than over that boundary's current
 member list, so the new entries are inside it as written. Its
-structural review re-runs at the store's intake site once the parts
-carry them.
+structural review re-runs at the store's intake site now that the
+parts carry them.
 
-The rest of the extension is a **named delegation**, recorded here
-rather than drafted here. Its owner is the change that lands the
-kernel-side lowering; the store's half lands in that same change and
-not before it, so this document and the kernel never state different
-lowering semantics at once. What that change must fix, in full:
+The rest of the extension was a **named delegation**, recorded here
+rather than drafted here, and its owner was the change that landed the
+kernel-side lowering — the store's half landing in that same change and
+not before it, so this document and the kernel never stated different
+lowering semantics at once. What that change had to fix, in full:
 
 - the store's own behavior for each new entry class — what a teardown
   entry selects over the store's pending set, and what a cleanup
@@ -2251,11 +2256,11 @@ lowering semantics at once. What that change must fix, in full:
   §4.2's negative space, §6's `send` rationale, INV-T8's keyed
   retention test, and the RFC 0003 entry in §11.
 
-Writing those edits before the kernel lands would state a contract
-this crate does not implement, which is why they are delegated rather
-than made here; nothing in stages 1–2 changes until then.
+Writing those edits before the kernel landed would have stated a
+contract the crate did not implement, which is why they were delegated
+rather than made when this section was written.
 
-**Discharged.** The kernel-side lowering has landed and all three are
+**Discharged.** The kernel-side lowering landed and all three are
 made. A teardown entry selects the store's pending leaves by scope
 prefix, over every kind, as §5.1 now states. A cleanup registration
 arms against its scope and is run by the teardown that selects it: the
@@ -2544,8 +2549,8 @@ begins at the send gate (§9.6).
 
 - RFC 0002 — redraw suppression: the directive `redraw_requested`
   observes.
-- RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation,
-  its §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
+- RFC 0003 — command cancellation: its §4.2 occupancy accounting, its
+  §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
   INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10 (cited in §§4.1,
   4.2, 5.1, 5.3 of this document). Two of the invariants this document
   once read parity off are superseded and are cited historically where

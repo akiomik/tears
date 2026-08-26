@@ -77,12 +77,9 @@ impl Application for App {
 To run your application, create an `Runtime` and call `run()`:
 
 ```rust
-use std::num::NonZeroU32;
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<App>::new((), frame_rate);
+    let runtime = Runtime::<App>::new(());
 
     // Setup terminal (see complete example below)
     // ...
@@ -97,7 +94,7 @@ async fn main() -> Result<()> {
 Here's a simple counter application that increments every second:
 
 ```rust
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode};
@@ -172,9 +169,8 @@ async fn main() -> Result<()> {
     // Installed after `color_eyre::install()` so it wraps that hook.
     tears::install_panic_hook();
 
-    // Run application at 60 FPS
-    let frame_rate = FrameRate::new(NonZeroU32::new(60).expect("non-zero"))?;
-    let runtime = Runtime::<Counter>::new((), frame_rate);
+    // Run the application
+    let runtime = Runtime::<Counter>::new(());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal (normal exit path)

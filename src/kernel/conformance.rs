@@ -1,10 +1,15 @@
 //! The kernel conformance suite: RFC 0014 §13.1's twelve series.
 //!
-//! The series live here rather than in `tests/` because they drive the
-//! kernel directly through the stage-3 driver, which is crate-private until
-//! the switch. The shared fixtures — the scripted program, its journal, the
-//! probe source, the gated effects, and the bounded waits — live in
-//! [`support`], and the series files are named for the property they hold.
+//! The series live here rather than in `tests/` because they reach past
+//! the driving surface: the fixtures name `Kernel` itself, the
+//! accounting counters, the send gate and its ingress, and the producer
+//! bodies — none of which an integration test can name. The driver is
+//! no longer the reason — it is public, at `tears::testing`
+//! (RFC 0008 §9.1) — and `tests/stage3_driver.rs` is what exercises it
+//! through that path. The shared fixtures — the scripted program, its
+//! journal, the probe source, the gated effects, and the bounded waits
+//! — live in [`support`], and the series files are named for the
+//! property they hold.
 //!
 //! # What produces evidence here
 //!
