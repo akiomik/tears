@@ -52,9 +52,11 @@ tokio::task_local! {
 /// ```
 ///
 /// Panics the runtime contains are exempt from the restore. A panic inside a
-/// runtime-owned producer task — an unkeyed command task, a keyed command
-/// task, or a subscription forwarder — is caught by the runtime and does not
-/// terminate the application (RFC 0011 §5, INV-LC8): the event loop keeps
+/// runtime-owned task — an unkeyed command task, a keyed command task, a
+/// subscription forwarder, or a [`Command::on_teardown`](crate::Command::on_teardown)
+/// finalizer, which is spawned through the same contained path — is caught by
+/// the runtime and does
+/// not terminate the application (RFC 0011 §5, INV-LC8): the event loop keeps
 /// running and keeps drawing. Restoring the terminal for such a panic would
 /// drop a live UI out of raw mode and off the alternate screen, so the hook
 /// only delegates to the previous hook in that case.

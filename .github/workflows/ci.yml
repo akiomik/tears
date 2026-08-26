@@ -130,6 +130,30 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  doctest:
+    name: Doc Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
+      # The `test` job passes explicit target flags, which suppress the
+      # implicit doctest run; `doc` builds docs without `cfg(doctest)`, and
+      # `coverage` omits `--doctests`. Without this job nothing compiles the
+      # examples in rustdoc comments or in the `cfg(doctest)`-included
+      # migration guide, so an API rename could break every snippet and leave
+      # CI green. Invoked via `just` so the local and CI invocations are
+      # identical, as the bench job above does.
+      - name: Run doc tests
+        run: just test-doc
+      # Guards the `include` entry that keeps `include_str!` resolvable once
+      # published; the recipe explains why nothing else catches it. Invoked
+      # via `just` so the local and CI invocations are identical, and so the
+      # feature list lives in one place rather than being restated here.
+      - name: Run doc tests against the packaged crate
+        run: just test-doc-packaged
+
   msrv:
     name: MSRV (1.88.0)
     runs-on: ubuntu-latest
