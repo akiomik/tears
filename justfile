@@ -43,11 +43,11 @@ test-integration:
 
 # Deliberately not `--all-features`. Measured, on rustc 1.97.0:
 #
-#     cargo test --doc                          61 tests
-#     cargo test --doc --features loom-core     60 tests   (both `Signal` ones gone)
-#     cargo test --doc --all-features           71 tests   (both `Signal` ones gone)
-#     cargo test --doc --features http,ws,native-tls
-#                                               73 tests   (superset of all above)
+#     cargo test --doc                       61 tests
+#     cargo test --doc --features loom-core  60 tests  (both `Signal` ones gone)
+#     cargo test --doc --all-features        71 tests  (both `Signal` ones gone)
+#     cargo test --doc --features <the value below>
+#                                            73 tests  (superset of all above)
 #
 # Enabling `loom-core` drops `subscription::signal`'s two doctests. The
 # obvious reading — that rustdoc satisfies the `test` in that module's
@@ -60,7 +60,9 @@ test-integration:
 # (`loom-core`, `bench-internals`) — the three TLS backends included, since
 # they coexist and a doctest gated on one must not go uncompiled just because
 # another was picked here. Single source for both doctest recipes and for the
-# CI job that calls them; keep it exhaustive as features are added.
+# CI job that calls them; `test-doc-packaged` fails if it drifts from
+# Cargo.toml's `[features]`, so the table above stays measured against this
+# exact value.
 doc_features := "http,ws,native-tls,rustls,rustls-tls-webpki-roots"
 
 # Run only doc tests
@@ -78,7 +80,8 @@ test-doc:
 # unpacks over whatever is already there, so a file dropped from `include`
 # would survive from an earlier run and the check would pass locally while
 # failing on CI's clean checkout — which is the half of this recipe
-# `--allow-dirty` exists to serve. Requires `jq`.
+# `--allow-dirty` exists to serve. Requires `jq` and Python 3.11+ (`tomllib`);
+# neither is needed by `just check`, which does not reach this recipe.
 
 # Run the doc tests against the packaged crate
 test-doc-packaged:
@@ -94,20 +97,24 @@ test-doc-packaged:
     # new feature gating a module with doctests would silently stop being
     # compiled while this job stayed green — the failure mode the job exists
     # to prevent.
-    # Excludes `default`, the two build-only features, and the implicit
-    # features cargo synthesises for optional dependencies (value is exactly
-    # `["dep:<same name>"]`) — those are not features a caller enables.
-    want=$(jq -r '[.packages[0].features | to_entries[]
-                   | select(.value != ["dep:" + .key])
-                   | .key
-                   | select(. != "default" and . != "loom-core" and . != "bench-internals")]
-                  | sort | join(",")' <<<"$meta")
-    have=$(tr ',' '\n' <<<'{{doc_features}}' | sort | paste -sd, -)
-    if [ "$want" != "$have" ]; then
-      echo "doc_features is stale: expected '$want', got '$have'" >&2
-      echo "Update doc_features in the justfile (see the notes above it)." >&2
-      exit 1
-    fi
+    #
+    # Read from Cargo.toml's `[features]` rather than `cargo metadata`, which
+    # reports cargo's synthesised optional-dependency features the same way it
+    # reports an explicitly declared `foo = ["dep:foo"]`. Filtering the
+    # synthesised ones out of metadata would therefore also drop an explicit
+    # declaration of that shape and let it go missing here.
+    python3 - '{{doc_features}}' <<'PY'
+    import pathlib, sys, tomllib
+
+    BUILD_ONLY = {"default", "loom-core", "bench-internals"}
+    have = {f for f in sys.argv[1].split(",") if f}
+    want = set(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["features"]) - BUILD_ONLY
+    if have != want:
+        print(f"doc_features is stale: expected '{','.join(sorted(want))}', "
+              f"got '{','.join(sorted(have))}'", file=sys.stderr)
+        print("Update doc_features in the justfile (see the notes above it).", file=sys.stderr)
+        raise SystemExit(1)
+    PY
 
     cargo package --no-verify --allow-dirty
     rm -rf "${out:?}/${pkg}"
