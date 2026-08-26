@@ -1,0 +1,40 @@
+# Migration guides
+
+Per-release upgrade guides for breaking changes that the compiler does not
+fully report.
+
+## When a release gets a guide
+
+A guide is warranted when a release's breaking changes include **behavior a
+caller must reason about but the compiler cannot name** — an ordering
+guarantee that no longer holds, a property that is gone and not restorable, a
+telemetry field whose meaning changed under a stable schema.
+
+A release whose breaking changes are entirely type-level does **not** get a
+guide. A renamed or removed item is already reported at every call site, and
+the [changelog](../../CHANGELOG.md) entry carries the before/after next to the
+change it belongs to. Adding a guide for those would split one story across
+two files and put the maintenance burden on the wrong one.
+
+The changelog is organised by *what changed*. A guide is organised by *what
+the reader must do*, and exists to answer a question the changelog cannot:
+which of these changes reaches me, and how do I tell?
+
+## Conventions
+
+- A guide is included into the crate under `#[cfg(doctest)]`, so its "after"
+  snippets are compiled by `cargo test --doc` and cannot drift from the API.
+  It adds no public module, so it can be deleted once the release it covers is
+  far enough back.
+- "Before" snippets are marked `ignore`; they describe an API that is gone.
+  Where "this no longer builds" is the point being taught, use `compile_fail`
+  against the current API instead.
+- The changelog keeps its per-entry before/after blocks. A guide links to the
+  changelog rather than restating it, and holds only the triage, the detection
+  steps, and the properties that are not restorable.
+
+## Index
+
+| Guide | Covers |
+| --- | --- |
+| [0.10.x → 0.11.0](0.10-to-0.11.md) | Reducer-first core: frame rate removal, one-lane delivery, `EffectCommand`, quit ordering |

@@ -157,5 +157,15 @@ pub use runtime::load::LoadObserver;
 #[doc(hidden)]
 pub use kernel::bench_support::{BenchKernel, CleanupLedgerScan, RegistryScan, producer_quit};
 
+// The 0.10.x → 0.11.0 migration guide, compiled only when collecting
+// doctests, so every "after" snippet in it is checked against the API it
+// tells callers to move to and the guide cannot rot silently. `cfg(doctest)`
+// keeps it off the public module tree: the guide is a transitional artifact
+// that should be deletable without touching the surface (docs/api-guidelines.md,
+// "Root Promotion Criteria").
+#[cfg(doctest)]
+#[doc = include_str!("../docs/migrations/0.10-to-0.11.md")]
+pub struct MigrationGuide0_11;
+
 #[cfg(test)]
 mod test_support;

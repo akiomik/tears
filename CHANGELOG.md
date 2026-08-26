@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Upgrading from 0.10.x? The
+> [migration guide](docs/migrations/0.10-to-0.11.md) triages the entries below
+> into the ones the compiler reports, the ones that change behaviour with the
+> build still green, and the properties that no configuration restores.
+
 ### Added
 
 - `ProgramRuntime<P>` — the entry point for a `Program`, which is what a stack
