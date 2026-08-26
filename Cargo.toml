@@ -15,13 +15,18 @@ rust-version = "1.88.0"
 # Anchored with a leading slash: an include pattern without one is a
 # gitignore-style glob that matches at any depth, so a bare "README.md"
 # also swept `docs/rfcs/README.md` and `scripts/README.md` into the
-# package. The four directory patterns already contain a slash and are
+# package. The five directory patterns already contain a slash and are
 # anchored for that reason.
 include = [
     "src/**/*",
     "examples/**/*",
     "tests/**/*",
     "benches/**/*",
+    # `src/lib.rs` pulls the migration guide in with `include_str!` under
+    # `cfg(doctest)`. `cargo publish` verifies with `cargo build`, which drops
+    # the item before the macro runs, so leaving this out breaks
+    # `cargo test --doc` in the published crate and nowhere earlier.
+    "docs/migrations/**/*",
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
