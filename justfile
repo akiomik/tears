@@ -38,7 +38,7 @@ test-integration:
 
 # Run only doc tests
 test-doc:
-    cargo test --doc
+    cargo test --doc --all-features
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:

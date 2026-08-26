@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (RFC 0008 §9)
 - `Command::teardown` and `Command::on_teardown`: tear down every run placed
   under a scope prefix, and register a finalizer that runs when one is
+- `RuntimeConfig` now derives `Default`, so `RuntimeConfig::default()` is
+  available beside `RuntimeConfig::new()`; both leave every control unset
 
 ### Changed
 
