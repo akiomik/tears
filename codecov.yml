@@ -1,0 +1,25 @@
+# Without this file Codecov applies its default `project` status, `target:
+# auto` with `threshold: 0%` — fail on any decrease at all. The measurement is
+# not stable to that resolution. On one branch, against one base, six commits
+# that changed no executable Rust landed on exactly two values, 95.61% and
+# 95.59%, and the check passed or failed accordingly; re-running the Code
+# Coverage job with nothing else changed has flipped a failure to a pass every
+# time it was tried. So a docs-only pull request fails this check about half
+# the time, and the only remedy is to re-run a job until the measurement lands
+# on the higher value.
+#
+# `informational` keeps the number and the pull request comment and never
+# reports failure. That is what the operating policy already is — this check is
+# not required and its failures are judged by content — so the setting states
+# it rather than changing it.
+#
+# `patch` is deliberately left at its default. It reports on the lines a diff
+# adds, so it has nothing to say about a diff that adds none: it read "Coverage
+# not affected" on every commit in the range above, including both failures.
+# Uncovered new lines are the part that has been accurate throughout, and it
+# stays a gate.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
