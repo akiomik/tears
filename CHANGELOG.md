@@ -453,7 +453,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Duplicate desired subscriptions still keep the first declaration and now
     emit a warning under the `tears::subscription` tracing target
 
-  Before:
+  Before, computing the digest by hand in `id()`:
 
   ```rust
   impl SubscriptionSource for WatchSource {
