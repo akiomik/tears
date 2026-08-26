@@ -240,14 +240,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; with the
   `Default` derive added above, the full set is now `Clone`, `Debug`,
   `Default`, `Eq`, `PartialEq` (RFC 0007 §2.1)
-  - The type is the aggregation point for future runtime knobs, so a `Copy`
-    config would turn the first non-`Copy` field added later into a breaking
-    derive removal deferred onto whoever adds it; taking the removal now, while
-    the config is small, keeps that growth non-breaking
-  - The consuming setters now move the configuration, so discarding a setter's
-    return value and then using the original is a compile error rather than a
-    silent stale read
-  - Code that relied on the implicit copy adds an explicit `clone()`
+
+  The type is the aggregation point for future runtime knobs, so a `Copy`
+  config would turn the first non-`Copy` field added later into a breaking
+  derive removal deferred onto whoever adds it; taking the removal now, while
+  the config is small, keeps that growth non-breaking. The consuming setters
+  now move the configuration, so discarding a setter's return value and then
+  using the original is a compile error rather than a silent stale read, and
+  code that relied on the implicit copy adds an explicit `clone()`.
 
   Before:
 
