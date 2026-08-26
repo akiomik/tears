@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-29
+
 > Upgrading from 0.10.x? The
 > [migration guide](docs/migrations/0.10-to-0.11.md) triages the entries below
 > into the ones the compiler reports, the ones that change behaviour with the
@@ -104,7 +106,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The 100µs window that used to cap a batch is gone with the wall-clock reads
   it needed. A batch is finite under every configuration; this control only
-  replaces the default count.
+  replaces the default count. An application that left it unset to mean
+  "drain everything ready" pins the size it wants instead:
+
+  ```rust
+  // Before: unset meant an uncapped batch.
+  let config = RuntimeConfig::new();
+
+  // After: unset means the kernel's own cap; name one to override it.
+  let config = RuntimeConfig::new()
+      .batch_max_messages(NonZeroUsize::new(4096).expect("non-zero"));
+  ```
 
 - **Breaking:** effect constructors return `EffectCommand<Msg>`, and
   `cancellable` / `cancellable_with` move onto it
@@ -158,6 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy. `batch` also takes anything convertible into a command, so a batch
   of carriers needs no conversion and a mixed one converts its carriers.
 
+  ```rust
+  // Before: the child key was discarded with a warning, and the batch ran
+  // one unkeyed run; cancelling `id` cancelled nothing.
+  Command::batch([fetch.cancellable(id), poll.cancellable(other)])
+
+  // After: two independently keyed runs. Drop the modifier from a child
+  // that was never meant to be cancellable on its own.
+  Command::batch([fetch.cancellable(id), poll.into()])
+  ```
+
 - **Breaking:** a quit returned from `update` is applied synchronously
 
   It no longer travels a channel, so no later input, cancel, or arbitration
@@ -174,6 +196,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An application that wants "deliver this, then quit" returns the quit from
   the `update` that observes the final message. That order is now pinned by
   construction rather than by channel timing.
+
+  ```rust
+  // Before: the quit rode the effect stream, so `Saved` might arrive first
+  // — or not, depending on arbitration.
+  fn update(&mut self, msg: Message) -> Command<Message> {
+      match msg {
+          Message::Save => Command::batch([save(), Command::quit()]),
+          Message::Saved => Command::none(),
+      }
+  }
+
+  // After: quit from the update that sees the last message you care about.
+  fn update(&mut self, msg: Message) -> Command<Message> {
+      match msg {
+          Message::Save => save().into(),
+          Message::Saved => Command::quit(),
+      }
+  }
+  ```
 
 - **Breaking:** a producer-originated quit no longer orders against its own
   run's earlier output
@@ -194,6 +235,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pull incidentally provided — a keyed command's output waiting behind ready
   shared input, leaving a window to cancel it — is gone with it.
 
+  There is no code change to make: nothing named the precedence. What needs
+  revisiting is a design that leaned on the window — cancel at the point you
+  decide to, rather than relying on a producer's output waiting its turn.
+
 - **Breaking:** `TestStore::receive_quit` observes a quit applied at a
   dispatch, and an applied quit is terminal before it is observed
 
@@ -210,6 +255,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A producer-originated quit still travels as output and is still asserted the
   same way.
+
+  ```rust
+  // Before: the quit had to be the next deliverable item, so a message the
+  // same command produced had to be received first.
+  store.send(Message::Save);
+  store.receive(Message::Saved);
+  store.receive_quit();
+
+  // After: the quit applied at the dispatch, and the store is terminal from
+  // that moment — observe it, and do not expect to drain anything after.
+  store.send(Message::Save);
+  store.receive_quit();
+  ```
 
 - **Breaking:** `TestStore` runs cleanup hooks, and exhaustiveness gained two
   leak classes
@@ -236,6 +294,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renamed telemetry field breaks dashboards and alert rules silently, off the
   compiler's path. `"shared"` and `"keyed"` retire with the channels they
   named, and `shared_pending` now reads as the data lane's residual occupancy.
+
+  The migration is consumer-side and the compiler will not find it: a query
+  or alert rule that groups by `channel`, or that matches `"shared"` or
+  `"keyed"`, now matches nothing. Drop the grouping, or match `"data"`.
 
 - **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; with the
   `Default` derive added above, the full set is now `Clone`, `Debug`,
@@ -338,6 +400,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   builds, where nothing can be contained. A contained panic's report is
   written on the alternate screen in raw mode, so applications that want it
   readable should point their panic reporter at a file or log target
+
+- The published crate no longer carries two files that were never meant to be
+  in it. `docs/rfcs/README.md` and `scripts/README.md` shipped in every
+  release that used the current `include` list, because an include pattern
+  without a slash is a glob that matches at any depth — so `"README.md"`
+  matched those two alongside the crate's own. The four file patterns are
+  anchored to the crate root now, which takes the package from 107 files to
+  105 and changes nothing else: `README.md`, `LICENSE`, `CHANGELOG.md`,
+  `Cargo.toml` and every source, test, example and bench file are where they
+  were
 
 ## [0.10.2] - 2026-07-26
 
@@ -1144,7 +1216,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.10.2...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/akiomik/tears/releases/tag/v0.11.0
 [0.10.2]: https://github.com/akiomik/tears/releases/tag/v0.10.2
 [0.10.1]: https://github.com/akiomik/tears/releases/tag/v0.10.1
 [0.10.0]: https://github.com/akiomik/tears/releases/tag/v0.10.0
