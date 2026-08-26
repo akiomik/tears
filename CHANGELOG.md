@@ -235,8 +235,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compiler's path. `"shared"` and `"keyed"` retire with the channels they
   named, and `shared_pending` now reads as the data lane's residual occupancy.
 
-- **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; `Debug`, `Eq`,
-  and `PartialEq` remain (RFC 0007 §2.1)
+- **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; with the
+  `Default` derive added above, the full set is now `Clone`, `Debug`,
+  `Default`, `Eq`, `PartialEq` (RFC 0007 §2.1)
   - The type is the aggregation point for future runtime knobs, so a `Copy`
     config would turn the first non-`Copy` field added later into a breaking
     derive removal deferred onto whoever adds it; taking the removal now, while

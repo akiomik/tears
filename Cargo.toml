@@ -15,7 +15,7 @@ rust-version = "1.88.0"
 # Anchored with a leading slash: an include pattern without one is a
 # gitignore-style glob that matches at any depth, so a bare "README.md"
 # also swept `docs/rfcs/README.md` and `scripts/README.md` into the
-# package. The five directory patterns already contain a slash and are
+# package. The four directory patterns already contain a slash and are
 # anchored for that reason.
 include = [
     "src/**/*",

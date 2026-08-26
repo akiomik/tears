@@ -57,11 +57,32 @@ test-integration:
 # as the reason and re-measure before widening this list. See issue #298.
 #
 # The list is the feature set a user can actually enable, minus the two
-# build-only ones (`loom-core`, `bench-internals`).
+# build-only ones (`loom-core`, `bench-internals`). Single source for both
+# doctest recipes and for the CI job that calls them.
+doc_features := "http,ws,native-tls"
 
 # Run only doc tests
 test-doc:
-    cargo test --doc --features http,ws,native-tls
+    cargo test --doc --features {{doc_features}}
+
+# Guards the `include` entry that keeps `include_str!` resolvable once
+# published: `cargo publish`'s verification is a `cargo build`, which drops
+# the `cfg(doctest)` item before the macro runs, so a missing entry shows up
+# nowhere else. Packaging and extracting reproduces what a consumer gets.
+#
+# `--allow-dirty` so this is usable before committing, which is when a bad
+# `include` is cheapest to catch; CI checks out clean, so it changes nothing
+# there.
+
+# Run the doc tests against the packaged crate
+test-doc-packaged:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo package --no-verify --allow-dirty
+    pkg=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0] | "\(.name)-\(.version)"')
+    tar xzf "target/package/${pkg}.crate" -C target/package
+    cd "target/package/${pkg}"
+    cargo test --doc --features {{doc_features}}
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:
