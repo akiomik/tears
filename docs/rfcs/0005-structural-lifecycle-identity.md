@@ -94,9 +94,9 @@ to distinguish entries in that bucket. That API discarded the value
 needed for the second step, so the manager could not recover correctness after
 a collision.
 
-The impact was observable. `SubscriptionManager::update` builds one desired set
-from the IDs, retains the first subscription for each ID, removes running IDs
-that are no longer desired, and starts absent IDs — so a false equality could:
+The impact was observable. Reconciliation builds one desired set from the
+IDs, retains the first subscription for each ID, removes running IDs that are
+no longer desired, and starts absent IDs — so a false equality could:
 
 - suppress a distinct stream before it starts;
 - keep a prior stream when a different one is requested;
@@ -506,9 +506,9 @@ printing scope values. Equality and hashing, not `Debug`, define identity.
 
 ### 3.5 Duplicate desired IDs
 
-`SubscriptionManager::update` preserves its current deterministic rule: for
-equal full IDs in one desired set, keep the first declaration in input order and
-ignore later declarations.
+Reconciliation preserves its deterministic rule: for equal full IDs in one
+desired set, keep the first declaration in input order and ignore later
+declarations.
 
 The ignored duplicate must be observable through a warning-level tracing event
 with target `tears::subscription`. The event must not require the logical key to

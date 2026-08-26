@@ -259,9 +259,13 @@ are the kernel's.
 ### 3.3 Dispatch ordering: the cancel phase
 
 Within one dispatched command, teardown entries apply in the same
-phase as explicit cancels: after pre-spawn reconciliation and before
-every spawn of the same command (RFC 0003 §4.3's phase order, extended
-to batch children by RFC 0014 §3.4). Application is commutative with
+phase as explicit cancels, and that phase precedes every spawn of the
+same command (RFC 0003 §4.3's phase order, extended to batch children
+by RFC 0014 §3.4). The dispatch is one ordered sequence — cancels,
+then teardowns, then spawns, then cleanup registrations, then a
+synchronous quit — and nothing reconciles the target slot ahead of it:
+what a spawn reads is the occupancy the cancel phase has already
+left. Application is commutative with
 the same command's explicit cancels — both are strict, idempotent
 drops, so a prefix covering an explicitly cancelled ID is applying the
 same removal twice.
@@ -526,9 +530,9 @@ full.
   automatically (RFC 0014 INV-RC2), and cleanup registrations are
   qualified alike (RFC 0005 INV-18's coverage).
 - **INV-ST3: cancel-phase application.** Teardown entries apply with
-  the same command's explicit cancels — after pre-spawn
-  reconciliation, before every spawn of the same command, batch
-  children included (RFC 0014 §3.4) — and commute with them. A
+  the same command's explicit cancels, in a phase that precedes every
+  spawn of the same command, batch children included (RFC 0014 §3.4),
+  and commute with them. A
   same-command spawn under a torn-down prefix starts fresh under every
   `CancelPolicy`.
 - **INV-ST4: revocation per selected run.** Each selected run is
@@ -895,5 +899,6 @@ construction (§3.1).
 - RFC 0012: Subscription Execution — §3, §4, §4.4, INV-SE2–INV-SE5
 - RFC 0014: Reducer-First Core — §2.5, §3, §4, §5, §7, §9, §10,
   INV-RC2–INV-RC8, INV-RC12
-- `src/runtime/keyed_commands.rs`, `src/subscription.rs` — the
-  registry shapes RFC 0014 §9's supersessions replace
+- `src/kernel/registry.rs`, `src/kernel/lowering.rs` — the run
+  bookkeeping a teardown selects over, and the dispatch phase order it
+  applies in; `src/subscription.rs` — the source side §4's stop reaches

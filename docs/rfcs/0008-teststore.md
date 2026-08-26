@@ -632,15 +632,19 @@ The store applies RFC 0003's delivery semantics to its pending set.
 Occupancy follows RFC 0003's own accounting (INV-6, INV-7): **an id is
 occupied while its current run may still deliver output, and is
 released once every one of the run's leaves has been observed
-exhausted.** Exhaustion is observable only by polling, so the store
-mirrors the runtime's pre-spawn reconciliation (before any
-`Spawn(policy)` decision the runtime reaps completed keyed tasks and
-samples the target receiver once — RFC 0003 §4.2) with **keyed-intake
-reconciliation**: when a keyed command arrives for an occupied id and
-its policy's admission decision depends on the occupant's state
-(`CancelPolicy::KeepInFlight`), the store reconciles before that
-decision. (`CancelInFlight`'s outcome does not depend on the occupant's
-state, so it reconciles nothing — see the per-policy bullets below.) If
+exhausted.** The runtime reads that fact from bookkeeping rather than
+by polling: a run holds its keyed slot until its queued output has
+drained, and the exits that end runs are reflected once at the head of
+every pass rather than sampled per dispatch
+(`ScopeRegistry::keyed_occupant`; RFC 0014 §3.1, and RFC 0003 §4.2's
+contract on the successor's accounting). The store keeps no such
+accounting, and exhaustion is observable to it only by polling, so it
+reaches the same fact by **keyed-intake reconciliation**: when a keyed
+command arrives for an occupied id and its policy's admission decision
+depends on the occupant's state (`CancelPolicy::KeepInFlight`), the
+store reconciles before that decision. (`CancelInFlight`'s outcome does
+not depend on the occupant's state, so it reconciles nothing — see the
+per-policy bullets below.) If
 the occupant already has buffered output, the id is occupied and nothing
 is polled; otherwise the store polls the occupant's remaining leaves in
 enqueue order, stopping at the first that shows the run still open — a
@@ -670,9 +674,10 @@ completes — the analogue of INV-7's sender-closed empty receiver.
   `CancelInFlight` included (`spawn_decision` in
   `src/kernel/lowering.rs`, applied by `Kernel::apply_spawn`;
   RFC 0003 §4.2), but that read cannot change a `CancelInFlight`
-  admission outcome — occupied or not, the occupant is superseded and
-  the new stream starts — and the store has no equivalent snapshot to
-  reconcile, so skipping the poll preserves the delivery contract while
+  admission outcome: an occupied slot means the occupant is superseded
+  first, an empty one means there is nothing to supersede, and the new
+  stream starts either way. The store has no equivalent occupancy to
+  read, so skipping the poll preserves the delivery contract while
   matching the runtime's outcome, not its every step. Not polling also
   lets a `CancelInFlight` command supersede an occupant whose poll
   would fail the test without polling it — in stage 1 that made
@@ -712,7 +717,8 @@ completes — the analogue of INV-7's sender-closed empty receiver.
 These are the deterministic core of RFC 0003 — what may still be
 delivered, and when an id releases — restated over the store's pending
 set, with keyed-intake reconciliation as the store's analogue of the
-runtime's pre-spawn reap-and-sample. The mechanics that exist only
+occupancy the runtime reads off its delivery accounting. The mechanics
+that exist only
 because the runtime is concurrent (stale-exit tokens, INV-8; bounded
 bookkeeping, INV-13) have no TestStore counterpart and are deliberately
 not modeled.
@@ -722,8 +728,8 @@ the store's proof of exhaustion is §4.1's single poll per leaf at
 intake. A leaf that needs further polls to complete (a self-waking
 future mid-completion) reads as still open and keeps the id occupied —
 deterministically — while at the runtime's decision point the same
-run's task may or may not have exited yet, a scheduling fact the
-runtime's reconciliation resolves whichever way it finds. In that
+run's exit may or may not have been reflected yet, a scheduling fact
+the pass boundary resolves whichever way it finds. In that
 window the store deterministically selects one of the runtime's legal
 outcomes; a test pinning a `KeepInFlight` discard there asserts the
 store's selection, not a runtime guarantee (§4.2's citation rule
@@ -2543,8 +2549,8 @@ begins at the send gate (§9.6).
 
 - RFC 0002 — redraw suppression: the directive `redraw_requested`
   observes.
-- RFC 0003 — command cancellation: its §4.2 pre-spawn reconciliation,
-  its §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
+- RFC 0003 — command cancellation: its §4.2 occupancy accounting, its
+  §5.1 explicit-cancels-before-keyed-spawn ordering, and INV-1,
   INV-3, INV-4, INV-5, INV-6, INV-7, INV-9, INV-10 (cited in §§4.1,
   4.2, 5.1, 5.3 of this document). Two of the invariants this document
   once read parity off are superseded and are cited historically where
