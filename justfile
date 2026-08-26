@@ -56,10 +56,12 @@ test-integration:
 # reproducible, the mechanism is not established, so treat the numbers above
 # as the reason and re-measure before widening this list. See issue #298.
 #
-# The list is the feature set a user can actually enable, minus the two
-# build-only ones (`loom-core`, `bench-internals`). Single source for both
-# doctest recipes and for the CI job that calls them.
-doc_features := "http,ws,native-tls"
+# The list is every feature a user can enable, minus the two build-only ones
+# (`loom-core`, `bench-internals`) — the three TLS backends included, since
+# they coexist and a doctest gated on one must not go uncompiled just because
+# another was picked here. Single source for both doctest recipes and for the
+# CI job that calls them; keep it exhaustive as features are added.
+doc_features := "http,ws,native-tls,rustls,rustls-tls-webpki-roots"
 
 # Run only doc tests
 test-doc:
@@ -72,16 +74,24 @@ test-doc:
 #
 # `--allow-dirty` so this is usable before committing, which is when a bad
 # `include` is cheapest to catch; CI checks out clean, so it changes nothing
-# there.
+# there. The extraction directory is removed first for the same reason: `tar`
+# unpacks over whatever is already there, so a file dropped from `include`
+# would survive from an earlier run and the check would pass locally while
+# failing on CI's clean checkout — which is the half of this recipe
+# `--allow-dirty` exists to serve. Requires `jq`.
 
 # Run the doc tests against the packaged crate
 test-doc-packaged:
     #!/usr/bin/env bash
     set -euo pipefail
+    meta=$(cargo metadata --no-deps --format-version 1)
+    pkg=$(jq -r '.packages[0] | "\(.name)-\(.version)"' <<<"$meta")
+    # Honours CARGO_TARGET_DIR / build.target-dir rather than assuming ./target.
+    out=$(jq -r '.target_directory' <<<"$meta")/package
     cargo package --no-verify --allow-dirty
-    pkg=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0] | "\(.name)-\(.version)"')
-    tar xzf "target/package/${pkg}.crate" -C target/package
-    cd "target/package/${pkg}"
+    rm -rf "${out:?}/${pkg}"
+    tar xzf "${out}/${pkg}.crate" -C "$out"
+    cd "${out}/${pkg}"
     cargo test --doc --features {{doc_features}}
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)

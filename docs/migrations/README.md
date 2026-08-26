@@ -26,6 +26,14 @@ which of these changes reaches me, and how do I tell?
   snippets are compiled by `cargo test --doc` and cannot drift from the API.
   It adds no public module, so it can be deleted once the release it covers is
   far enough back.
+- **Adding a guide takes two edits, not one.** Besides the `include_str!` in
+  `src/lib.rs`, add the file to `include` in `Cargo.toml` — named
+  individually, so the maintainer-facing files here (this README) stay out of
+  the package. Miss it and nothing fails until someone runs `cargo test --doc`
+  against the *published* crate: `cargo publish` verifies with `cargo build`,
+  which drops the `cfg(doctest)` item before the macro runs. `just
+  test-doc-packaged` reproduces the published tree and is what the CI
+  `doctest` job runs; removing a guide means removing both edits.
 - "Before" snippets are marked `ignore`; they describe an API that is gone.
   Where "this no longer builds" is the point being taught, use `compile_fail`
   against the current API instead.
