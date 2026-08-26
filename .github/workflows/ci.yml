@@ -147,6 +147,20 @@ jobs:
       # identical, as the bench job above does.
       - name: Run doc tests
         run: just test-doc
+      # The `include` entry for the migration guide is the only thing keeping
+      # `include_str!` resolvable in a published crate, and nothing else
+      # checks it: `cargo publish`'s verification is a `cargo build`, which
+      # drops the `cfg(doctest)` item before the macro runs. Package, extract
+      # and run the doctests against the extracted tree, which is what a
+      # consumer of the published crate gets.
+      - name: Run doc tests against the packaged crate
+        run: |
+          cargo package --no-verify
+          pkg=$(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[0] | "\(.name)-\(.version)"')
+          tar xzf "target/package/${pkg}.crate" -C target/package
+          cd "target/package/${pkg}"
+          cargo test --doc --features http,ws,native-tls
 
   msrv:
     name: MSRV (1.88.0)

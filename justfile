@@ -41,14 +41,25 @@ test-unit:
 test-integration:
     cargo test --test '*'
 
+# Deliberately not `--all-features`. Measured, on rustc 1.97.0:
+#
+#     cargo test --doc                          61 tests
+#     cargo test --doc --features loom-core     60 tests   (both `Signal` ones gone)
+#     cargo test --doc --all-features           71 tests   (both `Signal` ones gone)
+#     cargo test --doc --features http,ws,native-tls
+#                                               73 tests   (superset of all above)
+#
+# Enabling `loom-core` drops `subscription::signal`'s two doctests. The
+# obvious reading — that rustdoc satisfies the `test` in that module's
+# `#[cfg(not(all(feature = "loom-core", test)))]` — is *not* the cause: no
+# rustdoc invocation in the run receives `--cfg test`. The effect is
+# reproducible, the mechanism is not established, so treat the numbers above
+# as the reason and re-measure before widening this list. See issue #298.
+#
+# The list is the feature set a user can actually enable, minus the two
+# build-only ones (`loom-core`, `bench-internals`).
+
 # Run only doc tests
-# Deliberately not `--all-features`: that enables `loom-core`, and
-# `subscription::signal` is `#[cfg(not(all(feature = "loom-core", test)))]`,
-# which rustdoc's doctest collection satisfies — so `--all-features` silently
-# drops the `Signal` examples. The list below is the feature set a user can
-# actually enable, minus the two build-only ones (`loom-core`,
-# `bench-internals`), and covers strictly more doctests than either default
-# features or `--all-features`.
 test-doc:
     cargo test --doc --features http,ws,native-tls
 
@@ -60,10 +71,12 @@ test-loom:
 bench:
     cargo bench
 
-# Run the load harness's smoke profiles (RFC 0007 §6 and RFC 0014 §13.5;
-# the CI Benchmarks profile). Latency-assertion-free: proves the harness
-# builds and the reduced rows terminate with their exact scripted sequences.
-# Acceptance numbers come from the full runs only, never from these.
+# RFC 0007 §6 and RFC 0014 §13.5; the CI Benchmarks profile.
+# Latency-assertion-free: proves the harness builds and the reduced rows
+# terminate with their exact scripted sequences. Acceptance numbers come from
+# the full runs only, never from these.
+
+# Run the load harness's smoke profiles
 bench-smoke:
     cargo bench --bench kernel_load --features bench-internals -- --self-test
     cargo bench --bench kernel_load --features bench-internals -- --smoke

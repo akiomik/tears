@@ -22,11 +22,15 @@ include = [
     "examples/**/*",
     "tests/**/*",
     "benches/**/*",
-    # `src/lib.rs` pulls the migration guide in with `include_str!` under
+    # `src/lib.rs` pulls this guide in with `include_str!` under
     # `cfg(doctest)`. `cargo publish` verifies with `cargo build`, which drops
-    # the item before the macro runs, so leaving this out breaks
-    # `cargo test --doc` in the published crate and nowhere earlier.
-    "docs/migrations/**/*",
+    # the item before the macro runs, so leaving it out breaks
+    # `cargo test --doc` in the published crate and nowhere earlier; the
+    # `doctest` job packages and extracts the crate to catch that.
+    # Named file by file rather than `docs/migrations/**/*`, which would also
+    # ship `docs/migrations/README.md` — a maintainer policy index, not crate
+    # content.
+    "/docs/migrations/0.10-to-0.11.md",
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
