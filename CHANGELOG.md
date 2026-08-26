@@ -986,9 +986,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING**: `Command::single()` has been removed
-  - Use `Command::message()` instead for sending messages immediately; this is
-    a mechanical replacement with identical functionality
-  - This change aligns with iced v0.14.0 design principles while maintaining tears' self-messaging feature
+
+  Use `Command::message()` instead for sending messages immediately. It is a
+  mechanical replacement with identical functionality, and aligns with iced
+  v0.14.0 design principles while maintaining tears' self-messaging feature.
 
   Before:
 
