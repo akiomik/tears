@@ -159,10 +159,13 @@ pub use kernel::bench_support::{BenchKernel, CleanupLedgerScan, RegistryScan, pr
 
 // The 0.10.x → 0.11.0 migration guide, compiled only when collecting
 // doctests, so every "after" snippet in it is checked against the API it
-// tells callers to move to and the guide cannot rot silently. `cfg(doctest)`
-// keeps it off the public module tree: the guide is a transitional artifact
-// that should be deletable without touching the surface (docs/api-guidelines.md,
-// "Root Promotion Criteria").
+// tells callers to move to and the guide cannot rot silently. That check is
+// only as real as the job that runs it: the `test` job passes explicit target
+// flags, which suppress the implicit doctest run, so the `doctest` job in
+// .github/workflows/ci.yml is what makes this load-bearing. `cfg(doctest)`
+// keeps the item off the public module tree: the guide is a transitional
+// artifact that should be deletable without touching the surface
+// (docs/api-guidelines.md, "Root Promotion Criteria").
 #[cfg(doctest)]
 #[doc = include_str!("../docs/migrations/0.10-to-0.11.md")]
 pub struct MigrationGuide0_11;

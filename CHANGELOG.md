@@ -107,8 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cancellable` / `cancellable_with` move onto it
 
   `Command::perform`, `future`, `stream`, `run`, `message`, `retry` and
-  `retry_if` keep their names and return one effect carrier. The two keying
-  modifiers exist on that type alone, so keying a batch — one key reaching
+  `retry_if` keep their names and return one effect carrier, as does
+  `subscription::http::Mutation::mutate` under the `http` feature. The two
+  keying modifiers exist on that type alone, so keying a batch — one key reaching
   several carriers, a shape with no meaning to lower — no longer builds, and
   neither does keying `Command::quit()`, which names no run. `map`, `scoped`,
   `timeout` and `without_redraw` exist on both types and return their own, so

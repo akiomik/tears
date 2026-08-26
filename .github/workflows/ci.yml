@@ -130,6 +130,22 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  doctest:
+    name: Doc Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The `test` job passes explicit target flags, which suppress the
+      # implicit doctest run; `doc` builds docs without `cfg(doctest)`, and
+      # `coverage` omits `--doctests`. Without this job nothing compiles the
+      # examples in rustdoc comments or in the `cfg(doctest)`-included
+      # migration guide, so an API rename could break every snippet and leave
+      # CI green.
+      - name: Run doc tests
+        run: cargo test --doc --all-features
+
   msrv:
     name: MSRV (1.88.0)
     runs-on: ubuntu-latest
