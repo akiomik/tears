@@ -42,8 +42,15 @@ test-integration:
     cargo test --test '*'
 
 # Run only doc tests
+# Deliberately not `--all-features`: that enables `loom-core`, and
+# `subscription::signal` is `#[cfg(not(all(feature = "loom-core", test)))]`,
+# which rustdoc's doctest collection satisfies — so `--all-features` silently
+# drops the `Signal` examples. The list below is the feature set a user can
+# actually enable, minus the two build-only ones (`loom-core`,
+# `bench-internals`), and covers strictly more doctests than either default
+# features or `--all-features`.
 test-doc:
-    cargo test --doc --all-features
+    cargo test --doc --features http,ws,native-tls
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:
