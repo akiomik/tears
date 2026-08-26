@@ -144,7 +144,7 @@ jobs:
       # examples in rustdoc comments or in the `cfg(doctest)`-included
       # migration guide, so an API rename could break every snippet and leave
       # CI green. Invoked via `just` so the local and CI invocations are
-      # identical, as the bench job below does.
+      # identical, as the bench job above does.
       - name: Run doc tests
         run: just test-doc
 

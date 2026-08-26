@@ -5,8 +5,13 @@
 default:
     @just --list
 
-# Run all checks (fmt, clippy, test)
-check: fmt clippy test
+# `test` passes `--all-targets`, which suppresses the implicit doctest run, so
+# `test-doc` has to be listed separately here and in `pre-commit`; without it
+# nothing compiles the examples in rustdoc comments or in the
+# `cfg(doctest)`-included migration guide.
+
+# Run all checks (fmt, clippy, test, doc tests)
+check: fmt clippy test test-doc
 
 # Format code with rustfmt
 fmt:
@@ -109,7 +114,7 @@ outdated:
     cargo outdated
 
 # Run all pre-commit checks
-pre-commit: fmt-check clippy test
+pre-commit: fmt-check clippy test test-doc
 
 # Run quick checks (no tests)
 quick: fmt clippy
