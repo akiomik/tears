@@ -986,8 +986,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING**: `Command::single()` has been removed
-  - Use `Command::message()` instead for sending messages immediately
+  - Use `Command::message()` instead for sending messages immediately; this is
+    a mechanical replacement with identical functionality
   - This change aligns with iced v0.14.0 design principles while maintaining tears' self-messaging feature
+
+  Before:
+
+  ```rust
+  Command::single(Message::Refresh)
+  ```
+
+  After:
+
+  ```rust
+  Command::message(Message::Refresh)
+  ```
+
 - Simplified `Runtime` internals by removing `Instance` wrapper
   - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
   - Eliminates unnecessary indirection (`.inner`) throughout the codebase
@@ -1003,23 +1017,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `tokio` from 1.48.0 to 1.49.0
 - Upgraded `tokio-stream` from 0.1.17 to 0.1.18
 - Upgraded `tokio-util` from 0.7.17 to 0.7.18
-
-### Migration Guide (v0.5.0 → v0.6.0)
-
-#### Command API Changes
-
-Replace all uses of `Command::single()` with `Command::message()`:
-
-```rust
-// Before (v0.5.0)
-Command::single(Message::Refresh)
-
-// After (v0.6.0)
-Command::message(Message::Refresh)
-```
-
-This is a mechanical replacement with identical functionality.
-The new name better clarifies the intent and reserves more generic verbs (`send`, `dispatch`, `emit`) for potential future features.
 
 ## [0.5.0] - 2026-01-04
 
