@@ -240,14 +240,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `RuntimeConfig` is `Clone` but no longer `Copy`; with the
   `Default` derive added above, the full set is now `Clone`, `Debug`,
   `Default`, `Eq`, `PartialEq` (RFC 0007 §2.1)
-  - The type is the aggregation point for future runtime knobs, so a `Copy`
-    config would turn the first non-`Copy` field added later into a breaking
-    derive removal deferred onto whoever adds it; taking the removal now, while
-    the config is small, keeps that growth non-breaking
-  - The consuming setters now move the configuration, so discarding a setter's
-    return value and then using the original is a compile error rather than a
-    silent stale read
-  - Code that relied on the implicit copy adds an explicit `clone()`
+
+  The type is the aggregation point for future runtime knobs, so a `Copy`
+  config would turn the first non-`Copy` field added later into a breaking
+  derive removal deferred onto whoever adds it; taking the removal now, while
+  the config is small, keeps that growth non-breaking. The consuming setters
+  now move the configuration, so discarding a setter's return value and then
+  using the original is a compile error rather than a silent stale read, and
+  code that relied on the implicit copy adds an explicit `clone()`.
 
   Before:
 
@@ -453,7 +453,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Duplicate desired subscriptions still keep the first declaration and now
     emit a warning under the `tears::subscription` tracing target
 
-  Before:
+  Before, computing the digest by hand in `id()`:
 
   ```rust
   impl SubscriptionSource for WatchSource {
@@ -986,8 +986,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING**: `Command::single()` has been removed
-  - Use `Command::message()` instead for sending messages immediately
-  - This change aligns with iced v0.14.0 design principles while maintaining tears' self-messaging feature
+
+  Use `Command::message()` instead for sending messages immediately. It is a
+  mechanical replacement with identical functionality, and aligns with iced
+  v0.14.0 design principles while maintaining tears' self-messaging feature.
+
+  Before:
+
+  ```rust
+  Command::single(Message::Refresh)
+  ```
+
+  After:
+
+  ```rust
+  Command::message(Message::Refresh)
+  ```
+
 - Simplified `Runtime` internals by removing `Instance` wrapper
   - `Runtime` now directly holds the application instead of wrapping it in `Instance<App>`
   - Eliminates unnecessary indirection (`.inner`) throughout the codebase
@@ -1003,23 +1018,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `tokio` from 1.48.0 to 1.49.0
 - Upgraded `tokio-stream` from 0.1.17 to 0.1.18
 - Upgraded `tokio-util` from 0.7.17 to 0.7.18
-
-### Migration Guide (v0.5.0 → v0.6.0)
-
-#### Command API Changes
-
-Replace all uses of `Command::single()` with `Command::message()`:
-
-```rust
-// Before (v0.5.0)
-Command::single(Message::Refresh)
-
-// After (v0.6.0)
-Command::message(Message::Refresh)
-```
-
-This is a mechanical replacement with identical functionality.
-The new name better clarifies the intent and reserves more generic verbs (`send`, `dispatch`, `emit`) for potential future features.
 
 ## [0.5.0] - 2026-01-04
 
