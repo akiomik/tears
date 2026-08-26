@@ -200,9 +200,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A quit returned from `update` no longer travels as output, so `receive_quit`
   no longer requires it to be the next deliverable item, and a message the
   same command produced is not a failure there. In exchange the store stops
-  accepting work after that dispatch: `send`, `advance`, `receive` and
-  `receive_matching` fail from the moment the quit applies, which is what "no
-  later input can intervene" means on the test side. An applied quit that no
+  accepting work after that dispatch: `send`, `advance`, `receive`,
+  `receive_matching` and a second `receive_quit` fail from the moment the quit
+  applies, which is what "no later input can intervene" means on the test
+  side. Observation is unaffected — `state`, `redraw_requested` and
+  `subscription_ids` stay callable, and `finish` still passes. An applied quit that no
   `receive_quit` observed now fails `finish` and the drop check, with the same
   standing as output that was never received.
 
@@ -280,6 +282,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that constructs a runtime without running it, or that observes an init
   effect's side effects before `run()`, can tell the difference (RFC 0011 §3.4,
   INV-LC3)
+
+- **Breaking:** `run()` waits for every runtime-owned task to finish before it
+  returns
+
+  Termination used to abort: subscriptions were cancelled, command tasks were
+  aborted, and `run()` returned without waiting for either. It now joins the
+  task set to completion after the loop ends.
+
+  A producer that does not finish promptly once cancelled — a
+  `Command::perform` future or a subscription stream doing blocking work
+  between await points, an `on_teardown` finalizer waiting on something that
+  never arrives — was previously abandoned and is now waited for, so quitting
+  blocks on it. A task that never yields never lets `run()` return, and the
+  symptom is a hang at exit rather than an error.
+
+- **Breaking:** a quit carried by the init command ends bootstrap before any
+  frame renders and before any subscription source starts
+
+  The runtime terminates during the init dispatch, deterministically. Under
+  the previous contract subscriptions were initialized unconditionally before
+  the loop began and the quit arbitrated afterwards, so sources started and a
+  frame could render first — that outcome was one legal result of bootstrap
+  arbitration, and it is now settled the other way (RFC 0014 §6.2, amending
+  RFC 0011)
 
 - A new or restarted subscription is admitted only after every previously
   stopped subscription task has quiesced. A re-evaluation that removes or

@@ -88,11 +88,37 @@ test-doc-packaged:
     pkg=$(jq -r '.packages[0] | "\(.name)-\(.version)"' <<<"$meta")
     # Honours CARGO_TARGET_DIR / build.target-dir rather than assuming ./target.
     out=$(jq -r '.target_directory' <<<"$meta")/package
+
+    # `doc_features` is written by hand, so check it still lists every feature
+    # a user can enable. Without this the invariant is only a comment, and a
+    # new feature gating a module with doctests would silently stop being
+    # compiled while this job stayed green — the failure mode the job exists
+    # to prevent.
+    # Excludes `default`, the two build-only features, and the implicit
+    # features cargo synthesises for optional dependencies (value is exactly
+    # `["dep:<same name>"]`) — those are not features a caller enables.
+    want=$(jq -r '[.packages[0].features | to_entries[]
+                   | select(.value != ["dep:" + .key])
+                   | .key
+                   | select(. != "default" and . != "loom-core" and . != "bench-internals")]
+                  | sort | join(",")' <<<"$meta")
+    have=$(tr ',' '\n' <<<'{{doc_features}}' | sort | paste -sd, -)
+    if [ "$want" != "$have" ]; then
+      echo "doc_features is stale: expected '$want', got '$have'" >&2
+      echo "Update doc_features in the justfile (see the notes above it)." >&2
+      exit 1
+    fi
+
     cargo package --no-verify --allow-dirty
     rm -rf "${out:?}/${pkg}"
     tar xzf "${out}/${pkg}.crate" -C "$out"
     cd "${out}/${pkg}"
-    cargo test --doc --features {{doc_features}}
+    # Build outside the repo: an in-place build here leaves a second, ~1 GB
+    # tree under `target/` that nothing reuses and CI's cache action would
+    # store.
+    nested=$(mktemp -d)
+    trap 'rm -rf "$nested"' EXIT
+    CARGO_TARGET_DIR="$nested" cargo test --doc --features {{doc_features}}
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:
