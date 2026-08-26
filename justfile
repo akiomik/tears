@@ -56,14 +56,20 @@ test-integration:
 # reproducible, the mechanism is not established, so treat the numbers above
 # as the reason and re-measure before widening this list. See issue #298.
 #
-# The list is every feature a user can enable, minus the two build-only ones
-# (`loom-core`, `bench-internals`) — the three TLS backends included, since
-# they coexist and a doctest gated on one must not go uncompiled just because
-# another was picked here. Single source for both doctest recipes and for the
-# CI job that calls them; `test-doc-packaged` fails if it drifts from
-# Cargo.toml's `[features]`, so the table above stays measured against this
-# exact value.
-doc_features := "http,ws,native-tls,rustls,rustls-tls-webpki-roots"
+# The list is every feature a dependant can name, minus the two build-only
+# ones (`loom-core`, `bench-internals`). All three TLS backends are here
+# because they coexist and a doctest gated on one must not go uncompiled
+# because another was picked. `dashmap`, `thiserror` and `tokio-tungstenite`
+# are here because `http` and `ws` reference those optional dependencies by
+# bare name rather than with `dep:`, so cargo synthesises a feature per
+# dependency and a dependant can enable them — switching those two to `dep:`
+# would remove them from the surface, but that is a feature-surface decision,
+# not a doctest one.
+#
+# Single source for both doctest recipes and for the CI job that calls them;
+# `test-doc-packaged` fails if it drifts, so the table above stays measured
+# against this exact value.
+doc_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserror,tokio-tungstenite,ws"
 
 # Run only doc tests
 test-doc:
@@ -80,8 +86,8 @@ test-doc:
 # unpacks over whatever is already there, so a file dropped from `include`
 # would survive from an earlier run and the check would pass locally while
 # failing on CI's clean checkout — which is the half of this recipe
-# `--allow-dirty` exists to serve. Requires `jq` and Python 3.11+ (`tomllib`);
-# neither is needed by `just check`, which does not reach this recipe.
+# `--allow-dirty` exists to serve. Requires `jq`, which `just check` does not
+# need since it does not reach this recipe.
 
 # Run the doc tests against the packaged crate
 test-doc-packaged:
@@ -98,23 +104,20 @@ test-doc-packaged:
     # compiled while this job stayed green — the failure mode the job exists
     # to prevent.
     #
-    # Read from Cargo.toml's `[features]` rather than `cargo metadata`, which
-    # reports cargo's synthesised optional-dependency features the same way it
-    # reports an explicitly declared `foo = ["dep:foo"]`. Filtering the
-    # synthesised ones out of metadata would therefore also drop an explicit
-    # declaration of that shape and let it go missing here.
-    python3 - '{{doc_features}}' <<'PY'
-    import pathlib, sys, tomllib
-
-    BUILD_ONLY = {"default", "loom-core", "bench-internals"}
-    have = {f for f in sys.argv[1].split(",") if f}
-    want = set(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["features"]) - BUILD_ONLY
-    if have != want:
-        print(f"doc_features is stale: expected '{','.join(sorted(want))}', "
-              f"got '{','.join(sorted(have))}'", file=sys.stderr)
-        print("Update doc_features in the justfile (see the notes above it).", file=sys.stderr)
-        raise SystemExit(1)
-    PY
+    # `cargo metadata` reports explicit features and the ones cargo synthesises
+    # for optional dependencies identically, and that is fine here: both kinds
+    # can be named in a dependant's `features = [...]`, so both belong in the
+    # list. Nothing needs to tell them apart. Comparison and sorting happen
+    # inside jq so the two sides cannot disagree on collation.
+    jq -e --arg have '{{doc_features}}' '
+      ([.packages[0].features | keys[]
+        | select(. != "default" and . != "loom-core" and . != "bench-internals")]
+       | sort) as $want
+      | ($have | split(",") | map(select(length > 0)) | sort) as $got
+      | if $want == $got then true
+        else "doc_features is stale: expected \($want | join(",")), got \($got | join(","))"
+             | error
+        end' <<<"$meta" >/dev/null
 
     cargo package --no-verify --allow-dirty
     rm -rf "${out:?}/${pkg}"

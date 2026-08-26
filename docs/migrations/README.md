@@ -40,6 +40,12 @@ which of these changes reaches me, and how do I tell?
 - The changelog keeps its per-entry before/after blocks. A guide links to the
   changelog rather than restating it, and holds only the triage, the detection
   steps, and the properties that are not restorable.
+- **Links out of a guide must be absolute.** A guide is `include_str!`-ed into
+  rustdoc, where it is rendered from `src/`, so a repo-relative path like
+  `../../CHANGELOG.md` resolves in neither docs.rs nor a local `cargo doc`.
+  Use the full `https://github.com/akiomik/tears/...` URL. (Anchors within the
+  guide are fine, and are checked by nothing — verify them when editing
+  headings.)
 
 ## Index
 
