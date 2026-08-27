@@ -20,13 +20,12 @@
 //!   all. A blocking wait on a worker also has to announce itself with
 //!   [`block_in_place`], or the executor it is blocking stops being able to
 //!   turn.
-//!
-//! [`block_in_place`]: tokio::task::block_in_place
 //! - **One turn, one construction.** A turn is a spawn of a fresh no-op task
 //!   onto the executor plus a join on it (RFC 0008 §9.6), which is what
 //!   [`turn`] does and what [`TestDriver::settle`] does inside the driver.
 //!
 //! [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
+//! [`block_in_place`]: tokio::task::block_in_place
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
@@ -1541,4 +1540,61 @@ pub async fn turn() {
     tokio::spawn(ready(()))
         .await
         .expect("a no-op task neither panics nor is aborted");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The gate stores its release rather than signalling it, which is what
+    // makes the order between a script's `open` and the dismantling it holds
+    // not load-bearing: a hold that begins after the release reads the flag
+    // and returns without waiting for anything.
+    //
+    // Run on a plain test thread on purpose. That is the arm the hold takes
+    // when there is no multi-thread worker whose core it could hand off —
+    // the case a runtime shutdown reaches, where blocking announces nothing
+    // because there is nothing left to announce it to.
+    #[test]
+    fn a_hold_begun_after_its_release_waits_for_nothing() {
+        let gate = QuiescenceGate::default();
+        let quiesced = Beacon::default();
+        gate.open();
+
+        drop(GatedQuiescence {
+            gate: gate.clone(),
+            quiesced: quiesced.clone(),
+        });
+
+        assert!(
+            gate.entered(),
+            "the dismantling recorded itself on the way in"
+        );
+        assert!(
+            quiesced.marked(),
+            "and reached its end rather than holding, with no release left to wait for"
+        );
+    }
+
+    // The release a `GatedDriver` owns opens the gate, and it does so before
+    // the driver it wraps is dropped. The first half is what this asserts
+    // directly; the second is the field order above it, which is why a
+    // failing window unwinds into a test failure rather than into a join on
+    // the thread the hold is running on.
+    #[test]
+    fn a_release_guard_opens_its_gate_when_dropped() {
+        let gate = QuiescenceGate::default();
+        let quiesced = Beacon::default();
+
+        drop(gate.release_on_drop());
+
+        drop(GatedQuiescence {
+            gate,
+            quiesced: quiesced.clone(),
+        });
+        assert!(
+            quiesced.marked(),
+            "the guard's drop released the hold that began after it"
+        );
+    }
 }
