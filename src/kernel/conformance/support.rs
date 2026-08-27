@@ -11,32 +11,44 @@
 //!   in a [`Beacon`]. Both are the "test's own application-side
 //!   instrumentation" a `settle` predicate is meant to read (RFC 0008 §9.6).
 //! - **Bounded waiting, never timed.** Nothing here sleeps, arms a timer, or
-//!   reads a wall clock. Every wait is a counted number of executor turns
-//!   and fails the test on its bound.
+//!   reads a wall clock. A wait is bounded either by a counted number of
+//!   executor turns or scheduler yields, failing the test on its bound, or —
+//!   where the waiting side is a drop on a worker thread, which can count no
+//!   turns — by a release a script has no way to omit, because the type that
+//!   drives it owns it ([`GatedDriver`]). What both forms rule out is the
+//!   same pair: a wait that ends on a clock, and a wait that need not end at
+//!   all. A blocking wait on a worker also has to announce itself with
+//!   [`block_in_place`], or the executor it is blocking stops being able to
+//!   turn.
 //! - **One turn, one construction.** A turn is a spawn of a fresh no-op task
 //!   onto the executor plus a join on it (RFC 0008 §9.6), which is what
 //!   [`turn`] does and what [`TestDriver::settle`] does inside the driver.
 //!
 //! [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
+//! [`block_in_place`]: tokio::task::block_in_place
 
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
+use std::marker::PhantomData;
 use std::mem;
 use std::num::NonZeroUsize;
+use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::thread;
-use std::thread::Result as ThreadResult;
+use std::thread::{Result as ThreadResult, ThreadId};
 
 use futures::stream::{self, BoxStream, StreamExt};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::{Frame, Terminal};
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
-use tokio::task::yield_now;
+use tokio::task::{self, yield_now};
 
 use crate::command::effect_command::EffectCommand;
 use crate::command::{Action, Command};
@@ -89,13 +101,16 @@ pub const THREADED_TURNS: usize = 4096;
 /// stops it.
 const HANDSHAKE_YIELDS: usize = 1_000_000;
 
-/// How many turns a park witness hands the executor before re-asserting that
-/// nothing has woken the loop.
+/// How many turns a series hands the executor before asserting that
+/// something has **not** happened.
 ///
-/// Not a correctness condition: *any* number of turns has to leave a parked
-/// loop's waker unsignalled, and this is the number the series spend
-/// establishing that.
-const PARK_TURNS: usize = 8;
+/// Not a correctness condition anywhere it is used: *any* number of turns has
+/// to leave a parked loop's waker unsignalled, and *any* number has to leave a
+/// held quiescence unfinished. This is the number the series spend
+/// establishing that, and it is what separates such an assertion from a race
+/// with whatever would have made it false — read too early, "it has not
+/// happened yet" and "it does not happen" are the same reading.
+pub const NEGATIVE_TURNS: usize = 8;
 
 /// An application-side counter a producer, a source, or a drop glue marks.
 ///
@@ -157,17 +172,37 @@ impl Drop for DropMark {
 /// application's own, not the scheduler's, and a series using it cites no
 /// part of INV-RC14's determinism claim (RFC 0008 §9.8's verified range is
 /// current-thread).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct QuiescenceGate {
-    open: Arc<AtomicBool>,
+    open: Arc<(Mutex<bool>, Condvar)>,
     entered: Beacon,
-    exhausted: Arc<AtomicBool>,
+    /// The thread that will release this gate: the one it was constructed
+    /// on, which [`threaded_driver_with`] asserts is also the one building
+    /// the driver, and [`GatedDriver`]'s `!Send` keeps as the one dropping
+    /// it. See [`QuiescenceGate::wait`].
+    releaser: ThreadId,
+}
+
+impl Default for QuiescenceGate {
+    fn default() -> Self {
+        Self {
+            open: Arc::default(),
+            entered: Beacon::default(),
+            releaser: thread::current().id(),
+        }
+    }
 }
 
 impl QuiescenceGate {
     /// Releases the held run, which then quiesces.
+    ///
+    /// Idempotent, and it *stores* the release rather than signalling it: a
+    /// hold that has not begun yet reads the flag and never waits at all, so
+    /// no ordering between this and the dismantling is load-bearing.
     pub fn open(&self) {
-        self.open.store(true, Ordering::SeqCst);
+        let (open, released) = &*self.open;
+        *open.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        released.notify_all();
     }
 
     /// Whether the held run's dismantling has begun — the abort has landed
@@ -178,16 +213,41 @@ impl QuiescenceGate {
         self.entered.marked()
     }
 
-    /// Whether a hold ran out its budget instead of being released.
+    /// Hold side: block until the gate is open, unless blocking here would
+    /// be blocking the only thread that can open it.
     ///
-    /// The hold cannot report its own exhaustion by panicking — that would
-    /// abort the process from a drop rather than fail a test — so it records
-    /// it here and the script reads it beside the window assertions. Without
-    /// this, an exhausted hold looks exactly like a run that quiesced early,
-    /// and the row fails on a downstream admission count that names neither
-    /// the cause nor the file it happened in.
-    pub fn exhausted(&self) -> bool {
-        self.exhausted.load(Ordering::SeqCst)
+    /// That first clause is the whole of what keeps an unbounded wait from
+    /// being an unbounded risk. The hold is correct because the abort drops
+    /// the run's stream on a *worker*, never on the script's own thread — a
+    /// premise this fixture does not control, since it is the kernel that
+    /// decides where a cancelled task's future is dropped. Were that to
+    /// change, a hold on the script's thread would block the release it is
+    /// waiting for, and no arm of the caller's `block_in_place` check would
+    /// notice: a multi-thread runtime's `block_on` thread reports
+    /// `MultiThread` and runs the closure inline.
+    ///
+    /// So the premise is checked rather than assumed. Reached on the
+    /// releasing thread, the hold declines to wait, the run quiesces at once,
+    /// and the window's own assertion — "A is stop-requested and has not
+    /// quiesced, which is the state the sequence needs" — fails in the file
+    /// that states it. A named failure, where the alternative is a job that
+    /// times out with no test named at all.
+    ///
+    /// The trailing `drop` buys no contention back — it is the last statement
+    /// in the function, so the guard would fall at the same point without it.
+    /// It is there because `clippy::significant_drop_tightening` asks for it
+    /// and the lint job runs with `-D warnings`; removing it fails that job
+    /// rather than changing when anything is unlocked.
+    fn wait(&self) {
+        if thread::current().id() == self.releaser {
+            return;
+        }
+        let (open, released) = &*self.open;
+        let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*open {
+            open = released.wait(open).unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(open);
     }
 }
 
@@ -215,28 +275,61 @@ struct GatedQuiescence {
 }
 
 impl Drop for GatedQuiescence {
-    /// Held with a counted busy-yield rather than a waker or a deadline: a
-    /// drop cannot await, and a deadline would be a clock read. The bound is
-    /// a hang guard whose value is mechanism, in the style of
-    /// [`MidBatchHandshake`]'s.
+    /// Held with a blocking wait rather than a waker or a deadline: a drop
+    /// cannot await, and a deadline would be a clock read.
     ///
-    /// Panicking inside a drop would abort the process rather than fail the
-    /// test, so an exhausted bound is *recorded* instead
-    /// ([`QuiescenceGate::exhausted`]) and the script reads it where it can
-    /// name it. The hold then ends, which is the only other option: staying
-    /// in the drop forever would hang the suite.
+    /// What ends the wait is structural rather than counted, and the script
+    /// is not asked to remember any of it: the driver that runs the script
+    /// holds the gates the script declared and opens them in its own
+    /// [`Drop`], which runs before the field holding the executor does
+    /// ([`GatedDriver`]). So the gate is opened on every path out — the
+    /// ordinary one at the end of the window, and an unwinding one, where the
+    /// release still lands before the shutdown that would join this thread.
+    ///
+    /// A counted bound was the alternative and it is the wrong shape here:
+    /// the count would be spent concurrently with the script's own progress
+    /// through the window, so the two race, and the hold releasing early
+    /// fails a premise the kernel had nothing to do with (issue #300).
+    ///
+    /// Blocking a worker thread is what makes the window constructible at all:
+    /// the abort drops the run's stream on a worker, so the driving thread
+    /// stays steppable throughout. But blocking one *without telling the
+    /// scheduler* does not leave it steppable, and a second worker does not
+    /// save it. A worker blocked inside a task is indistinguishable from a
+    /// worker running a long one, so the scheduler counts it as active and
+    /// need not wake its parked neighbour for the task
+    /// [`TestDriver::turn`] injects — which strands that task, and with it the
+    /// `settle` whose turn budget was supposed to be this test's bound.
+    /// Reproduced at 2 hangs in 800 runs at 16x parallelism, with the driving
+    /// thread parked in `block_on`, one worker here, and the other parked in
+    /// the IO driver.
+    ///
+    /// [`block_in_place`] is the announcement that makes the hold safe: it
+    /// hands this worker's core to another thread for the duration, so the
+    /// executor keeps turning while this thread sits in the gate. It is only
+    /// valid on a multi-thread runtime's worker, and this drop also runs off
+    /// one — during a shutdown that tears the run down from elsewhere — so
+    /// the flavour is checked rather than assumed.
+    ///
+    /// The two cases that must *not* announce are named, and everything else
+    /// announces: [`RuntimeFlavor`] is `#[non_exhaustive]` and the dependency
+    /// is a caret requirement, so a flavour added later arrives here without
+    /// this file changing. Sent down the plain-wait path it would block a
+    /// worker without telling anyone, which is the hang above, silent and
+    /// unnamed; sent down this one, the worst it can do is panic where it is
+    /// misused, in a drop that is not unwinding, which says what happened.
+    /// The hazard `block_in_place` still has and this does not cover is a
+    /// `LocalSet` on a multi-thread runtime, where it panics too — there is
+    /// no `LocalSet` anywhere in this crate, and a check for one is not
+    /// something the runtime exposes.
+    ///
+    /// [`block_in_place`]: tokio::task::block_in_place
+    /// [`TestDriver::turn`]: crate::testing::driver::TestDriver
     fn drop(&mut self) {
         self.gate.entered.mark();
-        let mut released = false;
-        for _ in 0..HANDSHAKE_YIELDS {
-            if self.gate.open.load(Ordering::SeqCst) {
-                released = true;
-                break;
-            }
-            thread::yield_now();
-        }
-        if !released {
-            self.gate.exhausted.store(true, Ordering::SeqCst);
+        match Handle::try_current().map(|handle| handle.runtime_flavor()) {
+            Err(_) | Ok(RuntimeFlavor::CurrentThread) => self.gate.wait(),
+            Ok(RuntimeFlavor::MultiThread | _) => task::block_in_place(|| self.gate.wait()),
         }
         self.quiesced.mark();
     }
@@ -544,14 +637,22 @@ impl SubscriptionSource for ProbeSource {
 /// producer's side, so no scheduling order is load-bearing; neither side can
 /// pass the other.
 ///
-/// The reducer's wait is bounded like every other wait here, and bounded
-/// without a clock: it hands the OS scheduler a counted number of yields and
-/// polls for the signal between them, failing on the bound rather than
-/// blocking forever. A blocking `recv` would have been simpler and is what
-/// the shape suggests, but a producer that never commits would then hang the
-/// suite instead of failing it, and the only way to bound a block is a
-/// deadline — a clock read, which RFC 0014 §6.3 and this crate's
-/// disallowed-method list both rule out.
+/// The reducer's wait is bounded without a clock, by a count: it hands the OS
+/// scheduler a counted number of yields and polls for the signal between
+/// them, failing on the bound rather than blocking forever. A blocking `recv`
+/// would have been simpler and is what the shape suggests, but a producer
+/// that never commits would then hang the suite instead of failing it, and a
+/// deadline is the only way to bound *that* block — a clock read, which
+/// RFC 0014 §6.3 and this crate's disallowed-method list both rule out.
+///
+/// Which is why this wait is counted and [`QuiescenceGate`]'s is not, though
+/// both are hang guards over a rendezvous. There the party that must release
+/// the hold is the script itself, so the release can be made structural and
+/// unforgettable — [`GatedDriver`] owns it and drops it before its executor.
+/// Here it is the *producer* that must signal, from inside a run the script
+/// does not own and cannot finish on its behalf: a body that parks before its
+/// send holds its sender alive, so even `Disconnected` never arrives. Nothing
+/// the script can hold releases this one, so a count is what is left.
 ///
 /// [`open_and_await_commit`]: MidBatchHandshake::open_and_await_commit
 pub struct MidBatchHandshake {
@@ -746,6 +847,35 @@ impl Script {
             panic_in_subscriptions: None,
             handshake: None,
         }
+    }
+
+    /// Rejects this script at a current-thread constructor.
+    ///
+    /// There the abort drops a run's stream on the driving thread, which is
+    /// the gate's own releaser, so the hold declines and the window it exists
+    /// to open is never open — a row claiming a state it never reached, and
+    /// passing. Every constructor that builds a current-thread executor has
+    /// to say this, so it lives here rather than at one of them: the strength
+    /// of the rule is whichever sibling forgets it.
+    fn assert_ungated(&self) {
+        assert!(
+            self.gates().is_empty(),
+            "a gated source needs `threaded_driver_with`: on the current-thread executor its \
+             hold runs on the driving thread and declines, so the window it exists to open is \
+             never open"
+        );
+    }
+
+    /// Every [`QuiescenceGate`] a declared source of this script holds.
+    ///
+    /// What [`threaded_driver_with`] releases, taken from the script itself
+    /// so that it is the gate the source will actually hold at rather than
+    /// one named again alongside it.
+    fn gates(&self) -> Vec<QuiescenceGate> {
+        self.feeds
+            .iter()
+            .filter_map(|feed| feed.source.gate.clone())
+            .collect()
     }
 
     /// The commands `reduce` returns, one per delivered message in order.
@@ -968,10 +1098,18 @@ pub fn driver(script: Script) -> (TestDriver<Scripted, TestBackend>, Journal) {
 }
 
 /// The same, under a chosen configuration.
+///
+/// Rejects a script with a gated source. Holding a dismantling is only
+/// constructible beside worker threads — here the abort drops the run's
+/// stream on the driving thread, which is the gate's own releaser, so the
+/// hold declines and the window silently never opens. That is a row claiming
+/// to have tested a state it never reached, so it is a failure at the
+/// constructor instead.
 pub fn driver_with(
     script: Script,
     config: RuntimeConfig,
 ) -> (TestDriver<Scripted, TestBackend>, Journal) {
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -992,18 +1130,99 @@ pub fn driver_with(
 /// and the determinism of these series is the handshake's, not the
 /// scheduler's, so they cite no part of INV-RC14's scripted-determinism
 /// claim (RFC 0008 §9.8's verified range is current-thread).
-pub fn threaded_driver_with(
-    script: Script,
-    config: RuntimeConfig,
-) -> (TestDriver<Scripted, TestBackend>, Journal) {
+pub fn threaded_driver_with(script: Script, config: RuntimeConfig) -> (GatedDriver, Journal) {
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
     };
+    // Read off the script rather than passed in beside it, which is the only
+    // way the gate this releases is *the* gate the script's source holds. A
+    // separate argument can be the wrong one, or absent, and both compile.
+    let gates = script.gates();
+    // `wait`'s premise check guards the thread a gate names as its releaser,
+    // and a gate names the thread it was constructed on. That is only the
+    // thread that will actually release it while the two are the same thread,
+    // which they are here and at every call site — so it is asserted rather
+    // than assumed. Built somewhere else, the check would guard a thread that
+    // releases nothing while the real driving thread blocked on the gate, and
+    // the failure would be the hang this whole arrangement exists to remove.
+    // `GatedDriver` is not `Send`, so this thread is also the one that drops
+    // it, which is what closes the gap between the two.
+    for gate in &gates {
+        assert_eq!(
+            thread::current().id(),
+            gate.releaser,
+            "a gated script has to be driven from the thread its gate was constructed on: that \
+             thread is the one whose hold declines to wait, and the one this driver's drop \
+             releases from"
+        );
+    }
     (
-        TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
+        GatedDriver {
+            gates,
+            driver: TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
+            not_send: PhantomData,
+        },
         journal,
     )
+}
+
+/// A [`TestDriver`] that opens its script's [`QuiescenceGate`]s before it
+/// shuts its executor down.
+///
+/// This is the only multi-worker driver there is, and that is the point.
+/// A held quiescence with nothing to release it is a hang rather than a
+/// failure, so nothing about the release is left for a series to remember:
+/// there is no second constructor to reach for, no guard to bind, no
+/// position to get right, and no gate argument that can disagree with the
+/// one [`ProbeSource::gated`] handed the script. A script with no gated
+/// source carries no gates and this costs it an empty vector.
+///
+/// It is a plain deref to the driver otherwise: the release is all this
+/// adds.
+///
+/// Deliberately not [`Send`]. A gate's premise check names the thread it was
+/// constructed on, [`threaded_driver_with`] asserts that this is the thread
+/// building the driver, and staying on that thread is what makes it also the
+/// thread that drops it — so the thread whose hold declines to wait and the
+/// thread that performs the release are the same one, rather than two that
+/// happen to coincide. Moved across threads, a hold reaching the real driving
+/// thread would block it short of this drop, and the suite would hang with no
+/// test named.
+pub struct GatedDriver {
+    gates: Vec<QuiescenceGate>,
+    driver: TestDriver<Scripted, TestBackend>,
+    /// The `!Send` marker the paragraph above is about, and nothing else.
+    not_send: PhantomData<*const ()>,
+}
+
+impl Drop for GatedDriver {
+    /// Opens the gates before the driver goes.
+    ///
+    /// `Drop::drop` runs before any field is dropped, which is what makes
+    /// the ordering a property of the language rather than of the field
+    /// order below it: reordering, renaming or adding a field cannot put the
+    /// executor's shutdown — and its join on the thread a hold is running on
+    /// — in front of the release any more.
+    fn drop(&mut self) {
+        for gate in &self.gates {
+            gate.open();
+        }
+    }
+}
+
+impl Deref for GatedDriver {
+    type Target = TestDriver<Scripted, TestBackend>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+impl DerefMut for GatedDriver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.driver
+    }
 }
 
 /// A driver whose terminal fails its `healthy_draws + 1`-th draw.
@@ -1016,6 +1235,7 @@ pub fn failing_driver(
     script: Script,
     healthy_draws: usize,
 ) -> (TestDriver<Scripted, FailingBackend>, Journal) {
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1032,6 +1252,7 @@ pub fn failing_driver(
 /// drives the production loop itself, so it takes a kernel rather than a
 /// driver, and the gate is production's immediate one.
 pub fn park_kernel(script: Script) -> (Kernel<Scripted>, Journal) {
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1329,7 +1550,7 @@ where
     F: Future<Output = Result<Exit, E>>,
 {
     let before = assert_parked(probe, future.as_mut(), journal, what);
-    for _ in 0..PARK_TURNS {
+    for _ in 0..NEGATIVE_TURNS {
         turn().await;
     }
     assert_eq!(
@@ -1400,6 +1621,69 @@ pub fn silently<T>(body: impl FnOnce() -> T) -> ThreadResult<T> {
     outcome
 }
 
+/// Hands the driver exactly `turns` turns, and asserts nothing of its own.
+///
+/// What a series spends before claiming something has **not** happened, so
+/// whatever would have made the claim false has had its chance to. Written
+/// once because the shape has a trap in it: `settle`'s budget and the count
+/// being spent are different quantities, and spelling the second as
+/// [`NEGATIVE_TURNS`] inside a `settle` bounded by [`TEST_TURNS`] couples two
+/// constants documented as independent — raise the first past the second and
+/// the rows fail on the driver's exhausted-budget message, which names
+/// neither the constant that moved nor the row that moved it.
+///
+/// # Panics
+///
+/// Through [`TestDriver::settle`], which is what spends the turns: outside
+/// the running state, and while a grant is outstanding. The second is worth
+/// reading as this helper's own precondition rather than as something
+/// inherited by accident. A released send still in flight is exactly what
+/// makes an append to the guaranteed sequence possible during these turns
+/// (RFC 0008 §9.6) — so with a grant outstanding, "it has not happened" is
+/// not a claim any number of turns can establish, and a series that wants to
+/// spend them there is asking a question the turns cannot answer rather than
+/// reaching for the wrong helper.
+///
+/// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
+pub fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns: usize) {
+    let mut spent = 0_usize;
+    driver.settle(turns + 1, || {
+        spent += 1;
+        spent > turns
+    });
+}
+
+/// What a caught panic's payload says, for a failure that happened on a
+/// thread the reporting one is only watching.
+///
+/// `panic!` produces a `&str` for a literal and a `String` for a format, and
+/// an assertion produces the second; nothing here produces anything else, so
+/// the third arm is a description rather than a message.
+fn panic_text(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is neither &str nor String".to_owned())
+}
+
+/// Which of two things a watcher's exhausted bound caught, given whether the
+/// watched script reached the drop it is about.
+///
+/// A separate decision from the bound itself, because the bound covers a
+/// whole script and only part of it is the claim: reaching the drop and the
+/// drop returning are different failures, and reporting the second for the
+/// first names a cause that is not implicated.
+const fn bound_verdict(reached_drop: bool) -> &'static str {
+    if reached_drop {
+        "the driver's drop did not return: its shutdown joined the worker running the hold \
+         without the release having happened first"
+    } else {
+        "the script did not reach its drop: something before it outran this bound, and the \
+         release is not implicated"
+    }
+}
+
 /// One executor turn, by the construction RFC 0008 §9.6 pins: spawn a fresh
 /// no-op task and await it. Public primitives only, and no instrumentation
 /// of the scheduler.
@@ -1412,4 +1696,351 @@ pub async fn turn() {
     tokio::spawn(ready(()))
         .await
         .expect("a no-op task neither panics nor is aborted");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::runtime::Builder;
+
+    // A watcher's bound covers a whole script, so its verdict has to say
+    // which part of it ran out — the claim is the drop, and everything before
+    // it is a different failure wearing the same timeout.
+    #[test]
+    fn an_exhausted_bound_names_the_half_it_caught() {
+        assert!(
+            bound_verdict(true).starts_with("the driver's drop did not return"),
+            "reaching the drop makes the release the thing that did not happen"
+        );
+        assert!(
+            bound_verdict(false).contains("the release is not implicated"),
+            "and not reaching it makes the release the thing that cannot be blamed"
+        );
+    }
+
+    // The three shapes a caught payload arrives in, since the watcher rows
+    // report one from a thread they cannot otherwise ask.
+    #[test]
+    fn a_caught_payload_reads_as_its_message() {
+        assert_eq!(panic_text(&"from a literal"), "from a literal");
+        assert_eq!(
+            panic_text(&"from a format".to_owned()),
+            "from a format",
+            "an assertion's payload is a `String`, not a `&str`"
+        );
+        assert_eq!(
+            panic_text(&7_u8),
+            "a payload that is neither &str nor String",
+            "and anything else is described rather than dropped"
+        );
+    }
+
+    /// How many scheduler yields a row here spends waiting for a detached
+    /// hold to finish.
+    ///
+    /// A hang guard, so the two costs it trades between are not symmetric and
+    /// the value is not a midpoint.
+    ///
+    /// Passing costs nothing whatever the value is: the loops exit at the
+    /// first mark, so nothing here is spent on a bound that is never reached.
+    /// What has to fit under it is the longest *stall* — the gap between two
+    /// progress marks — not a whole script, which is what keeps the quantity
+    /// small enough to survive the conversion below. Worst observed, by
+    /// caller and platform:
+    ///
+    /// |                              | macOS, 10 cores | Linux CI, 4 cores |
+    /// | ---                          | ---             | ---               |
+    /// | a bare `drop` on a thread    | (not sampled)   |             1913 |
+    /// | a whole driver script's drop |           6664 |             3511 |
+    ///
+    /// The Linux column is 100 suite runs at 4x oversubscription and no
+    /// failures; the macOS column is 11 runs at default parallelism, ten of
+    /// them between 68 and 373 and one at 6664 with a build running beside
+    /// them. That single outlier is the number the margin is taken against,
+    /// because a thirtyfold tail is the thing a bound has to survive.
+    ///
+    /// A count is not a portable unit, which is why both columns exist: a
+    /// `thread::yield_now()` yields the scheduling quantum on Darwin and
+    /// returns almost immediately on Linux when the peer is already running.
+    /// Sampling one platform and calling the ratio a margin is how this
+    /// constant was first set, and it was wrong by an order of magnitude.
+    ///
+    /// Failing is the only thing a larger value delays, and it is measurably
+    /// expensive: a yield costs about 154 µs in a debug build *with a blocked
+    /// peer*, which is the failing path's own condition, so
+    /// [`HANDSHAKE_YIELDS`] would report a regression 154 seconds later — a
+    /// bound that slow reads as the hang it replaces.
+    ///
+    /// So the value sits far above the worst stall and far below that:
+    /// `262_144` is about 39x over 6664 and 75x over 3511, for a failure
+    /// reported in around 45 seconds. A bound that merely clears the observed
+    /// maximum is how the budget this change removed came to fail in the
+    /// first place.
+    const HOLD_YIELDS: usize = 262_144;
+
+    // The gate stores its release rather than signalling it, which is what
+    // makes the order between a script's `open` and the dismantling it holds
+    // not load-bearing: a hold that begins after the release reads the flag
+    // and returns without waiting for anything.
+    //
+    // Held on a spawned thread, because on the releasing thread the hold
+    // declines to wait at all and this would pass without touching the flag
+    // — the row below is the one that covers that.
+    //
+    // The thread is detached and the result read from the beacon, on a
+    // counted bound, rather than joined. A `join` would be the one wait in
+    // this file with nothing to end it: the hold it waits on is the fixture's
+    // own, with no `GatedDriver` behind it to release it, so a regression in
+    // `open` or `wait` would hang the suite here with no test named — which
+    // is the failure mode this whole file is arranged against.
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "an exhausted bound fails the test, which is what a panic is here"
+    )]
+    fn a_hold_begun_after_its_release_waits_for_nothing() {
+        let gate = QuiescenceGate::default();
+        let quiesced = Beacon::default();
+        gate.open();
+
+        let held = GatedQuiescence {
+            gate: gate.clone(),
+            quiesced: quiesced.clone(),
+        };
+        thread::spawn(move || drop(held));
+
+        for _ in 0..HOLD_YIELDS {
+            if quiesced.marked() {
+                assert!(
+                    gate.entered(),
+                    "the dismantling recorded itself on the way in"
+                );
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!(
+            "the hold did not finish in {HOLD_YIELDS} scheduler yields, with its gate open before \
+             it began: it waited for a release that had already been stored"
+        );
+    }
+
+    // Reached on the thread that has to release it, a hold declines to wait
+    // rather than blocking the release it is waiting for.
+    //
+    // The premise this stands in for is the kernel's: the abort drops a
+    // cancelled run's stream on a worker, never on the script's own thread.
+    // This fixture does not control that, so it checks it instead of
+    // assuming it — and the check has to be this way round, because a hold
+    // that did block here would take the whole suite with it and name
+    // nothing. Here the run quiesces at once and the window's own assertion
+    // is what fails.
+    #[test]
+    fn a_hold_reached_on_the_releasing_thread_declines_to_wait() {
+        let gate = QuiescenceGate::default();
+        let quiesced = Beacon::default();
+
+        drop(GatedQuiescence {
+            gate: gate.clone(),
+            quiesced: quiesced.clone(),
+        });
+
+        assert!(
+            quiesced.marked(),
+            "the hold returned on the releasing thread, with the gate never opened"
+        );
+        assert!(
+            !*gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
+            "and it returned by declining rather than by finding a release"
+        );
+    }
+
+    // The same check, reached the way the fixture reaches it.
+    //
+    // The row above drops the hold on a bare test thread, so
+    // `Handle::try_current` fails and the plain-wait arm runs. A script's
+    // releasing thread is inside a multi-thread runtime's `block_on`, which
+    // reports `MultiThread` and takes the `block_in_place` arm instead — the
+    // arm the premise check has to hold on, and the one where getting it
+    // wrong costs the most: a hold that blocked here would block the release,
+    // and `block_in_place` is what keeps the check's own call legal on this
+    // thread rather than a panic out of a drop.
+    #[test]
+    fn a_hold_reached_inside_the_runtime_declines_on_the_releasing_thread() {
+        let gate = QuiescenceGate::default();
+        let quiesced = Beacon::default();
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a two-worker runtime");
+
+        runtime.block_on(async {
+            drop(GatedQuiescence {
+                gate: gate.clone(),
+                quiesced: quiesced.clone(),
+            });
+        });
+
+        assert!(
+            quiesced.marked(),
+            "the hold returned on the releasing thread, from inside the runtime, with the gate \
+             never opened"
+        );
+        assert!(
+            !*gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
+            "and it returned by declining rather than by finding a release"
+        );
+    }
+
+    // Dropping the driver releases a hold that is *still blocking* — the
+    // guarantee a window that fails part-way through rests on, which is that
+    // the release lands before the executor's shutdown joins the thread the
+    // hold is on.
+    //
+    // Booting and stopping the run first is the whole point. Without it no
+    // hold ever blocks, and the row degrades into checking that a drop flips
+    // a boolean — which would keep passing with `gate.open()` moved back out
+    // of `Drop::drop` into a field-order dependency, while a failing window
+    // went back to hanging.
+    //
+    // Run on a spawned thread and watched from here on a counted bound,
+    // because a regression is a hang rather than a wrong answer, and
+    // `GatedDriver` is `!Send`: the driver has to live entirely on the thread
+    // that builds it, so the whole script goes there and only beacons come
+    // back.
+    //
+    // Two beacons, because "the thread ended" and "the thread got there" are
+    // different questions and only one of them is the bound's. `exited` is
+    // marked from a `DropMark`, so an unwind marks it too — otherwise a panic
+    // anywhere in the script would sail past the mark and be reported as the
+    // release having gone missing, which is a diagnosis of something else
+    // entirely. `arrived` is marked on the last line, so a script that
+    // panicked is a failed assertion here rather than a pass.
+    //
+    // And the panic is caught rather than left to the hook, because on a
+    // spawned thread the hook is the only route a payload has to the log, and
+    // `silently` replaces it process-wide for as long as a panic-class row is
+    // running. Reported from here, the message arrives whatever hook happens
+    // to be installed — an assertion that promises to name a cause has to be
+    // holding the cause.
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "an exhausted bound fails the test, which is what a panic is here"
+    )]
+    fn dropping_a_driver_releases_a_hold_that_is_still_blocking() {
+        let exited = Beacon::default();
+        let arrived = Beacon::default();
+        let at_drop = Beacon::default();
+        let (watch_exited, watch_arrived) = (exited.clone(), arrived.clone());
+        let watch_at_drop = at_drop.clone();
+        let progress = Beacon::default();
+        let watch_progress = progress.clone();
+        let panicked = Arc::new(Mutex::new(Option::<String>::None));
+        let reported = Arc::clone(&panicked);
+
+        thread::spawn(move || {
+            let _exited = DropMark::new(exited);
+            progress.mark();
+            let script = AssertUnwindSafe(|| {
+                let gate = QuiescenceGate::default();
+                let first = ProbeSource::gated("a", gate.clone());
+                let superseded = ProbeSource::silent("b");
+                let (mut driver, _journal) = threaded_driver_with(
+                    Script::new(parking_effect([1]))
+                        .feeding([Feed::new(first.clone()), Feed::new(superseded)])
+                        .wanting(["a"])
+                        .redeclaring(1, ["b"]),
+                    config().batch_max_messages(cap(1)),
+                );
+                progress.mark();
+                let trigger = driver.boot().started[0].clone();
+                progress.mark();
+                accept_within(&mut driver, trigger, THREADED_TURNS);
+                progress.mark();
+                driver
+                    .step_pass(WakeSource::Data)
+                    .expect("the trigger is in the lane");
+                progress.mark();
+                // A's dismantling is now held on a worker, and stays held: this
+                // thread never opens the gate itself.
+                driver.settle(THREADED_TURNS, || gate.entered());
+                progress.mark();
+
+                // The row's own premise, asserted rather than assumed. Without it,
+                // a kernel that dropped a cancelled run's stream on the driving
+                // thread would have `wait` decline, the hold would finish during
+                // the `settle` above, and this row would go back to observing
+                // nothing but a boolean while still passing.
+                //
+                // The turns first are what make it a check rather than a coin
+                // toss. `entered` and `quiesced` are marked either side of the
+                // hold, so observing the first says nothing yet about the second:
+                // a hold that declined marks both back to back and this thread can
+                // look in between. Measured with `wait` forced to decline, the
+                // bare check caught it 2 times in 5; with these turns spent
+                // first, 10 in 10.
+                spend_turns(&mut driver, NEGATIVE_TURNS);
+                progress.mark();
+                assert_eq!(
+                    first.quiescences(),
+                    0,
+                    "the hold is still blocking, which is what makes the drop below a release rather \
+                 than a formality"
+                );
+
+                at_drop.mark();
+                drop(driver);
+            });
+            if let Err(payload) = panic::catch_unwind(script) {
+                *panicked.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(panic_text(&*payload));
+                return;
+            }
+            arrived.mark();
+        });
+
+        let mut seen = watch_progress.marks();
+        let mut stalled = 0_usize;
+        while stalled < HOLD_YIELDS {
+            if watch_exited.marked() {
+                let cause = reported
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                assert!(
+                    cause.is_none(),
+                    "the script thread panicked: {}",
+                    cause.unwrap_or_default()
+                );
+                assert!(
+                    watch_arrived.marked(),
+                    "the script thread ended before its last line without panicking"
+                );
+                return;
+            }
+            // The bound is on a *stall*, not on the script: every phase marks
+            // `progress`, and observing a mark resets the count. A yield is
+            // worth wildly different amounts of time on different platforms —
+            // and on the same one under different load — so a count that has
+            // to cover a whole script is a wall-clock bound wearing a
+            // portable-looking unit. Covering the longest gap between two
+            // marks is a quantity that stays small everywhere.
+            let marks = watch_progress.marks();
+            if marks == seen {
+                stalled += 1;
+            } else {
+                seen = marks;
+                stalled = 0;
+            }
+            thread::yield_now();
+        }
+        // Which of the two the stall caught, rather than asserting the
+        // interesting one: reaching the drop and the drop returning are
+        // different failures, and the second is the row's claim.
+        let cause = bound_verdict(watch_at_drop.marked());
+        panic!("{cause} ({HOLD_YIELDS} scheduler yields without progress)");
+    }
 }

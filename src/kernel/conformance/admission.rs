@@ -52,8 +52,9 @@
 use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
-    Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
-    cap, config, driver, driver_with, parking_effect, step_when_ready, threaded_driver_with,
+    Feed, NEGATIVE_TURNS, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept,
+    accept_within, cap, config, driver, driver_with, parking_effect, spend_turns, step_when_ready,
+    threaded_driver_with,
 };
 
 // INV-SE1: one spawner invocation per admitted run, made at the admission
@@ -330,12 +331,16 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
 
     // The window opens: A's dismantling has begun on a worker and is held
     // there, so the stop is outstanding and the quiescence has not happened.
+    //
+    // The turns between the two are what make the second line a check. The
+    // hold marks `entered` on its way in and `quiesced` on its way out, so
+    // `settle` returning says only that the dismantling started — a hold that
+    // did *not* block marks both back to back, and this thread can read
+    // between them. Without the turns, forcing that case passed this row 10
+    // times in 20, reporting a supersession window that never opened; with
+    // them, 0 in 20.
     driver.settle(THREADED_TURNS, || gate.entered());
-    assert!(
-        !gate.exhausted(),
-        "the hold ran out its budget instead of being released, so the window below was never \
-         open — this row's premise failed, not the kernel"
-    );
+    spend_turns(&mut driver, NEGATIVE_TURNS);
     assert_eq!(
         first.quiescences(),
         0,
@@ -345,6 +350,13 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // `{B}` → `{C}` inside that window. The barrier defers this
     // re-evaluation's admissions too, so the generation that was declared
     // when the stop was issued passes without ever being admitted.
+    //
+    // That the hold is still holding across this pass is not re-asserted
+    // after it. Nothing between here and `gate.open()` below can release it —
+    // the gate has exactly two openers, that call and `GatedDriver`'s drop —
+    // so a repeat of the quiescence check above could not fail, and an
+    // assertion that cannot fail reads as a guarantee it is not making. The
+    // check that carries the claim is the one before this pass.
     let evaluations = journal.evaluations();
     driver
         .step_pass(WakeSource::Data)
@@ -363,11 +375,6 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
         newest.admissions(),
         0,
         "and C waits behind the outstanding stop rather than admitting beside it"
-    );
-    assert!(
-        !gate.exhausted(),
-        "the hold was still holding across that pass, so the two readings above are the \
-         barrier's answer and not a released run's"
     );
 
     // The window closes: A quiesces, and the pass its notification begins
