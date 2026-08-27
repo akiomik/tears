@@ -90,7 +90,7 @@ cargo test --test api_surface -- --ignored
 ```
 
 CI runs this as its own step with a nightly toolchain installed, separate
-from the main stable test job.
+from the test matrix.
 
 ## Do Not Use Sleep For Synchronization
 

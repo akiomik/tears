@@ -16,7 +16,22 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # `rust-toolchain.toml` outranks the `rustup default` that
+      # `dtolnay/rust-toolchain` sets, so asking that action for `stable` here
+      # installed a toolchain this job then did not publish with. The pin is
+      # the right toolchain to release from — it is the one every CI job and
+      # every contributor builds with — so this names it instead of naming
+      # something else and getting it by accident. Read from the file rather
+      # than restated, as `ci.yml`'s `versions` job does.
+      - id: versions
+        name: Read the pinned channel
+        run: |
+          pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Check package
