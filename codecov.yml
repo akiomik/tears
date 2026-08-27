@@ -8,13 +8,13 @@
 # the time, and the only remedy is to re-run a job until the measurement lands
 # on the higher value.
 #
-# A threshold rather than `informational`, which was the first thing tried
-# here. `informational` never reports failure, and that is more than this
-# needs: `project` is the only signal that watches *unchanged* code, because
-# `patch` reads the lines a diff adds and a pull request that deletes a test
-# covering something else adds none. Silencing it leaves nothing to notice
-# that, the `Code Coverage` job included — it uploads with
-# `fail_ci_if_error: false` and cannot fail on content.
+# A threshold rather than `informational`: `informational` never reports
+# failure, and that is more than this needs. `project` is the only signal that
+# watches *unchanged* code, because `patch` reads the lines a diff adds and a
+# pull request that deletes a test covering something else adds none.
+# Silencing it leaves nothing to notice that, the `Code Coverage` job
+# included — that job generates a report and uploads it, and nothing in it
+# reads the number back or fails on it.
 #
 # 0.5% is chosen against the observed spread rather than against a target
 # regression size: the oscillation is 0.02–0.03 points, so this is more than
