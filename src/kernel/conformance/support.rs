@@ -308,18 +308,27 @@ impl Drop for GatedQuiescence {
     /// executor keeps turning while this thread sits in the gate. It is only
     /// valid on a multi-thread runtime's worker, and this drop also runs off
     /// one — during a shutdown that tears the run down from elsewhere — so
-    /// the flavour is checked rather than assumed. Where it does not apply
-    /// there is no core to hand off and the plain wait is correct.
+    /// the flavour is checked rather than assumed.
+    ///
+    /// The two cases that must *not* announce are named, and everything else
+    /// announces: [`RuntimeFlavor`] is `#[non_exhaustive]` and the dependency
+    /// is a caret requirement, so a flavour added later arrives here without
+    /// this file changing. Sent down the plain-wait path it would block a
+    /// worker without telling anyone, which is the hang above, silent and
+    /// unnamed; sent down this one, the worst it can do is panic where it is
+    /// misused, in a drop that is not unwinding, which says what happened.
+    /// The hazard `block_in_place` still has and this does not cover is a
+    /// `LocalSet` on a multi-thread runtime, where it panics too — there is
+    /// no `LocalSet` anywhere in this crate, and a check for one is not
+    /// something the runtime exposes.
     ///
     /// [`block_in_place`]: tokio::task::block_in_place
     /// [`TestDriver::turn`]: crate::testing::driver::TestDriver
     fn drop(&mut self) {
         self.gate.entered.mark();
-        match Handle::try_current() {
-            Ok(handle) if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) => {
-                task::block_in_place(|| self.gate.wait());
-            }
-            _ => self.gate.wait(),
+        match Handle::try_current().map(|handle| handle.runtime_flavor()) {
+            Err(_) | Ok(RuntimeFlavor::CurrentThread) => self.gate.wait(),
+            Ok(RuntimeFlavor::MultiThread | _) => task::block_in_place(|| self.gate.wait()),
         }
         self.quiesced.mark();
     }
@@ -1596,6 +1605,24 @@ pub fn silently<T>(body: impl FnOnce() -> T) -> ThreadResult<T> {
     outcome
 }
 
+/// Hands the driver exactly `turns` turns, and asserts nothing.
+///
+/// What a series spends before claiming something has **not** happened, so
+/// whatever would have made the claim false has had its chance to. Written
+/// once because the shape has a trap in it: `settle`'s budget and the count
+/// being spent are different quantities, and spelling the second as
+/// [`NEGATIVE_TURNS`] inside a `settle` bounded by [`TEST_TURNS`] couples two
+/// constants documented as independent — raise the first past the second and
+/// the rows fail on the driver's exhausted-budget message, which names
+/// neither the constant that moved nor the row that moved it.
+pub fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns: usize) {
+    let mut spent = 0_usize;
+    driver.settle(turns + 1, || {
+        spent += 1;
+        spent > turns
+    });
+}
+
 /// One executor turn, by the construction RFC 0008 §9.6 pins: spawn a fresh
 /// no-op task and await it. Public primitives only, and no instrumentation
 /// of the scheduler.
@@ -1781,8 +1808,14 @@ mod tests {
     // anywhere in the script would sail past the mark and be reported as the
     // release having gone missing, which is a diagnosis of something else
     // entirely. `arrived` is marked on the last line, so a script that
-    // panicked is a failed assertion here rather than a pass, with its own
-    // message already on the way to the log.
+    // panicked is a failed assertion here rather than a pass.
+    //
+    // And the panic is caught rather than left to the hook, because on a
+    // spawned thread the hook is the only route a payload has to the log, and
+    // `silently` replaces it process-wide for as long as a panic-class row is
+    // running. Reported from here, the message arrives whatever hook happens
+    // to be installed — an assertion that promises to name a cause has to be
+    // holding the cause.
     #[test]
     #[expect(
         clippy::panic,
@@ -1792,63 +1825,80 @@ mod tests {
         let exited = Beacon::default();
         let arrived = Beacon::default();
         let (watch_exited, watch_arrived) = (exited.clone(), arrived.clone());
+        let panicked = Arc::new(Mutex::new(Option::<String>::None));
+        let reported = Arc::clone(&panicked);
 
         thread::spawn(move || {
             let _exited = DropMark::new(exited);
-            let gate = QuiescenceGate::default();
-            let first = ProbeSource::gated("a", gate.clone());
-            let superseded = ProbeSource::silent("b");
-            let (mut driver, _journal) = threaded_driver_with(
-                Script::new(parking_effect([1]))
-                    .feeding([Feed::new(first.clone()), Feed::new(superseded)])
-                    .wanting(["a"])
-                    .redeclaring(1, ["b"]),
-                config().batch_max_messages(cap(1)),
-            );
-            let trigger = driver.boot().started[0].clone();
-            accept_within(&mut driver, trigger, THREADED_TURNS);
-            driver
-                .step_pass(WakeSource::Data)
-                .expect("the trigger is in the lane");
-            // A's dismantling is now held on a worker, and stays held: this
-            // thread never opens the gate itself.
-            driver.settle(THREADED_TURNS, || gate.entered());
+            let script = AssertUnwindSafe(|| {
+                let gate = QuiescenceGate::default();
+                let first = ProbeSource::gated("a", gate.clone());
+                let superseded = ProbeSource::silent("b");
+                let (mut driver, _journal) = threaded_driver_with(
+                    Script::new(parking_effect([1]))
+                        .feeding([Feed::new(first.clone()), Feed::new(superseded)])
+                        .wanting(["a"])
+                        .redeclaring(1, ["b"]),
+                    config().batch_max_messages(cap(1)),
+                );
+                let trigger = driver.boot().started[0].clone();
+                accept_within(&mut driver, trigger, THREADED_TURNS);
+                driver
+                    .step_pass(WakeSource::Data)
+                    .expect("the trigger is in the lane");
+                // A's dismantling is now held on a worker, and stays held: this
+                // thread never opens the gate itself.
+                driver.settle(THREADED_TURNS, || gate.entered());
 
-            // The row's own premise, asserted rather than assumed. Without it,
-            // a kernel that dropped a cancelled run's stream on the driving
-            // thread would have `wait` decline, the hold would finish during
-            // the `settle` above, and this row would go back to observing
-            // nothing but a boolean while still passing.
-            //
-            // The turns first are what make it a check rather than a coin
-            // toss. `entered` and `quiesced` are marked either side of the
-            // hold, so observing the first says nothing yet about the second:
-            // a hold that declined marks both back to back and this thread can
-            // look in between. Measured with `wait` forced to decline, the
-            // bare check caught it 2 times in 5; with these turns spent
-            // first, 10 in 10.
-            let mut spent = 0_usize;
-            driver.settle(TEST_TURNS, || {
-                spent += 1;
-                spent > NEGATIVE_TURNS
-            });
-            assert_eq!(
-                first.quiescences(),
-                0,
-                "the hold is still blocking, which is what makes the drop below a release rather \
+                // The row's own premise, asserted rather than assumed. Without it,
+                // a kernel that dropped a cancelled run's stream on the driving
+                // thread would have `wait` decline, the hold would finish during
+                // the `settle` above, and this row would go back to observing
+                // nothing but a boolean while still passing.
+                //
+                // The turns first are what make it a check rather than a coin
+                // toss. `entered` and `quiesced` are marked either side of the
+                // hold, so observing the first says nothing yet about the second:
+                // a hold that declined marks both back to back and this thread can
+                // look in between. Measured with `wait` forced to decline, the
+                // bare check caught it 2 times in 5; with these turns spent
+                // first, 10 in 10.
+                spend_turns(&mut driver, NEGATIVE_TURNS);
+                assert_eq!(
+                    first.quiescences(),
+                    0,
+                    "the hold is still blocking, which is what makes the drop below a release rather \
                  than a formality"
-            );
+                );
 
-            drop(driver);
+                drop(driver);
+            });
+            if let Err(payload) = panic::catch_unwind(script) {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a payload that is neither &str nor String".to_owned());
+                *panicked.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+                return;
+            }
             arrived.mark();
         });
 
         for _ in 0..HOLD_YIELDS {
             if watch_exited.marked() {
+                let cause = reported
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                assert!(
+                    cause.is_none(),
+                    "the script thread panicked: {}",
+                    cause.unwrap_or_default()
+                );
                 assert!(
                     watch_arrived.marked(),
-                    "the script thread ended before its last line: it panicked, and its own \
-                     message says where"
+                    "the script thread ended before its last line without panicking"
                 );
                 return;
             }

@@ -53,7 +53,7 @@ use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
     Feed, NEGATIVE_TURNS, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept,
-    accept_within, cap, config, driver, driver_with, parking_effect, step_when_ready,
+    accept_within, cap, config, driver, driver_with, parking_effect, spend_turns, step_when_ready,
     threaded_driver_with,
 };
 
@@ -340,11 +340,7 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // times in 20, reporting a supersession window that never opened; with
     // them, 0 in 20.
     driver.settle(THREADED_TURNS, || gate.entered());
-    let mut spent = 0_usize;
-    driver.settle(TEST_TURNS, || {
-        spent += 1;
-        spent > NEGATIVE_TURNS
-    });
+    spend_turns(&mut driver, NEGATIVE_TURNS);
     assert_eq!(
         first.quiescences(),
         0,
