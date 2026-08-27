@@ -1599,6 +1599,8 @@ pub async fn turn() {
 mod tests {
     use super::*;
 
+    use tokio::runtime::Builder;
+
     /// How many scheduler yields a row here spends waiting for a detached
     /// hold to finish.
     ///
@@ -1703,34 +1705,102 @@ mod tests {
         );
     }
 
-    // Dropping the driver opens the gates its script's sources hold, which
-    // is what a window that fails part-way through relies on: the release
-    // has to happen before the executor's shutdown joins the thread a hold
-    // is running on.
+    // The same check, reached the way the fixture reaches it.
     //
-    // The gates come off the script, so this also covers the wiring — a
-    // driver built from a script with a gated source releases *that* gate,
-    // with nothing naming it a second time.
+    // The row above drops the hold on a bare test thread, so
+    // `Handle::try_current` fails and the plain-wait arm runs. A script's
+    // releasing thread is inside a multi-thread runtime's `block_on`, which
+    // reports `MultiThread` and takes the `block_in_place` arm instead — the
+    // arm the premise check has to hold on, and the one where getting it
+    // wrong costs the most: a hold that blocked here would block the release,
+    // and `block_in_place` is what keeps the check's own call legal on this
+    // thread rather than a panic out of a drop.
     #[test]
-    fn dropping_a_driver_opens_the_gates_its_script_declared() {
+    fn a_hold_reached_inside_the_runtime_declines_on_the_releasing_thread() {
         let gate = QuiescenceGate::default();
-        let source = ProbeSource::gated("held", gate.clone());
-        let (driver, _journal) = threaded_driver_with(
-            Script::new(parking_effect([1]))
-                .feeding([Feed::new(source)])
-                .wanting(["held"]),
-            config(),
-        );
+        let quiesced = Beacon::default();
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a two-worker runtime");
 
+        runtime.block_on(async {
+            drop(GatedQuiescence {
+                gate: gate.clone(),
+                quiesced: quiesced.clone(),
+            });
+        });
+
+        assert!(
+            quiesced.marked(),
+            "the hold returned on the releasing thread, from inside the runtime, with the gate \
+             never opened"
+        );
         assert!(
             !*gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
-            "the gate is shut while the driver is alive"
+            "and it returned by declining rather than by finding a release"
         );
-        drop(driver);
+    }
 
-        assert!(
-            *gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
-            "and the driver opened it on its way out"
+    // Dropping the driver releases a hold that is *still blocking* — the
+    // guarantee a window that fails part-way through rests on, which is that
+    // the release lands before the executor's shutdown joins the thread the
+    // hold is on.
+    //
+    // Booting and stopping the run first is the whole point. Without it no
+    // hold ever blocks, and the row degrades into checking that a drop flips
+    // a boolean — which would keep passing with `gate.open()` moved back out
+    // of `Drop::drop` into a field-order dependency, while a failing window
+    // went back to hanging.
+    //
+    // Run on a spawned thread and watched from here on a counted bound,
+    // because a regression is a hang rather than a wrong answer, and
+    // `GatedDriver` is `!Send`: the driver has to live entirely on the thread
+    // that builds it, so the whole script goes there and only the beacon
+    // comes back.
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "an exhausted bound fails the test, which is what a panic is here"
+    )]
+    fn dropping_a_driver_releases_a_hold_that_is_still_blocking() {
+        let released = Beacon::default();
+        let observed = released.clone();
+
+        thread::spawn(move || {
+            let gate = QuiescenceGate::default();
+            let first = ProbeSource::gated("a", gate.clone());
+            let superseded = ProbeSource::silent("b");
+            let (mut driver, _journal) = threaded_driver_with(
+                Script::new(parking_effect([1]))
+                    .feeding([Feed::new(first), Feed::new(superseded)])
+                    .wanting(["a"])
+                    .redeclaring(1, ["b"]),
+                config().batch_max_messages(cap(1)),
+            );
+            let trigger = driver.boot().started[0].clone();
+            accept_within(&mut driver, trigger, THREADED_TURNS);
+            driver
+                .step_pass(WakeSource::Data)
+                .expect("the trigger is in the lane");
+            // A's dismantling is now held on a worker, and stays held: this
+            // thread never opens the gate itself.
+            driver.settle(THREADED_TURNS, || gate.entered());
+
+            drop(driver);
+            released.mark();
+        });
+
+        for _ in 0..HOLD_YIELDS {
+            if observed.marked() {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!(
+            "the driver's drop did not return in {HOLD_YIELDS} scheduler yields: its shutdown \
+             joined the worker running the hold without the release having happened first"
         );
     }
 }
