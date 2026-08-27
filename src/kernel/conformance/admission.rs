@@ -53,7 +53,7 @@ use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
     Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
-    cap, config, driver, driver_with, parking_effect, step_when_ready, threaded_driver_with,
+    cap, config, driver, driver_with, gated_threaded_driver_with, parking_effect, step_when_ready,
 };
 
 // INV-SE1: one spawner invocation per admitted run, made at the admission
@@ -299,7 +299,11 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     let first = ProbeSource::gated("a", gate.clone());
     let superseded = ProbeSource::silent("b");
     let newest = ProbeSource::silent("c");
-    let (mut driver, journal) = threaded_driver_with(
+    // Driven through the gated constructor, not `threaded_driver_with`: the
+    // driver it returns owns the gate's release and drops it before shutting
+    // the executor down, so a failure inside the window below unwinds into a
+    // test failure rather than a join on the held worker (`GatedDriver`).
+    let (mut driver, journal) = gated_threaded_driver_with(
         Script::new(parking_effect([1, 2]))
             .feeding([
                 Feed::new(first.clone()),
@@ -310,12 +314,8 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
             .redeclaring(1, ["b"])
             .redeclaring(2, ["c"]),
         config().batch_max_messages(cap(1)),
+        &gate,
     );
-    // After the driver, so it drops before it: an assertion below that fails
-    // unwinds through this guard, which opens the gate and lets the held
-    // worker finish its drop, and only then does the driver shut the executor
-    // down and join that worker. See `QuiescenceGate::release_on_drop`.
-    let _release = gate.release_on_drop();
     let trigger = driver.boot().started[0].clone();
     assert_eq!(first.admissions(), 1, "boot admitted A");
 

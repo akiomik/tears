@@ -12,11 +12,16 @@
 //!   instrumentation" a `settle` predicate is meant to read (RFC 0008 §9.6).
 //! - **Bounded waiting, never timed.** Nothing here sleeps, arms a timer, or
 //!   reads a wall clock. A wait is bounded either by a counted number of
-//!   executor turns, failing the test on its bound, or — where the waiting
-//!   side is a drop on a worker thread, which can count no turns — by a
-//!   release the script cannot fail to issue ([`QuiescenceGate`]). What both
-//!   forms rule out is the same pair: a wait that ends on a clock, and a wait
-//!   that need not end at all.
+//!   executor turns or scheduler yields, failing the test on its bound, or —
+//!   where the waiting side is a drop on a worker thread, which can count no
+//!   turns — by a release a script has no way to omit, because the type that
+//!   drives it owns it ([`GatedDriver`]). What both forms rule out is the
+//!   same pair: a wait that ends on a clock, and a wait that need not end at
+//!   all. A blocking wait on a worker also has to announce itself with
+//!   [`block_in_place`], or the executor it is blocking stops being able to
+//!   turn.
+//!
+//! [`block_in_place`]: tokio::task::block_in_place
 //! - **One turn, one construction.** A turn is a spawn of a fresh no-op task
 //!   onto the executor plus a join on it (RFC 0008 §9.6), which is what
 //!   [`turn`] does and what [`TestDriver::settle`] does inside the driver.
@@ -27,6 +32,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
 use std::mem;
 use std::num::NonZeroUsize;
+use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,8 +45,9 @@ use std::thread::Result as ThreadResult;
 use futures::stream::{self, BoxStream, StreamExt};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::{Frame, Terminal};
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
-use tokio::task::yield_now;
+use tokio::task::{self, yield_now};
 
 use crate::command::effect_command::EffectCommand;
 use crate::command::{Action, Command};
@@ -181,18 +188,13 @@ impl QuiescenceGate {
 
     /// A guard that [`open`](Self::open)s this gate when it is dropped.
     ///
-    /// This is what bounds the hold, so a script that constructs a gated
-    /// source has to hold one, and has to declare it **after** the driver.
-    /// Locals drop in reverse, so that order puts the release before the
-    /// driver's shutdown: an assertion that fails part-way through a window
-    /// unwinds through this guard, the held worker finishes its drop, and
-    /// only then does the driver shut the executor down and join that worker.
-    /// Declared before the driver it would be the other way round, and the
-    /// shutdown would join a thread still holding — verified: moving the
-    /// binding above the driver turns the failing-window case from a test
-    /// failure in milliseconds into a hang.
-    #[must_use = "the gate is only released while this guard is alive; bind it"]
-    pub fn release_on_drop(&self) -> GateRelease {
+    /// Private, and reachable only through [`gated_threaded_driver_with`],
+    /// because *when* it drops is the whole of what makes it a bound and a
+    /// script cannot be relied on to place it: released after the driver, the
+    /// executor is already shutting down and joining the thread the hold is
+    /// on, which is a hang rather than a failure. [`GatedDriver`] settles the
+    /// order in a field declaration instead of in a convention.
+    fn release_on_drop(&self) -> GateRelease {
         GateRelease(self.clone())
     }
 
@@ -223,9 +225,8 @@ impl QuiescenceGate {
 /// Opens a [`QuiescenceGate`] when dropped, so every way out of a script
 /// releases the hold — the ordinary one and an unwinding one alike.
 ///
-/// The script's obligation is to own one for as long as its window lasts and
-/// to declare it after the driver; [`QuiescenceGate::release_on_drop`] says
-/// why the position is the load-bearing part.
+/// Only [`GatedDriver`] owns one, and that is deliberate: see
+/// [`QuiescenceGate::release_on_drop`].
 #[derive(Debug)]
 pub struct GateRelease(QuiescenceGate);
 
@@ -272,14 +273,37 @@ impl Drop for GatedQuiescence {
     /// two race, and the hold releasing early fails a premise the kernel had
     /// nothing to do with (issue #300).
     ///
-    /// Blocking a worker thread is what makes the window constructible at all
-    /// — the abort drops the run's stream on a worker, so the driving thread
-    /// stays steppable throughout — and the fixture's second worker
-    /// ([`threaded_driver_with`]) is what keeps the executor able to turn
-    /// while this one is held.
+    /// Blocking a worker thread is what makes the window constructible at all:
+    /// the abort drops the run's stream on a worker, so the driving thread
+    /// stays steppable throughout. But blocking one *without telling the
+    /// scheduler* does not leave it steppable, and a second worker does not
+    /// save it. A worker blocked inside a task is indistinguishable from a
+    /// worker running a long one, so the scheduler counts it as active and
+    /// need not wake its parked neighbour for the task
+    /// [`TestDriver::turn`] injects — which strands that task, and with it the
+    /// `settle` whose turn budget was supposed to be this test's bound.
+    /// Reproduced at 2 hangs in 800 runs at 16x parallelism, with the driving
+    /// thread parked in `block_on`, one worker here, and the other parked in
+    /// the IO driver.
+    ///
+    /// [`block_in_place`] is the announcement that makes the hold safe: it
+    /// hands this worker's core to another thread for the duration, so the
+    /// executor keeps turning while this thread sits in the gate. It is only
+    /// valid on a multi-thread runtime's worker, and this drop also runs off
+    /// one — during a shutdown that tears the run down from elsewhere — so
+    /// the flavour is checked rather than assumed. Where it does not apply
+    /// there is no core to hand off and the plain wait is correct.
+    ///
+    /// [`block_in_place`]: tokio::task::block_in_place
+    /// [`TestDriver::turn`]: crate::testing::driver::TestDriver
     fn drop(&mut self) {
         self.gate.entered.mark();
-        self.gate.wait();
+        match Handle::try_current() {
+            Ok(handle) if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) => {
+                task::block_in_place(|| self.gate.wait());
+            }
+            _ => self.gate.wait(),
+        }
         self.quiesced.mark();
     }
 }
@@ -586,14 +610,22 @@ impl SubscriptionSource for ProbeSource {
 /// producer's side, so no scheduling order is load-bearing; neither side can
 /// pass the other.
 ///
-/// The reducer's wait is bounded like every other wait here, and bounded
-/// without a clock: it hands the OS scheduler a counted number of yields and
-/// polls for the signal between them, failing on the bound rather than
-/// blocking forever. A blocking `recv` would have been simpler and is what
-/// the shape suggests, but a producer that never commits would then hang the
-/// suite instead of failing it, and the only way to bound a block is a
-/// deadline — a clock read, which RFC 0014 §6.3 and this crate's
-/// disallowed-method list both rule out.
+/// The reducer's wait is bounded without a clock, by a count: it hands the OS
+/// scheduler a counted number of yields and polls for the signal between
+/// them, failing on the bound rather than blocking forever. A blocking `recv`
+/// would have been simpler and is what the shape suggests, but a producer
+/// that never commits would then hang the suite instead of failing it, and a
+/// deadline is the only way to bound *that* block — a clock read, which
+/// RFC 0014 §6.3 and this crate's disallowed-method list both rule out.
+///
+/// Which is why this wait is counted and [`QuiescenceGate`]'s is not, though
+/// both are hang guards over a rendezvous. There the party that must release
+/// the hold is the script itself, so the release can be made structural and
+/// unforgettable — [`GatedDriver`] owns it and drops it before its executor.
+/// Here it is the *producer* that must signal, from inside a run the script
+/// does not own and cannot finish on its behalf: a body that parks before its
+/// send holds its sender alive, so even `Disconnected` never arrives. Nothing
+/// the script can hold releases this one, so a count is what is left.
 ///
 /// [`open_and_await_commit`]: MidBatchHandshake::open_and_await_commit
 pub struct MidBatchHandshake {
@@ -1046,6 +1078,61 @@ pub fn threaded_driver_with(
         TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
         journal,
     )
+}
+
+/// The same, for a script whose source is [`ProbeSource::gated`]: the driver
+/// arrives owning the gate's release.
+///
+/// A gated source has to be driven through this rather than through
+/// [`threaded_driver_with`], because a hold with nothing to release it is a
+/// hang and not a failure.
+pub fn gated_threaded_driver_with(
+    script: Script,
+    config: RuntimeConfig,
+    gate: &QuiescenceGate,
+) -> (GatedDriver, Journal) {
+    let (driver, journal) = threaded_driver_with(script, config);
+    (
+        GatedDriver {
+            release: gate.release_on_drop(),
+            driver,
+        },
+        journal,
+    )
+}
+
+/// A [`TestDriver`] that opens its script's [`QuiescenceGate`] before it
+/// shuts its executor down.
+///
+/// The field order is the mechanism, and the reason this is a type rather
+/// than a convention. Struct fields drop in declaration order, so `release`
+/// runs first: a window that fails part-way through unwinds, the gate opens,
+/// the held worker finishes its drop, and only then does `driver` shut the
+/// executor down and join it. The other order joins a thread nothing is going
+/// to release, which is a hang — and a hang is what every way of getting a
+/// hand-placed guard wrong produced, whether it was omitted, dropped
+/// immediately, or bound above the driver. None of those are reachable from
+/// here.
+///
+/// It is a plain deref to the driver otherwise: the release is the only thing
+/// this adds.
+pub struct GatedDriver {
+    release: GateRelease,
+    driver: TestDriver<Scripted, TestBackend>,
+}
+
+impl Deref for GatedDriver {
+    type Target = TestDriver<Scripted, TestBackend>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+impl DerefMut for GatedDriver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.driver
+    }
 }
 
 /// A driver whose terminal fails its `healthy_draws + 1`-th draw.
