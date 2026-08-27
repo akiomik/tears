@@ -27,6 +27,15 @@ jobs:
   # the wrong one installed its components somewhere it never built and cached
   # under a key that did not describe the build.
   #
+  # One consequence worth recording, because it stays silent until it bites:
+  # the action installs with `--profile minimal`, and it is now installing the
+  # pin itself. Before, the pin arrived by rustup auto-installing it from
+  # `rust-toolchain.toml`, which carries `profile = "default"` and so brought
+  # rustfmt, clippy and rust-docs along unasked. A job gets exactly what its
+  # `components:` names now. Every job here asks for what it uses, but one
+  # added later that runs, say, `just check` would fail on a component that
+  # used to be present by accident.
+  #
   # Reading both values out of the files that declare them is what keeps a job
   # honest: the pin has one home (`rust-toolchain.toml`) and the MSRV has one
   # home (`Cargo.toml`'s `rust-version`), and bumping either moves CI with it
@@ -106,12 +115,21 @@ jobs:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         shell: bash
-        # A leg is only what it claims while that precedence holds. Asserting it
-        # is what turns a future change in it into a failure here rather than
-        # into a leg that quietly tests the same thing as its neighbour.
+        # A leg is only what it claims while that precedence holds, so this
+        # turns a future change in it into a failure rather than into a leg
+        # that quietly tests the same thing as its neighbour. Note what it can
+        # and cannot catch: on the `beta` leg the two candidate answers differ,
+        # so the check is the precedence claim itself; on the `pinned` leg
+        # `RUSTUP_TOOLCHAIN` and `rust-toolchain.toml` carry the same string by
+        # construction, so it passes whichever wins and is a consistency check
+        # rather than evidence.
+        #
+        # A prefix comparison rather than `grep`, whose pattern would read the
+        # dots in a version as any-character.
         run: |
-          rustup show active-toolchain
-          rustup show active-toolchain | grep -q "^${RUSTUP_TOOLCHAIN}-"
+          active=$(rustup show active-toolchain)
+          echo "$active"
+          [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
@@ -232,11 +250,15 @@ jobs:
       - name: Run doc tests against the packaged crate
         run: just test-doc-packaged
 
-  # The version is `Cargo.toml`'s `rust-version` rather than a number written
-  # here, so the job's name, the toolchain it installs and the claim it is
-  # checking cannot come apart.
+  # The version installed is `Cargo.toml`'s `rust-version` rather than a number
+  # written here, so the toolchain this checks and the claim it is checking
+  # cannot come apart. The *name* is deliberately static and carries no
+  # version: a check-run name is what a required-status-check rule matches on,
+  # so deriving it from a file would let a `rust-version` bump rename the check
+  # with no diff here — which is the same trap the `pinned` leg above avoids by
+  # not being called `1.97.0`. The version is printed in the job instead.
   msrv:
-    name: MSRV (${{ needs.versions.outputs.msrv }})
+    name: MSRV
     runs-on: ubuntu-latest
     needs: versions
     # Without this the pin outranks the toolchain installed below and this job
@@ -250,8 +272,9 @@ jobs:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         run: |
-          rustup show active-toolchain
-          rustup show active-toolchain | grep -q "^${RUSTUP_TOOLCHAIN}-"
+          active=$(rustup show active-toolchain)
+          echo "$active"
+          [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-targets --all-features
