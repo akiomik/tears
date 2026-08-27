@@ -29,6 +29,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
+use std::marker::PhantomData;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
@@ -171,8 +172,10 @@ impl Drop for DropMark {
 pub struct QuiescenceGate {
     open: Arc<(Mutex<bool>, Condvar)>,
     entered: Beacon,
-    /// The thread that will release this gate — the one it was constructed
-    /// on, which is the script's own. See [`QuiescenceGate::wait`].
+    /// The thread that will release this gate: the one it was constructed
+    /// on, which [`threaded_driver_with`] asserts is also the one building
+    /// the driver, and [`GatedDriver`]'s `!Send` keeps as the one dropping
+    /// it. See [`QuiescenceGate::wait`].
     releaser: ThreadId,
 }
 
@@ -1098,10 +1101,29 @@ pub fn threaded_driver_with(script: Script, config: RuntimeConfig) -> (GatedDriv
     // way the gate this releases is *the* gate the script's source holds. A
     // separate argument can be the wrong one, or absent, and both compile.
     let gates = script.gates();
+    // `wait`'s premise check guards the thread a gate names as its releaser,
+    // and a gate names the thread it was constructed on. That is only the
+    // thread that will actually release it while the two are the same thread,
+    // which they are here and at every call site — so it is asserted rather
+    // than assumed. Built somewhere else, the check would guard a thread that
+    // releases nothing while the real driving thread blocked on the gate, and
+    // the failure would be the hang this whole arrangement exists to remove.
+    // `GatedDriver` is not `Send`, so this thread is also the one that drops
+    // it, which is what closes the gap between the two.
+    for gate in &gates {
+        assert_eq!(
+            thread::current().id(),
+            gate.releaser,
+            "a gated script has to be driven from the thread its gate was constructed on: that \
+             thread is the one whose hold declines to wait, and the one this driver's drop \
+             releases from"
+        );
+    }
     (
         GatedDriver {
             gates,
             driver: TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
+            not_send: PhantomData,
         },
         journal,
     )
@@ -1120,9 +1142,20 @@ pub fn threaded_driver_with(script: Script, config: RuntimeConfig) -> (GatedDriv
 ///
 /// It is a plain deref to the driver otherwise: the release is all this
 /// adds.
+///
+/// Deliberately not [`Send`]. A gate's premise check names the thread it was
+/// constructed on, [`threaded_driver_with`] asserts that this is the thread
+/// building the driver, and staying on that thread is what makes it also the
+/// thread that drops it — so the thread whose hold declines to wait and the
+/// thread that performs the release are the same one, rather than two that
+/// happen to coincide. Moved across threads, a hold reaching the real driving
+/// thread would block it short of this drop, and the suite would hang with no
+/// test named.
 pub struct GatedDriver {
     gates: Vec<QuiescenceGate>,
     driver: TestDriver<Scripted, TestBackend>,
+    /// The `!Send` marker the paragraph above is about, and nothing else.
+    not_send: PhantomData<*const ()>,
 }
 
 impl Drop for GatedDriver {
@@ -1569,16 +1602,29 @@ mod tests {
     /// How many scheduler yields a row here spends waiting for a detached
     /// hold to finish.
     ///
-    /// A hang guard, and far smaller than [`HANDSHAKE_YIELDS`] on purpose.
-    /// What it waits for is one thread being scheduled once, to run a drop
-    /// that returns immediately — measured over 30 runs each at 174 yields
-    /// at worst idle, and 2 beside sixteen busy-loop processes, a yield
-    /// costing more under load being what makes the loaded case the cheaper
-    /// one. `HANDSHAKE_YIELDS` would guard the same thing and take 154
-    /// seconds to report it, a yield here running about 154 µs in a debug
-    /// build with a blocked peer; a bound that slow reads as the hang it is
-    /// meant to replace.
-    const HOLD_YIELDS: usize = 4096;
+    /// A hang guard, so the two costs it trades between are not symmetric and
+    /// the value is not a midpoint.
+    ///
+    /// Passing costs nothing whatever the value is. The loop exits at the
+    /// first mark, which arrives in at most 174 yields idle and 2 beside
+    /// sixteen busy-loop processes, over 30 runs each — the loaded case being
+    /// the cheaper one because a yield under load is a longer time. Nothing
+    /// here is spent on a bound that is never reached.
+    ///
+    /// Failing is the only thing a larger value delays, and it is measurably
+    /// expensive: a yield costs about 154 µs in a debug build *with a blocked
+    /// peer*, which is the failing path's own condition, so
+    /// [`HANDSHAKE_YIELDS`] would report a regression 154 seconds later — a
+    /// bound that slow reads as the hang it replaces.
+    ///
+    /// So the value wants to be far above the passing path's worst case and
+    /// far below that: `65_536` keeps a margin of roughly 380x over 174, for a
+    /// failure reported in about 10 seconds. The margin matters more than the
+    /// arithmetic suggests, since scheduler latencies are heavy-tailed and
+    /// this suite runs thousands of times on shared machines — a bound that
+    /// merely clears the observed maximum is how the budget this change
+    /// removed came to fail in the first place.
+    const HOLD_YIELDS: usize = 65_536;
 
     // The gate stores its release rather than signalling it, which is what
     // makes the order between a script's `open` and the dismantling it holds
