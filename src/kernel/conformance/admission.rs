@@ -311,6 +311,11 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
             .redeclaring(2, ["c"]),
         config().batch_max_messages(cap(1)),
     );
+    // After the driver, so it drops before it: an assertion below that fails
+    // unwinds through this guard, which opens the gate and lets the held
+    // worker finish its drop, and only then does the driver shut the executor
+    // down and join that worker. See `QuiescenceGate::release_on_drop`.
+    let _release = gate.release_on_drop();
     let trigger = driver.boot().started[0].clone();
     assert_eq!(first.admissions(), 1, "boot admitted A");
 
@@ -331,11 +336,6 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // The window opens: A's dismantling has begun on a worker and is held
     // there, so the stop is outstanding and the quiescence has not happened.
     driver.settle(THREADED_TURNS, || gate.entered());
-    assert!(
-        !gate.exhausted(),
-        "the hold ran out its budget instead of being released, so the window below was never \
-         open — this row's premise failed, not the kernel"
-    );
     assert_eq!(
         first.quiescences(),
         0,
@@ -364,8 +364,9 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
         0,
         "and C waits behind the outstanding stop rather than admitting beside it"
     );
-    assert!(
-        !gate.exhausted(),
+    assert_eq!(
+        first.quiescences(),
+        0,
         "the hold was still holding across that pass, so the two readings above are the \
          barrier's answer and not a released run's"
     );

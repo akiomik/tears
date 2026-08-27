@@ -11,8 +11,12 @@
 //!   in a [`Beacon`]. Both are the "test's own application-side
 //!   instrumentation" a `settle` predicate is meant to read (RFC 0008 §9.6).
 //! - **Bounded waiting, never timed.** Nothing here sleeps, arms a timer, or
-//!   reads a wall clock. Every wait is a counted number of executor turns
-//!   and fails the test on its bound.
+//!   reads a wall clock. A wait is bounded either by a counted number of
+//!   executor turns, failing the test on its bound, or — where the waiting
+//!   side is a drop on a worker thread, which can count no turns — by a
+//!   release the script cannot fail to issue ([`QuiescenceGate`]). What both
+//!   forms rule out is the same pair: a wait that ends on a clock, and a wait
+//!   that need not end at all.
 //! - **One turn, one construction.** A turn is a spawn of a fresh no-op task
 //!   onto the executor plus a join on it (RFC 0008 §9.6), which is what
 //!   [`turn`] does and what [`TestDriver::settle`] does inside the driver.
@@ -27,7 +31,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::thread;
 use std::thread::Result as ThreadResult;
@@ -159,15 +163,37 @@ impl Drop for DropMark {
 /// current-thread).
 #[derive(Clone, Debug, Default)]
 pub struct QuiescenceGate {
-    open: Arc<AtomicBool>,
+    open: Arc<(Mutex<bool>, Condvar)>,
     entered: Beacon,
-    exhausted: Arc<AtomicBool>,
 }
 
 impl QuiescenceGate {
     /// Releases the held run, which then quiesces.
+    ///
+    /// Idempotent, and it *stores* the release rather than signalling it: a
+    /// hold that has not begun yet reads the flag and never waits at all, so
+    /// no ordering between this and the dismantling is load-bearing.
     pub fn open(&self) {
-        self.open.store(true, Ordering::SeqCst);
+        let (open, released) = &*self.open;
+        *open.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        released.notify_all();
+    }
+
+    /// A guard that [`open`](Self::open)s this gate when it is dropped.
+    ///
+    /// This is what bounds the hold, so a script that constructs a gated
+    /// source has to hold one, and has to declare it **after** the driver.
+    /// Locals drop in reverse, so that order puts the release before the
+    /// driver's shutdown: an assertion that fails part-way through a window
+    /// unwinds through this guard, the held worker finishes its drop, and
+    /// only then does the driver shut the executor down and join that worker.
+    /// Declared before the driver it would be the other way round, and the
+    /// shutdown would join a thread still holding — verified: moving the
+    /// binding above the driver turns the failing-window case from a test
+    /// failure in milliseconds into a hang.
+    #[must_use = "the gate is only released while this guard is alive; bind it"]
+    pub fn release_on_drop(&self) -> GateRelease {
+        GateRelease(self.clone())
     }
 
     /// Whether the held run's dismantling has begun — the abort has landed
@@ -178,16 +204,34 @@ impl QuiescenceGate {
         self.entered.marked()
     }
 
-    /// Whether a hold ran out its budget instead of being released.
+    /// Hold side: block until the gate is open.
     ///
-    /// The hold cannot report its own exhaustion by panicking — that would
-    /// abort the process from a drop rather than fail a test — so it records
-    /// it here and the script reads it beside the window assertions. Without
-    /// this, an exhausted hold looks exactly like a run that quiesced early,
-    /// and the row fails on a downstream admission count that names neither
-    /// the cause nor the file it happened in.
-    pub fn exhausted(&self) -> bool {
-        self.exhausted.load(Ordering::SeqCst)
+    /// The explicit `drop` is what `clippy::significant_drop_tightening`
+    /// asks for: the guard is dead once the loop has read `true` out of it,
+    /// and releasing it there rather than at the end of the scope keeps the
+    /// next holder from waiting on a lock nobody is using.
+    fn wait(&self) {
+        let (open, released) = &*self.open;
+        let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*open {
+            open = released.wait(open).unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(open);
+    }
+}
+
+/// Opens a [`QuiescenceGate`] when dropped, so every way out of a script
+/// releases the hold — the ordinary one and an unwinding one alike.
+///
+/// The script's obligation is to own one for as long as its window lasts and
+/// to declare it after the driver; [`QuiescenceGate::release_on_drop`] says
+/// why the position is the load-bearing part.
+#[derive(Debug)]
+pub struct GateRelease(QuiescenceGate);
+
+impl Drop for GateRelease {
+    fn drop(&mut self) {
+        self.0.open();
     }
 }
 
@@ -215,29 +259,27 @@ struct GatedQuiescence {
 }
 
 impl Drop for GatedQuiescence {
-    /// Held with a counted busy-yield rather than a waker or a deadline: a
-    /// drop cannot await, and a deadline would be a clock read. The bound is
-    /// a hang guard whose value is mechanism, in the style of
-    /// [`MidBatchHandshake`]'s.
+    /// Held with a blocking wait rather than a waker or a deadline: a drop
+    /// cannot await, and a deadline would be a clock read.
     ///
-    /// Panicking inside a drop would abort the process rather than fail the
-    /// test, so an exhausted bound is *recorded* instead
-    /// ([`QuiescenceGate::exhausted`]) and the script reads it where it can
-    /// name it. The hold then ends, which is the only other option: staying
-    /// in the drop forever would hang the suite.
+    /// What ends the wait is structural rather than counted. The script owns
+    /// a [`GateRelease`] declared after its driver, so the gate is opened on
+    /// every path out — the ordinary one at the end of the window, and an
+    /// unwinding one, where the guard drops first and this hold finishes
+    /// before the driver's shutdown reaches the join. A counted bound was the
+    /// alternative and it is the wrong shape here: the count would be spent
+    /// concurrently with the script's own progress through the window, so the
+    /// two race, and the hold releasing early fails a premise the kernel had
+    /// nothing to do with (issue #300).
+    ///
+    /// Blocking a worker thread is what makes the window constructible at all
+    /// — the abort drops the run's stream on a worker, so the driving thread
+    /// stays steppable throughout — and the fixture's second worker
+    /// ([`threaded_driver_with`]) is what keeps the executor able to turn
+    /// while this one is held.
     fn drop(&mut self) {
         self.gate.entered.mark();
-        let mut released = false;
-        for _ in 0..HANDSHAKE_YIELDS {
-            if self.gate.open.load(Ordering::SeqCst) {
-                released = true;
-                break;
-            }
-            thread::yield_now();
-        }
-        if !released {
-            self.gate.exhausted.store(true, Ordering::SeqCst);
-        }
+        self.gate.wait();
         self.quiesced.mark();
     }
 }
