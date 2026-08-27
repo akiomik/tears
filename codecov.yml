@@ -1,0 +1,37 @@
+# Without this file Codecov applies its default `project` status, `target:
+# auto` with `threshold: 0%` — fail on any decrease at all. The measurement is
+# not stable to that resolution. On one branch, against one base, six commits
+# that changed no executable Rust landed on exactly two values, 95.61% and
+# 95.59%, and the check passed or failed accordingly; re-running the Code
+# Coverage job with nothing else changed has flipped a failure to a pass every
+# time it was tried. So a docs-only pull request fails this check about half
+# the time, and the only remedy is to re-run a job until the measurement lands
+# on the higher value.
+#
+# A threshold rather than `informational`: `informational` never reports
+# failure, and that is more than this needs. `project` is the only signal that
+# watches *unchanged* code, because `patch` reads the lines a diff adds and a
+# pull request that deletes a test covering something else adds none.
+# Silencing it leaves nothing to notice that, the `Code Coverage` job
+# included — that job generates a report and uploads it, and nothing in it
+# reads the number back or fails on it.
+#
+# 0.5% is chosen against the observed spread rather than against a target
+# regression size: the oscillation is 0.02–0.03 points, so this is more than
+# an order of magnitude above the noise it exists to absorb, while a real
+# decrease large enough to matter is not that small. Re-measure it if the
+# oscillation's cause is ever found and fixed, since the reason for any
+# tolerance at all goes with it.
+#
+# Neither codecov status is a merge gate, and that is deliberate rather than
+# an oversight: the repository's ruleset requires neither, so what a threshold
+# buys is a red mark a reviewer can judge by content — which is the operating
+# policy, and which needs something to judge. `patch` is left at its default
+# for the same reason, reporting on the lines a diff adds. On every commit in
+# the range above it read "Coverage not affected", which says only that those
+# diffs added no lines for it to measure.
+coverage:
+  status:
+    project:
+      default:
+        threshold: 0.5%
