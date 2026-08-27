@@ -27,6 +27,7 @@
 //! [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
 //! [`block_in_place`]: tokio::task::block_in_place
 
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending, ready};
 use std::marker::PhantomData;
@@ -1623,6 +1624,20 @@ pub fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns:
     });
 }
 
+/// What a caught panic's payload says, for a failure that happened on a
+/// thread the reporting one is only watching.
+///
+/// `panic!` produces a `&str` for a literal and a `String` for a format, and
+/// an assertion produces the second; nothing here produces anything else, so
+/// the third arm is a description rather than a message.
+fn panic_text(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is neither &str nor String".to_owned())
+}
+
 /// One executor turn, by the construction RFC 0008 §9.6 pins: spawn a fresh
 /// no-op task and await it. Public primitives only, and no instrumentation
 /// of the scheduler.
@@ -1642,6 +1657,23 @@ mod tests {
     use super::*;
 
     use tokio::runtime::Builder;
+
+    // The three shapes a caught payload arrives in, since the watcher rows
+    // report one from a thread they cannot otherwise ask.
+    #[test]
+    fn a_caught_payload_reads_as_its_message() {
+        assert_eq!(panic_text(&"from a literal"), "from a literal");
+        assert_eq!(
+            panic_text(&"from a format".to_owned()),
+            "from a format",
+            "an assertion's payload is a `String`, not a `&str`"
+        );
+        assert_eq!(
+            panic_text(&7_u8),
+            "a payload that is neither &str nor String",
+            "and anything else is described rather than dropped"
+        );
+    }
 
     /// How many scheduler yields a row here spends waiting for a detached
     /// hold to finish.
@@ -1874,12 +1906,8 @@ mod tests {
                 drop(driver);
             });
             if let Err(payload) = panic::catch_unwind(script) {
-                let message = payload
-                    .downcast_ref::<&str>()
-                    .map(|text| (*text).to_owned())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "a payload that is neither &str nor String".to_owned());
-                *panicked.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+                *panicked.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(panic_text(&*payload));
                 return;
             }
             arrived.mark();
