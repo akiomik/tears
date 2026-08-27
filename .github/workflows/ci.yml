@@ -36,27 +36,43 @@ jobs:
   # added later that runs, say, `just check` would fail on a component that
   # used to be present by accident.
   #
-  # Reading both values out of the files that declare them is what keeps a job
-  # honest: the pin has one home (`rust-toolchain.toml`) and the MSRV has one
-  # home (`Cargo.toml`'s `rust-version`), and bumping either moves CI with it
-  # instead of leaving a job checking a version nothing claims any more.
+  # Reading these out of the files that declare them is what keeps a job
+  # honest: the pin has one home (`rust-toolchain.toml`), the MSRV has one
+  # home (`Cargo.toml`'s `rust-version`), and the feature set has one home
+  # (the `justfile`), so bumping any of them moves CI with it instead of
+  # leaving a job checking something nothing claims any more.
+  #
+  # `features` is what the jobs below enable instead of `--all-features`.
+  # `--all-features` turns on `loom-core`, which *removes* code from the
+  # build — `subscription::signal` is gated `cfg(not(all(feature =
+  # "loom-core", test)))`, so it and its three unit tests were compiled out of
+  # every job here. `build_features` is everything else, and the `justfile` is
+  # the source because `just test-doc-packaged` already fails when that list
+  # drifts from the crate's own feature table.
   versions:
     name: Declared Versions
     runs-on: ubuntu-latest
     outputs:
       pinned: ${{ steps.read.outputs.pinned }}
       msrv: ${{ steps.read.outputs.msrv }}
+      features: ${{ steps.read.outputs.features }}
     steps:
       - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@just
       - id: read
-        name: Read the pinned channel and the declared MSRV
+        name: Read the pinned channel, the declared MSRV and the feature set
         run: |
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          features=$(just --evaluate build_features)
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
-          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
-          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
+          test -n "$features" || { echo "no build_features in the justfile" >&2; exit 1; }
+          {
+            echo "pinned=$pinned"
+            echo "msrv=$msrv"
+            echo "features=$features"
+          } >> "$GITHUB_OUTPUT"
 
   fmt:
     name: Format Check
@@ -87,7 +103,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features ${{ needs.versions.outputs.features }} -- -D warnings
 
   test:
     name: Test
@@ -138,7 +154,7 @@ jobs:
         # `--test` flag and always runs its full scenarios; matrixing that
         # across every OS/toolchain makes Windows CI disproportionately slow
         # for no additional coverage.
-        run: cargo test --lib --bins --tests --examples --all-features
+        run: cargo test --lib --bins --tests --examples --features ${{ needs.versions.outputs.features }}
 
   bench:
     name: Benchmarks
@@ -159,7 +175,7 @@ jobs:
         # iteration, no sample, so what it gates is that it still compiles
         # and runs.
         run: |
-          cargo test --bench kernel_scan --all-features
+          cargo test --bench kernel_scan --features ${{ needs.versions.outputs.features }}
       - name: Run the load harness's smoke profiles
         # The full scenarios of the load harness leave CI: they are
         # deliberate acceptance/regression runs (RFC 0006 §5.1, RFC 0007
@@ -219,7 +235,7 @@ jobs:
           toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features ${{ needs.versions.outputs.features }}
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -277,7 +293,7 @@ jobs:
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
-        run: cargo check --all-targets --all-features
+        run: cargo check --all-targets --features ${{ needs.versions.outputs.features }}
 
   coverage:
     name: Code Coverage
@@ -293,7 +309,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --features ${{ needs.versions.outputs.features }} --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

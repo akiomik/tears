@@ -1,6 +1,60 @@
 # justfile for tears development
 # Run `just --list` to see all available commands
 
+# Deliberately not `--all-features`, anywhere below. `--all-features` enables
+# `loom-core`, and that feature *removes* code from the build rather than
+# adding to it: `subscription::signal` is gated
+# `#[cfg(not(all(feature = "loom-core", test)))]`, so enabling it takes the
+# module out along with its tests. Measured, on rustc 1.97.0:
+#
+#     cargo test --lib                       534 total,  3 `signal::`
+#     cargo test --lib --all-features        584 total,  0 `signal::`
+#     cargo test --lib --features {{build_features}}
+#                                            579 total,  3 `signal::`
+#
+#     cargo test --doc                        61 tests
+#     cargo test --doc --features loom-core   60 tests  (both `Signal` ones gone)
+#     cargo test --doc --all-features         71 tests  (both `Signal` ones gone)
+#     cargo test --doc --features {{user_features}}
+#                                             73 tests  (superset of all above)
+#
+# The 584 and the 579 differ by the three `signal::` rows gained and eight
+# lost: the four `cell_core` and four `accounting_core` rows, which
+# `test-loom` runs under `--cfg loom` — model-checked there rather than merely
+# executed once, and that is the only place `loom-core` is meant to be on. So
+# nothing stops being tested; the three that were being skipped start.
+#
+# For `--lib` the cfg above explains the count. For doctests it does not: no
+# rustdoc invocation in the run receives `--cfg test`. The effect is
+# reproducible, the mechanism is not established, so treat the numbers above as
+# the reason and re-measure before widening either list. See issue #298.
+
+# Every feature a dependant can name: the crate's feature table minus the two
+# build-only entries. All three TLS backends are here because they coexist and
+# a doctest gated on one must not go uncompiled because another was picked.
+# `dashmap`, `thiserror` and `tokio-tungstenite` are here because `http` and
+# `ws` reference those optional dependencies by bare name rather than with
+# `dep:`, so cargo synthesises a feature per dependency and a dependant can
+# enable them — switching those two to `dep:` would remove them from the
+# surface, but that is a feature-surface decision, not a doctest one.
+#
+# Single source for the doctest recipes and for the CI job that reads it with
+# `just --evaluate`; `test-doc-packaged` fails if it drifts from the crate's
+# own feature table, so the numbers above stay measured against this exact
+# value.
+user_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserror,tokio-tungstenite,ws"
+
+# What building, linting, testing and covering enable: everything except
+# `loom-core`.
+#
+# `bench-internals` is here and not in `user_features` because it only adds. It
+# is what the benches' `required-features` name, so without it `--all-targets`
+# does not reach a bench at all, and the `#[doc(hidden)]` handles it exposes
+# would go unlinted and unchecked — coverage that `--all-features` did have
+# and there is no reason to give up. It stays out of `user_features` because a
+# dependant is documented not to enable it.
+build_features := user_features + ",bench-internals"
+
 # Default recipe to display help
 default:
     @just --list
@@ -23,15 +77,15 @@ fmt-check:
 
 # Run clippy on all targets
 clippy:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --features {{build_features}} -- -D warnings
 
 # Fix clippy warnings automatically
 clippy-fix:
-    cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged
+    cargo clippy --fix --all-targets --features {{build_features}} --allow-dirty --allow-staged
 
 # Run all tests
 test:
-    cargo test --all-targets --all-features
+    cargo test --all-targets --features {{build_features}}
 
 # Run only unit tests
 test-unit:
@@ -41,39 +95,9 @@ test-unit:
 test-integration:
     cargo test --test '*'
 
-# Deliberately not `--all-features`. Measured, on rustc 1.97.0:
-#
-#     cargo test --doc                       61 tests
-#     cargo test --doc --features loom-core  60 tests  (both `Signal` ones gone)
-#     cargo test --doc --all-features        71 tests  (both `Signal` ones gone)
-#     cargo test --doc --features <the value below>
-#                                            73 tests  (superset of all above)
-#
-# Enabling `loom-core` drops `subscription::signal`'s two doctests. The
-# obvious reading — that rustdoc satisfies the `test` in that module's
-# `#[cfg(not(all(feature = "loom-core", test)))]` — is *not* the cause: no
-# rustdoc invocation in the run receives `--cfg test`. The effect is
-# reproducible, the mechanism is not established, so treat the numbers above
-# as the reason and re-measure before widening this list. See issue #298.
-#
-# The list is every feature a dependant can name, minus the two build-only
-# ones (`loom-core`, `bench-internals`). All three TLS backends are here
-# because they coexist and a doctest gated on one must not go uncompiled
-# because another was picked. `dashmap`, `thiserror` and `tokio-tungstenite`
-# are here because `http` and `ws` reference those optional dependencies by
-# bare name rather than with `dep:`, so cargo synthesises a feature per
-# dependency and a dependant can enable them — switching those two to `dep:`
-# would remove them from the surface, but that is a feature-surface decision,
-# not a doctest one.
-#
-# Single source for both doctest recipes and for the CI job that calls them;
-# `test-doc-packaged` fails if it drifts, so the table above stays measured
-# against this exact value.
-doc_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserror,tokio-tungstenite,ws"
-
 # Run only doc tests
 test-doc:
-    cargo test --doc --features {{doc_features}}
+    cargo test --doc --features {{user_features}}
 
 # Guards the `include` entry that keeps `include_str!` resolvable once
 # published: `cargo publish`'s verification is a `cargo build`, which drops
@@ -98,7 +122,7 @@ test-doc-packaged:
     # Honours CARGO_TARGET_DIR / build.target-dir rather than assuming ./target.
     out=$(jq -r '.target_directory' <<<"$meta")/package
 
-    # `doc_features` is written by hand, so check it still lists every feature
+    # `user_features` is written by hand, so check it still lists every feature
     # a user can enable. Without this the invariant is only a comment, and a
     # new feature gating a module with doctests would silently stop being
     # compiled while this job stayed green — the failure mode the job exists
@@ -109,13 +133,13 @@ test-doc-packaged:
     # can be named in a dependant's `features = [...]`, so both belong in the
     # list. Nothing needs to tell them apart. Comparison and sorting happen
     # inside jq so the two sides cannot disagree on collation.
-    jq -e --arg have '{{doc_features}}' '
+    jq -e --arg have '{{user_features}}' '
       ([.packages[0].features | keys[]
         | select(. != "default" and . != "loom-core" and . != "bench-internals")]
        | sort) as $want
       | ($have | split(",") | map(select(length > 0)) | sort) as $got
       | if $want == $got then true
-        else "doc_features is stale: expected \($want | join(",")), got \($got | join(","))"
+        else "user_features is stale: expected \($want | join(",")), got \($got | join(","))"
              | error
         end' <<<"$meta" >/dev/null
 
@@ -128,7 +152,7 @@ test-doc-packaged:
     # store.
     nested=$(mktemp -d)
     trap 'rm -rf "$nested"' EXIT
-    CARGO_TARGET_DIR="$nested" cargo test --doc --features {{doc_features}}
+    CARGO_TARGET_DIR="$nested" cargo test --doc --features {{user_features}}
 
 # Run loom concurrency model tests (scoped to the isolated core mirrors)
 test-loom:
@@ -174,11 +198,11 @@ doc-build:
 
 # Generate code coverage report
 coverage:
-    cargo llvm-cov --all-features --open
+    cargo llvm-cov --features {{build_features}} --open
 
 # Generate code coverage in lcov format
 coverage-lcov:
-    cargo llvm-cov --all-features --lcov --output-path lcov.info
+    cargo llvm-cov --features {{build_features}} --lcov --output-path lcov.info
 
 # Clean build artifacts
 clean:
