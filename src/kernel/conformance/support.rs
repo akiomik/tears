@@ -854,6 +854,23 @@ impl Script {
     /// What [`threaded_driver_with`] releases, taken from the script itself
     /// so that it is the gate the source will actually hold at rather than
     /// one named again alongside it.
+    /// Rejects this script at a current-thread constructor.
+    ///
+    /// There the abort drops a run's stream on the driving thread, which is
+    /// the gate's own releaser, so the hold declines and the window it exists
+    /// to open is never open — a row claiming a state it never reached, and
+    /// passing. Every constructor that builds a current-thread executor has
+    /// to say this, so it lives here rather than at one of them: the strength
+    /// of the rule is whichever sibling forgets it.
+    fn assert_ungated(&self) {
+        assert!(
+            self.gates().is_empty(),
+            "a gated source needs `threaded_driver_with`: on the current-thread executor its \
+             hold runs on the driving thread and declines, so the window it exists to open is \
+             never open"
+        );
+    }
+
     fn gates(&self) -> Vec<QuiescenceGate> {
         self.feeds
             .iter()
@@ -1092,11 +1109,7 @@ pub fn driver_with(
     script: Script,
     config: RuntimeConfig,
 ) -> (TestDriver<Scripted, TestBackend>, Journal) {
-    assert!(
-        script.gates().is_empty(),
-        "a gated source needs `threaded_driver_with`: on the current-thread executor its hold \
-         runs on the driving thread and declines, so the window it exists to open is never open"
-    );
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1222,6 +1235,7 @@ pub fn failing_driver(
     script: Script,
     healthy_draws: usize,
 ) -> (TestDriver<Scripted, FailingBackend>, Journal) {
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1238,6 +1252,7 @@ pub fn failing_driver(
 /// drives the production loop itself, so it takes a kernel rather than a
 /// driver, and the gate is production's immediate one.
 pub fn park_kernel(script: Script) -> (Kernel<Scripted>, Journal) {
+    script.assert_ungated();
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1681,11 +1696,18 @@ mod tests {
     /// A hang guard, so the two costs it trades between are not symmetric and
     /// the value is not a midpoint.
     ///
-    /// Passing costs nothing whatever the value is. The loop exits at the
-    /// first mark, which arrives in at most 174 yields idle and 2 beside
-    /// sixteen busy-loop processes, over 30 runs each — the loaded case being
-    /// the cheaper one because a yield under load is a longer time. Nothing
-    /// here is spent on a bound that is never reached.
+    /// Passing costs nothing whatever the value is: the loop exits at the
+    /// first mark, so nothing here is spent on a bound that is never reached.
+    /// Its two callers wait for different things and were measured
+    /// separately, 30 runs each, worst of each:
+    ///
+    /// |                              | idle | beside 16 busy-loop processes |
+    /// | ---                          | ---  | ---                           |
+    /// | a bare `drop` on a thread    |  174 |                             2 |
+    /// | a whole driver script's drop |  611 |                             3 |
+    ///
+    /// The loaded column is the cheaper one because a yield under load is a
+    /// longer time, so the passing path's worst case is an *idle* machine.
     ///
     /// Failing is the only thing a larger value delays, and it is measurably
     /// expensive: a yield costs about 154 µs in a debug build *with a blocked
@@ -1693,8 +1715,8 @@ mod tests {
     /// [`HANDSHAKE_YIELDS`] would report a regression 154 seconds later — a
     /// bound that slow reads as the hang it replaces.
     ///
-    /// So the value wants to be far above the passing path's worst case and
-    /// far below that: `65_536` keeps a margin of roughly 380x over 174, for a
+    /// So the value wants to be far above the worst of the column that
+    /// matters and far below that: `65_536` is roughly 107x over 611, for a
     /// failure reported in about 10 seconds. The margin matters more than the
     /// arithmetic suggests, since scheduler latencies are heavy-tailed and
     /// this suite runs thousands of times on shared machines — a bound that
@@ -1856,7 +1878,9 @@ mod tests {
     fn dropping_a_driver_releases_a_hold_that_is_still_blocking() {
         let exited = Beacon::default();
         let arrived = Beacon::default();
+        let at_drop = Beacon::default();
         let (watch_exited, watch_arrived) = (exited.clone(), arrived.clone());
+        let watch_at_drop = at_drop.clone();
         let panicked = Arc::new(Mutex::new(Option::<String>::None));
         let reported = Arc::clone(&panicked);
 
@@ -1903,6 +1927,7 @@ mod tests {
                  than a formality"
                 );
 
+                at_drop.mark();
                 drop(driver);
             });
             if let Err(payload) = panic::catch_unwind(script) {
@@ -1932,9 +1957,17 @@ mod tests {
             }
             thread::yield_now();
         }
-        panic!(
-            "the driver's drop did not return in {HOLD_YIELDS} scheduler yields: its shutdown \
-             joined the worker running the hold without the release having happened first"
-        );
+        // Which of the two the bound caught, rather than asserting the
+        // interesting one. `exited` covers the whole script, so without this
+        // a runtime construction or a `settle` merely slower than the bound
+        // would be reported as a release that never happened.
+        let cause = if watch_at_drop.marked() {
+            "the driver's drop did not return: its shutdown joined the worker running the hold \
+             without the release having happened first"
+        } else {
+            "the script did not reach its drop: something before it outran this bound, and the \
+             release is not implicated"
+        };
+        panic!("{cause} ({HOLD_YIELDS} scheduler yields)");
     }
 }
