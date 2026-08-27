@@ -226,10 +226,11 @@ impl QuiescenceGate {
     /// that states it. A named failure, where the alternative is a job that
     /// times out with no test named at all.
     ///
-    /// The explicit `drop` is what `clippy::significant_drop_tightening`
-    /// asks for: the guard is dead once the loop has read `true` out of it,
-    /// and releasing it there rather than at the end of the scope keeps the
-    /// next holder from waiting on a lock nobody is using.
+    /// The trailing `drop` buys no contention back — it is the last statement
+    /// in the function, so the guard would fall at the same point without it.
+    /// It is there because `clippy::significant_drop_tightening` asks for it
+    /// and the lint job runs with `-D warnings`; removing it fails that job
+    /// rather than changing when anything is unlocked.
     fn wait(&self) {
         if thread::current().id() == self.releaser {
             return;
@@ -270,15 +271,18 @@ impl Drop for GatedQuiescence {
     /// Held with a blocking wait rather than a waker or a deadline: a drop
     /// cannot await, and a deadline would be a clock read.
     ///
-    /// What ends the wait is structural rather than counted. The script owns
-    /// a [`GateRelease`] declared after its driver, so the gate is opened on
-    /// every path out — the ordinary one at the end of the window, and an
-    /// unwinding one, where the guard drops first and this hold finishes
-    /// before the driver's shutdown reaches the join. A counted bound was the
-    /// alternative and it is the wrong shape here: the count would be spent
-    /// concurrently with the script's own progress through the window, so the
-    /// two race, and the hold releasing early fails a premise the kernel had
-    /// nothing to do with (issue #300).
+    /// What ends the wait is structural rather than counted, and the script
+    /// is not asked to remember any of it: the driver that runs the script
+    /// holds the gates the script declared and opens them in its own
+    /// [`Drop`], which runs before the field holding the executor does
+    /// ([`GatedDriver`]). So the gate is opened on every path out — the
+    /// ordinary one at the end of the window, and an unwinding one, where the
+    /// release still lands before the shutdown that would join this thread.
+    ///
+    /// A counted bound was the alternative and it is the wrong shape here:
+    /// the count would be spent concurrently with the script's own progress
+    /// through the window, so the two race, and the hold releasing early
+    /// fails a premise the kernel had nothing to do with (issue #300).
     ///
     /// Blocking a worker thread is what makes the window constructible at all:
     /// the abort drops the run's stream on a worker, so the driving thread
@@ -1562,6 +1566,20 @@ pub async fn turn() {
 mod tests {
     use super::*;
 
+    /// How many scheduler yields a row here spends waiting for a detached
+    /// hold to finish.
+    ///
+    /// A hang guard, and far smaller than [`HANDSHAKE_YIELDS`] on purpose.
+    /// What it waits for is one thread being scheduled once, to run a drop
+    /// that returns immediately — measured over 30 runs each at 174 yields
+    /// at worst idle, and 2 beside sixteen busy-loop processes, a yield
+    /// costing more under load being what makes the loaded case the cheaper
+    /// one. `HANDSHAKE_YIELDS` would guard the same thing and take 154
+    /// seconds to report it, a yield here running about 154 µs in a debug
+    /// build with a blocked peer; a bound that slow reads as the hang it is
+    /// meant to replace.
+    const HOLD_YIELDS: usize = 4096;
+
     // The gate stores its release rather than signalling it, which is what
     // makes the order between a script's `open` and the dismantling it holds
     // not load-bearing: a hold that begins after the release reads the flag
@@ -1570,7 +1588,18 @@ mod tests {
     // Held on a spawned thread, because on the releasing thread the hold
     // declines to wait at all and this would pass without touching the flag
     // — the row below is the one that covers that.
+    //
+    // The thread is detached and the result read from the beacon, on a
+    // counted bound, rather than joined. A `join` would be the one wait in
+    // this file with nothing to end it: the hold it waits on is the fixture's
+    // own, with no `GatedDriver` behind it to release it, so a regression in
+    // `open` or `wait` would hang the suite here with no test named — which
+    // is the failure mode this whole file is arranged against.
     #[test]
+    #[expect(
+        clippy::panic,
+        reason = "an exhausted bound fails the test, which is what a panic is here"
+    )]
     fn a_hold_begun_after_its_release_waits_for_nothing() {
         let gate = QuiescenceGate::default();
         let quiesced = Beacon::default();
@@ -1580,17 +1609,21 @@ mod tests {
             gate: gate.clone(),
             quiesced: quiesced.clone(),
         };
-        thread::spawn(move || drop(held))
-            .join()
-            .expect("the hold read an open gate and returned");
+        thread::spawn(move || drop(held));
 
-        assert!(
-            gate.entered(),
-            "the dismantling recorded itself on the way in"
-        );
-        assert!(
-            quiesced.marked(),
-            "and reached its end rather than holding, with no release left to wait for"
+        for _ in 0..HOLD_YIELDS {
+            if quiesced.marked() {
+                assert!(
+                    gate.entered(),
+                    "the dismantling recorded itself on the way in"
+                );
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!(
+            "the hold did not finish in {HOLD_YIELDS} scheduler yields, with its gate open before \
+             it began: it waited for a release that had already been stored"
         );
     }
 
