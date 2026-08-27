@@ -13,11 +13,13 @@
 # not required and its failures are judged by content — so the setting states
 # it rather than changing it.
 #
-# `patch` is deliberately left at its default. It reports on the lines a diff
-# adds, so it has nothing to say about a diff that adds none: it read "Coverage
-# not affected" on every commit in the range above, including both failures.
-# Uncovered new lines are the part that has been accurate throughout, and it
-# stays a gate.
+# `patch` is left at its default, which makes it a report and not a gate:
+# the repository's ruleset requires neither codecov status, and the
+# `Code Coverage` job that feeds them uploads with `fail_ci_if_error: false`,
+# so it cannot fail on their content either. What `patch` keeps doing is
+# reporting on the lines a diff adds. On every commit in the range above it
+# read "Coverage not affected", which says only that those diffs added no
+# lines for it to measure.
 coverage:
   status:
     project:
