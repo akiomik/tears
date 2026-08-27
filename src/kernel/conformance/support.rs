@@ -1757,24 +1757,35 @@ mod tests {
     // Run on a spawned thread and watched from here on a counted bound,
     // because a regression is a hang rather than a wrong answer, and
     // `GatedDriver` is `!Send`: the driver has to live entirely on the thread
-    // that builds it, so the whole script goes there and only the beacon
-    // comes back.
+    // that builds it, so the whole script goes there and only beacons come
+    // back.
+    //
+    // Two beacons, because "the thread ended" and "the thread got there" are
+    // different questions and only one of them is the bound's. `exited` is
+    // marked from a `DropMark`, so an unwind marks it too — otherwise a panic
+    // anywhere in the script would sail past the mark and be reported as the
+    // release having gone missing, which is a diagnosis of something else
+    // entirely. `arrived` is marked on the last line, so a script that
+    // panicked is a failed assertion here rather than a pass, with its own
+    // message already on the way to the log.
     #[test]
     #[expect(
         clippy::panic,
         reason = "an exhausted bound fails the test, which is what a panic is here"
     )]
     fn dropping_a_driver_releases_a_hold_that_is_still_blocking() {
-        let released = Beacon::default();
-        let observed = released.clone();
+        let exited = Beacon::default();
+        let arrived = Beacon::default();
+        let (watch_exited, watch_arrived) = (exited.clone(), arrived.clone());
 
         thread::spawn(move || {
+            let _exited = DropMark::new(exited);
             let gate = QuiescenceGate::default();
             let first = ProbeSource::gated("a", gate.clone());
             let superseded = ProbeSource::silent("b");
             let (mut driver, _journal) = threaded_driver_with(
                 Script::new(parking_effect([1]))
-                    .feeding([Feed::new(first), Feed::new(superseded)])
+                    .feeding([Feed::new(first.clone()), Feed::new(superseded)])
                     .wanting(["a"])
                     .redeclaring(1, ["b"]),
                 config().batch_max_messages(cap(1)),
@@ -1788,12 +1799,42 @@ mod tests {
             // thread never opens the gate itself.
             driver.settle(THREADED_TURNS, || gate.entered());
 
+            // The row's own premise, asserted rather than assumed. Without it,
+            // a kernel that dropped a cancelled run's stream on the driving
+            // thread would have `wait` decline, the hold would finish during
+            // the `settle` above, and this row would go back to observing
+            // nothing but a boolean while still passing.
+            //
+            // The turns first are what make it a check rather than a coin
+            // toss. `entered` and `quiesced` are marked either side of the
+            // hold, so observing the first says nothing yet about the second:
+            // a hold that declined marks both back to back and this thread can
+            // look in between. Measured with `wait` forced to decline, the
+            // bare check caught it 2 times in 5; with these turns spent
+            // first, 10 in 10.
+            let mut spent = 0_usize;
+            driver.settle(TEST_TURNS, || {
+                spent += 1;
+                spent > PARK_TURNS
+            });
+            assert_eq!(
+                first.quiescences(),
+                0,
+                "the hold is still blocking, which is what makes the drop below a release rather \
+                 than a formality"
+            );
+
             drop(driver);
-            released.mark();
+            arrived.mark();
         });
 
         for _ in 0..HOLD_YIELDS {
-            if observed.marked() {
+            if watch_exited.marked() {
+                assert!(
+                    watch_arrived.marked(),
+                    "the script thread ended before its last line: it panicked, and its own \
+                     message says where"
+                );
                 return;
             }
             thread::yield_now();
