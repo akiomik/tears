@@ -4,8 +4,13 @@
 # Deliberately not `--all-features`, anywhere below. `--all-features` enables
 # `loom-core`, and that feature *removes* code from the build rather than
 # adding to it: `subscription::signal` is gated
-# `#[cfg(not(all(feature = "loom-core", test)))]`, so enabling it takes the
-# module out along with its tests. Measured, on rustc 1.97.0:
+# `#[cfg(not(all(feature = "loom-core", test)))]`.
+#
+# Note the `test` in that gate, because it bounds what is lost. Where
+# `cfg(test)` is off the `all(..)` is false and the module is kept, so
+# `cargo doc` and the plain `--lib` unit of `--all-targets` always had it.
+# What `--all-features` removed is the module from *test-target* builds, and
+# with it the three unit tests below. Measured, on rustc 1.97.0:
 #
 #     cargo test --lib                       534 total,  3 `signal::`
 #     cargo test --lib --all-features        584 total,  0 `signal::`
@@ -21,8 +26,16 @@
 # The 584 and the 579 differ by the three `signal::` rows gained and eight
 # lost: the four `cell_core` and four `accounting_core` rows, which
 # `test-loom` runs under `--cfg loom` — model-checked there rather than merely
-# executed once, and that is the only place `loom-core` is meant to be on. So
-# nothing stops being tested; the three that were being skipped start.
+# executed once. So no *test* stops being run, and the three that were being
+# skipped start.
+#
+# `loom-core` is on in exactly two recipes, and they are not interchangeable:
+# `test-loom` runs those rows under `--cfg loom`, and `clippy-loom` lints the
+# modules they live in, which the `build_features` pass cannot see. What no
+# recipe covers is compiling them against the MSRV or on a second platform —
+# `--all-features` used to, and giving that up is deliberate: `rust-version`
+# is a promise about what a dependant compiles, and a dependant never
+# compiles a `cfg(test)` mirror.
 #
 # For `--lib` the cfg above explains the count. For doctests it does not: no
 # rustdoc invocation in the run receives `--cfg test`. The effect is
@@ -38,14 +51,16 @@
 # enable them — switching those two to `dep:` would remove them from the
 # surface, but that is a feature-surface decision, not a doctest one.
 #
-# Single source for the doctest recipes and for the CI job that reads it with
-# `just --evaluate`; `test-doc-packaged` fails if it drifts from the crate's
+# Single source for the doctest recipes, and the base `build_features` is
+# derived from; `test-doc-packaged` fails if either drifts from the crate's
 # own feature table, so the numbers above stay measured against this exact
-# value.
+# value. CI evaluates `build_features`, not this.
 user_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserror,tokio-tungstenite,ws"
 
-# What building, linting, testing and covering enable: everything except
-# `loom-core`.
+# What the linting, testing and coverage recipes enable — `clippy`,
+# `clippy-fix`, `test`, `coverage`, `coverage-lcov` — and what CI reads with
+# `just --evaluate`. Everything except `loom-core`. The plain `build*` and
+# `doc*` recipes take cargo's defaults and are not on this list.
 #
 # `bench-internals` is here and not in `user_features` because it only adds. It
 # is what the benches' `required-features` name, so without it `--all-targets`
@@ -65,7 +80,7 @@ default:
 # `cfg(doctest)`-included migration guide.
 
 # Run all checks (fmt, clippy, test, doc tests)
-check: fmt clippy test test-doc
+check: fmt clippy clippy-loom test test-doc
 
 # Format code with rustfmt
 fmt:
@@ -78,6 +93,19 @@ fmt-check:
 # Run clippy on all targets
 clippy:
     cargo clippy --all-targets --features {{build_features}} -- -D warnings
+
+# No single feature set sees the whole crate, so linting takes two passes.
+# `loom-core` is the one feature that removes code, so the pass above cannot
+# reach `subscription::http::cell_core` or `kernel::accounting_core` — both
+# `cfg(all(feature = "loom-core", test))`, and both linted by `--all-features`
+# before this list replaced it. `test-loom` runs their rows but under a plain
+# `cargo test` with no `-D warnings`, so without this a violation in either
+# goes unseen. No `--cfg loom`: nothing in the crate is gated on it, and the
+# mirrors import `loom::` unconditionally.
+
+# Lint the modules only `loom-core` compiles
+clippy-loom:
+    cargo clippy --all-targets --features loom-core -- -D warnings
 
 # Fix clippy warnings automatically
 clippy-fix:
@@ -244,10 +272,10 @@ outdated:
     cargo outdated
 
 # Run all pre-commit checks
-pre-commit: fmt-check clippy test test-doc
+pre-commit: fmt-check clippy clippy-loom test test-doc
 
 # Run quick checks (no tests)
-quick: fmt clippy
+quick: fmt clippy clippy-loom
 
 # Watch for changes and run tests
 watch:

@@ -45,10 +45,18 @@ jobs:
   # `features` is what the jobs below enable instead of `--all-features`.
   # `--all-features` turns on `loom-core`, which *removes* code from the
   # build — `subscription::signal` is gated `cfg(not(all(feature =
-  # "loom-core", test)))`, so it and its three unit tests were compiled out of
-  # every job here. `build_features` is everything else, and the `justfile` is
-  # the source because `just test-doc-packaged` already fails when that list
-  # drifts from the crate's own feature table.
+  # "loom-core", test)))`.
+  #
+  # The `test` in that gate bounds what was lost, and it is narrower than it
+  # looks: where `cfg(test)` is off the `all(..)` is false and the module is
+  # kept, so `doc` documented it and the plain `--lib` unit of `--all-targets`
+  # linted and MSRV-checked it throughout. What `--all-features` removed is
+  # the module from *test-target* builds — so `test` never ran its three unit
+  # tests and `coverage` never measured it.
+  #
+  # `build_features` is everything except `loom-core`, and the `justfile` is
+  # the source because `just test-doc-packaged` fails when either list drifts
+  # from the crate's own feature table.
   versions:
     name: Declared Versions
     runs-on: ubuntu-latest
@@ -64,14 +72,17 @@ jobs:
         run: |
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          # No `test -n` for this one: `sed` prints nothing and succeeds when
-          # it matches nothing, so those two need a guard, while
-          # `just --evaluate` exits non-zero for a name it does not know and
-          # the step's `bash -eo pipefail` stops at the assignment with just's
-          # own message.
           features=$(just --evaluate build_features)
+          # All three are guarded, for two different failure modes. `sed`
+          # prints nothing and exits zero when it matches nothing, so those
+          # two would otherwise pass an empty string on. `just --evaluate`
+          # exits non-zero for a name it does not know — this step has no
+          # `shell:`, so it runs under the default `bash -e`, which aborts at
+          # the assignment — but a variable that exists and is empty exits
+          # zero, and that is what this guard is for.
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
+          test -n "$features" || { echo "build_features is empty" >&2; exit 1; }
           {
             echo "pinned=$pinned"
             echo "msrv=$msrv"
@@ -106,18 +117,19 @@ jobs:
           toolchain: ${{ needs.versions.outputs.pinned }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       - name: Run clippy
         run: cargo clippy --all-targets --features ${{ needs.versions.outputs.features }} -- -D warnings
-      # A second pass, because no single feature set sees the whole crate.
+      # A second pass, because no single feature set sees the whole crate:
       # `loom-core` is the one feature that *removes* code, so the pass above
       # cannot lint `subscription::http::cell_core` and
-      # `kernel::accounting_core` — both `cfg(all(feature = "loom-core",
-      # test))`, 479 lines that `--all-features` used to reach. The `loom` job
-      # runs them, but under a plain `cargo test` with no `-D warnings`, so
-      # without this a clippy violation in either lands unnoticed. Verified by
-      # putting one there: silent in the pass above, caught here.
+      # `kernel::accounting_core` — 479 lines that `--all-features` used to
+      # reach. Verified by putting a violation there: silent above, caught
+      # here. Invoked via `just` so the local and CI invocations are
+      # identical, as the bench and doctest jobs are, and so a red Clippy is
+      # reproducible with `just clippy-loom`.
       - name: Run clippy over the loom mirrors
-        run: cargo clippy --all-targets --features loom-core -- -D warnings
+        run: just clippy-loom
 
   test:
     name: Test
