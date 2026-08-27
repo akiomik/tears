@@ -1742,18 +1742,29 @@ mod tests {
     /// A hang guard, so the two costs it trades between are not symmetric and
     /// the value is not a midpoint.
     ///
-    /// Passing costs nothing whatever the value is: the loop exits at the
+    /// Passing costs nothing whatever the value is: the loops exit at the
     /// first mark, so nothing here is spent on a bound that is never reached.
-    /// Its two callers wait for different things and were measured
-    /// separately, 30 runs each, worst of each:
+    /// What has to fit under it is the longest *stall* — the gap between two
+    /// progress marks — not a whole script, which is what keeps the quantity
+    /// small enough to survive the conversion below. Worst observed, by
+    /// caller and platform:
     ///
-    /// |                              | idle | beside 16 busy-loop processes |
-    /// | ---                          | ---  | ---                           |
-    /// | a bare `drop` on a thread    |  174 |                             2 |
-    /// | a whole driver script's drop |  611 |                             3 |
+    /// |                              | macOS, 10 cores | Linux CI, 4 cores |
+    /// | ---                          | ---             | ---               |
+    /// | a bare `drop` on a thread    | (not sampled)   |             1913 |
+    /// | a whole driver script's drop |           6664 |             3511 |
     ///
-    /// The loaded column is the cheaper one because a yield under load is a
-    /// longer time, so the passing path's worst case is an *idle* machine.
+    /// The Linux column is 100 suite runs at 4x oversubscription and no
+    /// failures; the macOS column is 11 runs at default parallelism, ten of
+    /// them between 68 and 373 and one at 6664 with a build running beside
+    /// them. That single outlier is the number the margin is taken against,
+    /// because a thirtyfold tail is the thing a bound has to survive.
+    ///
+    /// A count is not a portable unit, which is why both columns exist: a
+    /// `thread::yield_now()` yields the scheduling quantum on Darwin and
+    /// returns almost immediately on Linux when the peer is already running.
+    /// Sampling one platform and calling the ratio a margin is how this
+    /// constant was first set, and it was wrong by an order of magnitude.
     ///
     /// Failing is the only thing a larger value delays, and it is measurably
     /// expensive: a yield costs about 154 µs in a debug build *with a blocked
@@ -1761,14 +1772,12 @@ mod tests {
     /// [`HANDSHAKE_YIELDS`] would report a regression 154 seconds later — a
     /// bound that slow reads as the hang it replaces.
     ///
-    /// So the value wants to be far above the worst of the column that
-    /// matters and far below that: `65_536` is roughly 107x over 611, for a
-    /// failure reported in about 10 seconds. The margin matters more than the
-    /// arithmetic suggests, since scheduler latencies are heavy-tailed and
-    /// this suite runs thousands of times on shared machines — a bound that
-    /// merely clears the observed maximum is how the budget this change
-    /// removed came to fail in the first place.
-    const HOLD_YIELDS: usize = 65_536;
+    /// So the value sits far above the worst stall and far below that:
+    /// `262_144` is about 39x over 6664 and 75x over 3511, for a failure
+    /// reported in around 45 seconds. A bound that merely clears the observed
+    /// maximum is how the budget this change removed came to fail in the
+    /// first place.
+    const HOLD_YIELDS: usize = 262_144;
 
     // The gate stores its release rather than signalling it, which is what
     // makes the order between a script's `open` and the dismantling it holds
