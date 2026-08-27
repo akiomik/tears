@@ -100,13 +100,16 @@ pub const THREADED_TURNS: usize = 4096;
 /// stops it.
 const HANDSHAKE_YIELDS: usize = 1_000_000;
 
-/// How many turns a park witness hands the executor before re-asserting that
-/// nothing has woken the loop.
+/// How many turns a series hands the executor before asserting that
+/// something has **not** happened.
 ///
-/// Not a correctness condition: *any* number of turns has to leave a parked
-/// loop's waker unsignalled, and this is the number the series spend
-/// establishing that.
-const PARK_TURNS: usize = 8;
+/// Not a correctness condition anywhere it is used: *any* number of turns has
+/// to leave a parked loop's waker unsignalled, and *any* number has to leave a
+/// held quiescence unfinished. This is the number the series spend
+/// establishing that, and it is what separates such an assertion from a race
+/// with whatever would have made it false — read too early, "it has not
+/// happened yet" and "it does not happen" are the same reading.
+pub const NEGATIVE_TURNS: usize = 8;
 
 /// An application-side counter a producer, a source, or a drop glue marks.
 ///
@@ -1068,10 +1071,22 @@ pub fn driver(script: Script) -> (TestDriver<Scripted, TestBackend>, Journal) {
 }
 
 /// The same, under a chosen configuration.
+///
+/// Rejects a script with a gated source. Holding a dismantling is only
+/// constructible beside worker threads — here the abort drops the run's
+/// stream on the driving thread, which is the gate's own releaser, so the
+/// hold declines and the window silently never opens. That is a row claiming
+/// to have tested a state it never reached, so it is a failure at the
+/// constructor instead.
 pub fn driver_with(
     script: Script,
     config: RuntimeConfig,
 ) -> (TestDriver<Scripted, TestBackend>, Journal) {
+    assert!(
+        script.gates().is_empty(),
+        "a gated source needs `threaded_driver_with`: on the current-thread executor its hold \
+         runs on the driving thread and declines, so the window it exists to open is never open"
+    );
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
@@ -1510,7 +1525,7 @@ where
     F: Future<Output = Result<Exit, E>>,
 {
     let before = assert_parked(probe, future.as_mut(), journal, what);
-    for _ in 0..PARK_TURNS {
+    for _ in 0..NEGATIVE_TURNS {
         turn().await;
     }
     assert_eq!(
@@ -1815,7 +1830,7 @@ mod tests {
             let mut spent = 0_usize;
             driver.settle(TEST_TURNS, || {
                 spent += 1;
-                spent > PARK_TURNS
+                spent > NEGATIVE_TURNS
             });
             assert_eq!(
                 first.quiescences(),

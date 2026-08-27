@@ -52,8 +52,9 @@
 use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
-    Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
-    cap, config, driver, driver_with, parking_effect, step_when_ready, threaded_driver_with,
+    Feed, NEGATIVE_TURNS, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept,
+    accept_within, cap, config, driver, driver_with, parking_effect, step_when_ready,
+    threaded_driver_with,
 };
 
 // INV-SE1: one spawner invocation per admitted run, made at the admission
@@ -330,7 +331,20 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
 
     // The window opens: A's dismantling has begun on a worker and is held
     // there, so the stop is outstanding and the quiescence has not happened.
+    //
+    // The turns between the two are what make the second line a check. The
+    // hold marks `entered` on its way in and `quiesced` on its way out, so
+    // `settle` returning says only that the dismantling started — a hold that
+    // did *not* block marks both back to back, and this thread can read
+    // between them. Without the turns, forcing that case passed this row 10
+    // times in 20, reporting a supersession window that never opened; with
+    // them, 0 in 20.
     driver.settle(THREADED_TURNS, || gate.entered());
+    let mut spent = 0_usize;
+    driver.settle(TEST_TURNS, || {
+        spent += 1;
+        spent > NEGATIVE_TURNS
+    });
     assert_eq!(
         first.quiescences(),
         0,
