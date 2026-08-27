@@ -1621,7 +1621,7 @@ pub fn silently<T>(body: impl FnOnce() -> T) -> ThreadResult<T> {
     outcome
 }
 
-/// Hands the driver exactly `turns` turns, and asserts nothing.
+/// Hands the driver exactly `turns` turns, and asserts nothing of its own.
 ///
 /// What a series spends before claiming something has **not** happened, so
 /// whatever would have made the claim false has had its chance to. Written
@@ -1631,6 +1631,20 @@ pub fn silently<T>(body: impl FnOnce() -> T) -> ThreadResult<T> {
 /// constants documented as independent — raise the first past the second and
 /// the rows fail on the driver's exhausted-budget message, which names
 /// neither the constant that moved nor the row that moved it.
+///
+/// # Panics
+///
+/// Through [`TestDriver::settle`], which is what spends the turns: outside
+/// the running state, and while a grant is outstanding. The second is worth
+/// reading as this helper's own precondition rather than as something
+/// inherited by accident. A released send still in flight is exactly what
+/// makes an append to the guaranteed sequence possible during these turns
+/// (RFC 0008 §9.6) — so with a grant outstanding, "it has not happened" is
+/// not a claim any number of turns can establish, and a series that wants to
+/// spend them there is asking a question the turns cannot answer rather than
+/// reaching for the wrong helper.
+///
+/// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
 pub fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns: usize) {
     let mut spent = 0_usize;
     driver.settle(turns + 1, || {
