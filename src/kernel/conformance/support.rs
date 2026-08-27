@@ -39,7 +39,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::thread;
-use std::thread::Result as ThreadResult;
+use std::thread::{Result as ThreadResult, ThreadId};
 
 use futures::stream::{self, BoxStream, StreamExt};
 use ratatui::backend::{Backend, TestBackend};
@@ -167,10 +167,23 @@ impl Drop for DropMark {
 /// application's own, not the scheduler's, and a series using it cites no
 /// part of INV-RC14's determinism claim (RFC 0008 §9.8's verified range is
 /// current-thread).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct QuiescenceGate {
     open: Arc<(Mutex<bool>, Condvar)>,
     entered: Beacon,
+    /// The thread that will release this gate — the one it was constructed
+    /// on, which is the script's own. See [`QuiescenceGate::wait`].
+    releaser: ThreadId,
+}
+
+impl Default for QuiescenceGate {
+    fn default() -> Self {
+        Self {
+            open: Arc::default(),
+            entered: Beacon::default(),
+            releaser: thread::current().id(),
+        }
+    }
 }
 
 impl QuiescenceGate {
@@ -185,18 +198,6 @@ impl QuiescenceGate {
         released.notify_all();
     }
 
-    /// A guard that [`open`](Self::open)s this gate when it is dropped.
-    ///
-    /// Private, and reachable only through [`gated_threaded_driver_with`],
-    /// because *when* it drops is the whole of what makes it a bound and a
-    /// script cannot be relied on to place it: released after the driver, the
-    /// executor is already shutting down and joining the thread the hold is
-    /// on, which is a hang rather than a failure. [`GatedDriver`] settles the
-    /// order in a field declaration instead of in a convention.
-    fn release_on_drop(&self) -> GateRelease {
-        GateRelease(self.clone())
-    }
-
     /// Whether the held run's dismantling has begun — the abort has landed
     /// on a worker and the run is now stop-requested with its quiescence
     /// pending, which is the state a script waits for before opening the
@@ -205,33 +206,40 @@ impl QuiescenceGate {
         self.entered.marked()
     }
 
-    /// Hold side: block until the gate is open.
+    /// Hold side: block until the gate is open, unless blocking here would
+    /// be blocking the only thread that can open it.
+    ///
+    /// That first clause is the whole of what keeps an unbounded wait from
+    /// being an unbounded risk. The hold is correct because the abort drops
+    /// the run's stream on a *worker*, never on the script's own thread — a
+    /// premise this fixture does not control, since it is the kernel that
+    /// decides where a cancelled task's future is dropped. Were that to
+    /// change, a hold on the script's thread would block the release it is
+    /// waiting for, and no arm of the caller's `block_in_place` check would
+    /// notice: a multi-thread runtime's `block_on` thread reports
+    /// `MultiThread` and runs the closure inline.
+    ///
+    /// So the premise is checked rather than assumed. Reached on the
+    /// releasing thread, the hold declines to wait, the run quiesces at once,
+    /// and the window's own assertion — "A is stop-requested and has not
+    /// quiesced, which is the state the sequence needs" — fails in the file
+    /// that states it. A named failure, where the alternative is a job that
+    /// times out with no test named at all.
     ///
     /// The explicit `drop` is what `clippy::significant_drop_tightening`
     /// asks for: the guard is dead once the loop has read `true` out of it,
     /// and releasing it there rather than at the end of the scope keeps the
     /// next holder from waiting on a lock nobody is using.
     fn wait(&self) {
+        if thread::current().id() == self.releaser {
+            return;
+        }
         let (open, released) = &*self.open;
         let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
         while !*open {
             open = released.wait(open).unwrap_or_else(PoisonError::into_inner);
         }
         drop(open);
-    }
-}
-
-/// Opens a [`QuiescenceGate`] when dropped, so every way out of a script
-/// releases the hold — the ordinary one and an unwinding one alike.
-///
-/// Only [`GatedDriver`] owns one, and that is deliberate: see
-/// [`QuiescenceGate::release_on_drop`].
-#[derive(Debug)]
-pub struct GateRelease(QuiescenceGate);
-
-impl Drop for GateRelease {
-    fn drop(&mut self) {
-        self.0.open();
     }
 }
 
@@ -821,6 +829,18 @@ impl Script {
         }
     }
 
+    /// Every [`QuiescenceGate`] a declared source of this script holds.
+    ///
+    /// What [`threaded_driver_with`] releases, taken from the script itself
+    /// so that it is the gate the source will actually hold at rather than
+    /// one named again alongside it.
+    fn gates(&self) -> Vec<QuiescenceGate> {
+        self.feeds
+            .iter()
+            .filter_map(|feed| feed.source.gate.clone())
+            .collect()
+    }
+
     /// The commands `reduce` returns, one per delivered message in order.
     #[must_use]
     pub fn replying(mut self, replies: impl IntoIterator<Item = impl Into<Command<u8>>>) -> Self {
@@ -1065,59 +1085,55 @@ pub fn driver_with(
 /// and the determinism of these series is the handshake's, not the
 /// scheduler's, so they cite no part of INV-RC14's scripted-determinism
 /// claim (RFC 0008 §9.8's verified range is current-thread).
-pub fn threaded_driver_with(
-    script: Script,
-    config: RuntimeConfig,
-) -> (TestDriver<Scripted, TestBackend>, Journal) {
+pub fn threaded_driver_with(script: Script, config: RuntimeConfig) -> (GatedDriver, Journal) {
     let journal = Journal::default();
     let program = Scripted {
         journal: journal.clone(),
     };
-    (
-        TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
-        journal,
-    )
-}
-
-/// The same, for a script whose source is [`ProbeSource::gated`]: the driver
-/// arrives owning the gate's release.
-///
-/// A gated source has to be driven through this rather than through
-/// [`threaded_driver_with`], because a hold with nothing to release it is a
-/// hang and not a failure.
-pub fn gated_threaded_driver_with(
-    script: Script,
-    config: RuntimeConfig,
-    gate: &QuiescenceGate,
-) -> (GatedDriver, Journal) {
-    let (driver, journal) = threaded_driver_with(script, config);
+    // Read off the script rather than passed in beside it, which is the only
+    // way the gate this releases is *the* gate the script's source holds. A
+    // separate argument can be the wrong one, or absent, and both compile.
+    let gates = script.gates();
     (
         GatedDriver {
-            release: gate.release_on_drop(),
-            driver,
+            gates,
+            driver: TestDriver::on_worker_threads(program, script, config, terminal(), cap(2)),
         },
         journal,
     )
 }
 
-/// A [`TestDriver`] that opens its script's [`QuiescenceGate`] before it
+/// A [`TestDriver`] that opens its script's [`QuiescenceGate`]s before it
 /// shuts its executor down.
 ///
-/// The field order is the mechanism, and the reason this is a type rather
-/// than a convention. Struct fields drop in declaration order, so `release`
-/// runs first: a window that fails part-way through unwinds, the gate opens,
-/// the held worker finishes its drop, and only then does `driver` shut the
-/// executor down and join it. The other order joins a thread nothing is going
-/// to release, which is a hang — and a hang is what every way of getting a
-/// hand-placed guard wrong produced, whether it was omitted, dropped
-/// immediately, or bound above the driver. None of those are reachable from
-/// here.
+/// This is the only multi-worker driver there is, and that is the point.
+/// A held quiescence with nothing to release it is a hang rather than a
+/// failure, so nothing about the release is left for a series to remember:
+/// there is no second constructor to reach for, no guard to bind, no
+/// position to get right, and no gate argument that can disagree with the
+/// one [`ProbeSource::gated`] handed the script. A script with no gated
+/// source carries no gates and this costs it an empty vector.
 ///
-/// It is a plain deref to the driver otherwise: the release is the only thing
-/// this adds.
+/// It is a plain deref to the driver otherwise: the release is all this
+/// adds.
 pub struct GatedDriver {
-    release: GateRelease,
+    gates: Vec<QuiescenceGate>,
     driver: TestDriver<Scripted, TestBackend>,
+}
+
+impl Drop for GatedDriver {
+    /// Opens the gates before the driver goes.
+    ///
+    /// `Drop::drop` runs before any field is dropped, which is what makes
+    /// the ordering a property of the language rather than of the field
+    /// order below it: reordering, renaming or adding a field cannot put the
+    /// executor's shutdown — and its join on the thread a hold is running on
+    /// — in front of the release any more.
+    fn drop(&mut self) {
+        for gate in &self.gates {
+            gate.open();
+        }
+    }
 }
 
 impl Deref for GatedDriver {
@@ -1551,20 +1567,22 @@ mod tests {
     // not load-bearing: a hold that begins after the release reads the flag
     // and returns without waiting for anything.
     //
-    // Run on a plain test thread on purpose. That is the arm the hold takes
-    // when there is no multi-thread worker whose core it could hand off —
-    // the case a runtime shutdown reaches, where blocking announces nothing
-    // because there is nothing left to announce it to.
+    // Held on a spawned thread, because on the releasing thread the hold
+    // declines to wait at all and this would pass without touching the flag
+    // — the row below is the one that covers that.
     #[test]
     fn a_hold_begun_after_its_release_waits_for_nothing() {
         let gate = QuiescenceGate::default();
         let quiesced = Beacon::default();
         gate.open();
 
-        drop(GatedQuiescence {
+        let held = GatedQuiescence {
             gate: gate.clone(),
             quiesced: quiesced.clone(),
-        });
+        };
+        thread::spawn(move || drop(held))
+            .join()
+            .expect("the hold read an open gate and returned");
 
         assert!(
             gate.entered(),
@@ -1576,25 +1594,64 @@ mod tests {
         );
     }
 
-    // The release a `GatedDriver` owns opens the gate, and it does so before
-    // the driver it wraps is dropped. The first half is what this asserts
-    // directly; the second is the field order above it, which is why a
-    // failing window unwinds into a test failure rather than into a join on
-    // the thread the hold is running on.
+    // Reached on the thread that has to release it, a hold declines to wait
+    // rather than blocking the release it is waiting for.
+    //
+    // The premise this stands in for is the kernel's: the abort drops a
+    // cancelled run's stream on a worker, never on the script's own thread.
+    // This fixture does not control that, so it checks it instead of
+    // assuming it — and the check has to be this way round, because a hold
+    // that did block here would take the whole suite with it and name
+    // nothing. Here the run quiesces at once and the window's own assertion
+    // is what fails.
     #[test]
-    fn a_release_guard_opens_its_gate_when_dropped() {
+    fn a_hold_reached_on_the_releasing_thread_declines_to_wait() {
         let gate = QuiescenceGate::default();
         let quiesced = Beacon::default();
 
-        drop(gate.release_on_drop());
-
         drop(GatedQuiescence {
-            gate,
+            gate: gate.clone(),
             quiesced: quiesced.clone(),
         });
+
         assert!(
             quiesced.marked(),
-            "the guard's drop released the hold that began after it"
+            "the hold returned on the releasing thread, with the gate never opened"
+        );
+        assert!(
+            !*gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
+            "and it returned by declining rather than by finding a release"
+        );
+    }
+
+    // Dropping the driver opens the gates its script's sources hold, which
+    // is what a window that fails part-way through relies on: the release
+    // has to happen before the executor's shutdown joins the thread a hold
+    // is running on.
+    //
+    // The gates come off the script, so this also covers the wiring — a
+    // driver built from a script with a gated source releases *that* gate,
+    // with nothing naming it a second time.
+    #[test]
+    fn dropping_a_driver_opens_the_gates_its_script_declared() {
+        let gate = QuiescenceGate::default();
+        let source = ProbeSource::gated("held", gate.clone());
+        let (driver, _journal) = threaded_driver_with(
+            Script::new(parking_effect([1]))
+                .feeding([Feed::new(source)])
+                .wanting(["held"]),
+            config(),
+        );
+
+        assert!(
+            !*gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
+            "the gate is shut while the driver is alive"
+        );
+        drop(driver);
+
+        assert!(
+            *gate.open.0.lock().unwrap_or_else(PoisonError::into_inner),
+            "and the driver opened it on its way out"
         );
     }
 }

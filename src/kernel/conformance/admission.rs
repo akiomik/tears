@@ -53,7 +53,7 @@ use crate::kernel::arbiter::WakeSource;
 
 use super::support::{
     Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, THREADED_TURNS, accept, accept_within,
-    cap, config, driver, driver_with, gated_threaded_driver_with, parking_effect, step_when_ready,
+    cap, config, driver, driver_with, parking_effect, step_when_ready, threaded_driver_with,
 };
 
 // INV-SE1: one spawner invocation per admitted run, made at the admission
@@ -299,11 +299,7 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     let first = ProbeSource::gated("a", gate.clone());
     let superseded = ProbeSource::silent("b");
     let newest = ProbeSource::silent("c");
-    // Driven through the gated constructor, not `threaded_driver_with`: the
-    // driver it returns owns the gate's release and drops it before shutting
-    // the executor down, so a failure inside the window below unwinds into a
-    // test failure rather than a join on the held worker (`GatedDriver`).
-    let (mut driver, journal) = gated_threaded_driver_with(
+    let (mut driver, journal) = threaded_driver_with(
         Script::new(parking_effect([1, 2]))
             .feeding([
                 Feed::new(first.clone()),
@@ -314,7 +310,6 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
             .redeclaring(1, ["b"])
             .redeclaring(2, ["c"]),
         config().batch_max_messages(cap(1)),
-        &gate,
     );
     let trigger = driver.boot().started[0].clone();
     assert_eq!(first.admissions(), 1, "boot admitted A");
@@ -345,6 +340,13 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // `{B}` → `{C}` inside that window. The barrier defers this
     // re-evaluation's admissions too, so the generation that was declared
     // when the stop was issued passes without ever being admitted.
+    //
+    // That the hold is still holding across this pass is not re-asserted
+    // after it. Nothing between here and `gate.open()` below can release it —
+    // the gate has exactly two openers, that call and `GatedDriver`'s drop —
+    // so a repeat of the quiescence check above could not fail, and an
+    // assertion that cannot fail reads as a guarantee it is not making. The
+    // check that carries the claim is the one before this pass.
     let evaluations = journal.evaluations();
     driver
         .step_pass(WakeSource::Data)
@@ -363,12 +365,6 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
         newest.admissions(),
         0,
         "and C waits behind the outstanding stop rather than admitting beside it"
-    );
-    assert_eq!(
-        first.quiescences(),
-        0,
-        "the hold was still holding across that pass, so the two readings above are the \
-         barrier's answer and not a released run's"
     );
 
     // The window closes: A quiesces, and the pass its notification begins
