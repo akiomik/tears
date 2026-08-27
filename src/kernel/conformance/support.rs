@@ -849,11 +849,6 @@ impl Script {
         }
     }
 
-    /// Every [`QuiescenceGate`] a declared source of this script holds.
-    ///
-    /// What [`threaded_driver_with`] releases, taken from the script itself
-    /// so that it is the gate the source will actually hold at rather than
-    /// one named again alongside it.
     /// Rejects this script at a current-thread constructor.
     ///
     /// There the abort drops a run's stream on the driving thread, which is
@@ -871,6 +866,11 @@ impl Script {
         );
     }
 
+    /// Every [`QuiescenceGate`] a declared source of this script holds.
+    ///
+    /// What [`threaded_driver_with`] releases, taken from the script itself
+    /// so that it is the gate the source will actually hold at rather than
+    /// one named again alongside it.
     fn gates(&self) -> Vec<QuiescenceGate> {
         self.feeds
             .iter()
