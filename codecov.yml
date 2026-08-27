@@ -8,20 +8,30 @@
 # the time, and the only remedy is to re-run a job until the measurement lands
 # on the higher value.
 #
-# `informational` keeps the number and the pull request comment and never
-# reports failure. That is what the operating policy already is — this check is
-# not required and its failures are judged by content — so the setting states
-# it rather than changing it.
+# A threshold rather than `informational`, which was the first thing tried
+# here. `informational` never reports failure, and that is more than this
+# needs: `project` is the only signal that watches *unchanged* code, because
+# `patch` reads the lines a diff adds and a pull request that deletes a test
+# covering something else adds none. Silencing it leaves nothing to notice
+# that, the `Code Coverage` job included — it uploads with
+# `fail_ci_if_error: false` and cannot fail on content.
 #
-# `patch` is left at its default, which makes it a report and not a gate:
-# the repository's ruleset requires neither codecov status, and the
-# `Code Coverage` job that feeds them uploads with `fail_ci_if_error: false`,
-# so it cannot fail on their content either. What `patch` keeps doing is
-# reporting on the lines a diff adds. On every commit in the range above it
-# read "Coverage not affected", which says only that those diffs added no
-# lines for it to measure.
+# 0.5% is chosen against the observed spread rather than against a target
+# regression size: the oscillation is 0.02–0.03 points, so this is more than
+# an order of magnitude above the noise it exists to absorb, while a real
+# decrease large enough to matter is not that small. Re-measure it if the
+# oscillation's cause is ever found and fixed, since the reason for any
+# tolerance at all goes with it.
+#
+# Neither codecov status is a merge gate, and that is deliberate rather than
+# an oversight: the repository's ruleset requires neither, so what a threshold
+# buys is a red mark a reviewer can judge by content — which is the operating
+# policy, and which needs something to judge. `patch` is left at its default
+# for the same reason, reporting on the lines a diff adds. On every commit in
+# the range above it read "Coverage not affected", which says only that those
+# diffs added no lines for it to measure.
 coverage:
   status:
     project:
       default:
-        informational: true
+        threshold: 0.5%
