@@ -14,13 +14,50 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Every job below names the toolchain it runs, and gets it from here rather
+  # than restating it.
+  #
+  # Why the indirection: `dtolnay/rust-toolchain` selects a toolchain with
+  # `rustup default` only, and rustup's precedence is `RUSTUP_TOOLCHAIN` >
+  # directory override > `rust-toolchain.toml` > `rustup default`. So the
+  # pinned channel outranks whatever a job asks that action for, and asking
+  # for `stable` while running the pin is the state this indirection replaces:
+  # the toolchain the action installs is the one the job's components are
+  # added to and the one `Swatinem/rust-cache` keys off, so a job that named
+  # the wrong one installed its components somewhere it never built and cached
+  # under a key that did not describe the build.
+  #
+  # Reading both values out of the files that declare them is what keeps a job
+  # honest: the pin has one home (`rust-toolchain.toml`) and the MSRV has one
+  # home (`Cargo.toml`'s `rust-version`), and bumping either moves CI with it
+  # instead of leaving a job checking a version nothing claims any more.
+  versions:
+    name: Declared Versions
+    runs-on: ubuntu-latest
+    outputs:
+      pinned: ${{ steps.read.outputs.pinned }}
+      msrv: ${{ steps.read.outputs.msrv }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: read
+        name: Read the pinned channel and the declared MSRV
+        run: |
+          pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
+          test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
+
   fmt:
     name: Format Check
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -28,10 +65,16 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    needs: versions
+    # Deliberately the pinned channel rather than the newest stable: a lint
+    # added after the pin would fail a contributor's pull request without
+    # `just clippy` reproducing it, and this job's `-D warnings` is the one
+    # place where that difference is a failure rather than a warning.
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
@@ -39,16 +82,36 @@ jobs:
 
   test:
     name: Test
+    needs: versions
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta]
+        # `pinned` is the channel a contributor's checkout selects, so this leg
+        # is the one whose failures reproduce locally without asking anyone to
+        # switch toolchains; `beta` is the leg that sees a regression before it
+        # reaches a release. Calling the first one `stable` is what this
+        # replaces — the pin outranked the action, so both legs ran the pin and
+        # three of these six jobs repeated the other three.
+        rust: [pinned, beta]
     runs-on: ${{ matrix.os }}
+    # The leg's toolchain, named once and actually in force: `RUSTUP_TOOLCHAIN`
+    # is the only thing that outranks `rust-toolchain.toml`, which is what makes
+    # the `beta` leg beta.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust == 'pinned' && needs.versions.outputs.pinned || matrix.rust }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Verify the active toolchain
+        shell: bash
+        # A leg is only what it claims while that precedence holds. Asserting it
+        # is what turns a future change in it into a failure here rather than
+        # into a leg that quietly tests the same thing as its neighbour.
+        run: |
+          rustup show active-toolchain
+          rustup show active-toolchain | grep -q "^${RUSTUP_TOOLCHAIN}-"
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
@@ -62,9 +125,12 @@ jobs:
   bench:
     name: Benchmarks
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
@@ -90,9 +156,12 @@ jobs:
   loom:
     name: Loom
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
       # loom model checks are scoped to the `--lib` unit tests for the isolated
@@ -106,9 +175,12 @@ jobs:
   api-surface:
     name: Public API Surface
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
       # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
       # (rustdoc JSON output is nightly-only); this just makes that toolchain
       # available, it doesn't change what builds the test binary.
@@ -121,9 +193,12 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
         run: cargo doc --no-deps --all-features
@@ -133,9 +208,12 @@ jobs:
   doctest:
     name: Doc Tests
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # The `test` job passes explicit target flags, which suppress the
@@ -154,14 +232,26 @@ jobs:
       - name: Run doc tests against the packaged crate
         run: just test-doc-packaged
 
+  # The version is `Cargo.toml`'s `rust-version` rather than a number written
+  # here, so the job's name, the toolchain it installs and the claim it is
+  # checking cannot come apart.
   msrv:
-    name: MSRV (1.88.0)
+    name: MSRV (${{ needs.versions.outputs.msrv }})
     runs-on: ubuntu-latest
+    needs: versions
+    # Without this the pin outranks the toolchain installed below and this job
+    # checks the pin, leaving `rust-version` asserted by nothing.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.versions.outputs.msrv }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - name: Verify the active toolchain
+        run: |
+          rustup show active-toolchain
+          rustup show active-toolchain | grep -q "^${RUSTUP_TOOLCHAIN}-"
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-targets --all-features
@@ -169,10 +259,12 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ needs.versions.outputs.pinned }}
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
