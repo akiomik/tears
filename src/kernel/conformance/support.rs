@@ -1653,6 +1653,23 @@ fn panic_text(payload: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "a payload that is neither &str nor String".to_owned())
 }
 
+/// Which of two things a watcher's exhausted bound caught, given whether the
+/// watched script reached the drop it is about.
+///
+/// A separate decision from the bound itself, because the bound covers a
+/// whole script and only part of it is the claim: reaching the drop and the
+/// drop returning are different failures, and reporting the second for the
+/// first names a cause that is not implicated.
+const fn bound_verdict(reached_drop: bool) -> &'static str {
+    if reached_drop {
+        "the driver's drop did not return: its shutdown joined the worker running the hold \
+         without the release having happened first"
+    } else {
+        "the script did not reach its drop: something before it outran this bound, and the \
+         release is not implicated"
+    }
+}
+
 /// One executor turn, by the construction RFC 0008 §9.6 pins: spawn a fresh
 /// no-op task and await it. Public primitives only, and no instrumentation
 /// of the scheduler.
@@ -1672,6 +1689,21 @@ mod tests {
     use super::*;
 
     use tokio::runtime::Builder;
+
+    // A watcher's bound covers a whole script, so its verdict has to say
+    // which part of it ran out — the claim is the drop, and everything before
+    // it is a different failure wearing the same timeout.
+    #[test]
+    fn an_exhausted_bound_names_the_half_it_caught() {
+        assert!(
+            bound_verdict(true).starts_with("the driver's drop did not return"),
+            "reaching the drop makes the release the thing that did not happen"
+        );
+        assert!(
+            bound_verdict(false).contains("the release is not implicated"),
+            "and not reaching it makes the release the thing that cannot be blamed"
+        );
+    }
 
     // The three shapes a caught payload arrives in, since the watcher rows
     // report one from a thread they cannot otherwise ask.
@@ -1961,13 +1993,7 @@ mod tests {
         // interesting one. `exited` covers the whole script, so without this
         // a runtime construction or a `settle` merely slower than the bound
         // would be reported as a release that never happened.
-        let cause = if watch_at_drop.marked() {
-            "the driver's drop did not return: its shutdown joined the worker running the hold \
-             without the release having happened first"
-        } else {
-            "the script did not reach its drop: something before it outran this bound, and the \
-             release is not implicated"
-        };
+        let cause = bound_verdict(watch_at_drop.marked());
         panic!("{cause} ({HOLD_YIELDS} scheduler yields)");
     }
 }
