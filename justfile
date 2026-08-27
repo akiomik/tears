@@ -143,6 +143,25 @@ test-doc-packaged:
              | error
         end' <<<"$meta" >/dev/null
 
+    # And the same for `build_features`, which is a different claim: the check
+    # above forces a new feature to be *classified* — added to the list or to
+    # its exclusions — but nothing there would make it *enabled*. A build-only
+    # feature added to the exclusions and left out of `build_features` would
+    # drop out of clippy, test, msrv, doc and coverage with CI still green,
+    # which is the failure this recipe exists to prevent, one list over.
+    #
+    # `loom-core` is the only exclusion here, and it is excluded because it
+    # removes code rather than adds it (see the table at the top of this file).
+    jq -e --arg have '{{build_features}}' '
+      ([.packages[0].features | keys[]
+        | select(. != "default" and . != "loom-core")]
+       | sort) as $want
+      | ($have | split(",") | map(select(length > 0)) | sort) as $got
+      | if $want == $got then true
+        else "build_features is stale: expected \($want | join(",")), got \($got | join(","))"
+             | error
+        end' <<<"$meta" >/dev/null
+
     cargo package --no-verify --allow-dirty
     rm -rf "${out:?}/${pkg}"
     tar xzf "${out}/${pkg}.crate" -C "$out"

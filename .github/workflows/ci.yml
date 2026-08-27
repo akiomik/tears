@@ -64,10 +64,14 @@ jobs:
         run: |
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          # No `test -n` for this one: `sed` prints nothing and succeeds when
+          # it matches nothing, so those two need a guard, while
+          # `just --evaluate` exits non-zero for a name it does not know and
+          # the step's `bash -eo pipefail` stops at the assignment with just's
+          # own message.
           features=$(just --evaluate build_features)
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
-          test -n "$features" || { echo "no build_features in the justfile" >&2; exit 1; }
           {
             echo "pinned=$pinned"
             echo "msrv=$msrv"
@@ -104,6 +108,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy
         run: cargo clippy --all-targets --features ${{ needs.versions.outputs.features }} -- -D warnings
+      # A second pass, because no single feature set sees the whole crate.
+      # `loom-core` is the one feature that *removes* code, so the pass above
+      # cannot lint `subscription::http::cell_core` and
+      # `kernel::accounting_core` — both `cfg(all(feature = "loom-core",
+      # test))`, 479 lines that `--all-features` used to reach. The `loom` job
+      # runs them, but under a plain `cargo test` with no `-D warnings`, so
+      # without this a clippy violation in either lands unnoticed. Verified by
+      # putting one there: silent in the pass above, caught here.
+      - name: Run clippy over the loom mirrors
+        run: cargo clippy --all-targets --features loom-core -- -D warnings
 
   test:
     name: Test
