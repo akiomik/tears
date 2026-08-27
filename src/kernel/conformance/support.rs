@@ -1927,11 +1927,14 @@ mod tests {
         let at_drop = Beacon::default();
         let (watch_exited, watch_arrived) = (exited.clone(), arrived.clone());
         let watch_at_drop = at_drop.clone();
+        let progress = Beacon::default();
+        let watch_progress = progress.clone();
         let panicked = Arc::new(Mutex::new(Option::<String>::None));
         let reported = Arc::clone(&panicked);
 
         thread::spawn(move || {
             let _exited = DropMark::new(exited);
+            progress.mark();
             let script = AssertUnwindSafe(|| {
                 let gate = QuiescenceGate::default();
                 let first = ProbeSource::gated("a", gate.clone());
@@ -1943,14 +1946,19 @@ mod tests {
                         .redeclaring(1, ["b"]),
                     config().batch_max_messages(cap(1)),
                 );
+                progress.mark();
                 let trigger = driver.boot().started[0].clone();
+                progress.mark();
                 accept_within(&mut driver, trigger, THREADED_TURNS);
+                progress.mark();
                 driver
                     .step_pass(WakeSource::Data)
                     .expect("the trigger is in the lane");
+                progress.mark();
                 // A's dismantling is now held on a worker, and stays held: this
                 // thread never opens the gate itself.
                 driver.settle(THREADED_TURNS, || gate.entered());
+                progress.mark();
 
                 // The row's own premise, asserted rather than assumed. Without it,
                 // a kernel that dropped a cancelled run's stream on the driving
@@ -1966,6 +1974,7 @@ mod tests {
                 // bare check caught it 2 times in 5; with these turns spent
                 // first, 10 in 10.
                 spend_turns(&mut driver, NEGATIVE_TURNS);
+                progress.mark();
                 assert_eq!(
                     first.quiescences(),
                     0,
@@ -1984,7 +1993,9 @@ mod tests {
             arrived.mark();
         });
 
-        for _ in 0..HOLD_YIELDS {
+        let mut seen = watch_progress.marks();
+        let mut stalled = 0_usize;
+        while stalled < HOLD_YIELDS {
             if watch_exited.marked() {
                 let cause = reported
                     .lock()
@@ -2001,13 +2012,26 @@ mod tests {
                 );
                 return;
             }
+            // The bound is on a *stall*, not on the script: every phase marks
+            // `progress`, and observing a mark resets the count. A yield is
+            // worth wildly different amounts of time on different platforms —
+            // and on the same one under different load — so a count that has
+            // to cover a whole script is a wall-clock bound wearing a
+            // portable-looking unit. Covering the longest gap between two
+            // marks is a quantity that stays small everywhere.
+            let marks = watch_progress.marks();
+            if marks == seen {
+                stalled += 1;
+            } else {
+                seen = marks;
+                stalled = 0;
+            }
             thread::yield_now();
         }
-        // Which of the two the bound caught, rather than asserting the
-        // interesting one. `exited` covers the whole script, so without this
-        // a runtime construction or a `settle` merely slower than the bound
-        // would be reported as a release that never happened.
+        // Which of the two the stall caught, rather than asserting the
+        // interesting one: reaching the drop and the drop returning are
+        // different failures, and the second is the row's claim.
         let cause = bound_verdict(watch_at_drop.marked());
-        panic!("{cause} ({HOLD_YIELDS} scheduler yields)");
+        panic!("{cause} ({HOLD_YIELDS} scheduler yields without progress)");
     }
 }
