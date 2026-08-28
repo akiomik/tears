@@ -89,8 +89,8 @@ default. Run them explicitly with:
 cargo test --test api_surface -- --ignored
 ```
 
-CI runs this as its own step with a nightly toolchain installed, separate
-from the test matrix.
+CI runs this in its own job, `Public API Surface`, with a nightly toolchain
+installed, separate from the test matrix.
 
 ## Do Not Use Sleep For Synchronization
 
