@@ -173,6 +173,7 @@ jobs:
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
         # only, in the `bench` job below) since the load harness's
@@ -181,6 +182,15 @@ jobs:
         # across every OS/toolchain makes Windows CI disproportionately slow
         # for no additional coverage.
         run: cargo test --lib --bins --tests --examples --features ${{ needs.versions.outputs.features }}
+      # The mirrors' eight rows, which the set above cannot compile. They used
+      # to run on every leg of this matrix under `--all-features`, and losing
+      # that would move them from three required contexts to the `loom` job,
+      # which is advisory and ubuntu-only — so a regression in them would stop
+      # blocking a merge, and stop being seen off Linux at all. `loom` still
+      # model-checks them; this is the leg that says they compile and pass on
+      # three platforms and on beta.
+      - name: Run the loom mirrors' rows as ordinary tests
+        run: just test-mirrors
 
   bench:
     name: Benchmarks

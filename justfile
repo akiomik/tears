@@ -80,7 +80,7 @@ default:
 # `cfg(doctest)`-included migration guide.
 
 # Run all checks (fmt, clippy, test, doc tests)
-check: fmt clippy clippy-loom test test-doc
+check: fmt clippy clippy-loom test test-mirrors test-doc
 
 # Format code with rustfmt
 fmt:
@@ -114,6 +114,18 @@ clippy-fix:
 # Run all tests
 test:
     cargo test --all-targets --features {{build_features}}
+
+# The same two-pass shape as `clippy` / `clippy-loom`, and for the same
+# reason: `build_features` excludes `loom-core`, so the pass above cannot even
+# compile the `cell_core` and `accounting_core` mirrors. `test-loom` runs their
+# rows under `--cfg loom`, which is the stronger check but a different one —
+# it model-checks interleavings on one platform. This runs them as ordinary
+# threaded tests, which is what `--all-features` used to do on every leg of the
+# CI matrix, and it is the run that says they still compile and pass off Linux.
+
+# Run the loom mirrors' rows as ordinary tests
+test-mirrors:
+    cargo test --lib --features loom-core -- cell_core accounting_core
 
 # Run only unit tests
 test-unit:
@@ -272,7 +284,7 @@ outdated:
     cargo outdated
 
 # Run all pre-commit checks
-pre-commit: fmt-check clippy clippy-loom test test-doc
+pre-commit: fmt-check clippy clippy-loom test test-mirrors test-doc
 
 # Run quick checks (no tests)
 quick: fmt clippy clippy-loom
