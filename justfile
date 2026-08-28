@@ -132,30 +132,48 @@ test:
 #
 # This is model checking, not a plain threaded run — loom's runtime is active
 # whenever the mirrors are compiled, because loom does not gate itself on
-# `cfg(loom)`. `LOOM_MAX_PREEMPTIONS` is set to the same 3 `test-loom` uses,
-# because an unbounded exploration is a hazard that grows with the model
-# rather than one that shows up today: measured on CI, the step is 10.6s of
-# compiling this feature set and 0.05s of running, bounded or not.
+# `cfg(loom)`. `LOOM_MAX_PREEMPTIONS` is set to the same 3 `test-loom` uses.
+# Bounding does shorten the run — 0.06s against 0.17s here, and 0.05-0.11s
+# against 0.16-0.29s across the CI legs — but that is not why it is set: the
+# step is dominated by compiling this feature set, tens of seconds and worst
+# on Windows, so the run is noise beside it either way. The bound is there
+# because an unbounded exploration is a hazard that grows with the model.
+# Absolute figures on a shared runner move between runs; the ratio is the
+# part that holds.
 #
 # What it adds over `test-loom` is the two things that job cannot give: it runs
 # on all three platforms rather than ubuntu only, and it compiles *without*
-# `--cfg loom`, so the `cfg(not(loom))` items that flag drops are exercised
-# beside the mirrors.
+# `--cfg loom`, so the `cfg(not(loom))` items that flag drops stay compiled
+# beside the mirrors. Compiled, not run: the filter is `cell_core
+# accounting_core`, so those rows are among the ones filtered out.
 #
-# The row count is asserted because a filter that matches nothing exits zero: a
-# renamed or deleted mirror would otherwise pass this silently, in a step whose
-# whole purpose is to keep those rows blocking a merge.
+# The exact row count is asserted, not just a non-zero one: the two filters
+# share a summary line, so a rename of one mirror still reports the other's
+# four and would pass a "more than zero" check silently — in a step whose whole
+# purpose is to keep those rows blocking a merge. Eight is stable and named in
+# the workflow beside it, and a ninth mirror row failing here is the right
+# prompt to update both.
+#
+# The output is captured so it can be inspected, so it has to be printed back
+# on both paths: under `set -e` a failing run aborts at the assignment, and
+# `2>&1` means nothing reached the log either — which would leave a failure
+# with no panic message, no failing-test list and none of loom's interleaving
+# dump, on the three `pinned` legs that gate a merge and the three `beta` ones
+# that do not.
 
 # Run the loom mirrors' rows on every platform
 test-mirrors:
     #!/usr/bin/env bash
     set -euo pipefail
-    out=$(LOOM_MAX_PREEMPTIONS=3 cargo test --lib --features loom-core -- cell_core accounting_core 2>&1)
-    echo "$out"
-    if grep -qE "test result: ok\. 0 passed" <<<"$out"; then
-      echo "no mirror rows matched: cell_core/accounting_core renamed or removed?" >&2
+    if ! out=$(LOOM_MAX_PREEMPTIONS=3 cargo test --lib --features loom-core -- cell_core accounting_core 2>&1); then
+      printf '%s\n' "$out"
       exit 1
     fi
+    printf '%s\n' "$out"
+    grep -qE "test result: ok\. 8 passed" <<<"$out" || {
+      echo "expected the mirrors' eight rows; cell_core/accounting_core renamed, removed or added to?" >&2
+      exit 1
+    }
 
 # Run only unit tests
 test-unit:
