@@ -12,10 +12,10 @@
 # What `--all-features` removed is the module from *test-target* builds, and
 # with it the three unit tests below. Measured, on rustc 1.97.0:
 #
-#     cargo test --lib                       534 total,  3 `signal::`
-#     cargo test --lib --all-features        584 total,  0 `signal::`
+#     cargo test --lib                       540 total,  3 `signal::`
+#     cargo test --lib --all-features        590 total,  0 `signal::`
 #     cargo test --lib --features {{build_features}}
-#                                            579 total,  3 `signal::`
+#                                            585 total,  3 `signal::`
 #
 #     cargo test --doc                        61 tests
 #     cargo test --doc --features loom-core   60 tests  (both `Signal` ones gone)
@@ -23,19 +23,24 @@
 #     cargo test --doc --features {{user_features}}
 #                                             73 tests  (superset of all above)
 #
-# The 584 and the 579 differ by the three `signal::` rows gained and eight
+# The 590 and the 585 differ by the three `signal::` rows gained and eight
 # lost: the four `cell_core` and four `accounting_core` rows, which
 # `test-loom` runs under `--cfg loom` — model-checked there rather than merely
 # executed once. So no *test* stops being run, and the three that were being
 # skipped start.
 #
-# `loom-core` is on in exactly two recipes, and they are not interchangeable:
-# `test-loom` runs those rows under `--cfg loom`, and `clippy-loom` lints the
-# modules they live in, which the `build_features` pass cannot see. What no
-# recipe covers is compiling them against the MSRV or on a second platform —
-# `--all-features` used to, and giving that up is deliberate: `rust-version`
-# is a promise about what a dependant compiles, and a dependant never
-# compiles a `cfg(test)` mirror.
+# `loom-core` is on in three recipes, and none of them is redundant.
+# `clippy-loom` lints the modules the mirrors live in, which the
+# `build_features` pass cannot see at all. `test-loom` and `test-mirrors` both
+# run the rows — loom's model checker is active either way, since loom's
+# runtime does not itself gate on `cfg(loom)` — and differ in what *else* is
+# compiled around them: `test-loom` sets `--cfg loom`, which reconfigures tokio
+# and drops the `cfg(not(loom))` items in `testing.rs`, while `test-mirrors`
+# leaves them in and is the one CI runs on three platforms.
+#
+# What no recipe covers is compiling the mirrors against the MSRV, and giving
+# that up is deliberate: `rust-version` is a promise about what a dependant
+# compiles, and a dependant never compiles a `cfg(test)` mirror.
 #
 # For `--lib` the cfg above explains the count. For doctests it does not: no
 # rustdoc invocation in the run receives `--cfg test`. The effect is
@@ -80,7 +85,7 @@ default:
 # `cfg(doctest)`-included migration guide.
 
 # Run all checks (fmt, clippy, test, doc tests)
-check: fmt clippy clippy-loom test test-mirrors test-doc
+check: fmt clippy test clippy-loom test-mirrors test-doc
 
 # Format code with rustfmt
 fmt:
@@ -100,10 +105,15 @@ clippy:
 # `cfg(all(feature = "loom-core", test))`, and both linted by `--all-features`
 # before this list replaced it. `test-loom` runs their rows but under a plain
 # `cargo test` with no `-D warnings`, so without this a violation in either
-# goes unseen. No `--cfg loom`: nothing in the crate is gated on it, and the
-# mirrors import `loom::` unconditionally.
+# goes unseen.
+#
+# Without `--cfg loom` on purpose, and not because nothing reads it: `testing.rs`
+# has 13 `cfg(not(loom))` items and `Cargo.toml` a `cfg(not(loom))`
+# dev-dependency. Setting the flag would drop those from the pass, and this one
+# is here to lint more, not less. The mirrors themselves import `loom::`
+# unconditionally, so they compile either way.
 
-# Lint the modules only `loom-core` compiles
+# Lint the modules only loom-core compiles
 clippy-loom:
     cargo clippy --all-targets --features loom-core -- -D warnings
 
@@ -115,17 +125,37 @@ clippy-fix:
 test:
     cargo test --all-targets --features {{build_features}}
 
-# The same two-pass shape as `clippy` / `clippy-loom`, and for the same
-# reason: `build_features` excludes `loom-core`, so the pass above cannot even
-# compile the `cell_core` and `accounting_core` mirrors. `test-loom` runs their
-# rows under `--cfg loom`, which is the stronger check but a different one —
-# it model-checks interleavings on one platform. This runs them as ordinary
-# threaded tests, which is what `--all-features` used to do on every leg of the
-# CI matrix, and it is the run that says they still compile and pass off Linux.
+# The same two-pass shape as `clippy` / `clippy-loom`: `build_features`
+# excludes `loom-core`, so the pass above cannot even compile the `cell_core`
+# and `accounting_core` mirrors, which `--all-features` used to run on every
+# leg of the CI matrix.
+#
+# This is model checking, not a plain threaded run — loom's runtime is active
+# whenever the mirrors are compiled, because loom does not gate itself on
+# `cfg(loom)`. `LOOM_MAX_PREEMPTIONS` is set to the same 3 `test-loom` uses,
+# because an unbounded exploration is a hazard that grows with the model
+# rather than one that shows up today: measured on CI, the step is 10.6s of
+# compiling this feature set and 0.05s of running, bounded or not.
+#
+# What it adds over `test-loom` is the two things that job cannot give: it runs
+# on all three platforms rather than ubuntu only, and it compiles *without*
+# `--cfg loom`, so the `cfg(not(loom))` items that flag drops are exercised
+# beside the mirrors.
+#
+# The row count is asserted because a filter that matches nothing exits zero: a
+# renamed or deleted mirror would otherwise pass this silently, in a step whose
+# whole purpose is to keep those rows blocking a merge.
 
-# Run the loom mirrors' rows as ordinary tests
+# Run the loom mirrors' rows on every platform
 test-mirrors:
-    cargo test --lib --features loom-core -- cell_core accounting_core
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(LOOM_MAX_PREEMPTIONS=3 cargo test --lib --features loom-core -- cell_core accounting_core 2>&1)
+    echo "$out"
+    if grep -qE "test result: ok\. 0 passed" <<<"$out"; then
+      echo "no mirror rows matched: cell_core/accounting_core renamed or removed?" >&2
+      exit 1
+    fi
 
 # Run only unit tests
 test-unit:
@@ -284,10 +314,10 @@ outdated:
     cargo outdated
 
 # Run all pre-commit checks
-pre-commit: fmt-check clippy clippy-loom test test-mirrors test-doc
+pre-commit: fmt-check clippy test clippy-loom test-mirrors test-doc
 
 # Run quick checks (no tests)
-quick: fmt clippy clippy-loom
+quick: fmt clippy
 
 # Watch for changes and run tests
 watch:

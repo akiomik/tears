@@ -52,7 +52,8 @@ jobs:
   # kept, so `doc` documented it and the plain `--lib` unit of `--all-targets`
   # linted and MSRV-checked it throughout. What `--all-features` removed is
   # the module from *test-target* builds — so `test` never ran its three unit
-  # tests and `coverage` never measured it.
+  # tests, and `coverage` reported the module at 0% because the tests that
+  # would have covered it were the ones removed.
   #
   # `build_features` is everything except `loom-core`, and the `justfile` is
   # the source because `just test-doc-packaged` fails when either list drifts
@@ -73,13 +74,14 @@ jobs:
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
           features=$(just --evaluate build_features)
-          # All three are guarded, for two different failure modes. `sed`
-          # prints nothing and exits zero when it matches nothing, so those
-          # two would otherwise pass an empty string on. `just --evaluate`
-          # exits non-zero for a name it does not know — this step has no
-          # `shell:`, so it runs under the default `bash -e`, which aborts at
-          # the assignment — but a variable that exists and is empty exits
-          # zero, and that is what this guard is for.
+          # The two `sed` reads need their guards: `sed` prints nothing and
+          # exits zero when it matches nothing, so an unreadable file would
+          # pass an empty string on. `just --evaluate` needs none for the
+          # equivalent case — it exits non-zero for a name it does not know,
+          # and this step has no `shell:`, so the default `bash -e` aborts at
+          # the assignment. Its guard is forward defence only: it fires for a
+          # variable that exists and evaluates empty, which `build_features`
+          # cannot do today because it is a concatenation.
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
           test -n "$features" || { echo "build_features is empty" >&2; exit 1; }
@@ -119,7 +121,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run clippy
-        run: cargo clippy --all-targets --features ${{ needs.versions.outputs.features }} -- -D warnings
+        run: just clippy
       # A second pass, because no single feature set sees the whole crate:
       # `loom-core` is the one feature that *removes* code, so the pass above
       # cannot lint `subscription::http::cell_core` and
@@ -186,10 +188,15 @@ jobs:
       # to run on every leg of this matrix under `--all-features`, and losing
       # that would move them from three required contexts to the `loom` job,
       # which is advisory and ubuntu-only — so a regression in them would stop
-      # blocking a merge, and stop being seen off Linux at all. `loom` still
-      # model-checks them; this is the leg that says they compile and pass on
-      # three platforms and on beta.
-      - name: Run the loom mirrors' rows as ordinary tests
+      # blocking a merge, and stop being seen off Linux at all.
+      #
+      # This is model checking too, not a plain threaded run: loom's runtime is
+      # active whenever the mirrors compile, `--cfg loom` or not. The recipe
+      # bounds it to the same preemption count the `loom` job uses. What it
+      # adds over that job is the two things it cannot give — three platforms,
+      # and a build *without* `--cfg loom`, which keeps the `cfg(not(loom))`
+      # items compiled beside the mirrors.
+      - name: Run the loom mirrors' rows
         run: just test-mirrors
 
   bench:
@@ -233,14 +240,15 @@ jobs:
         with:
           toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
       # loom model checks are scoped to the `--lib` unit tests for the isolated
       # `cell_core` and `accounting_core` mirrors rather than the whole suite.
+      # Invoked via `just` like the other stateful invocations here: the recipe
+      # carries `RUSTFLAGS` and the preemption bound, and duplicating them
+      # across two files is how they drift apart.
       - name: Run loom tests
-        run: cargo test --features loom-core --lib -- cell_core accounting_core
-        env:
-          RUSTFLAGS: --cfg loom
-          LOOM_MAX_PREEMPTIONS: 3
+        run: just test-loom
 
   api-surface:
     name: Public API Surface
@@ -344,8 +352,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@just
       - name: Generate coverage
-        run: cargo llvm-cov --features ${{ needs.versions.outputs.features }} --lcov --output-path lcov.info
+        run: just coverage-lcov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
