@@ -137,18 +137,34 @@ jobs:
     name: Test
     needs: versions
     strategy:
-      # A leg that fails must not cancel its neighbours, now that `beta` can
-      # fail on its own. Until this branch both legs ran the pin, so the only
-      # failures possible were ones every leg shared; a real `beta` picks up
-      # an upstream regression that none of the `pinned` legs have, and with
-      # the default `fail-fast` that cancels them — including all three
-      # required contexts, on a tree with nothing wrong in it, until upstream
-      # is fixed. Observed here already: on run 33041812710 one leg failed for
-      # an unrelated infrastructure reason and took the other five with it.
+      # A leg that fails must not cancel its neighbours. Under the default
+      # `fail-fast`, one failing leg cancels the rest of the matrix, and three
+      # of these six are required contexts — so any single failure leaves a
+      # merge blocked on checks that never ran and can therefore only ever
+      # report `cancelled`.
       #
-      # `cancelled` at least blocks rather than passes, so the default is not
-      # unsafe — it is just far heavier than what it buys, which is a few
-      # runner-minutes.
+      # Whether that clears depends on why the leg failed, and both cases are
+      # real. A transient failure clears on a re-run: that has happened here,
+      # an `actions/checkout` fault on one runner cancelling the other five,
+      # then a re-run turning all six green with nothing else changed. A
+      # deterministic one does not — a `beta` leg tracking an upstream
+      # regression fails the same way and cancels the same neighbours every
+      # time, and the `beta` legs are not required, so they would be holding
+      # up a merge they have no standing to block.
+      #
+      # The cost of not cancelling is the survivors' runtime: the six legs
+      # total a median of 580s over the last 25 runs, so five of them running
+      # on rather than being cancelled is most of that. It buys back a merge
+      # that would otherwise be blocked on a tree with nothing wrong in it,
+      # which is the better side of the trade.
+      #
+      # Runner *time*, not money — this repository is public, so GitHub-hosted
+      # runners are free and its runs report zero billable milliseconds. What
+      # is actually spent is occupancy and queue latency.
+      #
+      # `cancelled` blocks rather than passes, so the default was never
+      # fail-open. This is a question of which failure costs less, not of
+      # safety.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
