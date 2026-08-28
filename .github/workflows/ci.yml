@@ -137,6 +137,19 @@ jobs:
     name: Test
     needs: versions
     strategy:
+      # A leg that fails must not cancel its neighbours, now that `beta` can
+      # fail on its own. Until this branch both legs ran the pin, so the only
+      # failures possible were ones every leg shared; a real `beta` picks up
+      # an upstream regression that none of the `pinned` legs have, and with
+      # the default `fail-fast` that cancels them — including all three
+      # required contexts, on a tree with nothing wrong in it, until upstream
+      # is fixed. Observed here already: on run 33041812710 one leg failed for
+      # an unrelated infrastructure reason and took the other five with it.
+      #
+      # `cancelled` at least blocks rather than passes, so the default is not
+      # unsafe — it is just far heavier than what it buys, which is a few
+      # runner-minutes.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # `pinned` is the channel a contributor's checkout selects, so this leg
