@@ -36,27 +36,60 @@ jobs:
   # added later that runs, say, `just check` would fail on a component that
   # used to be present by accident.
   #
-  # Reading both values out of the files that declare them is what keeps a job
-  # honest: the pin has one home (`rust-toolchain.toml`) and the MSRV has one
-  # home (`Cargo.toml`'s `rust-version`), and bumping either moves CI with it
-  # instead of leaving a job checking a version nothing claims any more.
+  # Reading these out of the files that declare them is what keeps a job
+  # honest: the pin has one home (`rust-toolchain.toml`), the MSRV has one
+  # home (`Cargo.toml`'s `rust-version`), and the feature set has one home
+  # (the `justfile`), so bumping any of them moves CI with it instead of
+  # leaving a job checking something nothing claims any more.
+  #
+  # `features` is what the jobs below enable instead of `--all-features`.
+  # `--all-features` turns on `loom-core`, which *removes* code from the
+  # build — `subscription::signal` is gated `cfg(not(all(feature =
+  # "loom-core", test)))`.
+  #
+  # The `test` in that gate bounds what was lost, and it is narrower than it
+  # looks: where `cfg(test)` is off the `all(..)` is false and the module is
+  # kept, so `doc` documented it and the plain `--lib` unit of `--all-targets`
+  # linted and MSRV-checked it throughout. What `--all-features` removed is
+  # the module from *test-target* builds — so `test` never ran its three unit
+  # tests, and `coverage` reported the module at 0% because the tests that
+  # would have covered it were the ones removed.
+  #
+  # `build_features` is everything except `loom-core`, and the `justfile` is
+  # the source because `just test-doc-packaged` fails when either list drifts
+  # from the crate's own feature table.
   versions:
     name: Declared Versions
     runs-on: ubuntu-latest
     outputs:
       pinned: ${{ steps.read.outputs.pinned }}
       msrv: ${{ steps.read.outputs.msrv }}
+      features: ${{ steps.read.outputs.features }}
     steps:
       - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@just
       - id: read
-        name: Read the pinned channel and the declared MSRV
+        name: Read the pinned channel, the declared MSRV and the feature set
         run: |
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          features=$(just --evaluate build_features)
+          # The two `sed` reads need their guards: `sed` prints nothing and
+          # exits zero when it matches nothing, so an unreadable file would
+          # pass an empty string on. `just --evaluate` needs none for the
+          # equivalent case — it exits non-zero for a name it does not know,
+          # and this step has no `shell:`, so the default `bash -e` aborts at
+          # the assignment. Its guard is forward defence only: it fires for a
+          # variable that exists and evaluates empty, which `build_features`
+          # cannot do today because it is a concatenation.
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
-          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
-          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
+          test -n "$features" || { echo "build_features is empty" >&2; exit 1; }
+          {
+            echo "pinned=$pinned"
+            echo "msrv=$msrv"
+            echo "features=$features"
+          } >> "$GITHUB_OUTPUT"
 
   fmt:
     name: Format Check
@@ -86,8 +119,19 @@ jobs:
           toolchain: ${{ needs.versions.outputs.pinned }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: just clippy
+      # A second pass, because no single feature set sees the whole crate:
+      # `loom-core` is the one feature that *removes* code, so the pass above
+      # cannot lint `subscription::http::cell_core` and
+      # `kernel::accounting_core` — 479 lines that `--all-features` used to
+      # reach. Verified by putting a violation there: silent above, caught
+      # here. Invoked via `just` so the local and CI invocations are
+      # identical, as the bench and doctest jobs are, and so a red Clippy is
+      # reproducible with `just clippy-loom`.
+      - name: Run clippy over the loom mirrors
+        run: just clippy-loom
 
   test:
     name: Test
@@ -131,6 +175,7 @@ jobs:
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
         # only, in the `bench` job below) since the load harness's
@@ -138,7 +183,21 @@ jobs:
         # `--test` flag and always runs its full scenarios; matrixing that
         # across every OS/toolchain makes Windows CI disproportionately slow
         # for no additional coverage.
-        run: cargo test --lib --bins --tests --examples --all-features
+        run: cargo test --lib --bins --tests --examples --features ${{ needs.versions.outputs.features }}
+      # The mirrors' eight rows, which the set above cannot compile. They used
+      # to run on every leg of this matrix under `--all-features`, and losing
+      # that would move them from three required contexts to the `loom` job,
+      # which is advisory and ubuntu-only — so a regression in them would stop
+      # blocking a merge, and stop being seen off Linux at all.
+      #
+      # This is model checking too, not a plain threaded run: loom's runtime is
+      # active whenever the mirrors compile, `--cfg loom` or not. The recipe
+      # bounds it to the same preemption count the `loom` job uses. What it
+      # adds over that job is the two things it cannot give — three platforms,
+      # and a build *without* `--cfg loom`, which keeps the `cfg(not(loom))`
+      # items compiled beside the mirrors.
+      - name: Run the loom mirrors' rows
+        run: just test-mirrors
 
   bench:
     name: Benchmarks
@@ -159,7 +218,7 @@ jobs:
         # iteration, no sample, so what it gates is that it still compiles
         # and runs.
         run: |
-          cargo test --bench kernel_scan --all-features
+          cargo test --bench kernel_scan --features ${{ needs.versions.outputs.features }}
       - name: Run the load harness's smoke profiles
         # The full scenarios of the load harness leave CI: they are
         # deliberate acceptance/regression runs (RFC 0006 §5.1, RFC 0007
@@ -181,14 +240,15 @@ jobs:
         with:
           toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
       # loom model checks are scoped to the `--lib` unit tests for the isolated
       # `cell_core` and `accounting_core` mirrors rather than the whole suite.
+      # Invoked via `just` like the other stateful invocations here: the recipe
+      # carries `RUSTFLAGS` and the preemption bound, and duplicating them
+      # across two files is how they drift apart.
       - name: Run loom tests
-        run: cargo test --features loom-core --lib -- cell_core accounting_core
-        env:
-          RUSTFLAGS: --cfg loom
-          LOOM_MAX_PREEMPTIONS: 3
+        run: just test-loom
 
   api-surface:
     name: Public API Surface
@@ -219,7 +279,7 @@ jobs:
           toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features ${{ needs.versions.outputs.features }}
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -277,7 +337,7 @@ jobs:
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
-        run: cargo check --all-targets --all-features
+        run: cargo check --all-targets --features ${{ needs.versions.outputs.features }}
 
   coverage:
     name: Code Coverage
@@ -292,8 +352,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@just
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: just coverage-lcov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
