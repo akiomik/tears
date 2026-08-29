@@ -32,6 +32,61 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.versions.outputs.pinned }}
+      # Assert on `rustup default`, which is the level the action writes to
+      # and so the level that records whether it did. `dtolnay/rust-toolchain`
+      # installs the toolchain and runs `rustup default` on it — and that step
+      # carries `continue-on-error: true`, so it can fail without failing the
+      # job. `rust-toolchain.toml` outranks `rustup default`, so this job
+      # builds with the pin either way; what the default records is whether
+      # the action did what it was asked.
+      #
+      # That is why the assertion reads `rustup default`. The
+      # `rustup show active-toolchain` above it is there to name the winner in
+      # the log when the assertion fails — not a second check, though it is
+      # not inert either: the step has no `shell:`, so it runs under `bash -e`
+      # like every other line, and anything that makes rustup itself fail
+      # fails the step there. Comparing `rustup show active-toolchain` here
+      # would be comparing `rust-toolchain.toml` with itself: no directory
+      # override is set here, so the file decides, and `PINNED` is read from that
+      # same file. `ci.yml` says as much of the one leg where it has the same
+      # shape, and asserts the active toolchain only in the two jobs that set
+      # `RUSTUP_TOOLCHAIN` — an independent second source this job does not
+      # have. The eight jobs that install a toolchain without that second
+      # source assert nothing.
+      #
+      # What the default catches is both ways the action can fail to select
+      # the pin and say nothing: its `rustup default` step failing under the
+      # `continue-on-error`, and the `toolchain:` above naming something
+      # other than the pin — the state #302 replaced, when the channel lived
+      # in the action ref rather than in an input.
+      #
+      # Neither stops the build. `rust-toolchain.toml` outranks the default,
+      # and a pin the action did not install rustup installs on first use.
+      # They differ in what else they cost.
+      #
+      # The first costs nothing else. The action's install step carries no
+      # `continue-on-error`, so by the time its `rustup default` can fail the
+      # pin is installed already, at the profile the action asked for; the
+      # toolchains present and the cache key are what a healthy run has. All
+      # that is lost is the record that the action ran — which is what makes
+      # it worth asserting, not any damage it does.
+      #
+      # The second is quieter rather than harmless, and `ci.yml` records both
+      # halves. A pin that arrives by auto-install carries the `profile`
+      # named in `rust-toolchain.toml` rather than the action's
+      # `--profile minimal`. And the action updates whichever toolchain it
+      # names — the runner ships `stable` already — while
+      # `Swatinem/rust-cache` hashes the version of every installed toolchain
+      # into its key. The job publishes correctly throughout, while its
+      # `toolchain:` input has stopped naming the pin.
+      - name: Verify the toolchain the action selected
+        env:
+          PINNED: ${{ steps.versions.outputs.pinned }}
+        run: |
+          rustup show active-toolchain
+          default=$(rustup default)
+          echo "$default"
+          [[ $default == "${PINNED}-"* ]]
       - uses: Swatinem/rust-cache@v2
 
       - name: Check package
