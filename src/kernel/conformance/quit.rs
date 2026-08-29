@@ -421,10 +421,10 @@ fn a_quit_buffered_before_its_origin_s_revocation_is_discarded() {
 // not a stage probe — so this row stays pass-unit driven like the rest.
 #[test]
 fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running() {
+    const KEYED_GAUGE: &str = "keyed_commands";
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _subscriber = recorder.set_default();
-    let gauge = || recorder.u64_values("keyed_commands");
-    let keyed = || gauge().last().copied();
+    let keyed = || recorder.current_u64(KEYED_GAUGE);
 
     let (handshake, gate) = MidBatchHandshake::new();
     let reclaimed = handshake.reclaimed();
@@ -499,7 +499,7 @@ fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running()
          is what leaves the drain below two passes"
     );
 
-    let events_at_retirement = gauge().len();
+    let readings_at_retirement = recorder.u64_values(KEYED_GAUGE).len();
     for _ in 0..2 {
         let stepped = driver
             .step_pass(WakeSource::Data)
@@ -509,12 +509,12 @@ fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running()
             "and the kernel stays running while the backlog drains"
         );
     }
+    let readings = recorder.u64_values(KEYED_GAUGE);
+    let recorded_since = &readings[readings_at_retirement..];
     assert!(
-        gauge()[events_at_retirement..]
-            .iter()
-            .all(|&keyed_count| keyed_count == 0),
-        "the retirement holds through the drain: every gauge event the trailing passes \
-         recorded still counts zero keyed runs"
+        recorded_since.iter().all(|&count| count == 0),
+        "the retirement holds through the drain: no reading recorded after it counts a keyed \
+         run — a claim about the arrival-order log, whose suffix is {recorded_since:?}"
     );
     assert_eq!(
         journal.reduced(),

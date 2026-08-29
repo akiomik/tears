@@ -240,18 +240,18 @@ fn the_gauge_kind_counts_map_onto_the_kernel_s_run_kinds() {
     driver.boot();
 
     assert_eq!(
-        recorder.u64_values("unkeyed_commands").last(),
-        Some(&1),
+        recorder.current_u64("unkeyed_commands"),
+        Some(1),
         "the anonymous run"
     );
     assert_eq!(
-        recorder.u64_values("keyed_commands").last(),
-        Some(&1),
+        recorder.current_u64("keyed_commands"),
+        Some(1),
         "the keyed run"
     );
     assert_eq!(
-        recorder.u64_values("subscriptions").last(),
-        Some(&1),
+        recorder.current_u64("subscriptions"),
+        Some(1),
         "and the subscription run"
     );
 }
@@ -281,11 +281,16 @@ fn a_cleanup_run_counts_in_no_gauge_field() {
         config().batch_max_messages(cap(1)),
     );
     let trigger = driver.boot().started[0].clone();
-    let kinds = |field: &str| recorder.u64_values(field).last().copied();
-    let (anonymous, keyed, subscriptions) = (
-        kinds("unkeyed_commands"),
-        kinds("keyed_commands"),
-        kinds("subscriptions"),
+    assert_eq!(
+        (
+            recorder.current_u64("unkeyed_commands"),
+            recorder.current_u64("keyed_commands"),
+            recorder.current_u64("subscriptions"),
+        ),
+        (Some(1), Some(0), Some(0)),
+        "the baseline is a measured reading, not a silenced instrument, checked before the \
+         teardown so a fixture or schema change reports here rather than as a cleanup-run \
+         regression at the closing comparison"
     );
 
     accept(&mut driver, trigger);
@@ -296,11 +301,11 @@ fn a_cleanup_run_counts_in_no_gauge_field() {
 
     assert_eq!(
         (
-            kinds("unkeyed_commands"),
-            kinds("keyed_commands"),
-            kinds("subscriptions")
+            recorder.current_u64("unkeyed_commands"),
+            recorder.current_u64("keyed_commands"),
+            recorder.current_u64("subscriptions")
         ),
-        (anonymous, keyed, subscriptions),
+        (Some(1), Some(0), Some(0)),
         "the teardown started a cleanup run and no gauge field moved for it"
     );
 }

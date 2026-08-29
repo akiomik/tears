@@ -250,6 +250,14 @@ impl GaugeSnapshot {
     /// `tracing::event_enabled!` gate, or the gate goes stale — silently
     /// skipping (or failing to skip) dispatch for events it no longer
     /// describes.
+    ///
+    /// The field names emitted here are also read back *by name* by the
+    /// test recorders' `current_u64` (`seq`/`runtime_id` as the snapshot
+    /// markers), by the integration census's `PRODUCER_GAUGES`, and by the
+    /// bench subscriber's `LoadVisitor` in `benches/kernel_load.rs` — the
+    /// one consumer that degrades *silently* on a rename, its unmatched
+    /// names falling into a catch-all arm; this emitter is their source of
+    /// truth.
     fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
