@@ -23,9 +23,12 @@ jobs:
   # pinned channel outranks whatever a job asks that action for, and asking
   # for `stable` while running the pin is the state this indirection replaces:
   # the toolchain the action installs is the one the job's components are
-  # added to and the one `Swatinem/rust-cache` keys off, so a job that named
-  # the wrong one installed its components somewhere it never built and cached
-  # under a key that did not describe the build.
+  # added to, while the pin is what builds, so a job that named the wrong one
+  # installed its components somewhere it never built. It could also move the
+  # `Swatinem/rust-cache` key, which hashes the version of every installed
+  # toolchain and so picks up the action updating the one it names — though
+  # not by making the key stop describing the build, since `rustc -vV` runs in
+  # the workspace and so reports the pin either way.
   #
   # One consequence worth recording, because it stays silent until it bites:
   # the action installs with `--profile minimal`, and it is now installing the
@@ -74,14 +77,18 @@ jobs:
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           msrv=$(sed -ne 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
           features=$(just --evaluate build_features)
-          # The two `sed` reads need their guards: `sed` prints nothing and
-          # exits zero when it matches nothing, so an unreadable file would
-          # pass an empty string on. `just --evaluate` needs none for the
-          # equivalent case — it exits non-zero for a name it does not know,
-          # and this step has no `shell:`, so the default `bash -e` aborts at
-          # the assignment. Its guard is forward defence only: it fires for a
-          # variable that exists and evaluates empty, which `build_features`
-          # cannot do today because it is a concatenation.
+          # Each read needs a guard for the one empty result its command
+          # reports as success: `sed` prints nothing and exits zero for a file
+          # it can read that holds no matching line, and `just --evaluate`
+          # exits zero for a variable that exists and evaluates empty. The
+          # failures they do report need no guard — `sed` for a file it cannot
+          # read, `just` for a name it does not know, both non-zero — because
+          # this step has no `shell:`, so the default `bash -e` aborts at the
+          # assignment before any guard runs. None of the three can fire
+          # against the files as they stand; they are here for the edits that
+          # would change that, and the `sed` guards are the likelier pair,
+          # being tied to the layout of two files that get edited whenever
+          # the pin or the MSRV moves.
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           test -n "$msrv" || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
           test -n "$features" || { echo "build_features is empty" >&2; exit 1; }
