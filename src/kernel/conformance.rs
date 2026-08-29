@@ -98,8 +98,10 @@
 //! than the scripted reducer; [`admission`] carries RFC 0012's admission
 //! suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and INV-SE4's
 //! mandated supersession sequence — which is INV-RC12's first clause; and
-//! [`observability`] carries the batch event's kernel reading and INV-RC15's
-//! behavioural neighbour (RFC 0014 §9 row 9).
+//! [`observability`] carries the batch event's kernel reading, INV-RC15's
+//! behavioural neighbour (RFC 0014 §9 row 9), and the removal condition's
+//! exit-observation half on the gauge surface (its dequeue-site mirror is
+//! in [`quit`]).
 //!
 //! [`lifecycle`] additionally carries the rows of RFC 0011's suite that the
 //! four series above do not, which is the rest of INV-RC11; its own module
