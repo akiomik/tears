@@ -193,7 +193,7 @@ fn a_revoked_run_s_buffered_message_and_quit_are_both_retracted() {
 #[test]
 fn a_naturally_finished_run_s_buffered_output_is_still_delivered() {
     let done = Beacon::default();
-    let (mut driver, journal) = driver(Script::new(finishing_effect(vec![9], done.clone())));
+    let (mut driver, journal) = driver(Script::new(finishing_effect([9], done.clone())));
     let run = driver.boot().started[0].clone();
 
     accept(&mut driver, run);
@@ -221,7 +221,7 @@ fn a_revoked_run_s_exit_lands_before_its_buffered_item_is_filtered() {
     let (mut driver, journal) = driver_with(
         Script::new(Command::batch([
             parking_effect([1]),
-            finishing_effect(vec![10], reclaimed.clone()).cancellable(worker.clone()),
+            finishing_effect([10], reclaimed.clone()).cancellable(worker.clone()),
         ]))
         .replying([Command::cancel(worker)]),
         config().batch_max_messages(cap(1)),

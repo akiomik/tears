@@ -1,5 +1,6 @@
-//! The observability seam: the batch event's kernel reading and INV-RC15's
-//! behavioural neighbour (RFC 0014 §9 row 9, RFC 0006 §4.4's INV-L13
+//! The observability seam: the batch event's kernel reading, INV-RC15's
+//! behavioural neighbour, and the removal condition's exit-observation half
+//! on the gauge surface (RFC 0014 §9 row 9, RFC 0006 §4.4's INV-L13
 //! schema).
 //!
 //! **What is read here is a production surface, not a driver one.** These
@@ -16,15 +17,21 @@
 //! `shared_pending`, and `channel` by name, and one of them asserts the
 //! batch event's field set entire — a renamed field is the silent break
 //! that row exists to prevent.
+//!
+//! One run-accounting row also lives here (registry rules 5 and 6, not an
+//! INV-LC cell): the removal condition's exit-observation half, asserted on
+//! the `keyed_commands` gauge it moves — extending the gauge readings this
+//! file already takes at admission (the boot triple) and at teardown (the
+//! cleanup row) to retirement. Its dequeue-site mirror is in `quit.rs`.
 
-use crate::command::{Command, CommandId};
+use crate::command::{CancelPolicy, Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
 use crate::test_support::TraceRecorder;
-use crate::testing::driver::{Confirmed, RunKind};
+use crate::testing::driver::{Confirmed, NotReady, RunKind, RunName};
 
 use super::support::{
-    Beacon, Feed, ProbeSource, Script, TEST_TURNS, accept, cap, config, driver, driver_with,
-    marking_effect, parking_effect,
+    Beacon, Feed, Latch, ProbeSource, Script, TEST_TURNS, accept, cap, config, driver, driver_with,
+    marking_effect, outliving_effect, parking_effect, silent_effect,
 };
 
 /// The one target the whole schema lives on (RFC 0006 §4.4).
@@ -307,6 +314,138 @@ fn a_cleanup_run_counts_in_no_gauge_field() {
         ),
         (Some(1), Some(0), Some(0)),
         "the teardown started a cleanup run and no gauge field moved for it"
+    );
+}
+
+// The removal condition's exit-observation half, on the gauge surface. A
+// keyed run whose committed envelope is dequeued while it still runs is an
+// *emptied entry* — count at zero, run still living — which is the state
+// opposite to a `Draining` tombstone (there, the run has exited and output
+// is still pending): the dequeue's own removal check finds the run
+// unexited and keeps the entry. What retires it is the run's natural
+// finish — the pass that reflects the exit applies the same removal
+// condition, and with the count already at zero it is the only site left
+// that can. A registry that dropped that half would hold a finished keyed
+// run's entry and its gauge reading until termination's `clear`, with
+// nothing in steady state ever able to retire it. The gauge counts keyed
+// *entries*, tombstones included, so what it names is retirement, not slot
+// occupancy; in this row the two never part (the run is never revoked),
+// and the slot claim is carried by the tail's admission rather than by the
+// count (RFC 0003 §6.1). Read on the same production surface as the rest
+// of the file (RFC 0006 §4.4 as RFC 0014 §9 row 9 amends it); the
+// registry-level core of the same composition is a unit row on
+// `ScopeRegistry` itself, and the dequeue-site half is `quit.rs`'s — the
+// module header holds the pairing. This row's tail pins the behavioral
+// consequence — a same-identity keep-in-flight successor admitted rather
+// than suppressed.
+#[test]
+fn a_natural_finish_retires_the_emptied_entry_at_its_exit_observation() {
+    let recorder = TraceRecorder::new().with_target(TARGET);
+    let _subscriber = recorder.set_default();
+    let keyed = || recorder.current_u64("keyed_commands");
+    let worker = CommandId::new("worker");
+    let release = Latch::default();
+    let done = Beacon::default();
+    let (mut driver, journal) = driver(
+        Script::new(Command::batch([
+            parking_effect([1]),
+            outliving_effect([7], release.clone(), done.clone()).cancellable(worker.clone()),
+        ]))
+        .replying([
+            // Reply to message 7, the keyed run's own send: nothing.
+            Command::none(),
+            // Reply to message 1, the trigger's post-retirement send: the
+            // successor. Keep-in-flight, so an *occupied* slot would
+            // suppress it — the admission at the tail then discriminates a
+            // freed slot from a leaked occupant, which the default replace
+            // policy could not, since it admits against either.
+            silent_effect()
+                .cancellable_with(worker.clone(), CancelPolicy::KeepInFlight)
+                .into(),
+        ]),
+    );
+    let report = driver.boot();
+    let (trigger, run) = (report.started[0].clone(), report.started[1].clone());
+    assert_eq!(
+        run.kind(),
+        RunKind::Keyed(worker.clone()),
+        "the premise: the second started run is the keyed one this row drives"
+    );
+    assert_eq!(keyed(), Some(1), "the keyed run is in the bookkeeping");
+
+    accept(&mut driver, run.clone());
+    // The ordering premise, checked kernel-side the way `delivery.rs`'s
+    // tombstone row checks its own: no exit is observable before the
+    // dequeue — the finish is still latched — so this row cannot silently
+    // degenerate into the tombstone case.
+    assert_eq!(
+        driver.step_pass(WakeSource::ProducerExit).err(),
+        Some(NotReady),
+        "no exit precedes the dequeue: the keyed run still holds its latch"
+    );
+    driver
+        .step_pass(WakeSource::Data)
+        .expect("the committed send is in the lane");
+    assert_eq!(journal.reduced(), vec![7], "the envelope was delivered");
+    assert_eq!(
+        keyed(),
+        Some(1),
+        "emptied is not retired: the dequeue found the run still living and kept its entry"
+    );
+
+    // The run ends only now, so the exit observation lands strictly after
+    // the dequeue — the ordering that leaves the exit-side removal check as
+    // the only possible retirement site. Its exit is the only one this
+    // script can produce at this point: the trigger parks forever and the
+    // successor is not yet spawned.
+    release.open();
+    driver.settle(TEST_TURNS, || done.marked());
+    assert_eq!(
+        keyed(),
+        Some(1),
+        "the run's own end moves no gauge: retirement is the registry's, applied at a pass, \
+         never a task-side effect of finishing"
+    );
+    let stepped = driver
+        .step_pass(WakeSource::ProducerExit)
+        .expect("the finished run's exit is observable");
+    assert!(
+        stepped.terminated.is_none(),
+        "a keyed run's natural finish terminates nothing"
+    );
+    assert_eq!(
+        keyed(),
+        Some(0),
+        "the exit observation retired the emptied entry: the removal condition's other half"
+    );
+
+    // The behavioral half of the same claim: retirement freed the identity
+    // slot, not just the count. Under the successor's keep-in-flight policy
+    // a leaked occupant would suppress it, so its admission as a run of its
+    // own is what pins the slot as genuinely free.
+    accept(&mut driver, trigger);
+    let stepped = driver
+        .step_pass(WakeSource::Data)
+        .expect("the trigger's send is in the lane");
+    assert_eq!(
+        stepped
+            .started
+            .iter()
+            .map(RunName::kind)
+            .collect::<Vec<_>>(),
+        vec![RunKind::Keyed(worker)],
+        "the same-identity successor started as a keyed run of its own: {:?}",
+        stepped.started
+    );
+    assert_ne!(
+        stepped.started[0], run,
+        "and it is a fresh run, not the retired one re-reported"
+    );
+    assert_eq!(journal.reduced(), vec![7, 1], "the trigger was delivered");
+    assert_eq!(
+        keyed(),
+        Some(1),
+        "and its admission put the count back on the books"
     );
 }
 
