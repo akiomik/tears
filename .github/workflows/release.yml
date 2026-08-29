@@ -29,64 +29,103 @@ jobs:
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          # Also as `RUSTUP_TOOLCHAIN`, which outranks both
+          # `rust-toolchain.toml` and the directory override that also
+          # outranks it. Only a `+toolchain` argument beats it, and nothing
+          # here passes one to cargo. `ci.yml` sets this from job `env:`
+          # because its read is a separate job; this read is a step in the
+          # job that uses it, so it travels through `GITHUB_ENV`. Same effect
+          # from the next step on.
+          echo "RUSTUP_TOOLCHAIN=$pinned" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.versions.outputs.pinned }}
-      # Assert on `rustup default`, which is the level the action writes to
-      # and so the level that records whether it did. `dtolnay/rust-toolchain`
-      # installs the toolchain and runs `rustup default` on it — and that step
-      # carries `continue-on-error: true`, so it can fail without failing the
-      # job. `rust-toolchain.toml` outranks `rustup default`, so this job
-      # builds with the pin either way; what the default records is whether
-      # the action did what it was asked.
+      # Two readings, because the job can go wrong in two places and neither
+      # reading sees the other's failure.
       #
-      # That is why the assertion reads `rustup default`. The
-      # `rustup show active-toolchain` above it is there to name the winner in
-      # the log when the assertion fails — not a second check, though it is
-      # not inert either: the step has no `shell:`, so it runs under `bash -e`
-      # like every other line, and anything that makes rustup itself fail
-      # fails the step there. Comparing `rustup show active-toolchain` here
-      # would be comparing `rust-toolchain.toml` with itself: no directory
-      # override is set here, so the file decides, and `PINNED` is read from that
-      # same file. `ci.yml` says as much of the one leg where it has the same
-      # shape, and asserts the active toolchain only in the two jobs that set
-      # `RUSTUP_TOOLCHAIN` — an independent second source this job does not
-      # have. The eight jobs that install a toolchain without that second
-      # source assert nothing.
+      # The active toolchain is what `cargo publish` below will run under, and
+      # that is the highest-consequence cargo invocation in the repository.
+      # Asserting it mirrors what `ci.yml` does in the two jobs that set
+      # `RUSTUP_TOOLCHAIN`. Setting that variable is the substantive half of
+      # this, and it is prevention rather than evidence. Before it, two things
+      # named the pin — the file, and the `rustup default` the action sets —
+      # so in a healthy run any order between them still landed on the pin;
+      # what was unguarded is the run where the action's `rustup default`
+      # silently fails under its `continue-on-error` and the file is the only
+      # thing left holding the release on the pin. Now the pin is named above
+      # every level that decides what `cargo publish` runs under, so that is
+      # no longer a position the job can be argued into.
       #
-      # What the default catches is both ways the action can fail to select
-      # the pin and say nothing: its `rustup default` step failing under the
-      # `continue-on-error`, and the `toolchain:` above naming something
-      # other than the pin — the state #302 replaced, when the channel lived
-      # in the action ref rather than in an input.
+      # `ci.yml`'s disclaimer applies here too, and this is the pinned-leg
+      # shape it applies to: the env var and the file carry the same string by
+      # construction, so the assertion passes whichever of them wins. Against
+      # the precedence question it is therefore weaker than comparing the file
+      # against itself would be: it adds one more level that has to be off the
+      # pin before the comparison can fail. The file and the action's
+      # `rustup default` both name it, so removing the file alone already fell
+      # through to a `rustup default` that answers correctly; now the export
+      # has to be lost as well. It does add one case of its own: if the export
+      # never happens the comparison matches against a bare `-` and the step
+      # fails, even though the file still has the pin in force. What it is for
+      # is saying the pin is in force rather than assuming it.
       #
-      # Neither stops the build. `rust-toolchain.toml` outranks the default,
-      # and a pin the action did not install rustup installs on first use.
-      # They differ in what else they cost.
+      # `rustup default` is a separate question — whether the action did what
+      # it was asked. `dtolnay/rust-toolchain` selects by running
+      # `rustup default`, and that step carries `continue-on-error: true`, so
+      # it can fail without failing the job; `RUSTUP_TOOLCHAIN` now outranks
+      # the result either way, so the failure is silent by construction. What
+      # `rustup default` reports does not consult `RUSTUP_TOOLCHAIN`, so this
+      # reading survives the export above.
       #
-      # The first costs nothing else. The action's install step carries no
-      # `continue-on-error`, so by the time its `rustup default` can fail the
-      # pin is installed already, at the profile the action asked for; the
-      # toolchains present and the cache key are what a healthy run has. All
-      # that is lost is the record that the action ran — which is what makes
-      # it worth asserting, not any damage it does.
+      # What it catches is both ways the action can fail to select the pin:
+      # that step failing under the `continue-on-error`, and the `toolchain:`
+      # input naming something other than the pin — the state #302 replaced,
+      # when the channel lived in the action ref. Neither stops the build, and
+      # they differ in what else they cost. The first costs nothing else: the
+      # install step carries no `continue-on-error`, so by the time
+      # `rustup default` can fail the pin is installed already, at the profile
+      # the action asked for. The second is quieter rather than harmless: the
+      # action updates whichever toolchain it names, and `Swatinem/rust-cache`
+      # hashes the version of every installed toolchain into its key, so the
+      # key can move for a change that did not touch the build — only if the
+      # update finds a newer version, as `ci.yml` hedges it too.
       #
-      # The second is quieter rather than harmless, and `ci.yml` records both
-      # halves. A pin that arrives by auto-install carries the `profile`
-      # named in `rust-toolchain.toml` rather than the action's
-      # `--profile minimal`. And the action updates whichever toolchain it
-      # names — the runner ships `stable` already — while
-      # `Swatinem/rust-cache` hashes the version of every installed toolchain
-      # into its key. The job publishes correctly throughout, while its
-      # `toolchain:` input has stopped naming the pin.
-      - name: Verify the toolchain the action selected
-        env:
-          PINNED: ${{ steps.versions.outputs.pinned }}
+      # `ci.yml` records a second cost there — a pin arriving by auto-install
+      # carrying `rust-toolchain.toml`'s `profile` rather than the action's
+      # `--profile minimal` — and the export above removes it rather than
+      # moving it. The file stops being the override, so such an install takes
+      # rustup's settings profile, and the runner image installs rustup with
+      # `--profile=minimal`; the pin arrives with what the action would have
+      # given it. That half of the cost is `ci.yml`'s, not this file's.
+      #
+      # What neither reading catches: both compare against a value read by the
+      # same `sed`, so a read returning a wrong-but-installable channel is
+      # installed, defaulted to, put in `RUSTUP_TOOLCHAIN` and asserted
+      # against itself. #308's other option does not close that either — a
+      # composite action shared with `ci.yml` still reads once and compares
+      # against that read; what it closes is the two copies drifting apart,
+      # the duplication half the issue names. Catching a wrong read means
+      # making the read itself stricter, which is neither option as the issue
+      # states them.
+      #
+      # Each comparison carries its own `exit` rather than leaning on
+      # `bash -e`, because errexit does not catch every failing command here:
+      # a `[[ ]]` that fails does not trip it on bash 3.2, which is what a
+      # contributor reproducing this on macOS runs, though `false` and `test`
+      # on the same shell do trip it. The two `ci.yml` assertions are single
+      # trailing comparisons, so they are exit status rather than errexit and
+      # are unaffected. Prefix comparisons rather than `grep`, whose pattern
+      # would read the dots in a version as any-character.
+      - name: Verify the toolchain
         run: |
-          rustup show active-toolchain
+          active=$(rustup show active-toolchain)
+          echo "$active"
+          [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]] \
+            || { echo "active toolchain is not the pin ${RUSTUP_TOOLCHAIN}" >&2; exit 1; }
           default=$(rustup default)
           echo "$default"
-          [[ $default == "${PINNED}-"* ]]
+          [[ $default == "${RUSTUP_TOOLCHAIN}-"* ]] \
+            || { echo "the action did not default to the pin ${RUSTUP_TOOLCHAIN}" >&2; exit 1; }
       - uses: Swatinem/rust-cache@v2
 
       - name: Check package

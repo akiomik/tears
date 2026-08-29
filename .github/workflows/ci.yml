@@ -18,17 +18,17 @@ jobs:
   # than restating it.
   #
   # Why the indirection: `dtolnay/rust-toolchain` selects a toolchain with
-  # `rustup default` only, and rustup's precedence is `RUSTUP_TOOLCHAIN` >
-  # directory override > `rust-toolchain.toml` > `rustup default`. So the
-  # pinned channel outranks whatever a job asks that action for, and asking
-  # for `stable` while running the pin is the state this indirection replaces:
-  # the toolchain the action installs is the one the job's components are
-  # added to, while the pin is what builds, so a job that named the wrong one
-  # installed its components somewhere it never built. It could also move the
-  # `Swatinem/rust-cache` key, which hashes the version of every installed
-  # toolchain and so picks up the action updating the one it names — though
-  # not by making the key stop describing the build, since `rustc -vV` runs in
-  # the workspace and so reports the pin either way.
+  # `rustup default` only, and rustup's precedence is a `+toolchain` argument >
+  # `RUSTUP_TOOLCHAIN` > directory override > `rust-toolchain.toml` >
+  # `rustup default`. So the pinned channel outranks whatever a job asks that
+  # action for, and asking for `stable` while running the pin is the state this
+  # indirection replaces: the toolchain the action installs is the one the
+  # job's components are added to, while the pin is what builds, so a job that
+  # named the wrong one installed its components somewhere it never built. It
+  # could also move the `Swatinem/rust-cache` key, which hashes the version of
+  # every installed toolchain and so picks up the action updating the one it
+  # names — though not by making the key stop describing the build, since
+  # `rustc -vV` runs in the workspace and so reports the pin either way.
   #
   # One consequence worth recording, because it stays silent until it bites:
   # the action installs with `--profile minimal`, and it is now installing the
@@ -184,8 +184,8 @@ jobs:
         rust: [pinned, beta]
     runs-on: ${{ matrix.os }}
     # The leg's toolchain, named once and actually in force: `RUSTUP_TOOLCHAIN`
-    # is the only thing that outranks `rust-toolchain.toml`, which is what makes
-    # the `beta` leg beta.
+    # outranks `rust-toolchain.toml`, which is what makes the `beta` leg beta.
+    # A directory override outranks the file too, but nothing here sets one.
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.rust == 'pinned' && needs.versions.outputs.pinned || matrix.rust }}
     steps:
