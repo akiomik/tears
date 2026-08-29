@@ -381,6 +381,9 @@ fn the_mandated_supersession_window_never_invokes_the_superseded_spawner() {
     // re-evaluates against the then-current state.
     gate.open();
     driver.settle(THREADED_TURNS, || first.quiescences() > 0);
+    // Deterministic because A's quiescence is the only observable this
+    // script can produce: the trigger parks forever, and B and C are
+    // silent, never-ending sources (`step_when_ready`'s preconditions).
     step_when_ready(&mut driver, WakeSource::ProducerExit, THREADED_TURNS);
 
     assert_eq!(
