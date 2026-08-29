@@ -81,6 +81,13 @@ different mechanics from every other test in this repository:
 - Each test shells out to `cargo +nightly rustdoc`, so it needs a nightly
   toolchain installed (`rustup toolchain install nightly`) and takes several
   seconds per run.
+- It builds the surface with the features a dependant can enable, read at run
+  time from `just --evaluate user_features`, so `just` also has to be on PATH
+  (`cargo install just`). It does not use `--all-features`: that enables
+  `loom-core`, which removes code rather than adding it. As the code stands
+  the two sets produce the same surface, so nothing is lost either way; but an
+  item compiled out is one these rules never examine, so the check would pass
+  by looking at less.
 
 Both tests are `#[ignore]`d so `cargo test` stays fast and stable-only by
 default. Run them explicitly with:
