@@ -1294,9 +1294,27 @@ pub fn accept<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, run: RunNam
 /// driver's own budgeted waiting primitive, so nothing here reaches past the
 /// published surface.
 ///
+/// # Preconditions
+///
+/// With [`WakeSource::ProducerExit`], readiness is satisfied by *any*
+/// observable exit or quiescence, not one the caller has in mind — the
+/// report carries no run identity to check against. A call is
+/// deterministic only when the script has exactly one exit-capable run
+/// outstanding; with more, the step can be admitted by the wrong one while
+/// the awaited run is still unreaped, and the caller's next read is back
+/// on worker timing. State the census at the call site.
+///
+/// The retry path also inherits [`TestDriver::settle`]'s misuse condition:
+/// do not call with a grant outstanding, banked or not. An attempt that
+/// finds the source already ready returns without settling, so the misuse
+/// would surface only on the runs that wait — a timing-dependent panic,
+/// the class this helper exists to remove.
+///
 /// # Panics
 ///
-/// Panics when `max_turns` is spent with the source still not ready.
+/// Panics when `max_turns` is spent with the source still not ready, and —
+/// through the retry path's [`TestDriver::settle`] — when called while a
+/// grant is outstanding.
 ///
 /// [`TestDriver::settle`]: crate::testing::driver::TestDriver::settle
 #[expect(

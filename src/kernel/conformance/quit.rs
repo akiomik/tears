@@ -35,7 +35,7 @@ use crate::testing::driver::{Confirmed, NotReady};
 use super::support::{
     Call, MidBatchHandshake, Script, THREADED_TURNS, accept, accept_within, cap, config, driver,
     driver_with, gated_quitting_effect, parking_effect, quitting_effect, silent_effect,
-    threaded_driver_with,
+    step_when_ready, threaded_driver_with,
 };
 
 // --- the synchronous route ------------------------------------------------
@@ -423,6 +423,8 @@ fn a_quit_buffered_before_its_origin_s_revocation_is_discarded() {
 fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running() {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _subscriber = recorder.set_default();
+    let gauge = || recorder.u64_values("keyed_commands");
+    let keyed = || gauge().last().copied();
 
     let (handshake, gate) = MidBatchHandshake::new();
     let reclaimed = handshake.reclaimed();
@@ -439,11 +441,7 @@ fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running()
     );
     let report = driver.boot();
     let (feed, quitter) = (report.started[0].clone(), report.started[1].clone());
-    assert_eq!(
-        recorder.u64_values("keyed_commands").last(),
-        Some(&1),
-        "the keyed run is in the bookkeeping"
-    );
+    assert_eq!(keyed(), Some(1), "the keyed run is in the bookkeeping");
 
     for _ in 0..4 {
         accept_within(&mut driver, feed.clone(), THREADED_TURNS);
@@ -461,26 +459,62 @@ fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running()
 
     driver.settle(THREADED_TURNS, || reclaimed.marked());
     assert_eq!(
-        recorder.u64_values("keyed_commands").last(),
-        Some(&1),
+        keyed(),
+        Some(1),
         "the entry outlives its own task: the quit it committed is still in the control lane"
     );
 
-    for _ in 0..3 {
+    // The task is reclaimed, but its exit is a separate fact: it reaches the
+    // registry only through a pass's first stage, and no pass has run since
+    // the teardown's abort — so the exit is still on the join set. Reflect
+    // it now, on a stated bound: left to land during the drain below, a
+    // slow reap could outrun every stage-1 drain (#307's flake), leaving
+    // the removal condition half-met and the row reading the un-retired
+    // count. Reflected here, the retirement lands at the discarding dequeue
+    // of this same pass — the steady-state site the header names — on every
+    // run.
+    //
+    // Deterministic only because the quitter's is the sole exit this
+    // script can produce (`step_when_ready`'s preconditions): the feed
+    // parks forever and is root-scoped (the teardown does not select it),
+    // and the torn-down scope registers no cleanup. A run added to this
+    // row that can exit — or the feed moved into the "quit" scope — would
+    // let readiness arrive with the quitter still unreaped and break this
+    // step.
+    let stepped = step_when_ready(&mut driver, WakeSource::ProducerExit, THREADED_TURNS);
+    assert!(
+        stepped.terminated.is_none(),
+        "the discarded quit terminates nothing, so the kernel is still running"
+    );
+    assert_eq!(
+        keyed(),
+        Some(0),
+        "the discarding dequeue took the last committed item off the count, and the tombstone \
+         retired on the steady-state rule rather than at a settle"
+    );
+    assert_eq!(
+        journal.reduced(),
+        vec![5, 6],
+        "and the same pass still drained the data lane — exactly one item under the cap, which \
+         is what leaves the drain below two passes"
+    );
+
+    let events_at_retirement = gauge().len();
+    for _ in 0..2 {
         let stepped = driver
             .step_pass(WakeSource::Data)
             .expect("the feed's backlog is still ready");
         assert!(
             stepped.terminated.is_none(),
-            "the discarded quit terminates nothing, so the kernel is still running"
+            "and the kernel stays running while the backlog drains"
         );
     }
-
-    assert_eq!(
-        recorder.u64_values("keyed_commands").last(),
-        Some(&0),
-        "the discarding dequeue took the last committed item off the count, and the tombstone \
-         retired on the steady-state rule rather than at a settle"
+    assert!(
+        gauge()[events_at_retirement..]
+            .iter()
+            .all(|&keyed_count| keyed_count == 0),
+        "the retirement holds through the drain: every gauge event the trailing passes \
+         recorded still counts zero keyed runs"
     );
     assert_eq!(
         journal.reduced(),
