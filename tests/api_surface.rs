@@ -4,10 +4,64 @@
 //! for why these require nightly and are `#[ignore]`d by default.
 
 use std::collections::{HashMap, HashSet};
+use std::process::Command;
 
 use public_api::PublicItem;
 use public_api::rustdoc_types::Id;
 use public_api::tokens::Token;
+
+/// The features a dependant can enable, read from the one place that declares
+/// them rather than restated here.
+///
+/// Not `--all-features`: that turns on `loom-core`, which *removes* code
+/// rather than adding it. The gate that would bite carries a `test`
+/// (`src/subscription.rs`), and rustdoc JSON builds the library without
+/// `cfg(test)`, so nothing is lost from the surface today — but that is a
+/// property of one gate's shape, not of the approach. A plain
+/// `#[cfg(not(feature = "loom-core"))]` compiles its item away whenever
+/// `loom-core` is on, so under `--all-features` it would not reach the
+/// surface at all, and the rules below cannot find a violation in an item
+/// that is not there: the check would pass by looking at less. Reading the
+/// set a dependant can actually enable keeps such an item in view.
+///
+/// `user_features` and not `build_features`: the public surface is what a
+/// dependant can reach, and everything `bench-internals` adds to it arrives
+/// through two `#[doc(hidden)]` re-exports in `src/lib.rs`; what they
+/// re-export sits under a `pub(crate)` module and is otherwise unreachable.
+/// `Cargo.toml` documents the feature as outside the API and not covered by
+/// semver.
+fn user_features() -> Vec<String> {
+    let output = Command::new("just")
+        .args(["--evaluate", "user_features"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect(
+            "failed to run `just --evaluate user_features`; install just with \
+             `cargo install just` (see docs/testing.md)",
+        );
+    assert!(
+        output.status.success(),
+        "`just --evaluate user_features` failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let evaluated = String::from_utf8(output.stdout)
+        .expect("`just --evaluate user_features` produced non-UTF-8 output");
+    // `just --evaluate <var>` prints the bare value and no trailing newline,
+    // but trim rather than depend on that.
+    let features: Vec<String> = evaluated
+        .trim()
+        .split(',')
+        .map(str::to_owned)
+        .filter(|feature| !feature.is_empty())
+        .collect();
+    assert!(
+        !features.is_empty(),
+        "`just --evaluate user_features` evaluated to nothing; the surface \
+         would be built with default features only",
+    );
+    features
+}
 
 fn build_public_api() -> public_api::PublicApi {
     let mut manifest_path = env!("CARGO_MANIFEST_DIR").to_owned();
@@ -16,7 +70,7 @@ fn build_public_api() -> public_api::PublicApi {
     let json_path = rustdoc_json::Builder::default()
         .toolchain("nightly")
         .manifest_path(manifest_path)
-        .all_features(true)
+        .features(user_features())
         .build()
         .expect(
             "failed to build rustdoc JSON; install a nightly toolchain with \
@@ -106,8 +160,10 @@ fn no_public_item_has_two_non_prelude_paths() {
     assert!(
         violations.is_empty(),
         "found public items reachable through more than one non-prelude path: {violations:?}\n\
-         Run `cargo +nightly public-api --all-features` to see the current surface and \
-         close the extra path per docs/api-guidelines.md \"Single Canonical Path\"."
+         Run `cargo +nightly public-api -ss --features \"$(just --evaluate user_features)\"` \
+         to see the same surface this test read (`-ss` drops the blanket and \
+         auto-trait impls this test also omits) and close the extra path per \
+         docs/api-guidelines.md \"Single Canonical Path\"."
     );
 }
 
