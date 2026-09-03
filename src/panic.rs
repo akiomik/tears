@@ -131,12 +131,14 @@ pub fn compose_hook(restore: impl Fn() + Sync + Send + 'static, next: PanicHook)
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{HookProbe, hook_guard};
+    use crate::test_support::{HookProbe, hook_guard, on_thread};
 
     use super::*;
 
     use std::future::pending;
+    use std::panic::AssertUnwindSafe;
     use std::sync::{Arc, Mutex};
+    use std::thread;
 
     use futures::future::join_all;
     use tokio::runtime::Builder;
@@ -151,51 +153,167 @@ mod tests {
         }
     }
 
-    #[test]
-    #[expect(clippy::panic, reason = "driving the panic hook requires a real panic")]
-    fn test_compose_hook_restores_then_delegates_once() {
-        // Serialize against other tests that touch the global panic hook or
-        // panic, so a concurrent panic cannot invoke our recording hook.
-        let _hook_guard = hook_guard();
-
-        // Records the order (and therefore the count) of the two stages.
-        // `restore` must run first so the terminal is usable before the
-        // delegated reporter prints.
+    /// Runs `trigger` with a composed hook installed that records the order of
+    /// its two stages, counting only panics raised on threads named with
+    /// `prefix`, and returns what it recorded.
+    ///
+    /// The filter is the recording test's own obligation: the caller's
+    /// [`hook_guard`] serializes hook swaps, not the rest of the binary, so any
+    /// `#[should_panic]` row passing on another thread would otherwise append a
+    /// stage pair of its own (docs/testing.md "Process-Global Panic Hook
+    /// Tests"). Callers hold the guard across the whole call.
+    ///
+    /// An unexpected panic out of `trigger` — a failed thread spawn, say — is
+    /// caught long enough to reinstall the previous hook and then resumed, the
+    /// same shape `with_silent_panic_hook` uses. A drop guard could not do it:
+    /// `set_hook` panics when called from a panicking thread, so restoring
+    /// mid-unwind is not available, and leaving the recording hook installed
+    /// would strip every later panic in the binary of its reported location.
+    fn record_hook_stages(prefix: &'static str, trigger: impl FnOnce()) -> Vec<&'static str> {
         let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
-
         let restore_order = order.clone();
         let next_order = order.clone();
+
         let next: PanicHook = Box::new(move |_info| {
-            next_order
-                .lock()
-                .expect("order mutex should not be poisoned")
-                .push("next");
+            if on_thread(prefix) {
+                next_order
+                    .lock()
+                    .expect("order mutex should not be poisoned")
+                    .push("next");
+            }
         });
         let hook = compose_hook(
             move || {
-                restore_order
-                    .lock()
-                    .expect("order mutex should not be poisoned")
-                    .push("restore");
+                if on_thread(prefix) {
+                    restore_order
+                        .lock()
+                        .expect("order mutex should not be poisoned")
+                        .push("restore");
+                }
             },
             next,
         );
 
-        // `PanicHookInfo` cannot be constructed directly, so drive the composed
-        // hook through the real panic runtime and catch the unwind.
         let previous = panic::take_hook();
         panic::set_hook(hook);
-        let _ = panic::catch_unwind(|| panic!("trigger"));
+        let triggered = panic::catch_unwind(AssertUnwindSafe(trigger));
         panic::set_hook(previous);
+        if let Err(payload) = triggered {
+            panic::resume_unwind(payload);
+        }
 
-        let recorded = order
+        order
             .lock()
             .expect("order mutex should not be poisoned")
-            .clone();
+            .clone()
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "driving the panic hook requires a real panic")]
+    fn test_compose_hook_restores_then_delegates_once() {
+        // libtest names each test's thread after the test's full path, and the
+        // panic below is raised inline, so this is the thread the hook records
+        // from.
+        const PROBE: &str = "panic::tests::test_compose_hook_restores_then_delegates_once";
+
+        // Serialize against other tests that swap the global panic hook, so
+        // one of them cannot install over the recording hook.
+        let _hook_guard = hook_guard();
+
+        // `restore` must run first so the terminal is usable before the
+        // delegated reporter prints. `PanicHookInfo` cannot be constructed
+        // directly, so drive the composed hook through the real panic runtime
+        // and catch the unwind.
+        let recorded = record_hook_stages(PROBE, || {
+            let _ = panic::catch_unwind(|| panic!("trigger"));
+        });
+
         assert_eq!(
             recorded,
             vec!["restore", "next"],
             "restore must run exactly once, before the delegated hook"
+        );
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "driving the panic hook requires a real panic")]
+    fn test_recording_hook_ignores_a_panic_from_another_thread() {
+        const PROBE: &str = "panic::tests::test_recording_hook_ignores_a_panic_from_another_thread";
+        const FOREIGN: &str = "tears-panic-foreign";
+
+        // A panic on a differently named thread, standing in for the
+        // `#[should_panic]` rows: they panic on their own libtest threads and
+        // take no guard, so their panics reach whichever hook is installed.
+        fn panic_elsewhere() {
+            thread::Builder::new()
+                .name(FOREIGN.to_owned())
+                .spawn(|| {
+                    let _ = panic::catch_unwind(|| panic!("foreign panic"));
+                })
+                .expect("the foreign thread should spawn")
+                .join()
+                .expect("the foreign thread should not unwind");
+        }
+
+        let _hook_guard = hook_guard();
+
+        // A foreign panic on either side of this test's own, the interleaving
+        // that appended a second and a third stage pair before the filter. The
+        // inline panic is also the positive control: without it the assertion
+        // below would pass on an empty record, and so would survive a `PROBE`
+        // that had stopped matching the thread libtest names after this test.
+        let recorded = record_hook_stages(PROBE, || {
+            panic_elsewhere();
+            let _ = panic::catch_unwind(|| panic!("trigger"));
+            panic_elsewhere();
+        });
+
+        assert_eq!(
+            recorded,
+            vec!["restore", "next"],
+            "only this test's own panic may be recorded"
+        );
+    }
+
+    #[test]
+    #[expect(clippy::panic, reason = "driving the panic hook requires a real panic")]
+    fn test_an_unwinding_trigger_restores_the_previous_hook() {
+        const PROBE: &str = "panic::tests::test_an_unwinding_trigger_restores_the_previous_hook";
+
+        let _hook_guard = hook_guard();
+
+        // Stands in for the previous hook — the real one reports a panic's
+        // location. A recording hook left installed over it would strip that
+        // from every later panic in the binary, so the helper has to reinstall
+        // it even when the trigger unwinds, as a failed thread spawn would.
+        let reports = Arc::new(Mutex::new(0_usize));
+        let counted = reports.clone();
+        let original = panic::take_hook();
+        panic::set_hook(Box::new(move |_info| {
+            if on_thread(PROBE) {
+                *counted
+                    .lock()
+                    .expect("report counter should not be poisoned") += 1;
+            }
+        }));
+
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            record_hook_stages(PROBE, || panic!("the trigger unwinds"))
+        }));
+        // Reaches the hook that is installed now, whichever one that is.
+        let _ = panic::catch_unwind(|| panic!("after the window"));
+
+        let installed = panic::take_hook();
+        panic::set_hook(original);
+        drop(installed);
+
+        assert!(outcome.is_err(), "the trigger's panic must be resumed");
+        assert_eq!(
+            *reports
+                .lock()
+                .expect("report counter should not be poisoned"),
+            1,
+            "the previous hook must be back once the window closes"
         );
     }
 
