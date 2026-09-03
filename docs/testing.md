@@ -211,11 +211,15 @@ is the recording test's own obligation.** The guard serializes hook swaps, not
 the rest of the binary: any test in the process may panic while a recording hook
 is installed, and there is no way to enumerate — let alone guard — every test
 that panics on purpose, since `#[should_panic]` tests panic by construction. So
-a test that counts hook activity counts only panics raised on its own threads,
-the way `HookProbe` does, and the hook-restoration test in
-`src/test_support/panic_hook.rs` applies the same filter for the same reason.
-A recording hook without that filter is the defect: it asserts a count over the
-whole process while claiming to measure one test.
+a test that records hook activity records only panics raised on its own threads,
+through `crate::test_support::on_thread(prefix)` — the check `HookProbe` applies
+to its counts, and the one the hand-rolled recording hooks in `src/panic.rs` and
+`src/test_support/panic_hook.rs` apply for the same reason. A test whose panic
+is raised inline passes its own full path, since libtest names the thread after
+it — or, where that does not fit on a line, a leading part of the path that no
+other test's name shares; a test that drives its own runtime passes the prefix
+it stamped on the workers. A recording hook without that filter is the defect:
+it asserts over the whole process while claiming to measure one test.
 
 **A loom model takes the guard because it is a hook swapper**, which is the
 first rule of this section rather than a category of its own. Loom drives each

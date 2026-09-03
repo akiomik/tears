@@ -7,7 +7,7 @@
 
 pub use async_utils::{assert_pending_until, gate_fetches, wait_until};
 pub use failing_backend::FailingBackend;
-pub use panic_hook::{HookProbe, hook_guard, with_silent_panic_hook};
+pub use panic_hook::{HookProbe, hook_guard, on_thread, with_silent_panic_hook};
 pub use trace_recorder::{TraceRecorder, set_default_subscriber};
 
 mod async_utils;

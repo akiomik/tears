@@ -149,7 +149,14 @@ impl Drop for HookProbe {
     }
 }
 
-fn on_thread(prefix: &str) -> bool {
+/// Reports whether the calling thread's name starts with `prefix`.
+///
+/// The filter a recording panic hook applies to keep panics raised by other
+/// tests out of its records (docs/testing.md "Process-Global Panic Hook
+/// Tests"): libtest names each test's thread after the test's full path, and
+/// a test that drives a multi-thread runtime stamps its workers with a prefix
+/// of its own.
+pub fn on_thread(prefix: &str) -> bool {
     thread::current()
         .name()
         .is_some_and(|name| name.starts_with(prefix))
