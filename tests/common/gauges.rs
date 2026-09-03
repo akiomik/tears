@@ -18,8 +18,11 @@ use crate::trace_recorder::TraceRecorder;
 /// §4.4's four counts. `blocked`, the fourth, rides the same snapshot but
 /// belongs to the bounded-send layer rather than to run lifecycle, so the
 /// settle census does not hold it to a terminal reading. The names' code
-/// source of truth is `GaugeSnapshot::dispatch` in `src/runtime/load.rs`,
-/// the schema's single emitter.
+/// source of truth is `GAUGE_EVENT_FIELDS` in `src/runtime/load.rs`, which
+/// a unit row holds to the schema its emitter actually writes. Nothing
+/// binds these three literals to that array, though: a coordinated rename
+/// leaves them stale, and what refuses it is the strict branch below —
+/// a renamed gauge reads `None`, which is not a settled gauge.
 pub const PRODUCER_GAUGES: [&str; 3] = ["subscriptions", "unkeyed_commands", "keyed_commands"];
 
 /// How many settle steps a census may take before it reports the quiescent

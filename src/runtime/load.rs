@@ -228,6 +228,35 @@ impl Gauges {
     }
 }
 
+/// The producer-gauge event's field-name schema: the two snapshot markers
+/// followed by RFC 0006 §4.4's four counts.
+///
+/// The names are the contract, and they are matched *by name* by consumers
+/// that cannot see each other — the test recorders' `current_u64` markers,
+/// the integration census's `PRODUCER_GAUGES`, and the bench subscriber's
+/// `LoadVisitor`. `tracing`'s field names are macro syntax rather than
+/// values, so `GaugeSnapshot::dispatch` cannot be written in terms of this
+/// array; the binding is made by test instead. `gauge_event_carries_the_full_field_set`
+/// reads an emitted event's own field set and holds it to exactly this list,
+/// so a rename that reaches the emitter without reaching here fails at the
+/// anchor rather than at whichever consumer noticed first — or, in the bench
+/// visitor's case, at no consumer at all.
+///
+/// Exported under `bench-internals` for that visitor, which is the reason the
+/// anchor is worth having: an unmatched name there falls into a catch-all
+/// arm, `gauge_sum()` under-reports, and the harness stops waiting for
+/// producers that are still live — corrupting later rows' gauge readings with
+/// no failure signal.
+#[cfg(any(test, feature = "bench-internals"))]
+pub const GAUGE_EVENT_FIELDS: [&str; 6] = [
+    "runtime_id",
+    "seq",
+    "subscriptions",
+    "unkeyed_commands",
+    "keyed_commands",
+    "blocked",
+];
+
 /// One producer-gauge event's payload — the four counts, the emitting
 /// instance's `runtime_id`, and their ordering `seq` — captured under the lock
 /// and dispatched to `tracing` after the lock is released (RFC 0006 §4.4).
@@ -251,13 +280,11 @@ impl GaugeSnapshot {
     /// skipping (or failing to skip) dispatch for events it no longer
     /// describes.
     ///
-    /// The field names emitted here are also read back *by name* by the
-    /// test recorders' `current_u64` (`seq`/`runtime_id` as the snapshot
-    /// markers), by the integration census's `PRODUCER_GAUGES`, and by the
-    /// bench subscriber's `LoadVisitor` in `benches/kernel_load.rs` — the
-    /// one consumer that degrades *silently* on a rename, its unmatched
-    /// names falling into a catch-all arm; this emitter is their source of
-    /// truth.
+    /// The field names emitted here are read back *by name* downstream, so
+    /// they are a contract rather than a spelling. This is where they are
+    /// written; `GAUGE_EVENT_FIELDS` is where they are named as data, and
+    /// a rename must reach both — which is what
+    /// `gauge_event_carries_the_full_field_set` enforces.
     fn dispatch(self) {
         tracing::debug!(
             target: "tears::runtime::load",
@@ -576,6 +603,15 @@ mod tests {
     // ordering `seq` — so a subscriber reads a complete, attributable, ordered
     // snapshot from any one event. The per-field recorder views flatten across
     // events and cannot see this; the field-set view can.
+    //
+    // Doubles as `GAUGE_EVENT_FIELDS`'s anchor, and that is why the comparison
+    // is set *equality* rather than a containment check per name. Containment
+    // holds the emitter to the array; equality also holds the array to the
+    // emitter, which is the direction a by-name consumer depends on: a field
+    // added to the event and not to the array leaves the array describing a
+    // schema that no longer exists, and the bench visitor's catch-all guard
+    // reads the array. `message` is excluded because it is `tracing`'s own
+    // field for the event's literal text, not part of the gauge schema.
     #[test]
     fn gauge_event_carries_the_full_field_set() {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
@@ -586,26 +622,35 @@ mod tests {
         observer.set_keyed_entries(2);
         drop(subscription);
 
+        let mut expected: Vec<&str> = GAUGE_EVENT_FIELDS.to_vec();
+        expected.sort_unstable();
+
+        // Selected by schema membership rather than by a literal name: a
+        // literal here would be a fourth copy of a name inside the very row
+        // that makes the array authoritative, and a coordinated rename would
+        // fail on "no events fired" instead of on the mismatch. Any event
+        // carrying at least one schema name is a candidate; the equality
+        // assert below is what decides whether it is a whole one.
         let gauge_events: Vec<_> = recorder
             .field_name_sets()
             .into_iter()
-            .filter(|fields| fields.iter().any(|name| name == "subscriptions"))
+            .filter(|fields| {
+                fields
+                    .iter()
+                    .any(|name| GAUGE_EVENT_FIELDS.contains(&name.as_str()))
+            })
             .collect();
         assert!(!gauge_events.is_empty(), "gauge events should have fired");
         for fields in gauge_events {
-            for required in [
-                "runtime_id",
-                "seq",
-                "subscriptions",
-                "unkeyed_commands",
-                "keyed_commands",
-                "blocked",
-            ] {
-                assert!(
-                    fields.iter().any(|name| name == required),
-                    "a gauge event is missing `{required}`: {fields:?}"
-                );
-            }
+            let schema: Vec<&str> = fields
+                .iter()
+                .map(String::as_str)
+                .filter(|name| *name != "message")
+                .collect();
+            assert_eq!(
+                schema, expected,
+                "a gauge event's field set must be exactly GAUGE_EVENT_FIELDS"
+            );
         }
     }
 

@@ -162,8 +162,11 @@ impl TraceRecorder {
     /// resolves to the first-arriving match. An event carrying `field`
     /// without both a `seq` and a `runtime_id` is not a gauge snapshot and
     /// is ignored; `None` when no event carries all three. The marker
-    /// names come from `GaugeSnapshot::dispatch` (`src/runtime/load.rs`),
-    /// the schema's single emitter and their source of truth.
+    /// names must match `GAUGE_EVENT_FIELDS` (`src/runtime/load.rs`), the
+    /// schema's source of truth, which a unit row holds to what
+    /// `GaugeSnapshot::dispatch` actually emits. Nothing binds these two
+    /// literals to that array — a coordinated rename makes this return
+    /// `None`, and the census's strict branch is what refuses it.
     ///
     /// # Panics
     ///
