@@ -414,6 +414,10 @@ fn a_quit_buffered_before_its_origin_s_revocation_is_discarded() {
 // scripted to stay **running**: the retirement here is the steady-state
 // rule's, not the quiescent postcondition's.
 //
+// The exit-observation half of the same removal condition — a natural
+// finish retiring an emptied, still-unexited entry — is pinned by its
+// mirror row in `observability.rs`.
+//
 // The observation is the `keyed_commands` gauge, which the registry
 // publishes at its single membership mutation point. That is a production
 // observability surface (RFC 0006 §4.4 as RFC 0014 §9 row 9 amends it), read

@@ -1420,13 +1420,45 @@ where
 /// An effect that sends each of `messages`, marks `done`, and then ends —
 /// a run whose natural finish is observable from the application side, so a
 /// `settle` predicate can wait for it.
-pub fn finishing_effect(messages: Vec<u8>, done: Beacon) -> EffectCommand<u8> {
-    Command::stream(
-        stream::iter(messages).chain(stream::unfold(Some(done), |state| async move {
-            state?.mark();
-            None::<(u8, Option<Beacon>)>
-        })),
-    )
+///
+/// [`outliving_effect`] with the latch already open: one finish tail, one
+/// place its caveats live — the mark-before-observable-exit fact documented
+/// there binds this fixture's callers identically.
+pub fn finishing_effect<I>(messages: I, done: Beacon) -> EffectCommand<u8>
+where
+    I: IntoIterator<Item = u8>,
+    I::IntoIter: Send + 'static,
+{
+    let release = Latch::default();
+    release.open();
+    outliving_effect(messages, release, done)
+}
+
+/// An effect that sends each of `messages`, holds at `release`, then marks
+/// `done` and ends — [`finishing_effect`] with its finish pinned behind the
+/// test's own latch, for rows that need the run still living while its
+/// output is committed and dequeued, and its natural finish strictly after.
+///
+/// Two facts a caller's script leans on. The mark lands on the effect's
+/// final poll, strictly *before* the run's exit is observable on the join
+/// set — settling on `done` and then stepping a pass is deterministic only
+/// on the current-thread driver, where that poll, the stream's end, and
+/// the task's completion land together; the multi-worker series must use
+/// [`step_when_ready`] instead. And `release` frees exactly one waiter
+/// ([`Latch::open`] banks a single permit), so one latch serves one run.
+pub fn outliving_effect<I>(messages: I, release: Latch, done: Beacon) -> EffectCommand<u8>
+where
+    I: IntoIterator<Item = u8>,
+    I::IntoIter: Send + 'static,
+{
+    Command::stream(stream::iter(messages).chain(stream::unfold(
+        (release, done),
+        |(release, done)| async move {
+            release.wait().await;
+            done.mark();
+            None
+        },
+    )))
 }
 
 /// A producer-originated quit: the run emits one quit on the control lane

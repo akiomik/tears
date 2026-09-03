@@ -545,10 +545,15 @@ impl Drop for ScopeRegistry {
 mod tests {
     use super::*;
 
+    use std::future::pending;
     use std::hash::{Hash, Hasher};
 
+    use tokio::task::JoinSet;
+
+    use crate::kernel::GateMode;
     use crate::subscription::Subscription;
     use crate::subscription::mock::MockSource;
+    use crate::test_support::TraceRecorder;
 
     fn path(segments: &[&'static str]) -> ScopePath {
         // Root-first storage: the *last* `prefixed` call names the outermost
@@ -577,6 +582,59 @@ mod tests {
         assert!(
             !removal_rule(true, true, 0),
             "a poisoned counter never satisfies the removal condition"
+        );
+    }
+
+    // The rule's two application sites composed, which the rows above read
+    // one cell at a time: a dequeue that empties the count keeps an unexited
+    // entry, and the exit observation then applies the same rule and retires
+    // it. The kernel-level mirror is `conformance::observability`'s
+    // natural-finish row; this is its two-call registry core.
+    #[tokio::test]
+    async fn an_exit_observed_after_the_drain_retires_the_entry() {
+        // The gauge is read alongside membership so the keyed-count half of
+        // retire is pinned here too, not only by `publish_keyed_gauge`'s
+        // debug assertion, which a release build compiles out.
+        let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+        let _subscriber = recorder.set_default();
+        let mut tasks = JoinSet::new();
+        let mut registry = ScopeRegistry::new(LoadObserver::new());
+        let counter = Arc::new(PendingCounter::default());
+        counter.reserve();
+        registry.insert(RunEntry {
+            token: 1,
+            kind: RunKind::Keyed(CommandId::new("worker")),
+            scope: ScopePath::empty(),
+            phase: Phase::Running,
+            revoked: false,
+            exited: false,
+            counter,
+            gate: Arc::new(SendGate::new(GateMode::Immediate)),
+            abort: tasks.spawn(pending::<()>()),
+        });
+        assert_eq!(recorder.current_u64("keyed_commands"), Some(1));
+
+        assert!(!registry.on_dequeue(1), "an unrevoked origin delivers");
+        let kept = registry
+            .get(1)
+            .expect("drained but unexited: the entry is kept");
+        assert_eq!(
+            kept.counter.value(),
+            0,
+            "the premise: the dequeue emptied the count"
+        );
+        assert_eq!(kept.phase, Phase::Running, "still living, not a tombstone");
+        assert!(!kept.exited, "the dequeue observed no exit");
+
+        let observed = registry
+            .on_exit(1)
+            .expect("the entry is still known at its exit");
+        assert!(!observed.stopped, "a natural finish, not a stop");
+        assert_eq!(registry.len(), 0, "and the exit observation retires it");
+        assert_eq!(
+            recorder.current_u64("keyed_commands"),
+            Some(0),
+            "with the keyed count retired alongside the entry"
         );
     }
 
