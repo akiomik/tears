@@ -1118,9 +1118,24 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
         let settled = executor.block_on(async {
             let settle = kernel.settle();
             tokio::pin!(settle);
-            for _ in 0..TURN_BUDGET {
+            // One read more than turns. `0..TURN_BUDGET` read before each
+            // turn but never after the last, so a join set that drained *on*
+            // turn `TURN_BUDGET` was reported as one that never drained. The
+            // bound sits between the read and the turn, counting up like
+            // `settle` and `confirm` above; the turns still number exactly
+            // `TURN_BUDGET`, which is what the assertion prints.
+            //
+            // Those two end on the assertion itself, where this breaks and
+            // asserts outside the executor. Not because it must — a panic
+            // inside `block_on` propagates fine — but so the message is
+            // raised on the caller's frame rather than from inside a
+            // future being driven.
+            for turns in 0..=TURN_BUDGET {
                 if let Poll::Ready(report) = futures::poll!(settle.as_mut()) {
                     return Some(report);
+                }
+                if turns == TURN_BUDGET {
+                    break;
                 }
                 executor_turn().await;
             }
