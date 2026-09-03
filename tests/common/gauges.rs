@@ -74,15 +74,29 @@ pub const SETTLE_STEPS: usize = 1_000;
 /// those and *pass*, asserting that the ordering counter rose. The guard is
 /// what keeps this half unable to satisfy itself on a non-gauge.
 ///
+/// An empty `expected_active` is refused, which is the opposite of what
+/// [`producer_gauges_are_zero`] does with one — read the two together, since
+/// a caller usually hands the same slice to both. Empty is a meaningful
+/// reading there (no producers to settle) and no reading at all here, and
+/// letting it through would take both halves of the census vacuous at once:
+/// a rise check that asserts nothing beside a settle loop that returns on
+/// its first iteration.
+///
 /// Written as a plain loop rather than an iterator chain for the same
 /// `#[track_caller]` reason as [`producer_gauges_are_zero`].
 ///
 /// # Panics
 ///
-/// If any name is outside [`PRODUCER_GAUGES`], or any named gauge has no
-/// reading above zero.
+/// If `expected_active` is empty, if any name in it is outside
+/// [`PRODUCER_GAUGES`], or if any named gauge has no reading above zero.
 #[track_caller]
 pub fn producer_gauges_rose(recorder: &TraceRecorder, expected_active: &[&str]) {
+    assert!(
+        !expected_active.is_empty(),
+        "an empty rise check asserts nothing, and its caller hands the same slice to \
+         `producer_gauges_are_zero`, where empty is the tolerant reading — so both halves \
+         of the census would go vacuous at once"
+    );
     assert!(
         expected_active
             .iter()
@@ -169,15 +183,69 @@ pub fn producer_gauge_report(
     })
 }
 
-// Compiled per including target, so this row runs once per binary — the
+// Compiled per including target, so these rows run once per binary — the
 // deliberate cost of each target pinning the census it links against.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The strict/tolerant split is the census's whole contract: an active
-    // gauge with no events is a silenced instrument, not a settled one,
-    // while a gauge the row never raises may legitimately have none.
+    /// The target `GaugeSnapshot::dispatch` emits on, so a row here can
+    /// stand up an event of the shape the census reads.
+    const LOAD_TARGET: &str = "tears::runtime::load";
+
+    // The two guards on the rise half. Its sibling's strict/tolerant split
+    // has `an_active_gauge_with_no_events_is_not_settled` below; these two
+    // had nothing, and a rise check that quietly asserts nothing leaves no
+    // trace to notice. Both are `#[should_panic]` rather than checks on an
+    // extracted predicate, because the guards *are* asserts — a predicate
+    // tested beside them would be pinned without its use.
+    //
+    // Safe to panic here, unlike the `#[should_panic]` rows #306 is about:
+    // those share the lib binary with `panic`'s recording-hook row, which
+    // counts hook invocations. The integration targets this module compiles
+    // into have no hook-counting row — `common/panic_hook.rs` silences
+    // reporting and asserts nothing about it.
+    #[test]
+    #[should_panic(expected = "outside the census")]
+    fn a_non_census_name_cannot_satisfy_the_rise_half() {
+        // The recorder is installed and a real gauge-shaped event emitted,
+        // so `seq` genuinely reads above zero. That is what makes this row
+        // witness the hazard rather than the guard's message: without the
+        // guard the rise assert *passes* here, on the ordering counter
+        // having risen. `u64_values` matches a bare field name across the
+        // whole target, so nothing but the guard separates a census gauge
+        // from the two markers every event carries.
+        let recorder = TraceRecorder::new().with_target(LOAD_TARGET);
+        let _guard = recorder.set_default();
+        tracing::debug!(
+            target: LOAD_TARGET,
+            runtime_id = 1u64,
+            seq = 1u64,
+            subscriptions = 0u64,
+            unkeyed_commands = 0u64,
+            keyed_commands = 0u64,
+            blocked = 0u64,
+            "producer gauges",
+        );
+        assert_eq!(
+            recorder.u64_values("seq"),
+            vec![1],
+            "the premise: the marker reads above zero, so an unguarded rise \
+             check on it would pass"
+        );
+
+        producer_gauges_rose(&recorder, &["seq"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "asserts nothing")]
+    fn an_empty_rise_check_is_refused() {
+        producer_gauges_rose(&TraceRecorder::new(), &[]);
+    }
+
+    // The strict/tolerant split is the settle half's whole contract: an
+    // active gauge with no events is a silenced instrument, not a settled
+    // one, while a gauge the row never raises may legitimately have none.
     #[test]
     fn an_active_gauge_with_no_events_is_not_settled() {
         let recorder = TraceRecorder::new();
