@@ -145,9 +145,12 @@ pub use subscription::core::{Subscription, SubscriptionId, SubscriptionSource};
 // is not part of the public API and carries no semver guarantees; do not
 // enable it for normal builds. `kernel::bench_support` is the same pattern
 // applied to the kernel's own internals.
+// `GAUGE_EVENT_FIELDS` rides the same gate for `benches/kernel_load.rs`: its
+// `LoadVisitor` matches the gauge schema by name, and reading the array back
+// is what turns a rename from a silent under-count into a bench failure.
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
-pub use runtime::load::LoadObserver;
+pub use runtime::load::{GAUGE_EVENT_FIELDS, LoadObserver};
 // Bench-only re-exports for the kernel load-acceptance re-derivation
 // (RFC 0014 §13.5). `kernel` is `pub(crate)`, so `benches/kernel_load.rs` and
 // `benches/kernel_scan.rs` — separate crates that see the public API only —

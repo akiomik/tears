@@ -191,7 +191,9 @@ use futures::stream::{self, StreamExt};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tears::prelude::*;
-use tears::{BenchKernel, BoxStream, RuntimeConfig, SubscriptionSource, producer_quit};
+use tears::{
+    BenchKernel, BoxStream, GAUGE_EVENT_FIELDS, RuntimeConfig, SubscriptionSource, producer_quit,
+};
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 use tokio::task::yield_now;
 use tokio::time::{MissedTickBehavior, interval, timeout};
@@ -1527,6 +1529,22 @@ impl Subscriber for LoadSubscriber {
         event.record(&mut visitor);
 
         if let (Some(runtime_id), Some(seq)) = (visitor.runtime_id, visitor.seq) {
+            // Both markers present means this is a gauge event, and INV-L13
+            // says a gauge event carries the whole field set. The guards on
+            // the three recording paths cover a count that arrived *wrong*;
+            // this covers one that did not arrive at all — dropped from the
+            // emitter, and from `GAUGE_EVENT_FIELDS` with it, so neither the
+            // schema guards nor the anchor row has anything left to compare.
+            // It is where `gauge_sum()`'s `unwrap_or(0)` stops being able to
+            // absorb the loss.
+            assert!(
+                visitor.subscriptions.is_some()
+                    && visitor.unkeyed_commands.is_some()
+                    && visitor.keyed_commands.is_some()
+                    && visitor.blocked.is_some(),
+                "a gauge event reached this subscriber without all four counts as unsigned \
+                 integers: {visitor:?}"
+            );
             let slot = TRIAL_METRICS
                 .lock()
                 .expect("trial metrics slot poisoned")
@@ -1570,7 +1588,7 @@ impl Subscriber for LoadSubscriber {
     fn exit(&self, _span: &Id) {}
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct LoadVisitor {
     runtime_id: Option<u64>,
     seq: Option<u64>,
@@ -1590,6 +1608,27 @@ impl LoadVisitor {
     }
 }
 
+/// Rejects a gauge-schema name arriving anywhere but `record_u64`.
+///
+/// The whole schema is unsigned integers, so a schema name reaching a
+/// different recording path is a gauge this visitor will silently read as
+/// absent — `gauge_sum()` under-reports, `LIVE_PRODUCERS` falls early, and
+/// `await_quiescence()` returns with producers still live, corrupting later
+/// rows' gauge readings with no failure signal. That is the same corruption
+/// the rename guard prevents, reached by a different route.
+///
+/// Costs nothing on the target's real traffic: the only non-schema names that
+/// arrive off `record_u64` are `tracing`'s own `message` and the
+/// capacity-wait event's `channel`.
+fn assert_off_schema(field: &Field) {
+    assert!(
+        !GAUGE_EVENT_FIELDS.contains(&field.name()),
+        "`{}` is in the gauge schema but did not arrive as an unsigned integer: the emitter's \
+         representation has drifted from what this visitor reads",
+        field.name()
+    );
+}
+
 impl Visit for LoadVisitor {
     fn record_u64(&mut self, field: &Field, value: u64) {
         match field.name() {
@@ -1599,17 +1638,47 @@ impl Visit for LoadVisitor {
             "unkeyed_commands" => self.unkeyed_commands = Some(value),
             "keyed_commands" => self.keyed_commands = Some(value),
             "blocked" => self.blocked = Some(value),
-            _ => {}
+            // The capacity-wait event's `wait_us` also arrives here, so an
+            // unmatched name is ordinary — unless it belongs to the gauge
+            // schema, which is the one way this arm goes wrong. (The batch
+            // event's `pulled`/`updated`/`shared_pending` never reach it:
+            // `batch` emits at `trace!` and `enabled` above takes `DEBUG`
+            // only.) A renamed gauge would land here, `gauge_sum()` would
+            // under-report it, and the harness would stop waiting for
+            // producers that are still live: the exact corruption of later
+            // rows' gauge readings that `await_quiescence` exists to prevent,
+            // with no failure signal. `GAUGE_EVENT_FIELDS` is kept in step
+            // with the emitter by a unit row, so consulting it here turns that
+            // silence into a panic.
+            //
+            // This closes the *rename* axis. The representation axis — a
+            // schema name that keeps its spelling but stops arriving as an
+            // unsigned integer — never reaches this arm at all, and is closed
+            // by the mirrored guards on `record_str` and `record_debug`.
+            other => assert!(
+                !GAUGE_EVENT_FIELDS.contains(&other),
+                "`{other}` is in the gauge schema but has no arm here: this visitor's \
+                 match has fallen behind `GAUGE_EVENT_FIELDS`"
+            ),
         }
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "channel" {
             self.channel = Some(value.to_owned());
+            return;
         }
+        assert_off_schema(field);
     }
 
-    fn record_debug(&mut self, _field: &Field, _value: &dyn Debug) {}
+    // The sink every recording path that this visitor does not override falls
+    // into: `Visit`'s `record_i64`, `record_f64`, `record_bool` and the rest
+    // all default to `record_debug`. So this arm plus `record_str`'s is the
+    // whole of the representation axis — a schema field given a signed type,
+    // or emitted with `?`, arrives at one of the two.
+    fn record_debug(&mut self, field: &Field, _value: &dyn Debug) {
+        assert_off_schema(field);
+    }
 }
 
 struct Metrics {
