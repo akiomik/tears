@@ -34,7 +34,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use color_eyre::eyre::Result;
 use futures::FutureExt;
 use futures::stream::{self, StreamExt};
-use gauges::{PRODUCER_GAUGES, producer_gauge_report, producer_gauges_are_zero};
+use gauges::{
+    PRODUCER_GAUGES, SETTLE_STEPS, producer_gauge_report, producer_gauges_are_zero,
+    producer_gauges_rose,
+};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::Cell;
@@ -116,27 +119,6 @@ fn no_producer_gauge_event_fired(recorder: &TraceRecorder) -> bool {
         .all(|field| recorder.u64_values(field).is_empty())
 }
 
-/// How many settle steps [`assert_two_stage_postconditions`] may take before it
-/// reports the quiescent postcondition as unmet.
-///
-/// This counts executor drains, not intervals, so host load cannot consume it.
-/// One step is one `yield_now`, and under the `current_thread` scheduler that is
-/// a complete drain of the run queue: the caller's waker goes on the deferred
-/// list, so `block_on` keeps popping tasks until the queue is empty before it
-/// wakes the deferred wakers and polls the caller again. The teardown needs
-/// exactly one such drain — aborting a task leaves it queued and cancelled, and
-/// running it drops the future — so the bound carries three orders of magnitude
-/// of margin over the mechanism it waits on.
-///
-/// A step must not advance the paused clock, which rules out a
-/// `sleep`/`timeout` bound however appealing "settled or never will" sounds as a
-/// formulation. Advancing virtual time hands a producer that the teardown failed
-/// to cancel a second way to stop — its own timer firing into the channel whose
-/// receiver the teardown dropped — and these rows exist to catch exactly that
-/// failure. `yield_now` reschedules through the deferred list, which keeps the
-/// scheduler off the parking path and therefore keeps the clock still.
-const SETTLE_STEPS: usize = 1_000;
-
 /// INV-LC7's bounded settle loop, doubling as INV-LC6's re-checked
 /// no-further-transition assertion.
 ///
@@ -167,14 +149,7 @@ async fn assert_two_stage_postconditions(
     expected_active: &[&str],
     dismantled: &[(&str, &Arc<AtomicBool>)],
 ) {
-    for field in expected_active {
-        let values = recorder.u64_values(field);
-        assert!(
-            values.iter().any(|&value| value > 0),
-            "the {field} gauge must have risen while this row's producer ran, \
-             or its fall to zero witnesses nothing: {values:?}"
-        );
-    }
+    producer_gauges_rose(recorder, expected_active);
 
     for _ in 0..SETTLE_STEPS {
         assert_eq!(
