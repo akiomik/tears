@@ -45,7 +45,7 @@ use crate::testing::driver::{AcceptanceRecorder, IntentRecorder};
 
 use super::accounting::PendingCounter;
 use super::lane::{ControlSender, DataSender, IngressHandle, RunToken, SendGate};
-use super::registry::{Phase, RunEntry, RunKind};
+use super::registry::{RunEntry, RunKind};
 
 /// What a producer body receives.
 pub struct EffectCtx<Msg> {
@@ -256,17 +256,7 @@ impl<Msg: Send + 'static> ProducerHarness<'_, Msg> {
         let run = body(EffectCtx { handle });
         let abort = spawn_contained(self.join_set, self.task_index, token, gauge, run);
 
-        RunEntry {
-            token,
-            kind,
-            scope,
-            phase: Phase::Running,
-            revoked: false,
-            exited: false,
-            counter,
-            gate,
-            abort,
-        }
+        RunEntry::running(token, kind, scope, counter, gate, abort)
     }
 }
 
@@ -328,17 +318,14 @@ impl CleanupHarness<'_> {
     ) -> RunEntry {
         let abort = spawn_contained(self.join_set, self.task_index, token, None, finalizer);
 
-        RunEntry {
+        RunEntry::running(
             token,
-            kind: RunKind::Cleanup,
+            RunKind::Cleanup,
             scope,
-            phase: Phase::Running,
-            revoked: false,
-            exited: false,
-            counter: Arc::new(PendingCounter::default()),
-            gate: Arc::clone(self.gate),
+            Arc::new(PendingCounter::default()),
+            Arc::clone(self.gate),
             abort,
-        }
+        )
     }
 }
 

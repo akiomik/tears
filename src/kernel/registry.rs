@@ -229,6 +229,43 @@ pub struct RunEntry {
 }
 
 impl RunEntry {
+    /// A freshly started run's entry: `Running`, unrevoked, unexited.
+    ///
+    /// Every construction site builds that one shape — the two spawn paths in
+    /// `producer`, the bench fixture, and this module's own unit row — because a
+    /// run is only ever recorded at its start; the other phases are reached by
+    /// transition, never by construction. The three state fields are therefore
+    /// not parameters: they are what "fresh" *means*, and nothing a spawn site
+    /// holds decides them. The remaining six are the run's identity and the
+    /// handles its spawn produced, which only the spawn site does hold.
+    ///
+    /// A convention its call sites keep, not a barrier: the fields stay `pub`
+    /// because the transitions and their readers are elsewhere — `pass` filters
+    /// on `phase`, `testing::driver` reads `exited` — so the literal remains
+    /// writable crate-wide and a site that skips this constructor still
+    /// compiles. What it buys is the one place a field addition has to be
+    /// taught the fresh shape.
+    pub const fn running(
+        token: RunToken,
+        kind: RunKind,
+        scope: ScopePath,
+        counter: Arc<PendingCounter>,
+        gate: Arc<SendGate>,
+        abort: AbortHandle,
+    ) -> Self {
+        Self {
+            token,
+            kind,
+            scope,
+            phase: Phase::Running,
+            revoked: false,
+            exited: false,
+            counter,
+            gate,
+            abort,
+        }
+    }
+
     /// Whether this entry participates in the uniform admission barrier: a
     /// stop-requested subscription run whose exit is unobserved (RFC 0014
     /// §5.1).
@@ -601,17 +638,14 @@ mod tests {
         let mut registry = ScopeRegistry::new(LoadObserver::new());
         let counter = Arc::new(PendingCounter::default());
         counter.reserve();
-        registry.insert(RunEntry {
-            token: 1,
-            kind: RunKind::Keyed(CommandId::new("worker")),
-            scope: ScopePath::empty(),
-            phase: Phase::Running,
-            revoked: false,
-            exited: false,
+        registry.insert(RunEntry::running(
+            1,
+            RunKind::Keyed(CommandId::new("worker")),
+            ScopePath::empty(),
             counter,
-            gate: Arc::new(SendGate::new(GateMode::Immediate)),
-            abort: tasks.spawn(pending::<()>()),
-        });
+            Arc::new(SendGate::new(GateMode::Immediate)),
+            tasks.spawn(pending::<()>()),
+        ));
         assert_eq!(recorder.current_u64("keyed_commands"), Some(1));
 
         assert!(!registry.on_dequeue(1), "an unrevoked origin delivers");
