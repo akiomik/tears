@@ -6,6 +6,8 @@
 //! at their narrower deterministic layers in `src/runtime`.
 
 mod common;
+#[path = "common/gauges.rs"]
+mod gauges;
 #[path = "common/trace_recorder.rs"]
 mod trace_recorder;
 
@@ -13,6 +15,7 @@ use std::future::pending;
 use std::num::NonZeroU64;
 
 use color_eyre::eyre::Result;
+use gauges::{PRODUCER_GAUGES, producer_gauge_report, producer_gauges_are_zero};
 use ratatui::Frame;
 use tears::command::CommandId;
 use tears::prelude::*;
@@ -86,15 +89,14 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
     // fixed wait would make this assertion flake on a scheduler change. The cap
     // only bounds a pathological hang; the loop exits the moment they settle.
     for _ in 0..1_000 {
-        let settled = recorder.u64_values("subscriptions").last() == Some(&0)
-            && recorder.u64_values("unkeyed_commands").last() == Some(&0)
-            && recorder.u64_values("keyed_commands").last() == Some(&0);
-        if settled {
+        if producer_gauges_are_zero(&recorder, &PRODUCER_GAUGES) {
             break;
         }
         yield_now().await;
     }
-
+    // The rise assertions come first so a total-emission outage reports as
+    // "never rose" rather than as a settle failure; the census assert then
+    // carries the whole fall claim with its per-field diagnostic.
     let subscriptions = recorder.u64_values("subscriptions");
     let unkeyed = recorder.u64_values("unkeyed_commands");
     let keyed = recorder.u64_values("keyed_commands");
@@ -112,20 +114,10 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
         "starting a keyed command must raise the keyed_commands gauge: {keyed:?}"
     );
 
-    assert_eq!(
-        subscriptions.last(),
-        Some(&0),
-        "the subscriptions gauge must fall back to zero: {subscriptions:?}"
-    );
-    assert_eq!(
-        unkeyed.last(),
-        Some(&0),
-        "the unkeyed_commands gauge must fall back to zero: {unkeyed:?}"
-    );
-    assert_eq!(
-        keyed.last(),
-        Some(&0),
-        "the keyed_commands gauge must fall back to zero: {keyed:?}"
+    assert!(
+        producer_gauges_are_zero(&recorder, &PRODUCER_GAUGES),
+        "every producer gauge must settle to zero: {:?}",
+        producer_gauge_report(&recorder),
     );
 
     // INV-L13: every gauge event a real run emits carries the emitting

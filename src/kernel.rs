@@ -1270,8 +1270,8 @@ mod tests {
         assert_eq!(kernel.owned_task_count(), 0);
         assert_eq!(kernel.registry().len(), 0, "the bookkeeping is cleared");
         assert_eq!(
-            recorder.u64_values("unkeyed_commands").last(),
-            Some(&0),
+            recorder.current_u64("unkeyed_commands"),
+            Some(0),
             "the producer gauge fell with the task the settle drained"
         );
     }

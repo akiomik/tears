@@ -16,6 +16,8 @@
 //! can anchor on.
 
 mod common;
+#[path = "common/gauges.rs"]
+mod gauges;
 #[path = "common/panic_hook.rs"]
 mod panic_hook;
 #[path = "common/trace_recorder.rs"]
@@ -32,6 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use color_eyre::eyre::Result;
 use futures::FutureExt;
 use futures::stream::{self, StreamExt};
+use gauges::{PRODUCER_GAUGES, producer_gauge_report, producer_gauges_are_zero};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::Cell;
@@ -99,29 +102,14 @@ impl Drop for DropFlag {
     }
 }
 
-/// The producer gauges RFC 0006 §4.4 defines and RFC 0011 INV-LC7 reads.
-const PRODUCER_GAUGES: [&str; 3] = ["subscriptions", "unkeyed_commands", "keyed_commands"];
-
-/// Whether every producer gauge has reached its terminal reading.
+/// Whether no producer gauge event has fired at all — the complement census
+/// for rows whose application starts no producer. Local to this target, its
+/// only caller, so the shared census module carries no per-target dead code.
 ///
-/// A gauge whose producer the row actually starts (`expected_active`) must read
-/// zero: "no event ever" is not a settled gauge but a silenced instrument, and
-/// accepting `None` there would let a mutation that stops the emission
-/// altogether — a renamed target or field, a lowered level, an emission moved
-/// off the teardown path — satisfy INV-LC7 on iteration zero. A gauge the row
-/// never raises has no event of its own to wait for, so `None` and a trailing
-/// zero both count for it.
-fn producer_gauges_are_zero(recorder: &TraceRecorder, expected_active: &[&str]) -> bool {
-    PRODUCER_GAUGES.iter().all(|field| {
-        let last = recorder.u64_values(field).last().copied();
-        if expected_active.contains(field) {
-            last == Some(0)
-        } else {
-            matches!(last, None | Some(0))
-        }
-    })
-}
-
+/// Deliberately read off the raw event log (`u64_values`) rather than
+/// through `current_u64`: "no event ever" is a claim about the log itself,
+/// so a gauge event that somehow lost its `seq` must still count as fired
+/// here even though the current-value read would ignore it.
 fn no_producer_gauge_event_fired(recorder: &TraceRecorder) -> bool {
     PRODUCER_GAUGES
         .iter()
@@ -206,10 +194,8 @@ async fn assert_two_stage_postconditions(
 
     assert!(
         producer_gauges_are_zero(recorder, expected_active),
-        "every producer gauge must settle to zero: subscriptions={:?} unkeyed={:?} keyed={:?}",
-        recorder.u64_values("subscriptions"),
-        recorder.u64_values("unkeyed_commands"),
-        recorder.u64_values("keyed_commands"),
+        "every producer gauge must settle to zero (held active: {expected_active:?}): {:?}",
+        producer_gauge_report(recorder),
     );
     for (name, flag) in dismantled {
         assert!(

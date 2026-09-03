@@ -143,6 +143,21 @@ use trace_recorder::TraceRecorder;
 keeps unused tracing code out of integration-test targets that do not assert
 tracing output.
 
+Read a gauge's *current value* through `current_u64`, never through
+`u64_values(...).last()`: the gauge contract orders events by `seq`, not by
+arrival. The accessor assumes one runtime instance per recorder and
+panics otherwise; a deliberately multi-instance test partitions by
+`runtime_id` itself, the way `src/runtime/load.rs`'s contract rows do.
+The rule covers the gauge snapshot's fields — the ones whose events carry
+a `seq`. Other unsigned-integer fields on the same target (`pulled`,
+`updated`, `shared_pending`, `wait_us`) are per-event readings with no
+current value to take; `current_u64` returns `None` for them, so keep those
+on `u64_values`.
+
+The INV-LC7 producer-gauge census in `tests/common/gauges.rs` is included
+with the same `#[path]` mechanism as the recorder above; see its module
+docs for the include prerequisite.
+
 Prefer filtering the recorder to the event being asserted, for example with
 `.with_target("tears::runtime")` and `.with_level(tracing::Level::DEBUG)`.
 Avoid ad hoc subscribers that filter by returning `false` from `enabled()`:

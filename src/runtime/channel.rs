@@ -356,9 +356,9 @@ mod tests {
             "blocked rose while the send waited: {blocked:?}"
         );
         assert_eq!(
-            blocked.last(),
-            Some(&0),
-            "blocked fell once the send was accepted: {blocked:?}"
+            recorder.current_u64("blocked"),
+            Some(0),
+            "blocked fell once the send was accepted (arrival-order log: {blocked:?})"
         );
     }
 
@@ -421,9 +421,9 @@ mod tests {
             "blocked rose while the send waited: {blocked_values:?}"
         );
         assert_eq!(
-            blocked_values.last(),
-            Some(&0),
-            "aborting the blocked send lowered blocked: {blocked_values:?}"
+            recorder.current_u64("blocked"),
+            Some(0),
+            "aborting the blocked send lowered blocked (arrival-order log: {blocked_values:?})"
         );
         assert!(
             recorder.str_values("channel").is_empty(),
