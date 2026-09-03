@@ -47,7 +47,7 @@ use super::Kernel;
 use super::accounting::PendingCounter;
 use super::cleanup::CleanupLedger;
 use super::lane::{GateMode, RunToken, SendGate};
-use super::registry::{Phase, RunEntry, RunKind, ScopeRegistry};
+use super::registry::{RunEntry, RunKind, ScopeRegistry};
 
 /// A command whose spawned run emits one **producer-originated** quit on the
 /// control lane and then ends (RFC 0014 §3.3).
@@ -199,17 +199,14 @@ impl RegistryScan {
                     RunKind::Sub(id)
                 }
             };
-            registry.insert(RunEntry {
-                token: index as RunToken + 1,
+            registry.insert(RunEntry::running(
+                index as RunToken + 1,
                 kind,
-                scope: run_scope(index),
-                phase: Phase::Running,
-                revoked: false,
-                exited: false,
-                counter: Arc::new(PendingCounter::default()),
-                gate: Arc::clone(&gate),
+                run_scope(index),
+                Arc::new(PendingCounter::default()),
+                Arc::clone(&gate),
                 abort,
-            });
+            ));
         }
         Self {
             registry,
