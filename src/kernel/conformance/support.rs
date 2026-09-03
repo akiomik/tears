@@ -94,12 +94,163 @@ pub const THREADED_TURNS: usize = 4096;
 /// How many scheduler yields the reducer's half of a
 /// [`MidBatchHandshake`] spends waiting for the gated producer's commit.
 ///
-/// A hang guard whose value is mechanism, in the same style as
-/// [`THREADED_TURNS`]: the ordering the handshake establishes does not
-/// depend on how many yields it took to observe the signal, and the bound
-/// only decides whether a producer that never commits fails the test or
-/// stops it.
-const HANDSHAKE_YIELDS: usize = 1_000_000;
+/// A hang guard, in the same style as [`THREADED_TURNS`]: the ordering the
+/// handshake establishes does not depend on how many yields it took to
+/// observe the signal. Its *value*, unlike that one's, is not free. A
+/// passing run leaves this loop at the commit whatever the bound is, so no
+/// value here makes a healthy suite slower; what it decides is how long a
+/// real failure takes to report, and — if set below what a correct-but-late
+/// run can spend — whether a correct tree fails at all. The paragraphs
+/// below are that accounting.
+///
+/// **Reporting a real failure.** A yield is cheap when nothing else wants
+/// the calling core and dear when a peer is blocked on it: about 154 µs
+/// each in a debug build. That rate is the one this loop's exhaustion was
+/// measured at rather than extrapolated to — a row that spent the whole
+/// 1,000,000 was observed taking 154.46 s to report (issue #305) — and a
+/// hang guard that slow reads as the hang it exists to tell apart.
+/// `250_000` is a quarter of it: about 38 s.
+///
+/// **Not failing a correct tree.** The margin here is the yields a
+/// *successful* commit spends. A count is not a portable unit, so they are
+/// taken from a table rather than a host, the reason `HOLD_YIELDS` gives in
+/// this file's `mod tests`. Four rows reach this bound (`delivery`'s one,
+/// `quit`'s three), so a leg contributes four numbers. Two CI runs of each
+/// `test` leg, and one of the coverage leg:
+///
+/// | leg                          | first run    | second run   |
+/// | ---                          | ---          | ---          |
+/// | macOS CI, pinned             | 1, 1, 1, 1   | 1, 1, 1, 1   |
+/// | macOS CI, beta               | 1, 1, 1, 1   | 1, 1, 1, 2   |
+/// | Linux CI, pinned             | 1, 1, 8, 13  | 1, 1, 6, 12  |
+/// | Linux CI, beta               | 1, 1, 2, 12  | 1, 1, 2, 20  |
+/// | Windows CI, pinned           | 1, 1, 1, 155 | 1, 1, 32, 34 |
+/// | Windows CI, beta             | 1, 1, 1, 110 | 1, 1, 1, 81  |
+/// | Coverage CI, under `llvm-cov`| (not sampled)| 2, 2, 16, 20 |
+///
+/// Beside those, 20 local suite runs on a 10-core macOS host: median 2 over
+/// their ~80 observations, maximum 113. That row is a summary rather than
+/// four counts, which is why it is not in the table.
+///
+/// The coverage leg is sampled because it runs these rows too, under
+/// instrumentation, on the same runner class as the Linux legs — the
+/// environment most likely to inflate what is being measured. It shows in
+/// the lower order statistics — a floor of 2 where every other leg's is 1,
+/// and a third value of 16 against 8, 6, 2 and 2 for the Linux samples —
+/// but not at its own top: its maximum of 20 is exactly Linux beta's
+/// uninstrumented maximum from the same run. That is one sample on a runner
+/// class that never produced anything near 155, so it says instrumentation
+/// did not lift the Linux maximum, not that it leaves maxima alone.
+///
+/// `250_000` is about 1,600x the worst of those. `HOLD_YIELDS` takes 39x over
+/// its own worst observed, and the two ratios are not comparable, in two
+/// ways that both cut against this one. Its denominator is an outlier taken
+/// under contention — incidental rather than deliberate, a macOS run that
+/// happened to have a build beside it — where this is whatever seven CI
+/// legs were carrying. (The deliberately contended sampling in that table
+/// is its Linux column, whose maximum is 3511, and the 39x is not over
+/// that.) And its 6664 was measured on the caller that bounds a *stall* —
+/// a count that resets at every progress mark, so an arbitrarily long total
+/// wait passes as long as no single gap exceeds it — where this bounds a
+/// total that never resets. Measured against the more forgiving of the two
+/// shapes, that 39x is the more forgiving 39x, so the larger ratio here
+/// buys less than the arithmetic suggests. (`HOLD_YIELDS` has a second
+/// caller that is a flat total, like this one; the denominator is not from
+/// it.)
+///
+/// That margin is in counts, and it stays in counts deliberately. Turning
+/// it into a wall-clock tolerance would need the per-yield rate for the
+/// regime a late-but-correct commit sits in — a producer runnable but not
+/// yet scheduled — and no measurement of this loop in that regime exists.
+/// The rates that do exist bracket it widely: 0.15 µs idle and 2.1 µs
+/// against eight competing spinners, putting `250_000` at 37.5 ms and
+/// 525 ms — nowhere near the tens of seconds the blocked-peer rate
+/// implies. Two
+/// substitutions sit under those figures, and only one is signed. They are
+/// *release*-build measurements standing in for a debug suite, and the one
+/// debug rate available (154 µs) is three orders above the idle one, so
+/// that direction errs low. They were also taken on an Apple M1 Max, and
+/// `swtch_pri` on Darwin is not `SwitchToThread` on Windows — a
+/// substitution this file has been wrong about before (see `HOLD_YIELDS`:
+/// "sampling one platform and calling the ratio a margin is how this
+/// constant was first set, and it was wrong by an order of magnitude"), and
+/// which could err either way. So the count ratio is left to stand on its
+/// own rather than dressed up as a duration.
+///
+/// What the counts cannot show is a tail, which is the other half of why
+/// the ratio above is not the clearance it looks like. The worst entry is
+/// one observation out of two runs of that leg — the same leg's second run
+/// peaked at 34 — and the sampling that found `HOLD_YIELDS`'s outlier has
+/// no counterpart here: 100 Linux runs at 4x oversubscription, and a macOS
+/// run taken beside a running build. Instrumentation is the only extra load
+/// represented above, and oversubscription is not the same thing.
+/// Read 155 as the worst *sampled*, not the worst that exists. The tree's
+/// one measurement of that gap is `HOLD_YIELDS`'s macOS outlier of 6664,
+/// which stands at 18x its column's uncontended maximum of 373 while its
+/// own doc calls it a thirtyfold tail without saying which member the 30x
+/// is over. Take the larger, since the point is not to flatter the margin:
+/// a thirtyfold tail on 155 puts the real worst near 4,650, leaving
+/// `250_000` with roughly 54x of headroom rather than 1,600x. That is the
+/// figure to carry, because 1,600x is the one a reader would otherwise
+/// quote.
+///
+/// Borrowing that factor is a different move from comparing the two
+/// margins, which the paragraph above declines to do. A margin is a
+/// property of the bound — and a stall bound's is more forgiving than a
+/// total's, so 39x and 1,600x are not the same kind of number. A tail factor
+/// is a property of the *host*: how much worse an unsampled run can be than
+/// a sampled one under the same scheduler. That transfers across bound
+/// shapes in a way the margin does not. It transfers weakly all the same,
+/// since it comes from one macOS column and this bound's worst is a Windows
+/// observation, which is why 54x is the conservative end of a factor the
+/// tree does not pin down rather than a derived quantity.
+///
+/// **Why not smaller.** Issue #305 proposed "tens of thousands", reporting
+/// in single-digit seconds, on the premise that "the passing path exits at
+/// the commit whatever the bound is, so a smaller value costs a passing
+/// suite nothing". That premise does not survive the measurement #305 asked
+/// for, and retiring it is the main thing this accounting establishes.
+///
+/// A correct-but-late run spends this bound too, and what it has to outlast
+/// is a scheduling quantum. A Windows clock interval is ~15.6 ms and a
+/// quantum is a multiple of it — twelve intervals, about 187 ms, under the
+/// long fixed quantum Server defaults to, which is what `windows-latest`
+/// runners are. The mechanism is why a count cannot simply wait that out:
+/// `thread::yield_now` is `SwitchToThread` on Windows, which yields only to
+/// a thread already ready on the *calling* processor, so a producer queued
+/// behind a long-running thread on another core is not reached by yielding
+/// at all. It is reached when that thread's quantum expires, or when this
+/// thread is itself preempted — quantum-scale events that a sub-quantum
+/// bound can run out before.
+///
+/// That makes the value a threshold rather than a slider:
+///
+/// | bound   | idle rate | contended rate | vs ~187 ms quantum |
+/// | ---     | ---       | ---            | ---                |
+/// | 50,000  | 7.5 ms    | 105 ms         | under at both ends |
+/// | 250,000 | 37.5 ms   | 525 ms         | over at one end    |
+///
+/// `50_000` reports in 7.7 s and clears the target #305 names, but spends
+/// its whole budget inside one quantum at either rate. `250_000` reports in
+/// ~38 s and crosses the quantum at the contended end. The two costs are
+/// not symmetric, which is what decides it: a slow report is paid once, by
+/// whoever broke the fixture, and terminates either way, while a bound that
+/// expires on a correct tree is paid by every pull request, on a required
+/// check, indefinitely.
+///
+/// Most of #305's complaint was about *diagnosis* rather than latency — a
+/// bound that slow "reads as a hang rather than as the failure it is" — and
+/// the panic here now names the bound and both of its possible causes,
+/// which answers that half at any value.
+///
+/// **This is a decision rule, not a measurement.** `250_000` is not
+/// supported by evidence that `50_000` lacks; both are choices under the
+/// same unmeasured tail, and the contended rate above is itself borrowed
+/// from another host and build profile. It is chosen because where the
+/// uncertainty is unresolved, the cheaper thing to be wrong about is the
+/// slow report. Issue #342 carries the contended measurement that would
+/// replace this rule with a number, in either direction.
+const HANDSHAKE_YIELDS: usize = 250_000;
 
 /// How many turns a series hands the executor before asserting that
 /// something has **not** happened.
@@ -707,32 +858,48 @@ impl MidBatchHandshake {
     ///
     /// The wait is a counted number of scheduler yields with a poll for the
     /// signal between them, so it ends either at the commit or at its bound,
-    /// and never on a clock. The bound's value is mechanism, like every
-    /// other hang guard here: the *ordering* this establishes does not
-    /// depend on how many yields it took to observe.
+    /// and never on a clock. The *ordering* this establishes does not depend
+    /// on how many yields it took to observe; the bound's value does not
+    /// affect it either way. What the value does decide is the diagnosis
+    /// below — see [`HANDSHAKE_YIELDS`].
     ///
     /// # Panics
     ///
-    /// Panics when the bound is spent with no signal, which means the gated
-    /// producer never reached its send.
+    /// Panics when the bound is spent with no signal. At the bound's current
+    /// size that is *usually* a producer that never reached its send, but it
+    /// is not proof of one: the same exhaustion can come from a correct
+    /// producer that was not dispatched inside the window, which is why the
+    /// message names both.
+    ///
+    /// Panics too when the gate's sender is gone before a signal arrives —
+    /// the gated run torn down without reaching its send — which is a
+    /// distinct failure and says so.
     #[expect(
         clippy::panic,
         reason = "an exhausted bound fails the test, which is what a panic is here"
     )]
     pub fn open_and_await_commit(&self) {
         self.open.store(true, Ordering::SeqCst);
-        for _ in 0..HANDSHAKE_YIELDS {
+        // Counts down so the last pass can read without yielding again:
+        // the body polls *then* yields, so a plain `0..N` leaves its final
+        // `yield_now` in a window nothing looks at, and a commit landing
+        // there would be discarded and reported as a failure. This spends
+        // exactly `HANDSHAKE_YIELDS` yields — which keeps the panic below
+        // honest — across one more poll than that.
+        for remaining in (0..=HANDSHAKE_YIELDS).rev() {
             match self.committed.try_recv() {
                 Ok(()) => return,
-                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Empty) if remaining > 0 => thread::yield_now(),
+                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     panic!("the gated producer's run ended before it reached its send")
                 }
             }
         }
         panic!(
-            "the mid-batch handshake was not answered in {HANDSHAKE_YIELDS} scheduler yields: \
-             the gated producer never committed while the batch was running"
+            "the mid-batch handshake was not answered in {HANDSHAKE_YIELDS} scheduler yields. \
+             Either the gated producer never committed while the batch was running, or it was \
+             going to and this bound ran out first — see HANDSHAKE_YIELDS for which is which"
         );
     }
 }
@@ -1326,9 +1493,15 @@ pub fn step_when_ready<P: Program, B: Backend>(
     source: WakeSource,
     max_turns: usize,
 ) -> StepReport<B::Error> {
-    for _ in 0..max_turns {
+    // Counts down so the last turn's result is read: a plain `0..max_turns`
+    // takes its final turn with nothing polling afterwards, so a pass that
+    // becomes ready *because of* that turn is reported as exhausted.
+    for remaining in (0..=max_turns).rev() {
         if let Ok(stepped) = driver.step_pass(source) {
             return stepped;
+        }
+        if remaining == 0 {
+            break;
         }
         // Exactly one turn: the predicate is false on its first reading and
         // true on the one after the turn.
@@ -1623,9 +1796,15 @@ pub async fn drive_to_ready<E, F>(probe: &ParkProbe, mut future: Pin<&mut F>) ->
 where
     F: Future<Output = Result<Exit, E>>,
 {
-    for _ in 0..TEST_TURNS {
+    // Counts down for the same reason `step_when_ready` does: the last
+    // turn's result has to be polled, or a future that completes on it is
+    // reported as exhausted.
+    for remaining in (0..=TEST_TURNS).rev() {
         if let Poll::Ready(output) = probe.poll(future.as_mut()) {
             return output;
+        }
+        if remaining == 0 {
+            break;
         }
         turn().await;
     }
@@ -1644,9 +1823,16 @@ where
     reason = "an exhausted bound fails the test, which is what a panic is here"
 )]
 pub async fn settle_until(mut condition: impl FnMut() -> bool, what: &str) {
-    for _ in 0..=TEST_TURNS {
+    // Counts down like the other bounded waits here, which for this one is
+    // an accounting fix rather than a coverage one: `0..=TEST_TURNS` already
+    // read after its last turn, but spent `TEST_TURNS + 1` of them while
+    // reporting `TEST_TURNS`.
+    for remaining in (0..=TEST_TURNS).rev() {
         if condition() {
             return;
+        }
+        if remaining == 0 {
+            break;
         }
         turn().await;
     }
@@ -1808,7 +1994,12 @@ mod tests {
     /// failures; the macOS column is 11 runs at default parallelism, ten of
     /// them between 68 and 373 and one at 6664 with a build running beside
     /// them. That single outlier is the number the margin is taken against,
-    /// because a thirtyfold tail is the thing a bound has to survive.
+    /// because a thirtyfold tail is the thing a bound has to survive. (What
+    /// the 30x is taken over is not recorded: 6664 against the ten runs of
+    /// 68-373 is anywhere from 18x to 98x, and 30x falls inside that band
+    /// without matching either end. `HANDSHAKE_YIELDS`'s doc reuses the 30x
+    /// as a tail factor, which errs conservative against the 18x that the
+    /// max-to-max reading would give.)
     ///
     /// A count is not a portable unit, which is why both columns exist: a
     /// `thread::yield_now()` yields the scheduling quantum on Darwin and
@@ -1818,15 +2009,28 @@ mod tests {
     ///
     /// Failing is the only thing a larger value delays, and it is measurably
     /// expensive: a yield costs about 154 µs in a debug build *with a blocked
-    /// peer*, which is the failing path's own condition, so
-    /// [`HANDSHAKE_YIELDS`] would report a regression 154 seconds later — a
-    /// bound that slow reads as the hang it replaces.
+    /// peer*, which is the failing path's own condition. A million yields at
+    /// that rate is 154 seconds of silence before a failure is named, which
+    /// reads as the hang the guard replaces — the ceiling any bound here has
+    /// to sit under.
     ///
-    /// So the value sits far above the worst stall and far below that:
-    /// `262_144` is about 39x over 6664 and 75x over 3511, for a failure
-    /// reported in around 45 seconds. A bound that merely clears the observed
-    /// maximum is how the budget this change removed came to fail in the
-    /// first place.
+    /// It is only a ceiling, not the value: what a stall here has to outlast
+    /// is a whole driver script's drop rather than one producer reaching its
+    /// send, so the number comes from this wait's own table. That is also why
+    /// it lands so far from [`HANDSHAKE_YIELDS`]'s — this one is pinned from
+    /// below by a tail 6664 yields deep, seen under incidental contention,
+    /// and a reporting time is what is left over rather than a target it was
+    /// chosen to hit.
+    ///
+    /// So the value sits far above the worst stall and far below that
+    /// ceiling: `262_144` is about 39x over 6664 and 75x over 3511, for a
+    /// failure reported in around 45 seconds — a figure that implies about
+    /// 172 µs per yield rather than the 154 µs quoted above, at which the
+    /// same bound reports in 40 s. Neither rate has ever been measured for
+    /// *this* wait, which is issue #342's business, so the number is left as
+    /// it was rather than rederived from a rate borrowed off another loop. A
+    /// bound that merely clears the observed maximum is how the budget this
+    /// change removed came to fail in the first place.
     const HOLD_YIELDS: usize = 262_144;
 
     // The gate stores its release rather than signalling it, which is what
@@ -1860,13 +2064,21 @@ mod tests {
         };
         thread::spawn(move || drop(held));
 
-        for _ in 0..HOLD_YIELDS {
+        // Counts down for the reason `open_and_await_commit` does: reading
+        // then yielding leaves the last `yield_now` in a window nothing
+        // looks at, so a mark landing there would be discarded and reported
+        // as a failure. This spends `HOLD_YIELDS` yields across one more
+        // read than that.
+        for remaining in (0..=HOLD_YIELDS).rev() {
             if quiesced.marked() {
                 assert!(
                     gate.entered(),
                     "the dismantling recorded itself on the way in"
                 );
                 return;
+            }
+            if remaining == 0 {
+                break;
             }
             thread::yield_now();
         }
@@ -2054,7 +2266,7 @@ mod tests {
 
         let mut seen = watch_progress.marks();
         let mut stalled = 0_usize;
-        while stalled < HOLD_YIELDS {
+        loop {
             if watch_exited.marked() {
                 let cause = reported
                     .lock()
@@ -2084,6 +2296,14 @@ mod tests {
             } else {
                 seen = marks;
                 stalled = 0;
+            }
+            // Tested after both reads rather than as a `while` condition, so
+            // the last yield's window is read like every other one: a mark
+            // landing there resets the count instead of being lost, and the
+            // loop still spends exactly `HOLD_YIELDS` yields before giving
+            // up.
+            if stalled > HOLD_YIELDS {
+                break;
             }
             thread::yield_now();
         }
