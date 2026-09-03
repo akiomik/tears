@@ -44,13 +44,17 @@
 //! `view` calls the program under test counts, the driver owning its
 //! terminal and reporting nothing about frames (RFC 0008 §9.11).
 //!
-//! **Waiting.** No series sleeps, arms a timer, or reads a wall clock. Every
-//! wait is a bounded number of executor turns and fails the test on its
-//! bound, and both budgets that a script owns — `settle`'s and `confirm`'s —
-//! are named at the call site (RFC 0008 §9.6, §9.8). One wait is the
-//! exception and is documented where it lives: the mid-batch handshake's
-//! `recv` is an untimed block rather than a timed one, because a deadline
-//! would be a clock read.
+//! **Waiting.** No series sleeps, arms a timer, or reads a wall clock, and
+//! no wait can fail to end. Most are a bounded number of executor turns and
+//! fail the test on that bound, with both budgets a script owns —
+//! `settle`'s and `confirm`'s — named at the call site (RFC 0008 §9.6,
+//! §9.8). The mid-batch handshake counts scheduler yields instead, since
+//! the party it waits on runs on another thread, but it is bounded the same
+//! way. The gated-quiescence hold is the second form: it blocks on a
+//! release rather than a count, and what makes it terminate is structural —
+//! the type that drives the release owns it, so a script has no way to omit
+//! it. A deadline is ruled out in all of them for one reason, that it would
+//! be a clock read.
 //!
 //! **Four rows drive a multi-worker executor**, and take their determinism
 //! from an application-side handshake rather than from INV-RC14. A pass is a
