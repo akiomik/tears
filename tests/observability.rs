@@ -15,7 +15,10 @@ use std::future::pending;
 use std::num::NonZeroU64;
 
 use color_eyre::eyre::Result;
-use gauges::{PRODUCER_GAUGES, producer_gauge_report, producer_gauges_are_zero};
+use gauges::{
+    PRODUCER_GAUGES, SETTLE_STEPS, producer_gauge_report, producer_gauges_are_zero,
+    producer_gauges_rose,
+};
 use ratatui::Frame;
 use tears::command::CommandId;
 use tears::prelude::*;
@@ -88,31 +91,17 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
     // number of passes — that count is a tokio cooperative-budget detail, so a
     // fixed wait would make this assertion flake on a scheduler change. The cap
     // only bounds a pathological hang; the loop exits the moment they settle.
-    for _ in 0..1_000 {
+    for _ in 0..SETTLE_STEPS {
         if producer_gauges_are_zero(&recorder, &PRODUCER_GAUGES) {
             break;
         }
         yield_now().await;
     }
-    // The rise assertions come first so a total-emission outage reports as
+    // The rise assertion comes first so a total-emission outage reports as
     // "never rose" rather than as a settle failure; the census assert then
-    // carries the whole fall claim with its per-field diagnostic.
-    let subscriptions = recorder.u64_values("subscriptions");
-    let unkeyed = recorder.u64_values("unkeyed_commands");
-    let keyed = recorder.u64_values("keyed_commands");
-
-    assert!(
-        subscriptions.contains(&1),
-        "starting a subscription must raise the subscriptions gauge: {subscriptions:?}"
-    );
-    assert!(
-        unkeyed.contains(&1),
-        "starting an unkeyed command must raise the unkeyed_commands gauge: {unkeyed:?}"
-    );
-    assert!(
-        keyed.contains(&1),
-        "starting a keyed command must raise the keyed_commands gauge: {keyed:?}"
-    );
+    // carries the whole fall claim with its per-field diagnostic. Both halves
+    // take the whole census, so a gauge added to it is held to both here.
+    producer_gauges_rose(&recorder, &PRODUCER_GAUGES);
 
     assert!(
         producer_gauges_are_zero(&recorder, &PRODUCER_GAUGES),

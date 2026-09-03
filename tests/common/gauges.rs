@@ -1,8 +1,9 @@
 //! The INV-LC7 producer-gauge census, shared via `#[path]` so every
 //! integration target that reads the gauges reads one definition of the
-//! field set and one meaning of "settled" — a producer gauge added here
-//! reaches every census at once instead of leaving a copy waiting on the
-//! old set.
+//! field set, one meaning of "rose", one meaning of "settled", and one
+//! bound on how long settling may take — a producer gauge added here
+//! reaches every census at once, on both halves, instead of leaving a copy
+//! waiting on the old set.
 //!
 //! An including target must also declare the recorder at its crate root,
 //! spelled exactly `#[path = "common/trace_recorder.rs"] mod
@@ -20,6 +21,81 @@ use crate::trace_recorder::TraceRecorder;
 /// source of truth is `GaugeSnapshot::dispatch` in `src/runtime/load.rs`,
 /// the schema's single emitter.
 pub const PRODUCER_GAUGES: [&str; 3] = ["subscriptions", "unkeyed_commands", "keyed_commands"];
+
+/// How many settle steps a census may take before it reports the quiescent
+/// postcondition as unmet.
+///
+/// This counts executor drains, not intervals, so host load cannot consume it.
+/// One step is one `yield_now`, and under the `current_thread` scheduler that
+/// is a complete drain of the run queue: the caller's waker goes on the
+/// deferred list, so `block_on` keeps popping tasks until the queue is empty
+/// before it wakes the deferred wakers and polls the caller again. The
+/// teardown needs exactly one such drain — aborting a task leaves it queued
+/// and cancelled, and running it drops the future — so the bound carries three
+/// orders of magnitude of margin over the mechanism it waits on.
+///
+/// A step must not advance the paused clock, which rules out a
+/// `sleep`/`timeout` bound however appealing "settled or never will" sounds as
+/// a formulation. Advancing virtual time hands a producer that the teardown
+/// failed to cancel a second way to stop — its own timer firing into the
+/// channel whose receiver the teardown dropped — and the rows this bounds
+/// exist to catch exactly that failure. `yield_now` reschedules through the
+/// deferred list, which keeps the scheduler off the parking path and therefore
+/// keeps the clock still.
+pub const SETTLE_STEPS: usize = 1_000;
+
+/// Asserts every gauge named in `expected_active` rose while the row's
+/// producers ran.
+///
+/// The census's positive half, and what makes its settle half witness
+/// anything: every gauge event carries all the counts at once, so a gauge that
+/// never rose still reads `Some(0)` on some other producer's event and settles
+/// on iteration zero. Naming the risen gauges is what separates "wound down"
+/// from "never started". Taking the set as an argument is what keeps this half
+/// following [`PRODUCER_GAUGES`] — a gauge added there is rise-checked
+/// wherever the caller passes the whole census, instead of leaving a
+/// hand-unrolled copy asserting the old set.
+///
+/// "Rose" is any reading above zero rather than a reading of exactly one. The
+/// two agree for a counter that moves by one per producer and emits on every
+/// move, so they can only differ where an emission was lost — and there the
+/// exact-value form fails for the wrong reason, reporting a gauge that plainly
+/// ran as one that never started. How many producers ran is a different claim,
+/// left to the rows that make it.
+///
+/// Guarded on census membership like [`producer_gauges_are_zero`], and for
+/// a reason particular to this direction: `u64_values` reads a field name
+/// off the whole `tears::runtime::load` target, and every gauge event also
+/// carries `seq` and `runtime_id` — both above zero by construction. A name
+/// that misses the census does not read empty and fail; it can read one of
+/// those and *pass*, asserting that the ordering counter rose. The guard is
+/// what keeps this half unable to satisfy itself on a non-gauge.
+///
+/// Written as a plain loop rather than an iterator chain for the same
+/// `#[track_caller]` reason as [`producer_gauges_are_zero`].
+///
+/// # Panics
+///
+/// If any name is outside [`PRODUCER_GAUGES`], or any named gauge has no
+/// reading above zero.
+#[track_caller]
+pub fn producer_gauges_rose(recorder: &TraceRecorder, expected_active: &[&str]) {
+    assert!(
+        expected_active
+            .iter()
+            .all(|field| PRODUCER_GAUGES.contains(field)),
+        "a rise assertion on a name outside the census can pass on an unrelated load field: \
+         {expected_active:?}"
+    );
+    for field in expected_active {
+        let values = recorder.u64_values(field);
+        assert!(
+            values.iter().any(|&value| value > 0),
+            "the {field} gauge must have risen while this row's producers ran, \
+             or its fall to zero witnesses nothing: {values:?}"
+        );
+    }
+}
 
 /// Whether every producer gauge has reached its terminal reading.
 ///
