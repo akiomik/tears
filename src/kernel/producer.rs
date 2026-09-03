@@ -343,8 +343,22 @@ mod tests {
         RunKind::Sub(subscription.id().clone())
     }
 
-    /// The four producer gauges as `tears::runtime::load` reports them over
-    /// one run's guard: the values while it is held, then after it drops.
+    /// The three run-scoped producer gauges as `tears::runtime::load` reports
+    /// them over one run's guard: the values while it is held, then after it
+    /// drops. (`blocked`, the fourth field on the same snapshot, belongs to
+    /// the bounded-send layer and no run guard moves it.)
+    ///
+    /// Read per event, not by zipping three flattened per-field logs: `zip`
+    /// pairs by position and truncates to its shortest input without
+    /// reporting the mismatch, so a count that stopped riding every snapshot
+    /// would shift these triples or shorten the vector — and a shortened one
+    /// takes the `is_empty()` rows below with it, passing them on an emission
+    /// gap rather than on the absence they asserted. `u64_event_values`
+    /// refuses a snapshot carrying only some of the three instead.
+    ///
+    /// A snapshot carrying *none* of them is still skipped, so this trace
+    /// still empties out under a total gauge outage — what refuses that is
+    /// the two rows below that expect values, not this shape.
     fn gauge_trace(kind: &RunKind) -> Vec<(u64, u64, u64)> {
         let recorder = TraceRecorder::new().with_target("tears::runtime::load");
         let _guard = recorder.set_default();
@@ -352,15 +366,10 @@ mod tests {
 
         drop(gauge_guard(&observer, kind));
 
-        let subscriptions = recorder.u64_values("subscriptions");
-        let unkeyed = recorder.u64_values("unkeyed_commands");
-        let keyed = recorder.u64_values("keyed_commands");
-
-        subscriptions
+        recorder
+            .u64_event_values(["subscriptions", "unkeyed_commands", "keyed_commands"])
             .into_iter()
-            .zip(unkeyed)
-            .zip(keyed)
-            .map(|((subscriptions, unkeyed), keyed)| (subscriptions, unkeyed, keyed))
+            .map(<(u64, u64, u64)>::from)
             .collect()
     }
 
