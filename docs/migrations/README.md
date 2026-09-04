@@ -26,14 +26,28 @@ which of these changes reaches me, and how do I tell?
   snippets are compiled by `cargo test --doc` and cannot drift from the API.
   It adds no public module, so it can be deleted once the release it covers is
   far enough back.
-- **Adding a guide takes two edits, not one.** Besides the `include_str!` in
-  `src/lib.rs`, add the file to `include` in `Cargo.toml` — named
-  individually, so the maintainer-facing files here (this README) stay out of
-  the package. Miss it and nothing fails until someone runs `cargo test --doc`
-  against the *published* crate: `cargo publish` verifies with `cargo build`,
-  which drops the `cfg(doctest)` item before the macro runs. `just
-  test-doc-packaged` reproduces the published tree and is what the CI
-  `doctest` job runs; removing a guide means removing both edits.
+- **Adding a guide is four edits besides the file itself, and only one of
+  them fails loudly.** Removing a guide undoes the first three; the fourth
+  is repointed rather than removed.
+
+  - `include_str!` in `src/lib.rs`, under `cfg(doctest)`.
+  - The file in `include` in `Cargo.toml`, named individually so the
+    maintainer-facing files here (this README) stay out of the package.
+    **This is the loud one**, and only just: nothing fails until someone
+    runs `cargo test --doc` against the *published* crate, because `cargo
+    publish` verifies with `cargo build`, which drops the `cfg(doctest)`
+    item before the macro runs. `just test-doc-packaged` reproduces the
+    published tree and is what the CI `doctest` job runs.
+  - A row in the index below. Miss it and nothing fails at all — the guide
+    is merely unfindable from here.
+  - A pointer from the release's own `CHANGELOG.md` section, which is where
+    an upgrading reader starts and the only one of these paths they are
+    likely to be on. 0.11.0's is the blockquote above its `Added` list, and
+    it is repo-relative. Nothing reports this one either. When the guide is
+    eventually deleted, repoint this link at the release's tag rather than
+    dropping it: the entry describes a past release and stays as it was
+    written, and that release's published notes already link the guide
+    there.
 - "Before" snippets are marked `ignore`; they describe an API that is gone.
   Where "this no longer builds" is the point being taught, use `compile_fail`
   against the current API instead.
