@@ -514,7 +514,7 @@ fn a_discarded_quit_s_dequeue_retires_its_origin_with_the_kernel_still_running()
         );
     }
     let readings = recorder.u64_values(KEYED_GAUGE);
-    let recorded_since = &readings[readings_at_retirement..];
+    let recorded_since = &readings.arrival_order()[readings_at_retirement..];
     assert!(
         recorded_since.iter().all(|&count| count == 0),
         "the retirement holds through the drain: no reading recorded after it counts a keyed \

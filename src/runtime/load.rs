@@ -670,8 +670,8 @@ mod tests {
         drop(first);
 
         assert_eq!(
-            recorder.u64_values("seq"),
-            vec![1, 2, 3, 4],
+            recorder.u64_values("seq").arrival_order(),
+            [1, 2, 3, 4],
             "each of the four gauge changes emits one event with the next `seq`"
         );
     }
@@ -694,7 +694,7 @@ mod tests {
         drop(second.track_subscription());
         drop(first_clone.track_subscription());
 
-        let ids = recorder.u64_values("runtime_id");
+        let ids = recorder.u64_values("runtime_id").into_arrival_order();
         assert_eq!(
             ids.len(),
             6,
@@ -825,7 +825,7 @@ mod tests {
         let second = LoadObserver::default();
         drop(second.track_subscription());
 
-        let ids = recorder.u64_values("runtime_id");
+        let ids = recorder.u64_values("runtime_id").into_arrival_order();
         assert_eq!(ids.len(), 4, "four gauge changes fired: {ids:?}");
         assert_ne!(
             ids[0], ids[2],
@@ -856,12 +856,13 @@ mod tests {
         let _guard = recorder.set_default();
         let fourth = observer.track_subscription();
 
+        let subscriptions = recorder.u64_values("subscriptions");
         assert_eq!(
-            recorder.u64_values("subscriptions"),
-            vec![3],
+            subscriptions.only(),
+            Some(3),
             "the first event after a subscriber attaches must report the true \
              current count (second, third, fourth still held), not a count \
-             that missed the unobserved changes"
+             that missed the unobserved changes: {subscriptions:?}"
         );
 
         drop(second);
@@ -869,8 +870,8 @@ mod tests {
         drop(fourth);
 
         assert_eq!(
-            recorder.u64_values("subscriptions"),
-            vec![3, 2, 1, 0],
+            recorder.u64_values("subscriptions").arrival_order(),
+            [3, 2, 1, 0],
             "every value reached while subscribed is still emitted, and the \
              count never wraps from an unmatched decrement"
         );
@@ -897,8 +898,8 @@ mod tests {
         drop(observer.track_subscription());
 
         assert_eq!(
-            recorder.u64_values("subscriptions"),
-            vec![1, 0],
+            recorder.u64_values("subscriptions").arrival_order(),
+            [1, 0],
             "a subscriber that only answers enabled() for genuine events must \
              still see both gauge changes"
         );
@@ -957,8 +958,8 @@ mod tests {
         drop(first);
 
         assert_eq!(
-            recorder.u64_values("subscriptions"),
-            vec![1, 2, 1, 0],
+            recorder.u64_values("subscriptions").arrival_order(),
+            [1, 2, 1, 0],
             "every reached value, including the peak of 2, is emitted in order"
         );
     }
@@ -977,11 +978,8 @@ mod tests {
             let _guard = at_trace.set_default();
             batch(1, 1, 0);
         }
-        assert_eq!(
-            at_trace.u64_values("pulled"),
-            vec![1],
-            "batch event is TRACE"
-        );
+        let pulled = at_trace.u64_values("pulled");
+        assert_eq!(pulled.only(), Some(1), "batch event is TRACE: {pulled:?}");
 
         let at_debug = TraceRecorder::new()
             .with_target("tears::runtime::load")
@@ -1011,11 +1009,8 @@ mod tests {
             let _guard = at_debug.set_default();
             LoadObserver::default().set_keyed_entries(1);
         }
-        assert_eq!(
-            at_debug.u64_values("keyed_commands"),
-            vec![1],
-            "gauge event is DEBUG"
-        );
+        let keyed = at_debug.u64_values("keyed_commands");
+        assert_eq!(keyed.only(), Some(1), "gauge event is DEBUG: {keyed:?}");
         {
             let _guard = at_trace.set_default();
             LoadObserver::default().set_keyed_entries(1);

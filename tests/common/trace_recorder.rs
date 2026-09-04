@@ -9,8 +9,8 @@
     reason = "shared cross-target test helper; per-target usage varies (see module docs)"
 )]
 
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
@@ -138,20 +138,26 @@ impl TraceRecorder {
     }
 
     /// Returns all unsigned-integer values recorded for the named event field
-    /// (covers `u64` and `usize` fields).
+    /// (covers `u64` and `usize` fields), as [`Readings`] — which withholds
+    /// the positional reads a current-value assertion would reach for by
+    /// reflex. See that type for which reads stay open and how to name the
+    /// one that does not.
     #[must_use]
-    pub fn u64_values(&self, field: &str) -> Vec<u64> {
-        self.state
-            .u64_events
-            .lock()
-            .expect("trace recorder u64 event log mutex should not be poisoned")
-            .iter()
-            .flat_map(|event| {
-                // Every occurrence, not `field_value`'s first: the flattened
-                // log must not collapse a field a callsite recorded twice.
-                field_values(event, field)
-            })
-            .collect()
+    pub fn u64_values(&self, field: &str) -> Readings {
+        Readings::new(
+            self.state
+                .u64_events
+                .lock()
+                .expect("trace recorder u64 event log mutex should not be poisoned")
+                .iter()
+                .flat_map(|event| {
+                    // Every occurrence, not `field_value`'s first: the
+                    // flattened log must not collapse a field a callsite
+                    // recorded twice.
+                    field_values(event, field)
+                })
+                .collect(),
+        )
     }
 
     /// The named unsigned-integer fields of every event that records them,
@@ -174,6 +180,12 @@ impl TraceRecorder {
     /// event's first occurrence — and with none there would be nothing to
     /// read at all, which is a compile-time error rather than an empty
     /// answer (see the const assertion in the body).
+    ///
+    /// These rows are a plain `Vec`, so `.last()` compiles here even though
+    /// [`Readings`] refuses it. On a gauge field that read is the
+    /// arrival-order current value the contract forbids: take it from
+    /// [`Self::current_u64`] instead, and keep this accessor for what it is
+    /// for — reading the names on one event together.
     ///
     /// # Panics
     ///
@@ -342,6 +354,145 @@ impl TraceRecorder {
             .lock()
             .expect("trace recorder field-set log mutex should not be poisoned")
             .clone()
+    }
+}
+
+/// The readings one event field took, as the recorder's log holds them —
+/// the gauge counts, whose current value the contract below defines, and
+/// the per-event fields beside them (`pulled`, `wait_us`) that have no
+/// current value to take at all.
+///
+/// The gauge contract (`src/runtime/load.rs`, "Ordering") puts a gauge's
+/// current value on its greatest-`seq` event, and says arrival order
+/// matching `seq` order is an implementation coincidence no consumer may
+/// rely on. A plain `Vec<u64>` hands `.last()` to every caller as the
+/// ergonomic default, which puts the arrival-order read one keystroke from
+/// any current-value assertion — the read #318 removed from six files,
+/// and that nothing but a line of `docs/testing.md` then kept out.
+///
+/// So this type publishes no positional read: no first, no last, no index,
+/// no slice, no iterator. Its methods answer what the log *contains*, and a
+/// caller who means to observe the log *as a sequence* says so by name,
+/// through [`Self::arrival_order`] or [`Self::into_arrival_order`]. Those
+/// two and the `Debug` rendering are order-dependent by construction: they
+/// are the sanctioned way to depend on arrival order rather than exceptions
+/// to a wider claim. No method here takes a closure either, so evaluation
+/// order stays unobservable through a stateful predicate as well.
+///
+/// The current value is not on this type at all. It is
+/// [`TraceRecorder::current_u64`], which reads by `seq`.
+///
+/// The refusal reaches exactly the reads that come through this type, and
+/// the compiler applies it wherever such a call site is written. Two things
+/// stay outside it. A later edit could add `last()` to the impl below —
+/// nothing gates the surface itself. And [`TraceRecorder::u64_event_values`]
+/// reads the same log into plain rows, where `.last()` still compiles: with
+/// one name it is this accessor narrowed to each event's first occurrence,
+/// so a current-value read written that way is the arrival-order read again,
+/// on a gauge field. Both are held by review against this paragraph and
+/// `docs/testing.md`, not by the compiler.
+pub struct Readings(Vec<u64>);
+
+impl Readings {
+    /// Wraps a field's flattened log. Private to this helper, so a test
+    /// takes its readings from the recorder rather than minting them in an
+    /// order the runtime never emitted; the rows below build logs directly
+    /// because a boundary is a shape, not a run.
+    const fn new(values: Vec<u64>) -> Self {
+        Self(values)
+    }
+
+    /// How many readings the field recorded.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the field was never recorded — the "this gauge never fired"
+    /// claim, which is about the log itself and so has no current value to
+    /// read.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether some reading was `value`. By value rather than by
+    /// reference: `Readings` is not a slice and should not read like one,
+    /// and a `u64` is `Copy`.
+    #[must_use]
+    pub fn contains(&self, value: u64) -> bool {
+        self.0.contains(&value)
+    }
+
+    /// Whether some reading was above zero — "this gauge rose at some
+    /// point". `false` for an empty log, which is what a gauge that never
+    /// fired never did.
+    #[must_use]
+    pub fn contains_nonzero(&self) -> bool {
+        self.0.iter().any(|&value| value > 0)
+    }
+
+    /// The single reading, when the field recorded exactly one; `None` for
+    /// none, and `None` for several. A caller that has established a lone
+    /// reading takes it here rather than by index, so the "exactly one"
+    /// claim and the value it licenses stay in one place.
+    #[must_use]
+    pub fn only(&self) -> Option<u64> {
+        match *self.0.as_slice() {
+            [value] => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Whether no reading repeats. Vacuously `true` for an empty log and
+    /// for a single reading, which is what the sort-dedup-and-compare-lengths
+    /// idiom this replaces answers there. A row that must also refuse an
+    /// empty log asserts [`Self::is_empty`] beside this one: vacuity is its
+    /// own claim.
+    #[must_use]
+    pub fn all_unique(&self) -> bool {
+        let mut seen = HashSet::with_capacity(self.0.len());
+        self.0.iter().all(|value| seen.insert(*value))
+    }
+
+    /// Whether every reading agrees. Vacuously `true` on the same two
+    /// boundaries as [`Self::all_unique`], and for the same reason: it is
+    /// what the `windows(2)` comparison this replaces answers there.
+    #[must_use]
+    pub fn all_equal(&self) -> bool {
+        self.0.windows(2).all(|pair| pair[0] == pair[1])
+    }
+
+    /// The readings in the order they arrived — the opt-out, for a row
+    /// whose claim really is about arrival order: an exact emission
+    /// sequence, an index into it, a suffix of it.
+    ///
+    /// One grep for this name enumerates the rows that take that dependency
+    /// *through this type*, which is not the whole list. A row reading the
+    /// same log through [`TraceRecorder::u64_event_values`] depends on
+    /// arrival order while naming nothing: `src/runtime/load.rs`'s
+    /// strictly-increasing-`seq` row builds its per-`runtime_id` partitions
+    /// by iterating the rows as they arrived, and `src/kernel/producer.rs`'s
+    /// gauge trace compares exact arrival-order sequences. A divergence
+    /// between dispatch order and `seq` order has to re-examine both sets.
+    #[must_use]
+    pub fn arrival_order(&self) -> &[u64] {
+        &self.0
+    }
+
+    /// [`Self::arrival_order`] by value, for a caller that sorts the
+    /// readings, keeps them past the borrow, or indexes them after a move.
+    #[must_use]
+    pub fn into_arrival_order(self) -> Vec<u64> {
+        self.0
+    }
+}
+
+impl Debug for Readings {
+    /// Renders as the readings alone, so a failure message interpolating a
+    /// `Readings` reads exactly as it did when this was a `Vec<u64>`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&self.0, f)
     }
 }
 
@@ -554,8 +705,8 @@ mod tests {
              lacks a runtime_id, and whichever of a seq tie arrived later"
         );
         assert_eq!(
-            recorder.u64_values("gauge"),
-            vec![5, 9, 7, 1, 8],
+            recorder.u64_values("gauge").arrival_order(),
+            [5, 9, 7, 1, 8],
             "while the flattened view keeps every value in arrival order — the last is exactly \
              where the arrival-order read differs"
         );
@@ -589,6 +740,134 @@ mod tests {
              the instance whose events never carried the field"
         );
         assert_eq!(recorder.current_u64_by_runtime("absent"), BTreeMap::new());
+    }
+
+    // The surface `Readings` publishes, boundaries included. Every answer
+    // below is the one the idiom it replaced already gave — `only` for a
+    // length check and an index, `all_unique` for sort-dedup-and-compare,
+    // `all_equal` for `windows(2)`, `contains_nonzero` for `any(> 0)` — so
+    // the migration moved no call site's meaning. Built through the private
+    // constructor: the recorder path is pinned by the row above, and these
+    // shapes (no reading, one, a repeat) are what a log's boundaries are.
+    #[test]
+    fn readings_answer_what_the_log_contains() {
+        let empty = Readings::new(vec![]);
+        let single = Readings::new(vec![7]);
+        let mixed = Readings::new(vec![0, 3, 0]);
+
+        assert_eq!(empty.only(), None, "no reading can be the only one");
+        assert_eq!(single.only(), Some(7), "the lone reading, without an index");
+        assert_eq!(
+            mixed.only(),
+            None,
+            "and three readings have no single one either — the claim `only` \
+             carries is `exactly one`, not `take the first`"
+        );
+
+        assert!(
+            empty.all_unique(),
+            "an empty log has no repeat, which is what sort-dedup-and-compare answered"
+        );
+        assert!(
+            empty.all_equal(),
+            "and no disagreement, which is what `windows(2)` answered"
+        );
+        assert!(single.all_unique(), "one reading cannot repeat");
+        assert!(single.all_equal(), "or disagree with itself");
+        assert!(!mixed.all_unique(), "the zero recurs");
+        assert!(!mixed.all_equal(), "and the three differs from it");
+        assert!(
+            Readings::new(vec![4, 4]).all_equal(),
+            "two agreeing readings agree"
+        );
+        assert!(
+            Readings::new(vec![4, 5]).all_unique(),
+            "and two differing ones are distinct"
+        );
+
+        assert!(
+            !empty.contains_nonzero(),
+            "a gauge that never fired never rose"
+        );
+        assert!(
+            !Readings::new(vec![0, 0]).contains_nonzero(),
+            "nor did one that only ever read zero"
+        );
+        assert!(mixed.contains_nonzero(), "the three is a rise");
+
+        assert!(mixed.contains(3), "a reading the log holds");
+        assert!(!mixed.contains(9), "and one it does not");
+        assert_eq!(mixed.len(), 3, "every occurrence, including the repeat");
+        assert!(empty.is_empty(), "no event carried the field");
+        assert!(!mixed.is_empty(), "while three readings did");
+        assert_eq!(
+            format!("{mixed:?}"),
+            "[0, 3, 0]",
+            "and the readings render as the log alone: a failure message that \
+             interpolates them reads as it did when this was a `Vec<u64>`"
+        );
+    }
+
+    // Order lives behind the opt-out, and nowhere else on the surface.
+    //
+    // Three of the reads can fail here, and the fixtures are picked so that
+    // they can: a pair whose first reading differs separates a
+    // `contains_nonzero` that consulted a position, and a pair that moves a
+    // repeat separates an `all_equal` that compared the ends and an
+    // `all_unique` that compared neighbours.
+    //
+    // The other four cannot be separated by any permutation, since they are
+    // determined by the log's length or by the set of its values, neither of
+    // which a permutation changes. `len` and `contains` ride along here as
+    // the count and membership reads; `only` and `is_empty` are left out
+    // rather than asserted vacuously. The row above pins all four.
+    //
+    // So this row documents intent for the reads it names; it is not a proof
+    // of the type's rule, since a method added later is outside every
+    // assertion here, and review against the type's docs is what covers that.
+    #[test]
+    fn only_the_arrival_order_reads_depend_on_order() {
+        for (forward, backward) in [
+            (Readings::new(vec![0, 3]), Readings::new(vec![3, 0])),
+            (Readings::new(vec![1, 2, 1]), Readings::new(vec![1, 1, 2])),
+        ] {
+            assert_eq!(
+                forward.len(),
+                backward.len(),
+                "a permuted log is as long: {forward:?} against {backward:?}"
+            );
+            assert_eq!(
+                forward.contains_nonzero(),
+                backward.contains_nonzero(),
+                "and rose in the same readings: {forward:?} against {backward:?}"
+            );
+            assert_eq!(
+                forward.all_unique(),
+                backward.all_unique(),
+                "with the same repeats: {forward:?} against {backward:?}"
+            );
+            assert_eq!(
+                forward.all_equal(),
+                backward.all_equal(),
+                "and the same disagreement: {forward:?} against {backward:?}"
+            );
+            assert_eq!(
+                forward.contains(3),
+                backward.contains(3),
+                "and holds the same readings: {forward:?} against {backward:?}"
+            );
+            assert_ne!(
+                forward.arrival_order(),
+                backward.arrival_order(),
+                "while the opt-out is exactly where the two logs differ"
+            );
+        }
+
+        assert_eq!(
+            Readings::new(vec![1, 2]).into_arrival_order(),
+            vec![1, 2],
+            "which the owned form hands over unchanged"
+        );
     }
 
     #[test]

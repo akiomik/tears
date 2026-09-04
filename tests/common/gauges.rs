@@ -12,7 +12,7 @@
 //! item only one target needs (`no_producer_gauge_event_fired` lives in
 //! `lifecycle.rs` for this reason) stays with its caller.
 
-use crate::trace_recorder::TraceRecorder;
+use crate::trace_recorder::{Readings, TraceRecorder};
 
 /// The settling producer gauges RFC 0011 INV-LC7 reads — three of RFC 0006
 /// §4.4's four counts. `blocked`, the fourth, rides the same snapshot but
@@ -107,7 +107,7 @@ pub fn producer_gauges_rose(recorder: &TraceRecorder, expected_active: &[&str]) 
     for field in expected_active {
         let values = recorder.u64_values(field);
         assert!(
-            values.iter().any(|&value| value > 0),
+            values.contains_nonzero(),
             "the {field} gauge must have risen while this row's producers ran, \
              or its fall to zero witnesses nothing: {values:?}"
         );
@@ -173,7 +173,7 @@ pub fn producer_gauges_are_zero(recorder: &TraceRecorder, expected_active: &[&st
 #[must_use]
 pub fn producer_gauge_report(
     recorder: &TraceRecorder,
-) -> [(&'static str, Option<u64>, Vec<u64>); PRODUCER_GAUGES.len()] {
+) -> [(&'static str, Option<u64>, Readings); PRODUCER_GAUGES.len()] {
     PRODUCER_GAUGES.map(|field| {
         (
             field,
@@ -227,11 +227,12 @@ mod tests {
             blocked = 0u64,
             "producer gauges",
         );
+        let seqs = recorder.u64_values("seq");
         assert_eq!(
-            recorder.u64_values("seq"),
-            vec![1],
+            seqs.only(),
+            Some(1),
             "the premise: the marker reads above zero, so an unguarded rise \
-             check on it would pass"
+             check on it would pass: {seqs:?}"
         );
 
         producer_gauges_rose(&recorder, &["seq"]);
