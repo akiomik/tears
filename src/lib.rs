@@ -76,7 +76,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.9", features = ["ws", "native-tls"] }
+//! tears = { version = "0.11", features = ["ws", "native-tls"] }
 //! ```
 //!
 //! Enables `subscription::websocket::WebSocket`. Requires a TLS feature for `wss://`:
@@ -86,7 +86,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.9", features = ["http"] }
+//! tears = { version = "0.11", features = ["http"] }
 //! ```
 //!
 //! Enables `subscription::http` with Query and Mutation support.

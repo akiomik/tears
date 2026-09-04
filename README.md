@@ -299,7 +299,7 @@ Tears supports optional features that can be enabled in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tears = { version = "0.8", features = ["ws", "rustls"] }
+tears = { version = "0.11", features = ["ws", "rustls"] }
 ```
 
 - **`ws`**: Enables WebSocket subscription support
@@ -312,7 +312,7 @@ tears = { version = "0.8", features = ["ws", "rustls"] }
 
 ```toml
 [dependencies]
-tears = { version = "0.8", features = ["http"] }
+tears = { version = "0.11", features = ["http"] }
 ```
 
 - **`http`**: Enables HTTP Query and Mutation support
