@@ -143,20 +143,58 @@ use trace_recorder::TraceRecorder;
 keeps unused tracing code out of integration-test targets that do not assert
 tracing output.
 
-Read a gauge's *current value* through `current_u64`, never through
-`u64_values(...).last()`: the gauge contract orders events by `seq`, not by
-arrival. The accessor assumes one runtime instance per recorder and
-panics otherwise; a deliberately multi-instance test reads
-`current_u64_by_runtime`, which applies the same greatest-`seq` rule inside
-each `runtime_id`'s own events and which `current_u64` is the one-instance
-convenience over. A row asserting something else about those events — their
-arrival order, or that `seq` strictly increases inside one partition — reads
-the log itself instead; `src/runtime/load.rs`'s two-instance rows do both.
-The rule covers the gauge snapshot's fields — the ones whose events carry
-a `seq`. Other unsigned-integer fields on the same target (`pulled`,
-`updated`, `shared_pending`, `wait_us`) are per-event readings with no
-current value to take; `current_u64` returns `None` for them, so keep those
-on `u64_values`.
+Read a gauge's *current value* through `current_u64`: the gauge contract
+orders events by `seq`, not by arrival. The accessor assumes one runtime
+instance per recorder and panics otherwise; a deliberately multi-instance
+test reads `current_u64_by_runtime`, which applies the same greatest-`seq`
+rule inside each `runtime_id`'s own events and which `current_u64` is the
+one-instance convenience over. The rule covers the gauge snapshot's fields —
+the ones whose events carry a `seq`. Other unsigned-integer fields on the
+same target (`pulled`, `updated`, `shared_pending`, `wait_us`) are per-event
+readings with no current value to take; `current_u64` returns `None` for
+them, so keep those on `u64_values`.
+
+`u64_values` returns `Readings`, not a `Vec<u64>`, and that is what keeps the
+arrival-order read out of a current-value assertion: the type publishes no
+positional read — no first, no last, no index, no slice, no iterator — so
+`u64_values(...).last()` does not compile. What stays open are the reads that
+ask what the log contains (`len`, `is_empty`, `contains`, `contains_nonzero`,
+`only`, `all_unique`, `all_equal`), and a row that needs one of those asks for
+it by name rather than reaching into the sequence: `tests/observability.rs`
+takes `all_equal` for one instance's shared `runtime_id` and `all_unique` for
+its distinct `seq` values, and `src/runtime/channel.rs` takes `only` for the
+lone `wait_us` reading it has just established.
+
+A row whose claim really is about arrival order names `arrival_order()` — or
+`into_arrival_order()` where it sorts the readings, indexes them after a move,
+or keeps them past the borrow. Two shapes qualify: an exact emission sequence
+(`src/runtime/load.rs` pinning `[3, 2, 1, 0]` as every value a subscriber saw)
+and a positional read into the log (the same file's `ids[0]` against `ids[2]`,
+or `src/kernel/conformance/quit.rs`'s suffix after a recorded offset).
+
+One grep for `arrival_order` enumerates the rows that take that dependency
+through `Readings`. It is not the whole list, and a divergence between dispatch
+order and `seq` order has to re-examine the rest as well: a row reading the same
+log through `u64_event_values` depends on arrival order while naming nothing.
+`src/runtime/load.rs`'s row that `seq` strictly increases inside one
+`runtime_id` builds its partitions by iterating the rows as they arrived, and
+`src/kernel/producer.rs`'s gauge trace compares exact arrival-order sequences.
+
+Two reads that look positional but are not: "this gauge never fired at all" is
+`is_empty()` on the log — `tests/lifecycle.rs`'s complement census, whose own
+comment says why it reads the log rather than the current value — and "the
+gauge rose while the producers ran" is `contains_nonzero()`, which the INV-LC7
+census takes. Neither needs the opt-out.
+
+The refusal is a rule about the type's surface, enforced by the compiler at
+every call site that goes through `u64_values`. Two paths stay outside it, and
+review is what holds them. An edit that added `last()` to `Readings` would pass
+the whole run. And `u64_event_values` (below) hands back plain `Vec<[u64; N]>`
+rows, where `.last()` still compiles — with a single name that accessor is
+`u64_values` narrowed to each event's first occurrence, so a current-value read
+written that way is the arrival-order read again, on a gauge field. Take the
+current value from `current_u64`, and keep `u64_event_values` for what it is
+for: reading several names off one event together.
 
 Read several fields of the *same* event through `u64_event_values([...])`
 rather than by zipping as many `u64_values` logs: the per-field logs are
