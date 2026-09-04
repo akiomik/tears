@@ -225,6 +225,23 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 
 Create custom subscriptions by implementing the `SubscriptionSource` trait.
 
+### Composing Reducers
+
+A `Reducer` owns one state transition and the subscriptions that state declares.
+`scope`, `for_each` and `presented` compose one under a parent — a sibling
+feature, one child per row of a `Keyed` collection, or an optionally-present
+child in a `Slot` — and `into_program` closes the stack into a runnable
+`Program` for `ProgramRuntime`. Each boundary qualifies the identities its child
+produces with its own segment and tears a removed child's runs down, so rows
+declaring the same subscription or keying the same command do not collide and no
+removal leaks a run.
+
+An `Application` is run through an adapter over the same kernel, so this is a
+way to write a program rather than a second runtime. See
+[docs/composition.md](docs/composition.md) for when the rewrite is worth it, and
+[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) for
+`dashboard.rs` written the other way.
+
 ## Examples
 
 Check out the [`examples/`](examples/) directory. They fall into two groups,
