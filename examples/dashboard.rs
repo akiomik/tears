@@ -20,7 +20,7 @@
 //! Run with: cargo run --example dashboard
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tears::prelude::*;
@@ -138,7 +138,12 @@ impl Application for App {
             Message::Tasks(msg) => self.update_tasks(msg),
             Message::Details(msg) => self.update_details(msg),
             Message::Activity(msg) => self.update_activity(msg),
-            Message::Terminal(Event::Key(key)) => return handle_key_event(self.focus, key),
+            // Presses only. A terminal that reports releases too — Windows, or
+            // a session with the kitty keyboard protocol on — would otherwise
+            // turn one keystroke into two messages.
+            Message::Terminal(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                return handle_key_event(self.focus, key);
+            }
             Message::Terminal(_) => {}
             Message::TerminalError(e) => {
                 eprintln!("Terminal error: {e}");
@@ -572,7 +577,8 @@ impl StatusState {
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     match key.code {
         // Guarded like the other printable keys below, so `q` stays typable in
-        // the details editor. Esc leaves that panel first.
+        // the details editor. This panel is always present — Esc reloads the
+        // notes rather than leaving — so Tab is how you get out of it.
         KeyCode::Char('q') if focus != Focus::Details => Command::message(Message::Quit).into(),
         KeyCode::Tab => Command::message(Message::FocusNext).into(),
         KeyCode::Up => match focus {

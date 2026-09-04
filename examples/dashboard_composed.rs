@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures::stream;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -271,6 +271,12 @@ impl NavigationState {
 }
 
 struct TaskState {
+    /// The row's own key.
+    ///
+    /// Redundant with the key the collection holds it under, and kept anyway:
+    /// a child is handed its own state and nothing else, so this is how a hook
+    /// it registers can name which row it was.
+    id: TaskId,
     title: String,
     done: bool,
     notes: String,
@@ -281,8 +287,9 @@ struct TaskState {
 }
 
 impl TaskState {
-    const fn new(title: String, notes: String) -> Self {
+    const fn new(id: TaskId, title: String, notes: String) -> Self {
         Self {
+            id,
             title,
             done: false,
             notes,
@@ -341,7 +348,12 @@ impl Reducer for Root {
     fn reduce(&self, state: &mut App, message: Message) -> Command<Message> {
         match message {
             Message::Terminal(event) => match event {
-                Event::Key(key) => key_message(state, key.code)
+                // Presses only. A terminal that reports releases too — Windows,
+                // or a session with the kitty keyboard protocol on — would
+                // otherwise turn one keystroke into two messages, and in this
+                // file two `AddTask`s or two `OpenDetails` are two removals
+                // and two teardown lines.
+                Event::Key(key) if key.kind == KeyEventKind::Press => key_message(state, key.code)
                     .map_or_else(Command::none, |message| Command::message(message).into()),
                 _ => Command::none(),
             },
@@ -360,7 +372,7 @@ impl Reducer for Root {
                 select(state, forward);
                 Command::none()
             }
-            Message::AddTask(label) => {
+            Message::AddTask(title) => {
                 let id = TaskId(state.next_id);
                 state.next_id += 1;
                 // Insertion into an absent key records no removal: nothing was
@@ -368,10 +380,7 @@ impl Reducer for Root {
                 // that case and never the replacing one.
                 state.tasks.insert(
                     id,
-                    TaskState::new(
-                        format!("{label} #{}", id.0),
-                        "Add notes in the details pane.".to_owned(),
-                    ),
+                    TaskState::new(id, title, "Add notes in the details pane.".to_owned()),
                 );
                 state.selected = Some(id);
                 state.status = "Added a task";
@@ -388,7 +397,7 @@ impl Reducer for Root {
                 let title = task.title.clone();
                 state.tasks.insert(
                     id,
-                    TaskState::new(title, "Reloaded from the server.".to_owned()),
+                    TaskState::new(id, title, "Reloaded from the server.".to_owned()),
                 );
                 // The pane was opened for the instance that just left, and it
                 // holds that instance's title and notes; leaving it open would
@@ -404,7 +413,9 @@ impl Reducer for Root {
                 let Some(task) = state.tasks.remove(&id) else {
                     return Command::none();
                 };
-                state.activity.push(format!("deleted: {}", task.title));
+                state
+                    .activity
+                    .push(format!("deleted: #{} {}", id.0, task.title));
                 // A details pane open on the row that just left goes with it,
                 // and the slot's own boundary originates that teardown.
                 close_details_opened_on(state, id);
@@ -531,7 +542,7 @@ impl Reducer for Task {
                 }
                 state.watched = true;
                 let activity = self.activity.clone();
-                let title = state.title.clone();
+                let title = format!("#{} {}", state.id.0, state.title);
                 Command::batch([
                     // Registered here rather than at the root, so it anchors at
                     // this row's scope and the row's own teardown selects it. A
@@ -588,7 +599,7 @@ impl Reducer for Details {
                 }
                 state.opened = true;
                 let activity = self.activity.clone();
-                let title = state.title.clone();
+                let title = format!("#{} {}", state.task.0, state.title);
                 Command::batch([
                     Command::on_teardown(async move {
                         activity.push(format!("closed details: {title}"));
@@ -795,8 +806,8 @@ fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
         let checkbox = if task.done { "[x]" } else { "[ ]" };
         let sync = if task.syncing { " (syncing)" } else { "" };
         ListItem::new(format!(
-            "{marker} {checkbox} {} · {}s{sync}",
-            task.title, task.ticks
+            "{marker} {checkbox} #{} {} · {}s{sync}",
+            id.0, task.title, task.ticks
         ))
     });
     frame.render_widget(
@@ -813,7 +824,8 @@ fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
         || "No details open. Select a task and press Enter.".to_owned(),
         |open| {
             format!(
-                "{} · {}s{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to close.",
+                "#{} {} · {}s{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to close.",
+                open.task.0,
                 open.title,
                 open.ticks,
                 if open.loading { " (loading)" } else { "" },
@@ -885,12 +897,23 @@ fn select(state: &mut App, forward: bool) {
     state.status = "Selected another task";
 }
 
+/// Whether a key press is going into the notes editor.
+///
+/// Focus alone does not answer that. The pane lives in a `Slot`, and
+/// [`Focus::next`] walks through `Details` whether or not the slot is occupied,
+/// so most of the time that focus has no editor behind it. A guard written
+/// against the focus would swallow keys — `q` included — into a boundary with
+/// no occupant to claim them.
+fn editing_notes(state: &App) -> bool {
+    state.focus == Focus::Details && state.details.is_present()
+}
+
 /// The message a key press asks for, if any.
 fn key_message(state: &App, code: KeyCode) -> Option<Message> {
     match code {
         // Guarded like every other printable key below, so `q` stays typable
-        // in the notes editor. Esc leaves that pane first.
-        KeyCode::Char('q') if state.focus != Focus::Details => Some(Message::Quit),
+        // in the notes editor. Esc closes the pane, which is how you leave it.
+        KeyCode::Char('q') if !editing_notes(state) => Some(Message::Quit),
         KeyCode::Tab => Some(Message::FocusNext),
         KeyCode::Up => match state.focus {
             Focus::Navigation => Some(Message::Navigation(NavigationMessage::Up)),
@@ -918,12 +941,12 @@ fn key_message(state: &App, code: KeyCode) -> Option<Message> {
         KeyCode::Char('c') if state.focus == Focus::Activity => {
             Some(Message::Activity(ActivityMessage::Clear))
         }
-        KeyCode::Enter if state.focus == Focus::Details => Some(Message::SaveNotes),
+        KeyCode::Enter if editing_notes(state) => Some(Message::SaveNotes),
         KeyCode::Esc if state.focus == Focus::Details => Some(Message::CloseDetails),
-        KeyCode::Backspace if state.focus == Focus::Details => {
+        KeyCode::Backspace if editing_notes(state) => {
             Some(Message::Details(DetailsMessage::Backspace))
         }
-        KeyCode::Char(character) if state.focus == Focus::Details => {
+        KeyCode::Char(character) if editing_notes(state) => {
             Some(Message::Details(DetailsMessage::Input(character)))
         }
         _ => None,
@@ -1187,35 +1210,35 @@ mod tests {
 
         // Replacing the occupant removes it.
         let report = deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "closed details: alpha #1"));
+        driver.settle(TURNS, || recorded(&activity, "closed details: #1 alpha"));
         let open = anonymous(&report, "occupant setup message");
         deliver(&mut driver, &open);
 
         // Dismissing the slot removes its occupant.
         deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "closed details: beta #2"));
+        driver.settle(TURNS, || recorded(&activity, "closed details: #2 beta"));
 
         // Replacing a row removes it, and the successor starts fresh under the
         // same key.
         let report = deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "stopped watching: beta #2"));
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: #2 beta"));
         let watch = anonymous(&report, "row setup message");
         deliver(&mut driver, &watch);
 
         // Removing a row removes it, and leaves the successor row alone.
         deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "stopped watching: alpha #1"));
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: #1 alpha"));
 
         assert_eq!(
             activity.entries(),
             vec![
-                "closed details: alpha #1".to_owned(),
-                "closed details: beta #2".to_owned(),
-                "stopped watching: beta #2".to_owned(),
+                "closed details: #1 alpha".to_owned(),
+                "closed details: #2 beta".to_owned(),
+                "stopped watching: #2 beta".to_owned(),
                 // The root's own line, written by the reduce that removed the
                 // row, before the teardown it originated ran.
-                "deleted: alpha #1".to_owned(),
-                "stopped watching: alpha #1".to_owned(),
+                "deleted: #1 alpha".to_owned(),
+                "stopped watching: #1 alpha".to_owned(),
             ],
             "one teardown per removal, in removal order, and none for the successor row that is \
              still present"
@@ -1264,11 +1287,11 @@ mod tests {
         deliver(&mut driver, &second);
 
         deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "closed details: alpha #1"));
+        driver.settle(TURNS, || recorded(&activity, "closed details: #1 alpha"));
 
         assert_eq!(
             activity.entries(),
-            vec!["closed details: alpha #1".to_owned()],
+            vec!["closed details: #1 alpha".to_owned()],
             "one removal, one line: the second `Open` armed nothing"
         );
     }
@@ -1303,14 +1326,54 @@ mod tests {
 
         deliver(&mut driver, &script);
         driver.settle(TURNS, || {
-            recorded(&activity, "stopped watching: alpha #1")
-                && recorded(&activity, "closed details: alpha #1")
+            recorded(&activity, "stopped watching: #1 alpha")
+                && recorded(&activity, "closed details: #1 alpha")
         });
 
         assert_eq!(
             activity.entries().len(),
             2,
             "the row and the pane opened on it, and nothing else"
+        );
+    }
+
+    /// `q` quits unless the notes editor is actually there to receive it.
+    ///
+    /// The pane is a `Slot` and the focus cycle passes through `Details`
+    /// either way, so a guard written against the focus alone would swallow
+    /// `q` into a boundary with no occupant — leaving a focus the header still
+    /// advertises `q: quit` from, where it does nothing.
+    #[test]
+    fn q_is_typed_into_the_notes_editor_only_while_one_is_open() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        state.focus = Focus::Details;
+        assert!(
+            matches!(key_message(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "the focus is on an empty pane, so there is no editor to type into"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        assert!(
+            matches!(
+                key_message(&state, KeyCode::Char('q')),
+                Some(Message::Details(DetailsMessage::Input('q')))
+            ),
+            "with an occupant the key is text"
+        );
+
+        state.focus = Focus::Tasks;
+        assert!(
+            matches!(key_message(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "and an open pane the focus is not on does not hold the key"
         );
     }
 }
