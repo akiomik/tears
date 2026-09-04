@@ -32,12 +32,14 @@ which of these changes reaches me, and how do I tell?
 
   - `include_str!` in `src/lib.rs`, under `cfg(doctest)`.
   - The file in `include` in `Cargo.toml`, named individually so the
-    maintainer-facing files here (this README) stay out of the package.
-    **This is the loud one**, and only just: nothing fails until someone
-    runs `cargo test --doc` against the *published* crate, because `cargo
-    publish` verifies with `cargo build`, which drops the `cfg(doctest)`
-    item before the macro runs. `just test-doc-packaged` reproduces the
-    published tree and is what the CI `doctest` job runs.
+    maintainer-facing files here (this README) stay out of the package. **This
+    is the loud one**, and only because a recipe exists to make it so.
+    Publishing does not notice: `cargo publish` verifies with `cargo build`,
+    which drops the `cfg(doctest)` item before the macro expands, so the
+    verification build never looks for the file at all. What does catch it is
+    `just test-doc-packaged`, which reproduces the packaged tree and runs the
+    doctests inside it, and which the CI `doctest` job runs — so a missing
+    entry fails in CI rather than at publication.
   - A row in the index below. Miss it and nothing fails at all — the guide
     is merely unfindable from here.
   - A pointer from the release's own `CHANGELOG.md` section, which is where
