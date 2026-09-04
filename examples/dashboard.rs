@@ -571,7 +571,9 @@ impl StatusState {
 
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     match key.code {
-        KeyCode::Char('q') => Command::message(Message::Quit).into(),
+        // Guarded like the other printable keys below, so `q` stays typable in
+        // the details editor. Esc leaves that panel first.
+        KeyCode::Char('q') if focus != Focus::Details => Command::message(Message::Quit).into(),
         KeyCode::Tab => Command::message(Message::FocusNext).into(),
         KeyCode::Up => match focus {
             Focus::Navigation => {

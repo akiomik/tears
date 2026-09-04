@@ -888,7 +888,9 @@ fn select(state: &mut App, forward: bool) {
 /// The message a key press asks for, if any.
 fn key_message(state: &App, code: KeyCode) -> Option<Message> {
     match code {
-        KeyCode::Char('q') => Some(Message::Quit),
+        // Guarded like every other printable key below, so `q` stays typable
+        // in the notes editor. Esc leaves that pane first.
+        KeyCode::Char('q') if state.focus != Focus::Details => Some(Message::Quit),
         KeyCode::Tab => Some(Message::FocusNext),
         KeyCode::Up => match state.focus {
             Focus::Navigation => Some(Message::Navigation(NavigationMessage::Up)),
