@@ -1,4 +1,4 @@
-//! Structured state management example.
+//! Structured state management, with the root owning the wiring.
 //!
 //! This example shows how to organize a larger application without putting all
 //! state and update logic in one place:
@@ -6,6 +6,16 @@
 //! - Root `Message` wraps child messages such as `TaskMessage`.
 //! - Each child state updates only its own local data.
 //! - The root coordinates cross-component effects such as activity logging.
+//!
+//! That is the right shape while every child is a single instance whose
+//! command ids and subscriptions the root can keep distinct by choosing
+//! distinct values. [`dashboard_composed.rs`](dashboard_composed.rs) is this
+//! same application written with composed reducers, for when a child exists in
+//! more than one instance at a time or comes and goes: there the task list is a
+//! keyed collection with one child reducer per row and the details pane is an
+//! optionally-present child, and each boundary qualifies its child's identities
+//! and tears a removed child's runs down. `docs/composition.md` is the guide to
+//! choosing between the two.
 //!
 //! Run with: cargo run --example dashboard
 
