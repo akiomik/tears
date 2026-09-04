@@ -174,7 +174,15 @@ enum Message {
     FocusNext,
     SelectPrev,
     SelectNext,
-    AddTask(TaskId, String),
+    /// Adds a task under a **freshly allocated** key.
+    ///
+    /// The key is chosen by the reduce and not by the caller on purpose. A
+    /// caller reading `next_id` off the state reads a value the `AddTask`
+    /// messages already in flight have not been applied to yet, so two of them
+    /// would name the same key — and inserting over an occupied key is a
+    /// replacement, which would tear the first row down instead of adding a
+    /// second.
+    AddTask(String),
     DeleteTask(TaskId),
     /// Discards a row's instance and starts a fresh one under the same key.
     ReloadTask(TaskId),
@@ -202,6 +210,12 @@ enum NavigationMessage {
 enum TaskMessage {
     /// The row's one-time setup, routed through the row boundary so the hook it
     /// registers anchors at the row's scope.
+    ///
+    /// **Handled idempotently**, because nothing guarantees it arrives once: a
+    /// key press asks for it through `Command::message`, so two presses decided
+    /// against the same state produce two of these, and every registration a
+    /// scope holds is fired by the teardown that selects it. A second
+    /// registration would put two lines in the activity log for one removal.
     Watch,
     Toggle,
     Sync,
@@ -211,7 +225,8 @@ enum TaskMessage {
 
 #[derive(Debug)]
 enum DetailsMessage {
-    /// The occupant's one-time setup, for the reason [`TaskMessage::Watch`] is.
+    /// The occupant's one-time setup, for the reason [`TaskMessage::Watch`] is,
+    /// and handled idempotently for the same reason.
     Open,
     Loaded(String),
     Input(char),
@@ -259,6 +274,8 @@ struct TaskState {
     title: String,
     done: bool,
     notes: String,
+    /// Whether this instance's setup has already run; see [`TaskMessage::Watch`].
+    watched: bool,
     syncing: bool,
     ticks: u32,
 }
@@ -269,6 +286,7 @@ impl TaskState {
             title,
             done: false,
             notes,
+            watched: false,
             syncing: false,
             ticks: 0,
         }
@@ -279,6 +297,8 @@ struct DetailsState {
     task: TaskId,
     title: String,
     notes: String,
+    /// Whether this instance's setup has already run; see [`DetailsMessage::Open`].
+    opened: bool,
     loading: bool,
     ticks: u32,
 }
@@ -289,6 +309,7 @@ impl DetailsState {
             task,
             title,
             notes,
+            opened: false,
             loading: true,
             ticks: 0,
         }
@@ -339,14 +360,19 @@ impl Reducer for Root {
                 select(state, forward);
                 Command::none()
             }
-            Message::AddTask(id, title) => {
+            Message::AddTask(label) => {
+                let id = TaskId(state.next_id);
+                state.next_id += 1;
                 // Insertion into an absent key records no removal: nothing was
-                // running under it to tear down.
+                // running under it to tear down. The key is fresh, so this is
+                // that case and never the replacing one.
                 state.tasks.insert(
                     id,
-                    TaskState::new(title, "Add notes in the details pane.".to_owned()),
+                    TaskState::new(
+                        format!("{label} #{}", id.0),
+                        "Add notes in the details pane.".to_owned(),
+                    ),
                 );
-                state.next_id = state.next_id.max(id.0 + 1);
                 state.selected = Some(id);
                 state.status = "Added a task";
                 Command::message(Message::Task(id, TaskMessage::Watch)).into()
@@ -364,6 +390,10 @@ impl Reducer for Root {
                     id,
                     TaskState::new(title, "Reloaded from the server.".to_owned()),
                 );
+                // The pane was opened for the instance that just left, and it
+                // holds that instance's title and notes; leaving it open would
+                // let a later `SaveNotes` write them back over the reload.
+                close_details_opened_on(state, id);
                 state.status = "Reloaded the task";
                 Command::message(Message::Task(id, TaskMessage::Watch)).into()
             }
@@ -377,9 +407,7 @@ impl Reducer for Root {
                 state.activity.push(format!("deleted: {}", task.title));
                 // A details pane open on the row that just left goes with it,
                 // and the slot's own boundary originates that teardown.
-                if state.details.get().is_some_and(|open| open.task == id) {
-                    state.details.dismiss();
-                }
+                close_details_opened_on(state, id);
                 if state.selected == Some(id) {
                     state.selected = state.tasks.keys().next().copied();
                 }
@@ -402,7 +430,7 @@ impl Reducer for Root {
                 Command::message(Message::Details(DetailsMessage::Open)).into()
             }
             Message::CloseDetails => {
-                state.details.dismiss();
+                close_details(state);
                 state.status = "Closed the details pane";
                 Command::none()
             }
@@ -498,6 +526,10 @@ impl Reducer for Task {
     fn reduce(&self, state: &mut TaskState, message: TaskMessage) -> Command<TaskMessage> {
         match message {
             TaskMessage::Watch => {
+                if state.watched {
+                    return Command::message(TaskMessage::Sync).into();
+                }
+                state.watched = true;
                 let activity = self.activity.clone();
                 let title = state.title.clone();
                 Command::batch([
@@ -551,6 +583,10 @@ impl Reducer for Details {
     fn reduce(&self, state: &mut DetailsState, message: DetailsMessage) -> Command<DetailsMessage> {
         match message {
             DetailsMessage::Open => {
+                if state.opened {
+                    return Command::none();
+                }
+                state.opened = true;
                 let activity = self.activity.clone();
                 let title = state.title.clone();
                 Command::batch([
@@ -672,11 +708,7 @@ fn seed() -> Vec<Message> {
         "Plan next subscription API",
     ]
     .into_iter()
-    .enumerate()
-    .map(|(index, title)| {
-        let id = u32::try_from(index).expect("three seeds fit") + 1;
-        Message::AddTask(TaskId(id), title.to_owned())
-    })
+    .map(|label| Message::AddTask(label.to_owned()))
     .collect()
 }
 
@@ -816,6 +848,25 @@ fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// Dismisses the details pane and returns the focus it took.
+///
+/// Dismissal is a removal, so the slot's boundary tears the occupant's runs
+/// down; restoring the focus is this function's own half, and without it every
+/// printable key would keep routing to a slot that has no occupant to claim it.
+fn close_details(state: &mut App) {
+    state.details.dismiss();
+    if state.focus == Focus::Details {
+        state.focus = Focus::Tasks;
+    }
+}
+
+/// The same, but only when the pane is open on `task`.
+fn close_details_opened_on(state: &mut App, task: TaskId) {
+    if state.details.get().is_some_and(|open| open.task == task) {
+        close_details(state);
+    }
+}
+
 /// Moves the task selection, wrapping.
 fn select(state: &mut App, forward: bool) {
     let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
@@ -852,10 +903,9 @@ fn key_message(state: &App, code: KeyCode) -> Option<Message> {
         KeyCode::Char(' ') if state.focus == Focus::Tasks => state
             .selected
             .map(|id| Message::Task(id, TaskMessage::Toggle)),
-        KeyCode::Char('n') if state.focus == Focus::Tasks => Some(Message::AddTask(
-            TaskId(state.next_id),
-            format!("New task {}", state.next_id),
-        )),
+        KeyCode::Char('n') if state.focus == Focus::Tasks => {
+            Some(Message::AddTask("New task".to_owned()))
+        }
         KeyCode::Char('d') if state.focus == Focus::Tasks => {
             state.selected.map(Message::DeleteTask)
         }
@@ -1029,11 +1079,13 @@ mod tests {
     #[test]
     fn identical_child_identities_stay_apart_under_their_boundaries() {
         let activity = ActivityLog::default();
+        // `AddTask` allocates the key, so the two rows below are `TaskId(1)`
+        // and `TaskId(2)` in script order and the later messages can name them.
         let mut driver = scripted(
             &activity,
             vec![
-                Message::AddTask(TaskId(1), "alpha".to_owned()),
-                Message::AddTask(TaskId(2), "beta".to_owned()),
+                Message::AddTask("alpha".to_owned()),
+                Message::AddTask("beta".to_owned()),
                 Message::OpenDetails(TaskId(1)),
             ],
         );
@@ -1095,19 +1147,21 @@ mod tests {
         let mut driver = scripted(
             &activity,
             vec![
-                Message::AddTask(TaskId(1), "alpha".to_owned()),
-                Message::AddTask(TaskId(2), "beta".to_owned()),
+                Message::AddTask("alpha".to_owned()),
+                Message::AddTask("beta".to_owned()),
                 Message::OpenDetails(TaskId(1)),
                 // Presenting over an occupied slot: a replacement, which is a
                 // removal of the occupant.
                 Message::OpenDetails(TaskId(2)),
-                // Inserting over an occupied key: the same, one collection
-                // over.
+                // An occupied slot dismissed.
+                Message::CloseDetails,
+                // Inserting over an occupied key: a replacement, one collection
+                // over. The slot is empty by now, so this pass tears exactly
+                // one instance down and the order below stays the removal
+                // order rather than a race between two finalizers.
                 Message::ReloadTask(TaskId(2)),
                 // A row leaving the keyed collection.
                 Message::DeleteTask(TaskId(1)),
-                // An occupied slot dismissed.
-                Message::CloseDetails,
             ],
         );
 
@@ -1131,38 +1185,130 @@ mod tests {
 
         // Replacing the occupant removes it.
         let report = deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "closed details: alpha"));
+        driver.settle(TURNS, || recorded(&activity, "closed details: alpha #1"));
         let open = anonymous(&report, "occupant setup message");
         deliver(&mut driver, &open);
+
+        // Dismissing the slot removes its occupant.
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "closed details: beta #2"));
 
         // Replacing a row removes it, and the successor starts fresh under the
         // same key.
         let report = deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "stopped watching: beta"));
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: beta #2"));
         let watch = anonymous(&report, "row setup message");
         deliver(&mut driver, &watch);
 
-        // Removing a row removes it, and leaves the other row alone.
+        // Removing a row removes it, and leaves the successor row alone.
         deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "stopped watching: alpha"));
-
-        // Dismissing the slot removes its occupant.
-        deliver(&mut driver, &script);
-        driver.settle(TURNS, || recorded(&activity, "closed details: beta"));
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: alpha #1"));
 
         assert_eq!(
             activity.entries(),
             vec![
-                "closed details: alpha".to_owned(),
-                "stopped watching: beta".to_owned(),
+                "closed details: alpha #1".to_owned(),
+                "closed details: beta #2".to_owned(),
+                "stopped watching: beta #2".to_owned(),
                 // The root's own line, written by the reduce that removed the
                 // row, before the teardown it originated ran.
-                "deleted: alpha".to_owned(),
-                "stopped watching: alpha".to_owned(),
-                "closed details: beta".to_owned(),
+                "deleted: alpha #1".to_owned(),
+                "stopped watching: alpha #1".to_owned(),
             ],
             "one teardown per removal, in removal order, and none for the successor row that is \
              still present"
+        );
+    }
+
+    /// A child's setup message is not guaranteed to arrive once, and a second
+    /// one must not arm a second hook.
+    ///
+    /// Two `Enter` presses decided against the same state both ask to open the
+    /// pane. The first occupant is replaced before it ever handles its `Open`,
+    /// so it registered nothing and its removal reports nothing; both `Open`
+    /// messages then reach the survivor. Every registration a scope holds is
+    /// fired by the teardown that selects it, so a child that armed on each
+    /// would put two lines in the log for one removal.
+    #[test]
+    fn a_repeated_setup_message_arms_one_hook() {
+        let activity = ActivityLog::default();
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+                Message::OpenDetails(TaskId(1)),
+                Message::CloseDetails,
+            ],
+        );
+
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        let script = anonymous(&boot, "scripted input run");
+        add_task(&mut driver, &script);
+
+        // Both opens land before either `Open` is delivered, which is what a
+        // second key press ahead of the first message looks like.
+        let first = deliver(&mut driver, &script);
+        let second = deliver(&mut driver, &script);
+        assert!(
+            activity.entries().is_empty(),
+            "the replaced occupant never handled its `Open`, so it had registered nothing"
+        );
+
+        let first = anonymous(&first, "occupant setup message");
+        let second = anonymous(&second, "occupant setup message");
+        deliver(&mut driver, &first);
+        deliver(&mut driver, &second);
+
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "closed details: alpha #1"));
+
+        assert_eq!(
+            activity.entries(),
+            vec!["closed details: alpha #1".to_owned()],
+            "one removal, one line: the second `Open` armed nothing"
+        );
+    }
+
+    /// Replacing a row closes a pane opened on the instance that left.
+    ///
+    /// The pane holds the replaced instance's title and notes, so leaving it
+    /// open would let a later `SaveNotes` write them back over the reload.
+    ///
+    /// Both teardowns are originated by the same reduce, so this asserts which
+    /// hooks fired and not the order they finished in.
+    #[test]
+    fn replacing_a_row_closes_a_pane_opened_on_it() {
+        let activity = ActivityLog::default();
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+                Message::ReloadTask(TaskId(1)),
+            ],
+        );
+
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        let script = anonymous(&boot, "scripted input run");
+        add_task(&mut driver, &script);
+
+        let report = deliver(&mut driver, &script);
+        let open = anonymous(&report, "occupant setup message");
+        deliver(&mut driver, &open);
+
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || {
+            recorded(&activity, "stopped watching: alpha #1")
+                && recorded(&activity, "closed details: alpha #1")
+        });
+
+        assert_eq!(
+            activity.entries().len(),
+            2,
+            "the row and the pane opened on it, and nothing else"
         );
     }
 }

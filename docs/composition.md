@@ -105,6 +105,13 @@ message routed *through* the boundary. In the worked example that is
 `Command::message(Message::Task(id, TaskMessage::Watch))`, and the row's own
 reduce registers its hook.
 
+**Handle such a setup message idempotently.** Nothing guarantees it arrives
+once — a second key press decided against a state the first message has not
+been applied to yet produces a second — and a teardown fires *every*
+registration its scope holds, so a child that arms on each one reports two
+teardowns for one removal. A flag on the child's state is enough; the successor
+instance a replacement creates gets a fresh one.
+
 The same rule explains `Command::on_teardown`'s placement. A registration
 anchors at the scope of the boundary it is built at, and one built at the root
 anchors where no teardown reaches it.
