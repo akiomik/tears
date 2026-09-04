@@ -32,7 +32,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.9", features = ["ws"] }
+//! tears = { version = "0.11", features = ["ws"] }
 //! ```
 //!
 //! ## TLS Support
@@ -47,7 +47,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tears = { version = "0.9", features = ["ws", "native-tls"] }
+//! tears = { version = "0.11", features = ["ws", "native-tls"] }
 //! ```
 
 use futures::stream::{BoxStream, SplitSink, SplitStream};
