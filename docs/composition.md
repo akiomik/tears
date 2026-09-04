@@ -91,7 +91,7 @@ absent key remove no instance, so growing a collection during `init` is fine.
 The four shapes that *do* record belong inside a `reduce`, where the boundary
 drains them in the same update.
 
-## Three things stay at the root
+## What stays at the root
 
 **`view` does.** `Reducer` has no `view` and only `Program` does: pane layout,
 draw order and area allocation are decisions about the whole frame, so
@@ -105,12 +105,13 @@ message routed *through* the boundary. In the worked example that is
 `Command::message(Message::Task(id, TaskMessage::Watch))`, and the row's own
 reduce registers its hook.
 
-**Handle such a setup message idempotently.** Nothing guarantees it arrives
-once — a second key press decided against a state the first message has not
-been applied to yet produces a second — and a teardown fires *every*
-registration its scope holds, so a child that arms on each one reports two
-teardowns for one removal. A flag on the child's state is enough; the successor
-instance a replacement creates gets a fresh one.
+Such a setup message has to be handled *idempotently* by the child, which is
+the child's side of the same rule. Nothing guarantees it arrives once — a
+second key press decided against a state the first message has not been applied
+to yet produces a second — and a teardown fires *every* registration its scope
+holds, so a child that arms on each one reports two teardowns for one removal.
+A flag on the child's state is enough; the successor instance a replacement
+creates gets a fresh one.
 
 The same rule explains `Command::on_teardown`'s placement. A registration
 anchors at the scope of the boundary it is built at, and one built at the root
@@ -129,7 +130,7 @@ itself.
 `TestStore` takes an `Application`, so a composed program is driven with
 `tears::testing::TestDriver` instead: it constructs from the same inputs the
 production entry point takes, boots the program, and steps whole passes, with
-the sends a producer makes released one grant at a time. The two tests in
+the sends a producer makes released one grant at a time. The tests in
 `dashboard_composed.rs` drive that example's own stack — the same `Reducer`
 value `main` runs, closed with the same `init` and `view`, and started from a
 `Setup` carrying a scripted input instead of the binary's seed — and are the
