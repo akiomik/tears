@@ -132,20 +132,30 @@ async fn producer_gauges_rise_and_fall_over_a_run() -> Result<()> {
         }
     }
 
+    // Both reads below are vacuously true on an empty log, and the census
+    // above does not rule one out: it reads the field-name sets, which record
+    // a name whatever type carried it, while these read the unsigned-integer
+    // log. A marker re-emitted as a string — or as a negative integer — would
+    // satisfy every assertion above and empty both reads, so each states its
+    // own non-emptiness first.
     let ids = recorder.u64_values("runtime_id");
     assert!(
-        ids.windows(2).all(|pair| pair[0] == pair[1]),
+        !ids.is_empty(),
+        "the gauge events above carry a runtime_id the unsigned-integer log can read"
+    );
+    assert!(
+        ids.all_equal(),
         "one run is one runtime instance, so its gauge events share one \
          runtime_id: {ids:?}"
     );
 
-    let mut seqs = recorder.u64_values("seq");
-    let emitted = seqs.len();
-    seqs.sort_unstable();
-    seqs.dedup();
-    assert_eq!(
-        seqs.len(),
-        emitted,
+    let seqs = recorder.u64_values("seq");
+    assert!(
+        !seqs.is_empty(),
+        "and a seq the unsigned-integer log can read"
+    );
+    assert!(
+        seqs.all_unique(),
         "no two gauge events of one runtime may share a seq: {seqs:?}"
     );
 

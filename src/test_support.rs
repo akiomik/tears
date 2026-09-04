@@ -8,6 +8,14 @@
 pub use async_utils::{assert_pending_until, gate_fetches, wait_until};
 pub use failing_backend::FailingBackend;
 pub use panic_hook::{HookProbe, hook_guard, on_thread, with_silent_panic_hook};
+// `Readings` (the `u64_values` return type) is deliberately not re-exported.
+// No crate-internal caller names it — call sites reach it through
+// `TraceRecorder::u64_values` and read it by method — and an unused
+// re-export fails the `-D warnings` gate on `unused_imports`. The
+// integration mirror needs no export at all: `#[path]` puts its module at
+// that target's crate root, where `tests/common/gauges.rs` names the type in
+// `producer_gauge_report`'s signature. Add the name here the first time a
+// crate-internal helper spells it out.
 pub use trace_recorder::{TraceRecorder, set_default_subscriber};
 
 mod async_utils;

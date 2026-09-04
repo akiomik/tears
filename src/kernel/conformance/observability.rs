@@ -65,20 +65,23 @@ fn a_batch_reports_its_dequeues_its_updates_and_the_residue_it_left() {
         vec![1, 2],
         "the cap took two of the three"
     );
+    let pulled = recorder.u64_values("pulled");
     assert_eq!(
-        recorder.u64_values("pulled"),
-        vec![2],
-        "one batch event, for the one batch that pulled anything"
+        pulled.only(),
+        Some(2),
+        "one batch event, for the one batch that pulled anything: {pulled:?}"
     );
+    let updated = recorder.u64_values("updated");
     assert_eq!(
-        recorder.u64_values("updated"),
-        vec![2],
-        "both dequeues reached `update`"
+        updated.only(),
+        Some(2),
+        "both dequeues reached `update`: {updated:?}"
     );
+    let shared_pending = recorder.u64_values("shared_pending");
     assert_eq!(
-        recorder.u64_values("shared_pending"),
-        vec![1],
-        "and the third input is what it left in the data lane"
+        shared_pending.only(),
+        Some(1),
+        "and the third input is what it left in the data lane: {shared_pending:?}"
     );
 }
 
@@ -115,13 +118,20 @@ fn a_revoked_origin_s_envelope_is_pulled_without_being_updated() {
         vec![1],
         "the cancel applied, and the revoked origin's item never reached `update`"
     );
+    let pulled = recorder.u64_values("pulled");
     assert_eq!(
-        recorder.u64_values("pulled"),
-        vec![2],
-        "the discarded envelope is still a dequeue"
+        pulled.only(),
+        Some(2),
+        "the discarded envelope is still a dequeue: {pulled:?}"
     );
-    assert_eq!(recorder.u64_values("updated"), vec![1], "but not an update");
-    assert_eq!(recorder.u64_values("shared_pending"), vec![0]);
+    let updated = recorder.u64_values("updated");
+    assert_eq!(updated.only(), Some(1), "but not an update: {updated:?}");
+    let shared_pending = recorder.u64_values("shared_pending");
+    assert_eq!(
+        shared_pending.only(),
+        Some(0),
+        "and it left nothing in the data lane: {shared_pending:?}"
+    );
 }
 
 // The firing condition, unchanged by row 9 and the one thing the kernel's
@@ -543,7 +553,7 @@ fn blocked_send_channel(
         .step_pass(WakeSource::Data)
         .expect("the filler's send is in the lane");
     assert!(
-        recorder.u64_values("blocked").contains(&1),
+        recorder.u64_values("blocked").contains(1),
         "the released send found the lane full and waited, which is what this row measures"
     );
 

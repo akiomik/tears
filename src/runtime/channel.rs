@@ -340,11 +340,18 @@ mod tests {
             "exactly one capacity-wait event, naming the data lane"
         );
         let waits = recorder.u64_values("wait_us");
-        assert_eq!(waits.len(), 1, "the immediate first send fired no event");
+        assert_eq!(
+            waits.len(),
+            1,
+            "the immediately accepted first send fires no capacity-wait event, so this row \
+             records exactly one wait: {waits:?}"
+        );
+        let wait = waits
+            .only()
+            .expect("the count above admits exactly one reading");
         assert!(
-            waits[0] >= 5_000,
-            "wait_us reflects the ~5ms blocked interval, got {}",
-            waits[0]
+            wait >= 5_000,
+            "wait_us reflects the ~5ms blocked interval, got {wait}"
         );
 
         // The `blocked` gauge rose while the send waited and fell once it was
@@ -352,7 +359,7 @@ mod tests {
         // abort-decrement below.
         let blocked = recorder.u64_values("blocked");
         assert!(
-            blocked.contains(&1),
+            blocked.contains(1),
             "blocked rose while the send waited: {blocked:?}"
         );
         assert_eq!(
@@ -417,7 +424,7 @@ mod tests {
 
         let blocked_values = recorder.u64_values("blocked");
         assert!(
-            blocked_values.contains(&1),
+            blocked_values.contains(1),
             "blocked rose while the send waited: {blocked_values:?}"
         );
         assert_eq!(
