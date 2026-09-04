@@ -232,7 +232,8 @@ impl Gauges {
 /// followed by RFC 0006 §4.4's four counts.
 ///
 /// The names are the contract, and they are matched *by name* by consumers
-/// that cannot see each other — the test recorders' `current_u64` markers,
+/// that cannot see each other — the test recorders'
+/// `current_u64_by_runtime` markers (which `current_u64` reads through),
 /// the integration census's `PRODUCER_GAUGES`, and the bench subscriber's
 /// `LoadVisitor`. `tracing`'s field names are macro syntax rather than
 /// values, so `GaugeSnapshot::dispatch` cannot be written in terms of this
@@ -586,7 +587,6 @@ impl Drop for DrainGuard<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fmt::Debug;
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -732,29 +732,28 @@ mod tests {
         drop(held);
         drop(also_held);
 
-        // One `runtime_id` and one `seq` per gauge event, each log in arrival
-        // order, so the two line up index by index — the other two event kinds
-        // carry neither field, so nothing else can enter either log.
-        let ids = recorder.u64_values("runtime_id");
-        let seqs = recorder.u64_values("seq");
-        assert_eq!(ids.len(), 6, "six gauge changes fired: {ids:?}");
-        assert_eq!(
-            seqs.len(),
-            ids.len(),
-            "every gauge event carries both fields: {ids:?} / {seqs:?}"
-        );
+        // Every field read off the event that carries it, rather than off as
+        // many flattened per-field logs lined up by index: `u64_event_values`
+        // refuses an event recording only some of the four names, which is
+        // both the pairing the partition below needs and the premise the
+        // recovery half rests on — that every gauge event carries every count.
+        // Positional zips could only assume it, and a length check per field
+        // only narrows the assumption.
+        let events =
+            recorder.u64_event_values(["runtime_id", "seq", "subscriptions", "keyed_commands"]);
+        assert_eq!(events.len(), 6, "six gauge changes fired: {events:?}");
 
         let mut partitions: Vec<(u64, Vec<u64>)> = Vec::new();
-        for (id, seq) in ids.iter().zip(&seqs) {
-            match partitions.iter_mut().find(|(known, _)| known == id) {
-                Some((_, known_seqs)) => known_seqs.push(*seq),
-                None => partitions.push((*id, vec![*seq])),
+        for &[id, seq, _, _] in &events {
+            match partitions.iter_mut().find(|(known, _)| *known == id) {
+                Some((_, known_seqs)) => known_seqs.push(seq),
+                None => partitions.push((id, vec![seq])),
             }
         }
         assert_eq!(
             partitions.len(),
             2,
-            "two runtime instances must yield two partitions: {ids:?}"
+            "two runtime instances must yield two partitions: {events:?}"
         );
         for (id, seqs) in partitions {
             assert!(
@@ -768,41 +767,42 @@ mod tests {
         // `runtime_id` and applying the max-`seq` rule per partition recovers
         // each instance's current values — `first` ended with both
         // subscriptions dropped, `second` with two keyed entries live.
-        let subscriptions = recorder.u64_values("subscriptions");
-        let keyed = recorder.u64_values("keyed_commands");
-        for (name, values) in [
-            ("subscriptions", &subscriptions),
-            ("keyed_commands", &keyed),
-        ] {
-            assert_eq!(
-                values.len(),
-                ids.len(),
-                "every gauge event carries `{name}`: {ids:?} / {values:?}"
-            );
-        }
-        let mut current: BTreeMap<u64, (u64, u64, u64)> = BTreeMap::new();
-        for ((&id, &seq), (&subs, &keyed_now)) in
-            ids.iter().zip(&seqs).zip(subscriptions.iter().zip(&keyed))
-        {
-            let slot = current.entry(id).or_insert((seq, subs, keyed_now));
-            if seq > slot.0 {
-                *slot = (seq, subs, keyed_now);
-            }
-        }
-        let recover = |id: u64| {
-            let &(_, subs, keyed_now) = current.get(&id).expect("both partitions were built above");
-            (subs, keyed_now)
-        };
+        //
+        // Read through `current_u64_by_runtime`, which *is* that rule, rather
+        // than through a partition-then-max hand-rolled here: the rule then
+        // has one implementation, and the row that justifies the reader is the
+        // row that exercises it. What that trades away is recovered on both
+        // sides — the strict-increase half above builds its own partition from
+        // the raw per-event log, so the reader cannot cover for an emitter
+        // that stops ordering; and the reader's own rule is pinned on scripted
+        // events in `src/test_support/trace_recorder.rs`, where no emitter is
+        // involved at all.
+        //
+        // One scan per gauge, because the rule is per gauge: a field's current
+        // value is the value on the greatest-`seq` event carrying *that*
+        // field. Both scans land on one snapshot here, since the read above
+        // refuses an event carrying only some of the four names — but that is
+        // this schema's doing, not something the rule promises, so the
+        // assertions below claim a recovered partition rather than one row.
+        let subscriptions = recorder.current_u64_by_runtime("subscriptions");
+        let keyed = recorder.current_u64_by_runtime("keyed_commands");
+        let recover = |id: u64| (subscriptions.get(&id).copied(), keyed.get(&id).copied());
+        // `runtime_id` is the first name read above, so it is each row's head.
+        let [first_id, ..] = events[0];
         assert_eq!(
-            recover(ids[0]),
-            (0, 0),
-            "first's max-seq event must report its current values"
+            recover(first_id),
+            (Some(0), Some(0)),
+            "first's partition must recover its current values"
         );
-        let second_id = *ids.iter().find(|id| **id != ids[0]).expect("two ids");
+        let second_id = events
+            .iter()
+            .map(|&[id, ..]| id)
+            .find(|id| *id != first_id)
+            .expect("two ids");
         assert_eq!(
             recover(second_id),
-            (0, 2),
-            "second's max-seq event must report its current values"
+            (Some(0), Some(2)),
+            "second's partition must recover its current values"
         );
     }
 

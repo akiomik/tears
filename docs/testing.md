@@ -146,13 +146,25 @@ tracing output.
 Read a gauge's *current value* through `current_u64`, never through
 `u64_values(...).last()`: the gauge contract orders events by `seq`, not by
 arrival. The accessor assumes one runtime instance per recorder and
-panics otherwise; a deliberately multi-instance test partitions by
-`runtime_id` itself, the way `src/runtime/load.rs`'s contract rows do.
+panics otherwise; a deliberately multi-instance test reads
+`current_u64_by_runtime`, which applies the same greatest-`seq` rule inside
+each `runtime_id`'s own events and which `current_u64` is the one-instance
+convenience over. A row asserting something else about those events — their
+arrival order, or that `seq` strictly increases inside one partition — reads
+the log itself instead; `src/runtime/load.rs`'s two-instance rows do both.
 The rule covers the gauge snapshot's fields — the ones whose events carry
 a `seq`. Other unsigned-integer fields on the same target (`pulled`,
 `updated`, `shared_pending`, `wait_us`) are per-event readings with no
 current value to take; `current_u64` returns `None` for them, so keep those
 on `u64_values`.
+
+Read several fields of the *same* event through `u64_event_values([...])`
+rather than by zipping as many `u64_values` logs: the per-field logs are
+flattened across events, so zipping them pairs values by position and
+truncates to the shortest input without reporting the mismatch — a field
+that stops riding every event then shifts the tuples or shortens the vector
+instead of failing. `u64_event_values` keeps the per-event grouping and
+refuses an event that records only some of the names.
 
 The INV-LC7 producer-gauge census in `tests/common/gauges.rs` is included
 with the same `#[path]` mechanism as the recorder above; see its module

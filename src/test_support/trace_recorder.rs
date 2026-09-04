@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -55,9 +55,10 @@ struct TraceRecorderState {
     // the u64 event log below keeps per-event grouping for its own type only.
     field_sets: Mutex<Vec<Vec<String>>>,
     // Each event's unsigned-integer fields kept together, in arrival order —
-    // the single u64 source of truth: `u64_values` flattens it per field, and
-    // `current_u64` pairs a value with the `seq` recorded on its own event,
-    // which a flattened per-field map could not.
+    // the single u64 source of truth: `u64_values` flattens it per field,
+    // `u64_event_values` keeps the grouping, and the current-value reads pair
+    // a value with the `seq` recorded on its own event, which a flattened
+    // per-field map could not.
     u64_events: Mutex<Vec<Vec<(String, u64)>>>,
 }
 
@@ -123,44 +124,116 @@ impl TraceRecorder {
             .collect()
     }
 
-    /// Returns the current value of a gauge field, read the way the gauge
-    /// contract instructs (`src/runtime/load.rs`, "Ordering"): the value on
-    /// the greatest-`seq` event that records `field`. Arrival order is
-    /// never consulted among distinct `seq` values, so the read stays
-    /// correct even if dispatch order diverges from `seq` order; a `seq`
-    /// tie — impossible for a real runtime, whose `seq` strictly increases —
-    /// resolves to the first-arriving match. An event carrying `field`
-    /// without both a `seq` and a `runtime_id` is not a gauge snapshot and
-    /// is ignored; `None` when no event carries all three. The marker
-    /// names must match `GAUGE_EVENT_FIELDS` (`src/runtime/load.rs`), the
-    /// schema's source of truth, which a unit row holds to what
-    /// `GaugeSnapshot::dispatch` actually emits. Nothing binds these two
-    /// literals to that array — a coordinated rename makes this return
-    /// `None`, and the census's strict branch is what refuses it.
+    /// The named unsigned-integer fields of every event that records them,
+    /// grouped per event and ordered as named — the per-event view
+    /// [`Self::u64_values`] flattens away. Each name reads its event's
+    /// *first* occurrence, the way the snapshot fields are read, so a name
+    /// repeated in `fields` simply repeats its column. An event recording
+    /// none of the names is skipped, so the target's other event families
+    /// stay out of the result.
+    ///
+    /// Reading several fields this way rather than zipping as many
+    /// `u64_values` logs is what keeps a caller aligned with the schema:
+    /// `zip` pairs by position, truncates to its shortest input, and reports
+    /// no mismatch, so a field that stops riding every event shifts the
+    /// tuples or shortens the vector silently. Here a partial event fails,
+    /// by name.
+    ///
+    /// That alignment is what two or more names buy. With one name there is
+    /// nothing to align — the read is [`Self::u64_values`] narrowed to each
+    /// event's first occurrence — and with none there would be nothing to
+    /// read at all, which is a compile-time error rather than an empty
+    /// answer (see the const assertion in the body).
     ///
     /// # Panics
     ///
-    /// Panics when the matched events span more than one `runtime_id`,
-    /// since `seq` is comparable only within one runtime instance. An
-    /// event is matched when it carries `seq`, `runtime_id`, and the
-    /// queried field; every snapshot carries every count, so only an
-    /// instance that emits no snapshot at all stays outside the scan. The
-    /// panic message carries the remedies.
+    /// Panics when an event records some of `fields` but not all: such an
+    /// event has no aligned reading, and both ways of inventing one —
+    /// dropping it, or padding the missing name — are the silent
+    /// misalignment this accessor exists to refuse.
     #[must_use]
     #[track_caller]
     #[expect(
         clippy::panic,
-        reason = "a cross-instance read is test misuse, reported with the observed ids"
+        reason = "a partially recorded event is a schema break, reported with the event"
     )]
-    pub fn current_u64(&self, field: &str) -> Option<u64> {
+    pub fn u64_event_values<const N: usize>(&self, fields: [&str; N]) -> Vec<[u64; N]> {
+        // The one shape where "refuses a partial event" would degrade to
+        // silence: with no names every event records none of them, so the
+        // scan below would answer `vec![]` whatever the log holds — an empty
+        // trace that reads like a checked one. No row can pin that, since the
+        // answer is a value rather than a failure, so it is refused where the
+        // caller is written instead.
+        const { assert!(N > 0, "u64_event_values needs at least one field name") };
         let events = self
             .state
             .u64_events
             .lock()
             .expect("trace recorder u64 event log mutex should not be poisoned");
-        let mut runtime_id: Option<u64> = None;
-        let mut clash: Option<(u64, u64)> = None;
-        let mut current: Option<(u64, u64)> = None;
+        let mut rows: Vec<[u64; N]> = Vec::new();
+        let mut partial: Option<Vec<(String, u64)>> = None;
+        for event in events.iter() {
+            let values: Vec<u64> = fields
+                .iter()
+                .filter_map(|name| field_value(event, name))
+                .collect();
+            if values.is_empty() {
+                continue;
+            }
+            // At most one value per name, so a short vector is a name this
+            // event never recorded — never a name recorded twice.
+            let Ok(row) = <[u64; N]>::try_from(values.as_slice()) else {
+                partial = Some(event.clone());
+                break;
+            };
+            rows.push(row);
+        }
+        // Released before the panic below, so a failing guard reports its
+        // own message rather than poisoning the log for every later read.
+        drop(events);
+        if let Some(event) = partial {
+            let missing: Vec<&str> = fields
+                .into_iter()
+                .filter(|name| field_value(&event, name).is_none())
+                .collect();
+            panic!(
+                "u64_event_values({fields:?}) found an event recording only some of the \
+                 names: {missing:?} missing from {event:?}. A partial event has no \
+                 aligned reading — either a name here is not on this event's schema, or \
+                 a field stopped riding every event. The log holds a name only where the \
+                 event recorded it as a non-negative integer"
+            );
+        }
+        rows
+    }
+
+    /// Each observed runtime instance's current value of a gauge field,
+    /// keyed by `runtime_id`: the value on that instance's greatest-`seq`
+    /// event recording `field`. This is the gauge contract's read rule
+    /// (`src/runtime/load.rs`, "Ordering") in full — a subscriber watching
+    /// several runtimes in one process partitions by `runtime_id` first and
+    /// applies the max-`seq` rule inside each partition, since `seq` is
+    /// comparable only within one instance.
+    ///
+    /// Arrival order is never consulted among distinct `seq` values, so the
+    /// read stays correct even if dispatch order diverges from `seq` order;
+    /// a `seq` tie — impossible for a real runtime, whose `seq` strictly
+    /// increases — resolves to the first-arriving match. An event carrying
+    /// `field` without both a `seq` and a `runtime_id` is not a gauge
+    /// snapshot and is ignored; the map is empty when no event carries all
+    /// three. The marker names must match `GAUGE_EVENT_FIELDS`
+    /// (`src/runtime/load.rs`), the schema's source of truth, which a unit
+    /// row holds to what `GaugeSnapshot::dispatch` actually emits. Nothing
+    /// binds these two literals to that array — a coordinated rename empties
+    /// this map, and the census's strict branch is what refuses it.
+    #[must_use]
+    pub fn current_u64_by_runtime(&self, field: &str) -> BTreeMap<u64, u64> {
+        let events = self
+            .state
+            .u64_events
+            .lock()
+            .expect("trace recorder u64 event log mutex should not be poisoned");
+        let mut current: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
         for event in events.iter() {
             // `seq` first: the target's non-snapshot events (the batch and
             // capacity-wait families) fail that lookup, so they skip the
@@ -173,32 +246,49 @@ impl TraceRecorder {
             else {
                 continue;
             };
-            match runtime_id {
-                None => runtime_id = Some(id),
-                Some(seen) if seen != id => {
-                    clash = Some((seen, id));
-                    break;
-                }
-                Some(_) => {}
-            }
-            if current.is_none_or(|(greatest, _)| seq > greatest) {
-                current = Some((seq, value));
+            let slot = current.entry(id).or_insert((seq, value));
+            if seq > slot.0 {
+                *slot = (seq, value);
             }
         }
-        // Released before the panic below, so a failing guard reports its
-        // own message rather than poisoning the log for every later read.
         drop(events);
-        if let Some((first, second)) = clash {
-            panic!(
-                "current_u64({field:?}) matched gauge events from at least two runtime \
-                 instances ({first} and {second}); `seq` is comparable only within one. \
-                 Restructure to observe one runtime per recorder (test-helper observers, \
-                 like `channel`'s throwaway, also count), read `u64_values` and partition \
-                 by `runtime_id` yourself, or — if the script minted no second observer — \
-                 treat it as a one-instance-per-run regression"
-            );
-        }
-        current.map(|(_, value)| value)
+        current
+            .into_iter()
+            .map(|(id, (_, value))| (id, value))
+            .collect()
+    }
+
+    /// Returns the current value of a gauge field, read the way the gauge
+    /// contract instructs (`src/runtime/load.rs`, "Ordering"): the value on
+    /// the greatest-`seq` event that records `field`. This is the
+    /// one-instance convenience over [`Self::current_u64_by_runtime`], and
+    /// inherits every property described there: the `seq` ordering, the tie,
+    /// and what counts as a gauge snapshot at all. `None` when no event
+    /// carries `field` beside both markers.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the matched events span more than one `runtime_id`,
+    /// since `seq` is comparable only within one runtime instance. An
+    /// event is matched when it carries `seq`, `runtime_id`, and the
+    /// queried field; every snapshot carries every count, so only an
+    /// instance that emits no snapshot at all stays outside the scan. The
+    /// panic message carries the remedies.
+    #[must_use]
+    #[track_caller]
+    pub fn current_u64(&self, field: &str) -> Option<u64> {
+        let current = self.current_u64_by_runtime(field);
+        assert!(
+            current.len() <= 1,
+            "current_u64({field:?}) matched gauge events from at least two runtime \
+             instances ({ids:?}); `seq` is comparable only within one. Restructure to \
+             observe one runtime per recorder (test-helper observers, like `channel`'s \
+             throwaway, also count), read `current_u64_by_runtime` and name the \
+             instance you mean, or — if the script minted no second observer — treat \
+             it as a one-instance-per-run regression",
+            ids = current.keys().copied().collect::<Vec<_>>()
+        );
+        current.into_values().next()
     }
 
     /// Returns all string values recorded for the named event field.
@@ -476,6 +566,52 @@ mod tests {
         assert_eq!(recorder.current_u64("absent"), None);
     }
 
+    // The partition half of the same rule: `seq` orders events only inside
+    // one `runtime_id`, so a reader watching several instances keeps one
+    // current value per instance.
+    #[test]
+    fn current_u64_by_runtime_reads_each_instance_by_its_own_seq() {
+        let recorder = TraceRecorder::new().with_target(TARGET);
+        let _guard = recorder.set_default();
+
+        // Interleaved, with the greater `seq` on the instance whose current
+        // value is not the last to arrive: a read that compared `seq` across
+        // instances, or that took the latest arrival, gets both partitions
+        // wrong.
+        tracing::trace!(target: TARGET, runtime_id = 1u64, seq = 1u64, gauge = 3u64, "first instance");
+        tracing::trace!(target: TARGET, runtime_id = 2u64, seq = 9u64, gauge = 7u64, "second instance, a greater seq");
+        tracing::trace!(target: TARGET, runtime_id = 1u64, seq = 2u64, gauge = 5u64, "first instance's own current value");
+        tracing::trace!(target: TARGET, runtime_id = 2u64, seq = 8u64, gauge = 0u64, "second instance, an earlier seq arriving later");
+        tracing::trace!(target: TARGET, gauge = 4u64, "no markers: not a snapshot");
+        tracing::trace!(target: TARGET, runtime_id = 3u64, seq = 1u64, other = 1u64, "a third instance, recording another field only");
+
+        assert_eq!(
+            recorder.current_u64_by_runtime("gauge"),
+            BTreeMap::from([(1, 5), (2, 7)]),
+            "each instance's greatest-seq reading, whatever arrived last and \
+             whatever `seq` another instance reached — and no key at all for \
+             the instance whose events never carried the field"
+        );
+        assert_eq!(recorder.current_u64_by_runtime("absent"), BTreeMap::new());
+    }
+
+    #[test]
+    fn u64_event_values_groups_fields_per_event() {
+        let recorder = TraceRecorder::new().with_target(TARGET);
+        let _guard = recorder.set_default();
+
+        tracing::trace!(target: TARGET, left = 1u64, right = 2u64, "both names");
+        tracing::trace!(target: TARGET, elsewhere = 9u64, "neither name: skipped, not padded");
+        tracing::trace!(target: TARGET, right = 4u64, left = 3u64, spare = 9u64, "recorded in the other order, beside a name not asked for");
+
+        assert_eq!(
+            recorder.u64_event_values(["left", "right"]),
+            vec![[1, 2], [3, 4]],
+            "one row per event recording the names, ordered as named rather \
+             than as the event recorded them"
+        );
+    }
+
     // Pinned here and not in the tests/ mirror: one copy suffices for the
     // contract, and mirroring would add a deliberate panic to every
     // including binary for no new coverage of the same source. No
@@ -492,5 +628,18 @@ mod tests {
         tracing::trace!(target: TARGET, runtime_id = 2u64, seq = 9u64, gauge = 0u64, "another");
 
         let _ = recorder.current_u64("gauge");
+    }
+
+    // Pinned in this copy only, for the reason the row above it carries.
+    #[test]
+    #[should_panic(expected = "recording only some of the names")]
+    fn u64_event_values_refuses_a_partial_event() {
+        let recorder = TraceRecorder::new().with_target(TARGET);
+        let _guard = recorder.set_default();
+
+        tracing::trace!(target: TARGET, left = 1u64, right = 2u64, "a whole event");
+        tracing::trace!(target: TARGET, left = 3u64, "and one that dropped a name");
+
+        let _ = recorder.u64_event_values(["left", "right"]);
     }
 }
