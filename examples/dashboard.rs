@@ -138,10 +138,13 @@ impl Application for App {
             Message::Tasks(msg) => self.update_tasks(msg),
             Message::Details(msg) => self.update_details(msg),
             Message::Activity(msg) => self.update_activity(msg),
-            // Presses only. A terminal that reports releases too — Windows, or
-            // a session with the kitty keyboard protocol on — would otherwise
-            // turn one keystroke into two messages.
-            Message::Terminal(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+            // Not releases. A terminal that reports them — Windows, or a
+            // session with the kitty keyboard protocol on — would otherwise
+            // turn one keystroke into two messages. A *repeat* is an
+            // instruction and is kept: the same protocol that delivers
+            // releases is the one that reports a held key, and dropping those
+            // would make a held Down move the selection once.
+            Message::Terminal(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 return handle_key_event(self.focus, key);
             }
             Message::Terminal(_) => {}
@@ -409,7 +412,7 @@ impl TaskListState {
 
     fn delete_selected(&mut self) -> TaskOutcome {
         if self.tasks.is_empty() {
-            return TaskOutcome::status("No task to delete");
+            return TaskOutcome::status("No task selected");
         }
 
         let removed = self.tasks.remove(self.selected);
@@ -694,13 +697,12 @@ mod tests {
         Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
     }
 
-    /// The same for the release a terminal that reports both would send after
-    /// it.
-    fn key_release(code: KeyCode) -> Message {
+    /// The same for the other two kinds a terminal can report.
+    fn key_of(code: KeyCode, kind: KeyEventKind) -> Message {
         Message::Terminal(Event::Key(KeyEvent::new_with_kind(
             code,
             KeyModifiers::empty(),
-            KeyEventKind::Release,
+            kind,
         )))
     }
 
@@ -819,18 +821,27 @@ mod tests {
     }
 
     /// A terminal that reports releases as well as presses sends two events
-    /// per keystroke. Only the press is an instruction.
+    /// per keystroke. The release is not an instruction; a repeat is.
     #[test]
-    fn a_key_release_asks_for_nothing() {
+    fn a_key_release_asks_for_nothing_and_a_repeat_asks() {
         let mut store = TestStore::<App>::new(());
         assert_eq!(store.state().focus, Focus::Navigation);
 
-        store.send(key_release(KeyCode::Tab));
-
+        store.send(key_of(KeyCode::Tab, KeyEventKind::Release));
         assert_eq!(
             store.state().focus,
             Focus::Navigation,
             "the release is not a second Tab"
+        );
+
+        // The protocol that reports releases is the one that reports a held
+        // key, so a filter written as `== Press` would drop these too.
+        store.send(key_of(KeyCode::Tab, KeyEventKind::Repeat));
+        store.receive_matching(|msg| matches!(msg, Message::FocusNext));
+        assert_eq!(
+            store.state().focus,
+            Focus::Tasks,
+            "a held Tab keeps cycling"
         );
         store.finish();
     }

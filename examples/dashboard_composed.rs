@@ -56,7 +56,8 @@
 //! - **The activity log carries the same entries and more of its own.** The
 //!   teardown lines a removal fires; the completion lines the children's runs
 //!   write (`synced:`, `loaded details:`), which `dashboard.rs` has no
-//!   counterpart for because it runs no commands; `reloaded:`, for a key it
+//!   counterpart for because nothing there completes with a value later — its
+//!   commands hand a message straight back; `reloaded:`, for a key it
 //!   does not have; and the terminal-error line, which it prints to stderr on
 //!   its way out instead. Every row-scoped line names the row's key, because
 //!   here there is one and two rows added with `n` share a title.
@@ -209,6 +210,12 @@ enum Message {
     FocusNext,
     SelectPrev,
     SelectNext,
+    /// A key that needs a selected row arrived with none.
+    ///
+    /// A message rather than nothing, so the footer stops describing whatever
+    /// came before it — the reason `select` sets its status before the guard
+    /// that returns early on an empty collection.
+    NoTaskSelected,
     /// Adds a task under a **freshly allocated** key.
     ///
     /// The key is chosen by the reduce and not by the caller on purpose. A
@@ -383,15 +390,20 @@ impl Reducer for Root {
     fn reduce(&self, state: &mut App, message: Message) -> Command<Message> {
         match message {
             Message::Terminal(event) => match event {
-                // Presses only. A terminal that reports releases too —
-                // Windows, or a session with the kitty keyboard protocol on —
-                // would otherwise turn one keystroke into two messages, and
-                // every operation here is one a reader means to perform once:
-                // `n` would add two rows rather than the one asked for, and
-                // Enter would open the pane and then replace it with a second
-                // pane on the same row — a removal the reader never asked for,
-                // in a file about which removals happen.
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // Not releases. A terminal that reports them — Windows, or a
+                // session with the kitty keyboard protocol on — would
+                // otherwise turn one keystroke into two messages, and every
+                // operation here is one a reader means to perform once: `n`
+                // would add two rows rather than the one asked for, and Enter
+                // would open the pane and then replace it with a second pane on
+                // the same row — a removal the reader never asked for, in a
+                // file about which removals happen.
+                //
+                // A *repeat* is an instruction and is kept. The same protocol
+                // that delivers releases is the one that reports a held key,
+                // so testing for `Press` would drop those too and a held Down
+                // would move the selection once.
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
                     key_message(state, key.code).map_or_else(Command::none, |message| {
                         // A boundary claims a child-addressed message, so the
                         // root never sees it land and the arms for those below
@@ -412,6 +424,10 @@ impl Reducer for Root {
                 Command::quit()
             }
             Message::Quit => Command::quit(),
+            Message::NoTaskSelected => {
+                state.status = "No task selected";
+                Command::none()
+            }
             Message::FocusNext => {
                 state.focus = state.focus.next();
                 state.status = "Changed focus";
@@ -1069,19 +1085,29 @@ fn key_message(state: &App, code: KeyCode) -> Option<Message> {
             Focus::Tasks => Some(Message::SelectNext),
             _ => None,
         },
-        KeyCode::Char(' ') if state.focus == Focus::Tasks => state
-            .selected
-            .map(|id| Message::Task(id, TaskMessage::Toggle)),
+        KeyCode::Char(' ') if state.focus == Focus::Tasks => {
+            Some(state.selected.map_or(Message::NoTaskSelected, |id| {
+                Message::Task(id, TaskMessage::Toggle)
+            }))
+        }
         KeyCode::Char('n') if state.focus == Focus::Tasks => {
             Some(Message::AddTask("New task".to_owned()))
         }
-        KeyCode::Char('d') if state.focus == Focus::Tasks => {
-            state.selected.map(Message::DeleteTask)
-        }
-        KeyCode::Char('r') if state.focus == Focus::Tasks => {
-            state.selected.map(Message::ReloadTask)
-        }
-        KeyCode::Enter if state.focus == Focus::Tasks => state.selected.map(Message::OpenDetails),
+        KeyCode::Char('d') if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::DeleteTask),
+        ),
+        KeyCode::Char('r') if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::ReloadTask),
+        ),
+        KeyCode::Enter if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::OpenDetails),
+        ),
         KeyCode::Char('c') if state.focus == Focus::Activity => {
             Some(Message::Activity(ActivityMessage::Clear))
         }
@@ -1127,7 +1153,7 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
     use tears::reducer::Program;
@@ -1238,7 +1264,16 @@ mod tests {
 
     /// The message the terminal subscription produces for a key press.
     fn key_press(code: KeyCode) -> Message {
-        Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
+        key_of(code, KeyEventKind::Press)
+    }
+
+    /// The same for the other two kinds a terminal can report.
+    fn key_of(code: KeyCode, kind: KeyEventKind) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::empty(),
+            kind,
+        )))
     }
 
     fn recorded(activity: &ActivityLog, line: &str) -> bool {
@@ -1692,5 +1727,68 @@ mod tests {
             state.status, "Toggled the task",
             "and for a row, which is claimed by key"
         );
+    }
+
+    /// A held key is an instruction; the release after it is not.
+    ///
+    /// The protocol that reports releases is the one that reports repeats, so
+    /// a filter written as `== Press` would drop both and a held Down would
+    /// move the selection once.
+    #[test]
+    fn a_repeat_is_an_instruction_and_a_release_is_not() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..2 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+        state.focus = Focus::Tasks;
+        state.selected = Some(TaskId(1));
+
+        assert!(
+            !Root
+                .reduce(&mut state, key_of(KeyCode::Down, KeyEventKind::Repeat))
+                .is_none(),
+            "a repeat asks for the move a press would have asked for"
+        );
+        assert!(
+            Root.reduce(&mut state, key_of(KeyCode::Down, KeyEventKind::Release))
+                .is_none(),
+            "and the release after it asks for nothing"
+        );
+    }
+
+    /// A key that needs a selected row says so when there is none.
+    ///
+    /// Silence would leave the footer describing the operation before it — the
+    /// reason `select` sets its status ahead of its own empty-collection
+    /// guard.
+    #[test]
+    fn a_key_needing_a_selection_reports_when_there_is_none() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        state.focus = Focus::Tasks;
+        assert_eq!(state.selected, None, "nothing has been added");
+
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('d'),
+            KeyCode::Char('r'),
+            KeyCode::Enter,
+        ] {
+            assert!(
+                matches!(key_message(&state, code), Some(Message::NoTaskSelected)),
+                "{code:?} needs a row and there is none, so it reports rather than \
+                 leaving the last operation's line standing"
+            );
+        }
+
+        let _reported = Root.reduce(&mut state, Message::NoTaskSelected);
+        assert_eq!(state.status, "No task selected");
     }
 }
