@@ -5,12 +5,15 @@
 //! Tab. What differs is who owns the wiring.
 //!
 //! Two things differ besides, and a diff of the two files will show them.
-//! Every child here has **runs of its own** — a timer and a keyed request —
-//! where `dashboard.rs` has neither: qualification and teardown are about runs,
-//! so a child with none gives a boundary nothing to do. And three keys are not
-//! the same: `r` reloads a row, Enter opens the pane from the task list, and
-//! Esc closes the pane, where `dashboard.rs` reloads the notes into a panel
-//! that is always there.
+//! The **row children and the pane's occupant** have runs of their own — a
+//! timer and a keyed request each — where `dashboard.rs` has neither, its one
+//! subscription being the root's terminal source. That is not incidental:
+//! qualification and teardown are about runs, so a child with none gives a
+//! boundary nothing to do. `Navigation` and `Activity` are exactly that case
+//! and are composed anyway, for the organisation rather than the separation.
+//! And three keys are not the same: `r` reloads a row, Enter opens the pane
+//! from the task list, and Esc closes the pane, where `dashboard.rs` reloads
+//! the notes into a panel that is always there.
 //!
 //! In `dashboard.rs` the root owns it. `App::update` matches every child
 //! variant and forwards it, `App::subscriptions` is the root's alone, and any
@@ -380,74 +383,10 @@ impl Reducer for Root {
                 select(state, forward);
                 Command::none()
             }
-            Message::AddTask(title) => {
-                let id = TaskId(state.next_id);
-                state.next_id += 1;
-                // Insertion into an absent key records no removal: nothing was
-                // running under it to tear down. The key is fresh, so this is
-                // that case and never the replacing one.
-                state.tasks.insert(
-                    id,
-                    TaskState::new(id, title, "Add notes in the details pane.".to_owned()),
-                );
-                state.selected = Some(id);
-                state.status = "Added a task";
-                Command::message(Message::Task(id, TaskMessage::Watch)).into()
-            }
-            Message::ReloadTask(id) => {
-                let Some(task) = state.tasks.get(&id) else {
-                    return Command::none();
-                };
-                // Inserting over an occupied key is a replacement, and a
-                // replacement is a removal: the boundary tears the old
-                // instance's runs down before this command's spawns start the
-                // successor's.
-                let title = task.title.clone();
-                state.tasks.insert(
-                    id,
-                    TaskState::new(id, title, "Reloaded from the server.".to_owned()),
-                );
-                // The pane was opened for the instance that just left, and it
-                // holds that instance's title and notes; leaving it open would
-                // let a later `SaveNotes` write them back over the reload.
-                close_details_opened_on(state, id);
-                state.status = "Reloaded the task";
-                Command::message(Message::Task(id, TaskMessage::Watch)).into()
-            }
-            Message::DeleteTask(id) => {
-                // `remove` records the removal; the row boundary drains it in
-                // this same reduce and merges the row's teardown into the
-                // command returned here. Nothing below asks for that.
-                let Some(task) = state.tasks.remove(&id) else {
-                    return Command::none();
-                };
-                state
-                    .activity
-                    .push(format!("deleted: #{} {}", id.0, task.title));
-                // A details pane open on the row that just left goes with it,
-                // and the slot's own boundary originates that teardown.
-                close_details_opened_on(state, id);
-                if state.selected == Some(id) {
-                    state.selected = state.tasks.keys().next().copied();
-                }
-                state.status = "Deleted the task";
-                Command::none()
-            }
-            Message::OpenDetails(id) => {
-                let Some(task) = state.tasks.get(&id) else {
-                    return Command::none();
-                };
-                // Presenting over an occupied slot is a replacement too, for
-                // the same reason `ReloadTask` is.
-                state.details.present(DetailsState::new(
-                    id,
-                    task.title.clone(),
-                    task.notes.clone(),
-                ));
-                state.focus = Focus::Details;
-                state.status = "Opened the details pane";
-                Command::message(Message::Details(DetailsMessage::Open)).into()
-            }
+            Message::AddTask(title) => add_task(state, title),
+            Message::ReloadTask(id) => reload_task(state, id),
+            Message::DeleteTask(id) => delete_task(state, id),
+            Message::OpenDetails(id) => open_details(state, id),
             Message::CloseDetails => {
                 // Esc is guarded on the focus rather than on `editing_notes`,
                 // so it is the way out of a `Details` focus with nothing behind
@@ -461,23 +400,7 @@ impl Reducer for Root {
                 };
                 Command::none()
             }
-            Message::SaveNotes => {
-                let Some(open) = state.details.get() else {
-                    return Command::none();
-                };
-                let (task_id, notes) = (open.task, open.notes.clone());
-                let Some(task) = state.tasks.get_mut(&task_id) else {
-                    return Command::none();
-                };
-                task.notes = notes;
-                state
-                    .activity
-                    .push(format!("updated notes for '{}'", task.title));
-                state.status = "Saved the notes";
-                // The row's own sync is the row's to run, so it is asked for
-                // through the boundary rather than started here.
-                Command::message(Message::Task(task_id, TaskMessage::Sync)).into()
-            }
+            Message::SaveNotes => save_notes(state),
             // Claimed by a boundary above this reducer and never routed here.
             Message::Navigation(_)
             | Message::Task(..)
@@ -554,7 +477,12 @@ impl Reducer for Task {
         match message {
             TaskMessage::Watch => {
                 if state.watched {
-                    return Command::message(TaskMessage::Sync).into();
+                    // Inert, like the occupant's re-entry path: the first
+                    // `Watch` this instance saw already asked for the sync, and
+                    // a second request here would cancel that one in flight
+                    // under the shared id. Idempotent in its effect and not
+                    // only in its registration.
+                    return Command::none();
                 }
                 state.watched = true;
                 let activity = self.activity.clone();
@@ -576,7 +504,10 @@ impl Reducer for Task {
             }
             TaskMessage::Sync => {
                 state.syncing = true;
-                let title = state.title.clone();
+                // Named the way the teardown line is: two rows added with `n`
+                // share a title, and an activity log that cannot tell them
+                // apart is the one thing this example must not have.
+                let title = format!("#{} {}", state.id.0, state.title);
                 Command::perform(request(title), TaskMessage::Synced)
                     .cancellable(CommandId::new(SYNC))
                     .into()
@@ -876,11 +807,18 @@ fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// Dismisses the details pane and returns the focus it took.
+/// Dismisses the details pane, reporting whether there was an occupant to
+/// dismiss.
 ///
 /// Dismissal is a removal, so the slot's boundary tears the occupant's runs
-/// down; restoring the focus is this function's own half, and without it every
-/// printable key would keep routing to a slot that has no occupant to claim it.
+/// down — but only when there was one, which is why the caller is told: an
+/// empty slot records nothing, and the status must not claim a close that did
+/// not happen.
+///
+/// Restoring the focus is this function's other half, and it guards nothing:
+/// [`editing_notes`] already asks the slot, so a `Details` focus over an empty
+/// slot swallows no key. What it buys is that the focus does not sit on a pane
+/// the user cannot see.
 fn close_details(state: &mut App) -> bool {
     let dismissed = state.details.dismiss().is_some();
     if state.focus == Focus::Details {
@@ -896,7 +834,114 @@ fn close_details_opened_on(state: &mut App, task: TaskId) {
     }
 }
 
-/// Moves the task selection, wrapping.
+/// Adds a task under a freshly allocated key.
+fn add_task(state: &mut App, title: String) -> Command<Message> {
+    let id = TaskId(state.next_id);
+    state.next_id += 1;
+    // Insertion into an absent key records no removal: nothing was running
+    // under it to tear down. The key is fresh, so this is that case and never
+    // the replacing one.
+    state.tasks.insert(
+        id,
+        TaskState::new(id, title, "Add notes in the details pane.".to_owned()),
+    );
+    state.selected = Some(id);
+    state.status = "Added a task";
+    Command::message(Message::Task(id, TaskMessage::Watch)).into()
+}
+
+/// Replaces a row's instance with a fresh one under the same key.
+fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
+    let Some(task) = state.tasks.get(&id) else {
+        return Command::none();
+    };
+    // Inserting over an occupied key is a replacement, and a replacement is a
+    // removal: the boundary tears the old instance's runs down before this
+    // command's spawns start the successor's.
+    let title = task.title.clone();
+    state.tasks.insert(
+        id,
+        TaskState::new(id, title, "Reloaded from the server.".to_owned()),
+    );
+    // The pane was opened for the instance that just left, and it holds that
+    // instance's title and notes; leaving it open would let a later
+    // `SaveNotes` write them back over the reload.
+    close_details_opened_on(state, id);
+    state.status = "Reloaded the task";
+    Command::message(Message::Task(id, TaskMessage::Watch)).into()
+}
+
+/// Removes a row.
+fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
+    // Read before the removal, because it is a position in the collection and
+    // the removal is what changes it.
+    let position = state.tasks.keys().position(|key| *key == id);
+    // `remove` records the removal; the row boundary drains it in this same
+    // reduce and merges the row's teardown into the command returned here.
+    // Nothing below asks for that.
+    let Some(task) = state.tasks.remove(&id) else {
+        return Command::none();
+    };
+    state
+        .activity
+        .push(format!("deleted: #{} {}", id.0, task.title));
+    // A details pane open on the row that just left goes with it, and the
+    // slot's own boundary originates that teardown.
+    close_details_opened_on(state, id);
+    if state.selected == Some(id) {
+        // The row that moved up into the position, or the new last row when
+        // the deleted one was last — `dashboard.rs`'s behaviour, expressed
+        // over keys instead of indices.
+        let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
+        state.selected = position
+            .map(|index| index.min(keys.len().saturating_sub(1)))
+            .and_then(|index| keys.get(index).copied());
+    }
+    state.status = "Deleted the task";
+    Command::none()
+}
+
+/// Presents the details pane for a row.
+fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
+    let Some(task) = state.tasks.get(&id) else {
+        return Command::none();
+    };
+    // Presenting over an occupied slot is a replacement too, for the same
+    // reason `ReloadTask` is.
+    state.details.present(DetailsState::new(
+        id,
+        task.title.clone(),
+        task.notes.clone(),
+    ));
+    state.focus = Focus::Details;
+    state.status = "Opened the details pane";
+    Command::message(Message::Details(DetailsMessage::Open)).into()
+}
+
+/// Writes the pane's edited notes onto the task it was opened for.
+fn save_notes(state: &mut App) -> Command<Message> {
+    let Some(open) = state.details.get() else {
+        return Command::none();
+    };
+    let (task_id, notes) = (open.task, open.notes.clone());
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        return Command::none();
+    };
+    task.notes = notes;
+    state
+        .activity
+        .push(format!("updated notes for '{}'", task.title));
+    state.status = "Saved the notes";
+    // The row's own sync is the row's to run, so it is asked for through the
+    // boundary rather than started here.
+    Command::message(Message::Task(task_id, TaskMessage::Sync)).into()
+}
+
+/// Moves the task selection, stopping at the ends.
+///
+/// Clamped and not wrapped, because `dashboard.rs` clamps: the pair is meant
+/// to differ in structure, and a selection that wrapped here would read as
+/// something composition did.
 fn select(state: &mut App, forward: bool) {
     let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
     if keys.is_empty() {
@@ -905,9 +950,10 @@ fn select(state: &mut App, forward: bool) {
     let position = state
         .selected
         .and_then(|selected| keys.iter().position(|key| *key == selected));
+    let last = keys.len() - 1;
     let next = match position {
-        Some(index) if forward => (index + 1) % keys.len(),
-        Some(index) => (index + keys.len() - 1) % keys.len(),
+        Some(index) if forward => (index + 1).min(last),
+        Some(index) => index.saturating_sub(1),
         None => 0,
     };
     state.selected = keys.get(next).copied();
@@ -1101,7 +1147,7 @@ mod tests {
 
     /// Adds one task and drives it to the keyed sync its row runs, returning
     /// the identities that row's boundary produced.
-    fn add_task<P: Program, B: Backend>(
+    fn add_task_and_sync<P: Program, B: Backend>(
         driver: &mut TestDriver<P, B>,
         script: &RunName,
     ) -> (SubscriptionId, CommandId) {
@@ -1142,8 +1188,8 @@ mod tests {
         );
         let script = anonymous(&boot, "scripted input run");
 
-        let (alpha_timer, alpha_sync) = add_task(&mut driver, &script);
-        let (beta_timer, beta_sync) = add_task(&mut driver, &script);
+        let (alpha_timer, alpha_sync) = add_task_and_sync(&mut driver, &script);
+        let (beta_timer, beta_sync) = add_task_and_sync(&mut driver, &script);
 
         // The occupant declares the same timer again and keys its load with
         // the same id, one boundary over.
@@ -1213,8 +1259,8 @@ mod tests {
 
         // Both rows added and set up, so both have a hook registered under
         // their own key.
-        add_task(&mut driver, &script);
-        add_task(&mut driver, &script);
+        add_task_and_sync(&mut driver, &script);
+        add_task_and_sync(&mut driver, &script);
         assert!(
             activity.entries().is_empty(),
             "an insert into an absent key removes no instance, so nothing is torn down"
@@ -1287,7 +1333,7 @@ mod tests {
         let boot = driver.boot();
         assert!(boot.terminated.is_none(), "bootstrap did not terminate");
         let script = anonymous(&boot, "scripted input run");
-        add_task(&mut driver, &script);
+        add_task_and_sync(&mut driver, &script);
 
         // Both opens land before either `Open` is delivered, which is what a
         // second key press ahead of the first message looks like.
@@ -1335,7 +1381,7 @@ mod tests {
         let boot = driver.boot();
         assert!(boot.terminated.is_none(), "bootstrap did not terminate");
         let script = anonymous(&boot, "scripted input run");
-        add_task(&mut driver, &script);
+        add_task_and_sync(&mut driver, &script);
 
         let report = deliver(&mut driver, &script);
         let open = anonymous(&report, "occupant setup message");
@@ -1436,6 +1482,60 @@ mod tests {
         assert_eq!(
             state.status, "Closed the details pane",
             "and only then does the status say so"
+        );
+    }
+
+    /// The selection behaves as `dashboard.rs`'s does: it stops at the ends,
+    /// and a delete leaves it on the row that moved up into the position.
+    ///
+    /// Neither is composition's doing, which is the point — the pair is meant
+    /// to differ in structure, so a selection that wrapped or jumped to the
+    /// first row would read as something a boundary did.
+    #[test]
+    fn the_selection_clamps_and_survives_a_delete_in_place() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..3 {
+            let _watch = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "adding selects the row it added"
+        );
+
+        let _at_the_end = Root.reduce(&mut state, Message::SelectNext);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "the last row is an end, not a wrap"
+        );
+        for _ in 0..3 {
+            let _upwards = Root.reduce(&mut state, Message::SelectPrev);
+        }
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "and so is the first, after one step past it"
+        );
+
+        state.selected = Some(TaskId(2));
+        let _middle = Root.reduce(&mut state, Message::DeleteTask(TaskId(2)));
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "the row that moved up into the deleted one's position"
+        );
+
+        state.selected = Some(TaskId(3));
+        let _last = Root.reduce(&mut state, Message::DeleteTask(TaskId(3)));
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "and the new last row when the deleted one was last"
         );
     }
 }
