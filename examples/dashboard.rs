@@ -665,6 +665,16 @@ mod tests {
         Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
     }
 
+    /// The same for the release a terminal that reports both would send after
+    /// it.
+    fn key_release(code: KeyCode) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::empty(),
+            KeyEventKind::Release,
+        )))
+    }
+
     /// Sending the child message directly walks focus through the panels.
     #[test]
     fn focus_next_cycles_through_panels() {
@@ -734,6 +744,40 @@ mod tests {
         store.send(key(KeyCode::Char('q')));
         store.receive_matching(|msg| matches!(msg, Message::Quit));
         store.receive_quit();
+        store.finish();
+    }
+
+    /// The details panel is a text field, so 'q' is a character there rather
+    /// than a request to quit. Tab is how you leave that focus.
+    #[test]
+    fn quit_key_is_text_while_the_details_panel_has_focus() {
+        let mut store = TestStore::<App>::new(());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let notes = store.state().details.notes.clone();
+
+        store.send(key(KeyCode::Char('q')));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Input('q'))));
+
+        assert_eq!(store.state().details.notes, format!("{notes}q"));
+        store.finish();
+    }
+
+    /// A terminal that reports releases as well as presses sends two events
+    /// per keystroke. Only the press is an instruction.
+    #[test]
+    fn a_key_release_asks_for_nothing() {
+        let mut store = TestStore::<App>::new(());
+        assert_eq!(store.state().focus, Focus::Navigation);
+
+        store.send(key_release(KeyCode::Tab));
+
+        assert_eq!(
+            store.state().focus,
+            Focus::Navigation,
+            "the release is not a second Tab"
+        );
         store.finish();
     }
 }
