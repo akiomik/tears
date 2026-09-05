@@ -139,11 +139,12 @@ impl Application for App {
             Message::Details(msg) => self.update_details(msg),
             Message::Activity(msg) => self.update_activity(msg),
             // Not releases. A terminal that reports them — Windows, or a
-            // session with the kitty keyboard protocol on — would otherwise
-            // turn one keystroke into two messages. A *repeat* is an
-            // instruction and is kept: the same protocol that delivers
-            // releases is the one that reports a held key, and dropping those
-            // would make a held Down move the selection once.
+            // session with the kitty keyboard protocol on — sends two events
+            // for one press, and the second would be acted on. A *repeat* is
+            // kept, and is the other thing entirely: a held key is repetition
+            // the reader is asking for. Testing for `Press` would drop those
+            // with the releases, and a held Down would move the selection
+            // once.
             Message::Terminal(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 return handle_key_event(self.focus, key);
             }

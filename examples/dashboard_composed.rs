@@ -71,11 +71,14 @@
 //!   the selection throws an unsaved edit away; here the occupant is fixed to
 //!   the task it was opened for, because a `Slot` holds an instance rather than
 //!   a view of whatever is selected.
-//! - **The tasks arrive as messages** rather than as initial state, because
-//!   `init`'s command crosses no boundary and a row's setup has to. That they
-//!   start with the same notes and none marked done is not composition's doing
-//!   but `AddTask`'s: it carries a title and nothing else, and a setup message
-//!   carrying more would cross the same boundary just as well.
+//! - **The tasks arrive as messages** rather than being built into the initial
+//!   state. `init` could build them — `Keyed::from_iter` records no removal, so
+//!   growing a collection there is fine — and this file routes them through
+//!   `AddTask` so the seed and the `n` key take one path. What `init`'s command
+//!   cannot do is start work *under a child's scope*, so the row's own setup is
+//!   a message either way. That the rows start with the same notes and none
+//!   marked done is `AddTask`'s doing rather than composition's: it carries a
+//!   title and nothing else.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`
@@ -227,6 +230,12 @@ enum Message {
     AddTask(String),
     DeleteTask(TaskId),
     /// Discards a row's instance and starts a fresh one under the same key.
+    ///
+    /// The successor is the server's version of the task, so everything local
+    /// to the instance that left is gone with it: the `done` flag, and any
+    /// notes `SaveNotes` had written into it. That is what a replacement is
+    /// here — the old instance is torn down and the new one starts fresh — and
+    /// carrying state across would make it something else.
     ReloadTask(TaskId),
     OpenDetails(TaskId),
     CloseDetails,
@@ -391,18 +400,18 @@ impl Reducer for Root {
         match message {
             Message::Terminal(event) => match event {
                 // Not releases. A terminal that reports them — Windows, or a
-                // session with the kitty keyboard protocol on — would
-                // otherwise turn one keystroke into two messages, and every
-                // operation here is one a reader means to perform once: `n`
-                // would add two rows rather than the one asked for, and Enter
-                // would open the pane and then replace it with a second pane on
-                // the same row — a removal the reader never asked for, in a
-                // file about which removals happen.
+                // session with the kitty keyboard protocol on — sends two
+                // events for one press, and the second would be acted on: `n`
+                // would add two rows where one was asked for, and Enter would
+                // open the pane and then replace it with a second pane on the
+                // same row — a removal nobody asked for, in a file about which
+                // removals happen.
                 //
-                // A *repeat* is an instruction and is kept. The same protocol
-                // that delivers releases is the one that reports a held key,
-                // so testing for `Press` would drop those too and a held Down
-                // would move the selection once.
+                // A *repeat* is kept, and is the other thing entirely: a held
+                // key is repetition the reader is asking for, so holding Enter
+                // does replace the pane, over and over, exactly as pressing it
+                // twice would. Testing for `Press` would drop those with the
+                // releases, and a held Down would move the selection once.
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     key_message(state, key.code).map_or_else(Command::none, |message| {
                         // A boundary claims a child-addressed message, so the
@@ -944,7 +953,9 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
     state
         .activity
         .push(format!("reloaded: #{} {}", id.0, task_title));
-    state.status = "Reloaded the task";
+    // Says what the successor threw away, because a cleared checkbox is
+    // otherwise the only sign that it did.
+    state.status = "Reloaded the task, discarding its local state";
     Command::message(Message::Task(id, TaskMessage::Watch)).into()
 }
 
@@ -1790,5 +1801,38 @@ mod tests {
 
         let _reported = Root.reduce(&mut state, Message::NoTaskSelected);
         assert_eq!(state.status, "No task selected");
+    }
+
+    /// Reloading a row is a replacement, so the successor starts fresh and
+    /// everything local to the instance that left goes with it.
+    ///
+    /// A cleared checkbox is otherwise the only sign, so the status says it.
+    #[test]
+    fn reloading_a_row_discards_what_was_local_to_it() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let row = state
+            .tasks
+            .get_mut(&TaskId(1))
+            .expect("the row that was just added");
+        row.done = true;
+        row.notes = "edited and saved".to_owned();
+
+        let _reloaded = Root.reduce(&mut state, Message::ReloadTask(TaskId(1)));
+
+        let row = state.tasks.get(&TaskId(1)).expect("the successor");
+        assert!(!row.done, "the done flag was the old instance's");
+        assert_ne!(
+            row.notes, "edited and saved",
+            "and so were the notes saved into it"
+        );
+        assert_eq!(
+            state.status, "Reloaded the task, discarding its local state",
+            "which the reader is told, since the cleared checkbox is the only other sign"
+        );
     }
 }
