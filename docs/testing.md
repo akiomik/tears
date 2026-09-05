@@ -26,19 +26,23 @@ the contract:
 
 An example teaches with prose as much as with code, and prose is claims. A
 claim stays true by itself when it describes the code it annotates. When it
-describes something else — a framework item, another example, a different part
-of the same file — its truth lives where that thing lives, and the copy in the
-example goes stale the next time that thing changes.
+describes something else — another example, a different part of the same file,
+an item's semantics — its truth lives where that thing lives, and the copy in
+the example goes stale the next time that thing changes.
 
 Where each kind belongs:
 
 | Claim | Owner | Form in an example |
 | --- | --- | --- |
-| what a framework item does | that item's rustdoc | name the item, do not restate it |
+| what an item the example merely uses does | that item's rustdoc | name it, do not restate it |
 | how another example behaves | that example | a pointer to what it is for, and no more |
 | what this file does elsewhere in itself | a test | the test's name and its assertions |
 | why the code below is written this way | the comment | prose, as now |
-| a number heading a list it has to agree with | — | do not write one |
+
+**An item the example merely uses is described by its own rustdoc.** An example
+may of course describe what it exists to demonstrate; that is what it is for.
+What rots is a claim about an item picked up along the way, restated as the
+reason for a line, and changed later without the example hearing about it.
 
 **Turning a claim about the file's own behavior into a test is a conversion,
 not a deletion.** Run it — `cargo test --example <name>`, with whatever
@@ -51,12 +55,6 @@ changes. "`x.rs` prints it from inside the run" is a copy of `x.rs`'s behavior,
 and `x.rs` is free to change without knowing the copy exists. Where two examples
 exist to be compared, the comparison is stated once — in the one that exists
 because of it — and the other carries a pointer.
-
-**A number heading a list is a fact a reader can check by counting**, and it
-goes stale in silence when the list grows: "three things" over four items is
-wrong and nothing fails. A count sitting on what it counts is not that — a
-comment naming two areas, directly above the two constraints that make them,
-is seen by whoever changes them.
 
 These rules are about examples.
 

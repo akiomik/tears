@@ -280,11 +280,13 @@ store.finish();
 its own paused time context) and does not execute subscription sources — it
 observes only the *declared* set via `subscription_ids`. See the
 [`tears::testing`](https://docs.rs/tears/latest/tears/testing/) module docs for
-the full contract, including deterministic time without `TestStore`. Several
-examples carry worked, runnable tests of their own:
+the full contract, including deterministic time without `TestStore`. Worked,
+runnable tests ship with three of the examples:
 
 ```bash
-cargo test --example <name>
+cargo test --example command_timeout_retry
+cargo test --example command_cancellation
+cargo test --example dashboard
 ```
 
 Repository-wide test conventions live in [docs/testing.md](docs/testing.md).

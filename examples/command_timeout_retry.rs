@@ -1,6 +1,6 @@
 //! Example demonstrating `Command::timeout` and `Command::retry`.
 //!
-//! This example shows several asynchronous outcomes:
+//! This example shows four kinds of asynchronous outcomes:
 //! - A fetch that completes well within its deadline
 //! - A fetch that is slower than its deadline and times out
 //! - A flaky operation that fails twice and recovers on retry
