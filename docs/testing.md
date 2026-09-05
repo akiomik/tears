@@ -1,14 +1,17 @@
 # Testing Guidelines
 
 This document describes repository-wide test structure and async test
-synchronization rules, and one obligation about prose that no test can carry.
+synchronization rules, and one obligation that no test can carry.
 
 ## Prose Describing Code Is Read Again When That Code Changes
 
-A change that makes a sentence about the code false is caught by nothing in the
-build and nothing in the tests. So an edit is not finished until the file's own
-documentation has been read again: the module header, the doc on the item, the
-comment over the line.
+Some of what documentation says about code is checked: a link that no longer
+resolves fails the doc build, and an example that no longer compiles fails a
+doctest. A sentence is neither. Its truth is not expressed in a form anything
+runs, so a change that makes it false leaves nothing behind.
+
+So an edit is not finished until the file's own documentation has been read
+again: the module header, the doc on the item, the comment over the line.
 
 ## Test Placement
 
