@@ -1,7 +1,7 @@
 # Testing Guidelines
 
 This document describes repository-wide test structure and async test
-synchronization rules.
+synchronization rules, and which claims belong in a test rather than in prose.
 
 ## Test Placement
 
@@ -21,6 +21,48 @@ the contract:
   need private access.
 - Use integration tests for end-to-end runtime behavior, public API contracts,
   and interactions between runtime components.
+
+## What an Example May Assert
+
+An example teaches with prose as much as with code, and prose is claims. A
+claim keeps itself true only when what it describes is on the same screen.
+Every other kind has its truth somewhere else, and a copy of it in an example
+is a copy that will be wrong after the next edit to the thing it copied.
+
+Where each kind belongs:
+
+| Claim | Owner | Form in an example |
+| --- | --- | --- |
+| what a framework item does | that item's rustdoc | a link, not a restatement |
+| when and why to reach for a shape | the guide in `docs/` | a reference |
+| how two examples differ | the one that exists to be compared | nothing in the other |
+| what this file does elsewhere in itself | a test | the test's name and its assertions |
+| why the code below is written this way | the comment | prose, as now |
+| a count of anything | — | do not write one |
+
+The fourth row is the one that does the work, and it is a conversion rather
+than a deletion. A comment claiming what happens three functions away is
+checked by a reader holding two places in their head at once; a test claiming
+it is checked by `cargo test`. The explanation is worth keeping — move it to
+where something fails when it stops being true.
+
+The third row has a matching consequence: a file may not describe another
+file's behaviour. State the comparison once, in the file that exists because of
+it, and leave the other with a pointer and no claims.
+
+The last row is not pedantry. A written count is a fact a reader can check by
+counting, so it has to stay true through every later edit that adds or removes
+one of whatever was counted, and it never carries anything the sentence needs.
+
+This is scoped to examples because that is where the failure shows up. The same
+rule read the other way is why rustdoc rarely has it: an item's documentation
+sits against the item, so its claims are checked in place.
+
+The evidence is #360, which added one example and revised it across sixteen
+review rounds. Claims moved into tests stayed fixed. Claims corrected in prose
+came back: one comment was wrong, corrected, and wrong again in three
+consecutive rounds, each time because the correction described the change and
+not the sentences the change had invalidated.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
