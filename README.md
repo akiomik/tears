@@ -231,10 +231,12 @@ A `Reducer` owns one state transition and the subscriptions that state declares.
 `scope`, `for_each` and `presented` compose one under a parent — a sibling
 feature, one child per row of a `Keyed` collection, or an optionally-present
 child in a `Slot` — and `into_program` closes the stack into a runnable
-`Program` for `ProgramRuntime`. Each boundary qualifies the identities its child
-produces with its own segment and tears a removed child's runs down, so rows
-declaring the same subscription or keying the same command do not collide and no
-removal leaks a run.
+`Program` for `ProgramRuntime`. Every boundary qualifies the identities its
+child produces with its own segment, so rows declaring the same subscription or
+keying the same command do not collide. The two that hold a collection —
+`for_each` and `presented` — additionally tear a removed child's runs down, so
+no removal leaks a run; `scope` composes one child in place, where there is no
+collection for an instance to leave.
 
 An `Application` is run through an adapter over the same kernel, so this is a
 way to write a program rather than a second runtime. See
@@ -250,8 +252,9 @@ and each group is named after what a reader arrives knowing.
 ### Application structure
 
 Named after the application, because someone choosing a structure knows the
-shape of their problem and not yet the name of the API. Read them in order:
-each one is the previous one at the next scale.
+shape of their problem and not yet the name of the API. The first three are a
+scale, each one the previous grown; the fourth is the third one rewritten, so
+read it beside `dashboard.rs` rather than after it.
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
