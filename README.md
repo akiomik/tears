@@ -354,9 +354,9 @@ requesting review. Testing conventions are documented in
 [docs/testing.md](docs/testing.md), and the release procedure in
 [docs/releasing.md](docs/releasing.md).
 
-An edit is not finished until the file's own documentation has been read
-again and corrected where the change made it false: the module doc, the doc
-on the item, the comment over the line.
+An edit is not finished until the changed file's own documentation has been
+read again and corrected where the change made it false: the module doc, the
+doc on the item, the comment over the line.
 
 ---
 
