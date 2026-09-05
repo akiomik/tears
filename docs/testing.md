@@ -44,11 +44,15 @@ Where each kind belongs:
 **Turning a claim about the file's own behaviour into a test is a conversion,
 not a deletion.** A comment claiming what happens three functions away is
 checked by a reader holding two places in their head at once; a test claiming
-it is checked by a run. Run `cargo test --example <name>` on the converted
-claim and watch it pass, then break the code it describes and watch it fail: a
-test nothing reaches is a comment with more syntax. `just test` and CI reach
-every example's tests; confirm with those two rather than with whatever a
-narrower invocation happens to cover.
+it is checked by a run. Run the converted claim — `cargo test --example <name>`,
+with whatever `--features` that example's own header names — and watch it pass,
+then break the code it describes and watch it fail: a test nothing reaches is a
+comment with more syntax.
+
+Check that the runs you rely on reach it, rather than assuming they do. An
+example whose `required-features` are not enabled is left out without a word,
+so read the output for `Running unittests examples/<name>.rs` instead of for a
+green summary.
 
 **A pointer to another example may say what it is for, not how it behaves.**
 "For a larger state-management example, see `x.rs`" keeps working when `x.rs`
@@ -68,10 +72,11 @@ These rules are about examples, which is where the failure showed up. Read the
 other way they are why rustdoc rarely has it: an item's documentation sits
 against the item.
 
-The evidence is #360, whose example was revised across a long series of review
-rounds. Claims it moved into tests stayed fixed. Claims it corrected in prose
-came back — one comment was wrong, corrected, and wrong again, each correction
-describing the change and not the sentences the change had invalidated.
+The failure this is aimed at was watched happening in #360's review: one
+comment was wrong, corrected, and wrong again, each correction describing the
+change and not the sentences that the change had invalidated. A claim held by a
+test does not have that shape — nothing else has to be re-read for it to keep
+holding, and when it stops holding, a run says so.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
