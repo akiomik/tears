@@ -6,7 +6,7 @@
 //! - Conditional subscriptions based on current view
 //! - Different UI rendering for each view
 //!
-//! For a larger state-management example, see `examples/dashboard.rs`.
+//! For another state-management example, see `examples/dashboard.rs`.
 //!
 //! Views:
 //! - Menu: Select which view to navigate to

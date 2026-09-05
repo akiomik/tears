@@ -24,29 +24,33 @@ the contract:
 
 ## What an Example May Assert
 
-An example teaches with prose as much as with code, and prose is claims. Two of
-them are worth being deliberate about.
+An example teaches with prose as much as with code, and prose is claims. Three
+are worth being deliberate about: two about where a claim goes, one about when
+to read it again.
 
-**A file does not describe another file's behavior.** "For a larger
-state-management example, see `x.rs`" keeps working when `x.rs` changes.
-"`x.rs` prints it from inside the run" is a copy of `x.rs`'s behavior, and
-`x.rs` is free to change without knowing the copy exists. Where two examples
-exist to be compared, the comparison is stated once — in the one that exists
-because of it — and the other carries a pointer.
+**An example does not describe another example's behavior.** A pointer names the
+other file and what it is there for; a copy states something that file does,
+which it is free to stop doing without knowing the copy exists. "For another
+state-management example, see `x.rs`" is a pointer. "`x.rs` reports each retry
+attempt" is a copy, and it survives only until `x.rs` reports something else.
+Where two examples exist to be compared, the comparison is stated once — in the
+one that exists because of it — and the other carries a pointer.
 
 **A behavioral claim a reader would act on is better held by a test.** A comment
 claiming what happens three functions away is checked by a reader holding two
 places in their head at once; a test claiming it is checked by a run. Converting
 one is not a deletion: the explanation is worth keeping, and a test is where it
-keeps. Run it with `cargo test --example <name>`, plus whatever `--features` the
-example's own header names, and watch it pass, then break the code it describes
-and watch it fail.
+keeps. Run it with `cargo test --example <name>`, plus the `required-features`
+its `Cargo.toml` entry names, and watch it pass, then break the code it
+describes and watch it fail.
 
-Neither is a reason for an example's header to stop saying what the example
-shows. What a header needs is re-reading: when a change makes a sentence in it
-false, the change is the only thing that can notice.
+**Prose describing code is read again when that code changes.** This is not a
+question of where a claim lives, and it is not only about examples: a sentence
+that a change makes false is one only that change can notice. It is the failure
+neither rule above reaches, and neither is a reason for a header to stop saying
+what its file is for.
 
-These two are about examples; nothing here is a rule for `src/`.
+The two rules are about examples. The obligation is not.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
