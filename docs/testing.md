@@ -41,7 +41,7 @@ Where each kind belongs:
 | why the code below is written this way | the comment | prose, as now |
 | a number some list in the same artifact has to agree with | — | do not write one |
 
-**Turning a claim about the file's own behaviour into a test is a conversion,
+**Turning a claim about the file's own behavior into a test is a conversion,
 not a deletion.** A comment claiming what happens three functions away is
 checked by a reader holding two places in their head at once; a test claiming
 it is checked by a run. Run the converted claim — `cargo test --example <name>`,
@@ -49,14 +49,18 @@ with whatever `--features` that example's own header names — and watch it pass
 then break the code it describes and watch it fail: a test nothing reaches is a
 comment with more syntax.
 
-Check that the runs you rely on reach it, rather than assuming they do. An
-example whose `required-features` are not enabled is left out without a word,
-so read the output for `Running unittests examples/<name>.rs` instead of for a
-green summary.
+Check that the runs you rely on reach it. Naming one example fails loudly when
+its features are missing — `cargo test --example <name>` either runs the test or
+says what to enable — while a wildcard selection does not: `--examples` and
+`--all-targets`, which `just test` and CI use, pass over an example whose
+`required-features` are not enabled and succeed anyway. So when what you
+converted sits in a gated example, check that the recipe you are relying on
+enables its features; `just test` takes them from `build_features` in the
+`justfile`.
 
 **A pointer to another example may say what it is for, not how it behaves.**
 "For a larger state-management example, see `x.rs`" keeps working when `x.rs`
-changes. "`x.rs` prints it from inside the run" is a copy of `x.rs`'s behaviour,
+changes. "`x.rs` prints it from inside the run" is a copy of `x.rs`'s behavior,
 and `x.rs` is free to change without knowing the copy exists. Where two examples
 exist to be compared, the comparison is stated once — in the one that exists
 because of it — and the other carries a pointer.
@@ -64,9 +68,9 @@ because of it — and the other carries a pointer.
 **A number that a list has to agree with is a fact a reader can check by
 counting**, and it goes stale in silence when the list grows: "three things"
 over four items is wrong and nothing fails. A measurement a run produced is a
-different thing and stays — the interleaving and hook-call counts under
-"Process-Global Panic Hook Tests" are load-bearing, and no later edit changes
-what a past run measured.
+different thing and stays: an interleaving count, a number of hook calls
+observed where one was expected, a number of consecutive green runs. Nothing a
+later edit does changes what a past run measured.
 
 These rules are about examples, which is where the failure showed up. Read the
 other way they are why rustdoc rarely has it: an item's documentation sits
