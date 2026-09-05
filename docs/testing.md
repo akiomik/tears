@@ -25,44 +25,53 @@ the contract:
 ## What an Example May Assert
 
 An example teaches with prose as much as with code, and prose is claims. A
-claim keeps itself true only when what it describes is on the same screen.
-Every other kind has its truth somewhere else, and a copy of it in an example
-is a copy that will be wrong after the next edit to the thing it copied.
+claim stays true by itself when it describes the code it annotates. When it
+describes something else — a framework item, another example, a different part
+of the same file — its truth lives where that thing lives, and the copy in the
+example goes stale the next time that thing changes.
 
 Where each kind belongs:
 
 | Claim | Owner | Form in an example |
 | --- | --- | --- |
 | what a framework item does | that item's rustdoc | a link, not a restatement |
-| when and why to reach for a shape | the guide in `docs/` | a reference |
-| how two examples differ | the one that exists to be compared | nothing in the other |
+| when and why to reach for a shape | whichever document in `docs/` owns the subject | a reference |
+| how another example behaves | that example | a pointer to what it is for, and no more |
 | what this file does elsewhere in itself | a test | the test's name and its assertions |
 | why the code below is written this way | the comment | prose, as now |
-| a count of anything | — | do not write one |
+| a number some list in the same artifact has to agree with | — | do not write one |
 
-The fourth row is the one that does the work, and it is a conversion rather
-than a deletion. A comment claiming what happens three functions away is
+**Turning a claim about the file's own behaviour into a test is a conversion,
+not a deletion.** A comment claiming what happens three functions away is
 checked by a reader holding two places in their head at once; a test claiming
-it is checked by `cargo test`. The explanation is worth keeping — move it to
-where something fails when it stops being true.
+it is checked by a run. Run `cargo test --example <name>` on the converted
+claim and watch it pass, then break the code it describes and watch it fail: a
+test nothing reaches is a comment with more syntax. `just test` and CI reach
+every example's tests; confirm with those two rather than with whatever a
+narrower invocation happens to cover.
 
-The third row has a matching consequence: a file may not describe another
-file's behaviour. State the comparison once, in the file that exists because of
-it, and leave the other with a pointer and no claims.
+**A pointer to another example may say what it is for, not how it behaves.**
+"For a larger state-management example, see `x.rs`" keeps working when `x.rs`
+changes. "`x.rs` prints it from inside the run" is a copy of `x.rs`'s behaviour,
+and `x.rs` is free to change without knowing the copy exists. Where two examples
+exist to be compared, the comparison is stated once — in the one that exists
+because of it — and the other carries a pointer.
 
-The last row is not pedantry. A written count is a fact a reader can check by
-counting, so it has to stay true through every later edit that adds or removes
-one of whatever was counted, and it never carries anything the sentence needs.
+**A number that a list has to agree with is a fact a reader can check by
+counting**, and it goes stale in silence when the list grows: "three things"
+over four items is wrong and nothing fails. A measurement a run produced is a
+different thing and stays — the interleaving and hook-call counts under
+"Process-Global Panic Hook Tests" are load-bearing, and no later edit changes
+what a past run measured.
 
-This is scoped to examples because that is where the failure shows up. The same
-rule read the other way is why rustdoc rarely has it: an item's documentation
-sits against the item, so its claims are checked in place.
+These rules are about examples, which is where the failure showed up. Read the
+other way they are why rustdoc rarely has it: an item's documentation sits
+against the item.
 
-The evidence is #360, which added one example and revised it across sixteen
-review rounds. Claims moved into tests stayed fixed. Claims corrected in prose
-came back: one comment was wrong, corrected, and wrong again in three
-consecutive rounds, each time because the correction described the change and
-not the sentences the change had invalidated.
+The evidence is #360, whose example was revised across a long series of review
+rounds. Claims it moved into tests stayed fixed. Claims it corrected in prose
+came back — one comment was wrong, corrected, and wrong again, each correction
+describing the change and not the sentences the change had invalidated.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
