@@ -35,22 +35,15 @@ Where each kind belongs:
 | Claim | Owner | Form in an example |
 | --- | --- | --- |
 | what a framework item does | that item's rustdoc | name the item, do not restate it |
-| when and why to reach for a shape | whichever document in `docs/` owns the subject | a reference |
 | how another example behaves | that example | a pointer to what it is for, and no more |
 | what this file does elsewhere in itself | a test | the test's name and its assertions |
 | why the code below is written this way | the comment | prose, as now |
-| a number some list in the same artifact has to agree with | — | do not write one |
+| a number heading a list it has to agree with | — | do not write one |
 
 **Turning a claim about the file's own behavior into a test is a conversion,
 not a deletion.** Run it — `cargo test --example <name>`, with whatever
 `--features` that example's own header names — and watch it pass, then break the
 code it describes and watch it fail.
-
-`just test` and CI reach every example, feature-gated ones included: both pass
-`build_features`, which `just test-doc-packaged` checks against the crate's own
-feature table. A bare `cargo test --all-targets` enables nothing and passes over
-what it cannot build without saying so, which is worth knowing before reading a
-green summary as coverage.
 
 **A pointer to another example may say what it is for, not how it behaves.**
 "For a larger state-management example, see `x.rs`" keeps working when `x.rs`
@@ -59,13 +52,13 @@ and `x.rs` is free to change without knowing the copy exists. Where two examples
 exist to be compared, the comparison is stated once — in the one that exists
 because of it — and the other carries a pointer.
 
-**A number that a list has to agree with is a fact a reader can check by
-counting**, and it goes stale in silence when the list grows: "three things"
-over four items is wrong and nothing fails. A measurement a run produced is a
-different thing and stays: an interleaving count, a number of hook calls
-observed where one was expected.
+**A number heading a list is a fact a reader can check by counting**, and it
+goes stale in silence when the list grows: "three things" over four items is
+wrong and nothing fails. A count sitting on what it counts is not that — a
+comment naming two areas, directly above the two constraints that make them,
+is seen by whoever changes them.
 
-These rules are about examples, which is where the failure showed up.
+These rules are about examples.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
