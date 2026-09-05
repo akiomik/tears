@@ -19,6 +19,8 @@
 //!
 //! Run with: cargo run --example dashboard
 
+use std::sync::{Arc, Mutex};
+
 use color_eyre::eyre::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
@@ -27,6 +29,29 @@ use tears::prelude::*;
 use tears::subscription::terminal::TerminalEvents;
 
 const ACTIVITY_LIMIT: usize = 8;
+
+/// Where the run leaves a reason `main` can print once the terminal is back.
+///
+/// A handle rather than a field of the state, and for the reason
+/// `dashboard_composed.rs` has one: a terminal error quits, `main` restores the
+/// terminal immediately after, and anything written to the screen — or to
+/// stderr while the alternate screen is up — goes with it. The report has to
+/// outlive the run to be a report at all.
+#[derive(Clone, Default)]
+struct ExitReason(Arc<Mutex<Option<String>>>);
+
+impl ExitReason {
+    fn set(&self, reason: String) {
+        *self.0.lock().expect("the exit reason lock is not poisoned") = Some(reason);
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("the exit reason lock is not poisoned")
+            .take()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -97,8 +122,9 @@ enum ActivityMessage {
     Clear,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct App {
+    reason: ExitReason,
     focus: Focus,
     navigation: NavigationState,
     tasks: TaskListState,
@@ -109,14 +135,15 @@ struct App {
 
 impl Application for App {
     type Message = Message;
-    type Flags = ();
+    type Flags = ExitReason;
 
-    fn new(_flags: ()) -> (Self, Command<Message>) {
+    fn new(reason: ExitReason) -> (Self, Command<Message>) {
         let tasks = TaskListState::new();
         let details = DetailState::from_task(tasks.selected_task());
 
         (
             Self {
+                reason,
                 focus: Focus::Navigation,
                 navigation: NavigationState::new(),
                 tasks,
@@ -150,7 +177,10 @@ impl Application for App {
             }
             Message::Terminal(_) => {}
             Message::TerminalError(e) => {
-                eprintln!("Terminal error: {e}");
+                // Recorded rather than printed: the quit below ends the run and
+                // `main` restores the terminal immediately after, so this is
+                // reported once there is a screen left to report it on.
+                self.reason.set(e);
                 return Command::quit();
             }
             Message::Quit => return Command::quit(),
@@ -235,8 +265,16 @@ impl App {
             // Esc throws the edits away and reads the selected task again,
             // which is what the panel's hint offers and what `Reset` names.
             DetailAction::Reset => {
+                let reloaded = self.tasks.selected_task().is_some();
                 self.details.sync_from_task(self.tasks.selected_task());
-                self.status.set_info(outcome.status);
+                // With no task there is nothing to reread, and the panel says
+                // so; the footer must not claim otherwise, for the reason the
+                // `Save` arm above has an `else`.
+                if reloaded {
+                    self.status.set_info(outcome.status);
+                } else {
+                    self.status.set_info("No task selected");
+                }
             }
             DetailAction::Keep => self.status.set_info(outcome.status),
         }
@@ -616,19 +654,26 @@ impl StatusState {
     }
 }
 
-/// Every bare-character binding here excludes `CONTROL`. Raw mode delivers no
-/// SIGINT, so a reader pressing Ctrl+C to leave would otherwise have run
-/// whatever `c` is bound to — clearing the activity log — and Ctrl+D would have
-/// deleted a task.
+/// Every binding here is for an unmodified key. Raw mode delivers no SIGINT, so
+/// a reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
+/// bound to — clearing the activity log — and Ctrl+D would have deleted a task.
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    // The way out of raw mode, from any focus: the details editor holds `q`
+    // but nothing holds this.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Command::message(Message::Quit).into();
+    }
+    // Every binding below is for an unmodified key, so a chord this
+    // application does not bind is answered here rather than falling through
+    // to the bare key's. Above the match and not on the character arms,
+    // because `Enter`, `Up`/`Down`, `Tab` and `Esc` arrive with modifiers too.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return Command::none();
+    }
     match key.code {
-        // The way out of raw mode, from any focus: the details editor holds
-        // `q` but nothing holds this.
-        KeyCode::Char('c') if control => Command::message(Message::Quit).into(),
-        // Anything else with `CONTROL` on is a chord this application has no
-        // binding for, and it must not fall through to the bare key's.
-        KeyCode::Char(_) if control => Command::none(),
         // Guarded like the other printable keys below, so `q` stays typable in
         // the details editor. This panel is always present, and Esc rereads the
         // selected task's notes rather than leaving, so Tab is how you get out
@@ -685,11 +730,18 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let runtime = Runtime::<App>::new(());
+    let reason = ExitReason::default();
+    let runtime = Runtime::<App>::new(reason.clone());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
     ratatui::restore();
+
+    // What the run had to say and could not show, now that there is a screen
+    // to say it on.
+    if let Some(reason) = reason.take() {
+        eprintln!("Terminal error: {reason}");
+    }
 
     result?;
 
@@ -714,7 +766,12 @@ mod tests {
 
     /// The same held with `CONTROL`.
     fn chord(code: KeyCode) -> Message {
-        Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL)))
+        chord_with(code, KeyModifiers::CONTROL)
+    }
+
+    /// The same under any modifiers.
+    fn chord_with(code: KeyCode, modifiers: KeyModifiers) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
     }
 
     /// The same for the other two kinds a terminal can report.
@@ -729,7 +786,7 @@ mod tests {
     /// Sending the child message directly walks focus through the panels.
     #[test]
     fn focus_next_cycles_through_panels() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert_eq!(store.state().focus, Focus::Navigation);
 
         store.send(Message::FocusNext);
@@ -744,7 +801,7 @@ mod tests {
     /// `Command::message(FocusNext)` the store delivers as the next message.
     #[test]
     fn tab_key_emits_focus_next() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
 
         store.send(key(KeyCode::Tab));
         store.receive_matching(|msg| matches!(msg, Message::FocusNext));
@@ -757,7 +814,7 @@ mod tests {
     /// entry.
     #[test]
     fn toggle_marks_selected_task_done() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert!(!store.state().tasks.tasks[0].done);
         let activity_before = store.state().activity.entries.len();
 
@@ -772,7 +829,7 @@ mod tests {
     /// id counter keeps advancing.
     #[test]
     fn add_then_delete_returns_to_original_count() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert_eq!(store.state().tasks.tasks.len(), 3);
         assert_eq!(store.state().tasks.next_id, 4);
 
@@ -790,7 +847,7 @@ mod tests {
     /// quit request.
     #[test]
     fn quit_key_requests_shutdown() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
 
         store.send(key(KeyCode::Char('q')));
         store.receive_matching(|msg| matches!(msg, Message::Quit));
@@ -802,7 +859,7 @@ mod tests {
     /// than a request to quit. Tab is how you leave that focus.
     #[test]
     fn quit_key_is_text_while_the_details_panel_has_focus() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         store.send(Message::FocusNext);
         store.send(Message::FocusNext);
         assert_eq!(store.state().focus, Focus::Details);
@@ -819,7 +876,7 @@ mod tests {
     /// what the panel's hint offers and what `Reset` names.
     #[test]
     fn escape_rereads_the_selected_task_s_notes() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         store.send(Message::FocusNext);
         store.send(Message::FocusNext);
         assert_eq!(store.state().focus, Focus::Details);
@@ -847,16 +904,39 @@ mod tests {
     /// Ctrl+D would have deleted the selected task.
     #[test]
     fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         store.send(Message::FocusNext);
         assert_eq!(store.state().focus, Focus::Tasks);
         let before = store.state().tasks.tasks.len();
 
-        store.send(chord(KeyCode::Char('d')));
+        // Not only the characters: `Enter`, the arrows, `Tab` and `Esc` arrive
+        // with modifiers too.
+        let selected = store.state().tasks.selected;
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('n'),
+            KeyCode::Char(' '),
+            KeyCode::Tab,
+            KeyCode::Down,
+        ] {
+            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                store.send(chord_with(code, modifiers));
+            }
+        }
         assert_eq!(
             store.state().tasks.tasks.len(),
             before,
-            "Ctrl+D is a chord this application does not bind"
+            "no chord added or deleted a task"
+        );
+        assert_eq!(
+            store.state().tasks.selected,
+            selected,
+            "and none moved the selection"
+        );
+        assert_eq!(
+            store.state().focus,
+            Focus::Tasks,
+            "and none cycled the focus"
         );
 
         store.send(chord(KeyCode::Char('c')));
@@ -869,7 +949,7 @@ mod tests {
     /// reporting the edit it did not write.
     #[test]
     fn saving_without_a_task_reports_rather_than_going_silent() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         store.send(Message::FocusNext);
         for _ in 0..3 {
             store.send(Message::Tasks(TaskMessage::Delete));
@@ -889,11 +969,32 @@ mod tests {
         store.finish();
     }
 
+    /// Escaping with no task selected says so rather than reporting a reload
+    /// that had nothing to read.
+    #[test]
+    fn escaping_without_a_task_reports_rather_than_claiming_a_reload() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+
+        store.send(Message::Details(DetailMessage::Reset));
+
+        assert_eq!(
+            store.state().status.message,
+            "No task selected",
+            "there was nothing to reread"
+        );
+        store.finish();
+    }
+
     /// A terminal that reports releases as well as presses sends two events
     /// per keystroke. The release is not an instruction; a repeat is.
     #[test]
     fn a_key_release_asks_for_nothing_and_a_repeat_asks() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert_eq!(store.state().focus, Focus::Navigation);
 
         store.send(key_of(KeyCode::Tab, KeyEventKind::Release));

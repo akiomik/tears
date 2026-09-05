@@ -117,6 +117,14 @@ const SYNC: &str = "sync";
 /// How long the stand-in requests take.
 const REQUEST_MS: u64 = 900;
 
+/// What a terminal-error line is written under.
+///
+/// Named once because two places have to agree on it: the reduce that records
+/// the reason, and the `main` that reads it back after restoring the terminal.
+/// A literal at each end would let one change silently and leave the other
+/// matching nothing.
+const TERMINAL_ERROR: &str = "terminal error: ";
+
 /// How many activity lines the pane keeps.
 const ACTIVITY_LIMIT: usize = 8;
 
@@ -437,7 +445,7 @@ impl Reducer for Root {
                 // and `main` restores the terminal immediately after, so this
                 // is the only report there is — and `main` prints it once the
                 // screen it would have been drawn on is gone.
-                state.activity.push(format!("terminal error: {error}"));
+                state.activity.push(format!("{TERMINAL_ERROR}{error}"));
                 Command::quit()
             }
             Message::Quit => Command::quit(),
@@ -1089,19 +1097,30 @@ const fn child_status(message: &Message) -> Option<&'static str> {
 
 /// The message a key press asks for, if any.
 ///
-/// Every bare-character binding here excludes `CONTROL`. Raw mode delivers no
-/// SIGINT, so a reader pressing Ctrl+C to leave would otherwise have run
-/// whatever `c` is bound to — clearing the activity log — and Ctrl+D and Ctrl+R
-/// would have deleted and reloaded a row.
+/// Every binding here is for an unmodified key. Raw mode delivers no SIGINT, so
+/// a reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
+/// bound to — clearing the activity log — while Ctrl+D and Ctrl+R would have
+/// deleted and reloaded a row, and Ctrl+Enter would have replaced the pane's
+/// occupant, which is a removal.
 fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    // The way out of raw mode, from any focus: the notes editor holds `q` but
+    // nothing holds this.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(Message::Quit);
+    }
+    // Every binding below is for an unmodified key, so a chord this
+    // application does not bind is answered here rather than falling through
+    // to the bare key's. Above the match and not on the character arms,
+    // because `Enter`, `Up`/`Down`, `Tab`, `Esc` and `Backspace` arrive with
+    // modifiers too: Ctrl+Enter would open the pane — replacing an occupant,
+    // which is a removal — and Alt+q would quit.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
     match key.code {
-        // The way out of raw mode, from any focus: the notes editor holds `q`
-        // but nothing holds this.
-        KeyCode::Char('c') if control => Some(Message::Quit),
-        // Anything else with `CONTROL` on is a chord this application has no
-        // binding for, and it must not fall through to the bare key's.
-        KeyCode::Char(_) if control => None,
         // Guarded like every other printable key below, so `q` stays typable
         // in the notes editor. Esc closes the pane, which is how you leave it.
         KeyCode::Char('q') if !editing_notes(state) => Some(Message::Quit),
@@ -1175,7 +1194,7 @@ async fn main() -> Result<()> {
     // the pane holding this line is never drawn again; printing it here is
     // after the restore rather than into a screen that is about to go.
     for line in activity.entries() {
-        if let Some(reason) = line.strip_prefix("terminal error: ") {
+        if let Some(reason) = line.strip_prefix(TERMINAL_ERROR) {
             eprintln!("Terminal error: {reason}");
         }
     }
@@ -1473,9 +1492,9 @@ mod tests {
         driver.settle(TURNS, || recorded(&activity, "stopped watching: #1 alpha"));
 
         // Without the script's own `added:` lines, which are setup rather than
-        // subject and which put the comparison exactly on `ACTIVITY_LIMIT`: one
-        // more entry from anywhere would evict the *first* of them and report a
-        // missing head, sending a maintainer to the wrong end of the list.
+        // subject. They are also the two the log would shed first — it sits
+        // exactly on `ACTIVITY_LIMIT` — so dropping them here keeps this
+        // comparison about the teardowns rather than about the buffer's size.
         let written: Vec<String> = activity
             .entries()
             .into_iter()
@@ -1885,20 +1904,41 @@ mod tests {
         let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
 
         let chord =
-            |state: &App, code| key_message(state, KeyEvent::new(code, KeyModifiers::CONTROL));
+            |state: &App, code, modifiers| key_message(state, KeyEvent::new(code, modifiers));
 
+        // Not only the characters: `Enter`, the arrows, `Tab`, `Esc` and
+        // `Backspace` arrive with modifiers too, and Ctrl+Enter would open the
+        // pane — replacing an occupant, which is a removal.
         state.focus = Focus::Tasks;
-        for code in [KeyCode::Char('d'), KeyCode::Char('r'), KeyCode::Char(' ')] {
-            assert!(
-                chord(&state, code).is_none(),
-                "{code:?} with CONTROL is a chord this application does not bind"
-            );
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('r'),
+            KeyCode::Char(' '),
+            KeyCode::Char('n'),
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Up,
+            KeyCode::Down,
+        ] {
+            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                assert!(
+                    chord(&state, code, modifiers).is_none(),
+                    "{code:?} with {modifiers:?} is a chord this application does not bind"
+                );
+            }
         }
 
         state.focus = Focus::Activity;
         assert!(
-            matches!(chord(&state, KeyCode::Char('c')), Some(Message::Quit)),
+            matches!(
+                chord(&state, KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(Message::Quit)
+            ),
             "Ctrl+C leaves rather than clearing the log the bare key clears"
+        );
+        assert!(
+            chord(&state, KeyCode::Char('c'), KeyModifiers::ALT).is_none(),
+            "while Alt+c is bound to nothing and clears nothing"
         );
 
         state.details.present(DetailsState::new(
@@ -1908,13 +1948,23 @@ mod tests {
         ));
         state.focus = Focus::Details;
         assert!(
-            matches!(chord(&state, KeyCode::Char('c')), Some(Message::Quit)),
+            matches!(
+                chord(&state, KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(Message::Quit)
+            ),
             "and from the notes editor too, which holds the bare `q` but not this"
         );
-        assert!(
-            chord(&state, KeyCode::Char('x')).is_none(),
-            "while another chord inserts no character"
-        );
+        for (code, modifiers) in [
+            (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            (KeyCode::Char('q'), KeyModifiers::ALT),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Esc, KeyModifiers::ALT),
+        ] {
+            assert!(
+                chord(&state, code, modifiers).is_none(),
+                "{code:?} with {modifiers:?} neither edits nor leaves"
+            );
+        }
     }
 
     /// A terminal error is recorded, because the quit that follows it leaves
