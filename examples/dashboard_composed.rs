@@ -88,7 +88,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::stream;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -413,7 +413,7 @@ impl Reducer for Root {
                 // twice would. Testing for `Press` would drop those with the
                 // releases, and a held Down would move the selection once.
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    key_message(state, key.code).map_or_else(Command::none, |message| {
+                    key_message(state, key).map_or_else(Command::none, |message| {
                         // A boundary claims a child-addressed message, so the
                         // root never sees it land and the arms for those below
                         // are unreachable. Its status is set here, at the
@@ -1080,8 +1080,20 @@ const fn child_status(message: &Message) -> Option<&'static str> {
 }
 
 /// The message a key press asks for, if any.
-fn key_message(state: &App, code: KeyCode) -> Option<Message> {
-    match code {
+///
+/// Every bare-character binding here excludes `CONTROL`. Raw mode delivers no
+/// SIGINT, so a reader pressing Ctrl+C to leave would otherwise have run
+/// whatever `c` is bound to — clearing the activity log — and Ctrl+D and Ctrl+R
+/// would have deleted and reloaded a row.
+fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        // The way out of raw mode, from any focus: the notes editor holds `q`
+        // but nothing holds this.
+        KeyCode::Char('c') if control => Some(Message::Quit),
+        // Anything else with `CONTROL` on is a chord this application has no
+        // binding for, and it must not fall through to the bare key's.
+        KeyCode::Char(_) if control => None,
         // Guarded like every other printable key below, so `q` stays typable
         // in the notes editor. Esc closes the pane, which is how you leave it.
         KeyCode::Char('q') if !editing_notes(state) => Some(Message::Quit),
@@ -1271,6 +1283,11 @@ mod tests {
                 line.starts_with("stopped watching: ") || line.starts_with("closed details: ")
             })
             .collect()
+    }
+
+    /// What an unmodified key press decodes to.
+    fn bare(state: &App, code: KeyCode) -> Option<Message> {
+        key_message(state, KeyEvent::new(code, KeyModifiers::empty()))
     }
 
     /// The message the terminal subscription produces for a key press.
@@ -1572,7 +1589,7 @@ mod tests {
 
         state.focus = Focus::Details;
         assert!(
-            matches!(key_message(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
             "the focus is on an empty pane, so there is no editor to type into"
         );
 
@@ -1583,7 +1600,7 @@ mod tests {
         ));
         assert!(
             matches!(
-                key_message(&state, KeyCode::Char('q')),
+                bare(&state, KeyCode::Char('q')),
                 Some(Message::Details(DetailsMessage::Input('q')))
             ),
             "with an occupant the key is text"
@@ -1591,7 +1608,7 @@ mod tests {
 
         state.focus = Focus::Tasks;
         assert!(
-            matches!(key_message(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
             "and an open pane the focus is not on does not hold the key"
         );
     }
@@ -1793,7 +1810,7 @@ mod tests {
             KeyCode::Enter,
         ] {
             assert!(
-                matches!(key_message(&state, code), Some(Message::NoTaskSelected)),
+                matches!(bare(&state, code), Some(Message::NoTaskSelected)),
                 "{code:?} needs a row and there is none, so it reports rather than \
                  leaving the last operation's line standing"
             );
@@ -1833,6 +1850,53 @@ mod tests {
         assert_eq!(
             state.status, "Reloaded the task, discarding its local state",
             "which the reader is told, since the cleared checkbox is the only other sign"
+        );
+    }
+
+    /// A `CONTROL` chord runs no bare-key binding, and Ctrl+C leaves.
+    ///
+    /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
+    /// event. Without the guard it would have found whatever `c` is bound to —
+    /// and Ctrl+D and Ctrl+R would have found the destructive two.
+    #[test]
+    fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+
+        let chord =
+            |state: &App, code| key_message(state, KeyEvent::new(code, KeyModifiers::CONTROL));
+
+        state.focus = Focus::Tasks;
+        for code in [KeyCode::Char('d'), KeyCode::Char('r'), KeyCode::Char(' ')] {
+            assert!(
+                chord(&state, code).is_none(),
+                "{code:?} with CONTROL is a chord this application does not bind"
+            );
+        }
+
+        state.focus = Focus::Activity;
+        assert!(
+            matches!(chord(&state, KeyCode::Char('c')), Some(Message::Quit)),
+            "Ctrl+C leaves rather than clearing the log the bare key clears"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        state.focus = Focus::Details;
+        assert!(
+            matches!(chord(&state, KeyCode::Char('c')), Some(Message::Quit)),
+            "and from the notes editor too, which holds the bare `q` but not this"
+        );
+        assert!(
+            chord(&state, KeyCode::Char('x')).is_none(),
+            "while another chord inserts no character"
         );
     }
 }

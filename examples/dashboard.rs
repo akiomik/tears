@@ -20,7 +20,7 @@
 //! Run with: cargo run --example dashboard
 
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tears::prelude::*;
@@ -226,6 +226,10 @@ impl App {
                     self.activity
                         .push(format!("updated notes for {}", task.title));
                     self.status.set_info("Saved task notes");
+                } else {
+                    // Silence here would leave the footer reporting the edit
+                    // that was not saved.
+                    self.status.set_info("No task selected");
                 }
             }
             // Esc throws the edits away and reads the selected task again,
@@ -612,8 +616,19 @@ impl StatusState {
     }
 }
 
+/// Every bare-character binding here excludes `CONTROL`. Raw mode delivers no
+/// SIGINT, so a reader pressing Ctrl+C to leave would otherwise have run
+/// whatever `c` is bound to — clearing the activity log — and Ctrl+D would have
+/// deleted a task.
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
+        // The way out of raw mode, from any focus: the details editor holds
+        // `q` but nothing holds this.
+        KeyCode::Char('c') if control => Command::message(Message::Quit).into(),
+        // Anything else with `CONTROL` on is a chord this application has no
+        // binding for, and it must not fall through to the bare key's.
+        KeyCode::Char(_) if control => Command::none(),
         // Guarded like the other printable keys below, so `q` stays typable in
         // the details editor. This panel is always present, and Esc rereads the
         // selected task's notes rather than leaving, so Tab is how you get out
@@ -689,13 +704,17 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
     use tears::testing::TestStore;
 
     /// Builds the `Terminal` message a keystroke would produce, so a test can
     /// exercise the same `handle_key_event` path the subscription feeds.
     fn key(code: KeyCode) -> Message {
         Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
+    }
+
+    /// The same held with `CONTROL`.
+    fn chord(code: KeyCode) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL)))
     }
 
     /// The same for the other two kinds a terminal can report.
@@ -817,6 +836,55 @@ mod tests {
             store.state().details.notes,
             original,
             "the edit is gone and the task's own notes are back"
+        );
+        store.finish();
+    }
+
+    /// A `CONTROL` chord runs no bare-key binding, and Ctrl+C leaves.
+    ///
+    /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
+    /// event; without the guard it would have cleared the activity log, and
+    /// Ctrl+D would have deleted the selected task.
+    #[test]
+    fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
+        let mut store = TestStore::<App>::new(());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Tasks);
+        let before = store.state().tasks.tasks.len();
+
+        store.send(chord(KeyCode::Char('d')));
+        assert_eq!(
+            store.state().tasks.tasks.len(),
+            before,
+            "Ctrl+D is a chord this application does not bind"
+        );
+
+        store.send(chord(KeyCode::Char('c')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+    }
+
+    /// Saving with no task selected says so rather than leaving the footer
+    /// reporting the edit it did not write.
+    #[test]
+    fn saving_without_a_task_reports_rather_than_going_silent() {
+        let mut store = TestStore::<App>::new(());
+        store.send(Message::FocusNext);
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+
+        store.send(Message::Details(DetailMessage::Input('a')));
+        assert_eq!(store.state().status.message, "Editing notes");
+
+        store.send(Message::Details(DetailMessage::Save));
+
+        assert_eq!(
+            store.state().status.message,
+            "No task selected",
+            "the save wrote nothing and says so"
         );
         store.finish();
     }
