@@ -4,6 +4,14 @@
 //! the selected task, an activity log and a status line, cycled through with
 //! Tab. What differs is who owns the wiring.
 //!
+//! Two things differ besides, and a diff of the two files will show them.
+//! Every child here has **runs of its own** — a timer and a keyed request —
+//! where `dashboard.rs` has neither: qualification and teardown are about runs,
+//! so a child with none gives a boundary nothing to do. And three keys are not
+//! the same: `r` reloads a row, Enter opens the pane from the task list, and
+//! Esc closes the pane, where `dashboard.rs` reloads the notes into a panel
+//! that is always there.
+//!
 //! In `dashboard.rs` the root owns it. `App::update` matches every child
 //! variant and forwards it, `App::subscriptions` is the root's alone, and any
 //! work a task started would be the root's to stop when that task is deleted.
@@ -441,8 +449,16 @@ impl Reducer for Root {
                 Command::message(Message::Details(DetailsMessage::Open)).into()
             }
             Message::CloseDetails => {
-                close_details(state);
-                state.status = "Closed the details pane";
+                // Esc is guarded on the focus rather than on `editing_notes`,
+                // so it is the way out of a `Details` focus with nothing behind
+                // it — which is also why the status has to say which of the two
+                // happened. Dismissing an empty slot removes no instance and
+                // records nothing.
+                state.status = if close_details(state) {
+                    "Closed the details pane"
+                } else {
+                    "Left the details pane"
+                };
                 Command::none()
             }
             Message::SaveNotes => {
@@ -865,11 +881,12 @@ fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
 /// Dismissal is a removal, so the slot's boundary tears the occupant's runs
 /// down; restoring the focus is this function's own half, and without it every
 /// printable key would keep routing to a slot that has no occupant to claim it.
-fn close_details(state: &mut App) {
-    state.details.dismiss();
+fn close_details(state: &mut App) -> bool {
+    let dismissed = state.details.dismiss().is_some();
     if state.focus == Focus::Details {
         state.focus = Focus::Tasks;
     }
+    dismissed
 }
 
 /// The same, but only when the pane is open on `task`.
@@ -1374,6 +1391,51 @@ mod tests {
         assert!(
             matches!(key_message(&state, KeyCode::Char('q')), Some(Message::Quit)),
             "and an open pane the focus is not on does not hold the key"
+        );
+    }
+
+    /// Esc leaves a `Details` focus whether or not a pane is behind it, and
+    /// says which of the two it did.
+    ///
+    /// It is guarded on the focus and not on `editing_notes`, because a focus
+    /// with an empty slot behind it still needs a way out. Dismissing an empty
+    /// slot removes no instance, so reporting a close there would describe a
+    /// teardown that never happened, in the file whose subject is which
+    /// removals produce which teardowns.
+    #[test]
+    fn escaping_an_empty_pane_leaves_it_without_claiming_a_close() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        state.focus = Focus::Details;
+        let _nothing_to_close = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.focus,
+            Focus::Tasks,
+            "the focus is restored either way, which is what makes Esc the way out"
+        );
+        assert_eq!(
+            state.status, "Left the details pane",
+            "there was no occupant, so nothing was closed"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        state.focus = Focus::Details;
+        let _closed = Root.reduce(&mut state, Message::CloseDetails);
+        assert!(
+            !state.details.is_present(),
+            "an occupant is dismissed, which is the removal the boundary tears down"
+        );
+        assert_eq!(
+            state.status, "Closed the details pane",
+            "and only then does the status say so"
         );
     }
 }
