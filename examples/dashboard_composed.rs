@@ -4,17 +4,6 @@
 //! the selected task, an activity log and a status line, cycled through with
 //! Tab. What differs is who owns the wiring.
 //!
-//! Two things differ besides, and a diff of the two files will show them.
-//! The **row children and the pane's occupant** have runs of their own — a
-//! timer and a keyed request each — where `dashboard.rs` has neither, its one
-//! subscription being the root's terminal source. That is not incidental:
-//! qualification and teardown are about runs, so a child with none gives a
-//! boundary nothing to do. `Navigation` and `Activity` are exactly that case
-//! and are composed anyway, for the organisation rather than the separation.
-//! And three keys are not the same: `r` reloads a row, Enter opens the pane
-//! from the task list, and Esc closes the pane, where `dashboard.rs` reloads
-//! the notes into a panel that is always there.
-//!
 //! In `dashboard.rs` the root owns it. `App::update` matches every child
 //! variant and forwards it, `App::subscriptions` is the root's alone, and any
 //! work a task started would be the root's to stop when that task is deleted.
@@ -51,6 +40,26 @@
 //! Cross-child work stays the root's. Saving the details pane's notes back
 //! onto the task it was opened for touches two children, so it is a root
 //! message; see `Message::SaveNotes`.
+//!
+//! A diff of the two files shows more than the wiring. What is worth knowing
+//! before reading one:
+//!
+//! - The **row children and the pane's occupant** have runs of their own — a
+//!   timer and a keyed request each — where `dashboard.rs` has neither, its one
+//!   subscription being the root's terminal source. That is not incidental:
+//!   qualification and teardown are about runs, so a child with none gives a
+//!   boundary nothing to do. `Navigation` and `Activity` are exactly that case
+//!   and are composed anyway, for the organisation rather than the separation.
+//! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
+//!   from the task list, and Esc closes the pane, where `dashboard.rs` reloads
+//!   the notes into a panel that is always there.
+//! - **The activity log carries the same entries, plus the teardown lines** a
+//!   removal fires here and nothing fires there. Every row-scoped line names
+//!   the row's key, because here there is one and two rows added with `n` share
+//!   a title.
+//! - **The tasks arrive as messages** rather than as initial state, because
+//!   `init`'s command crosses no boundary and a row's setup has to. They start
+//!   with the same notes and none marked done as a result.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`
@@ -500,6 +509,9 @@ impl Reducer for Task {
             }
             TaskMessage::Toggle => {
                 state.done = !state.done;
+                let verb = if state.done { "completed" } else { "reopened" };
+                self.activity
+                    .push(format!("{verb}: #{} {}", state.id.0, state.title));
                 Command::message(TaskMessage::Sync).into()
             }
             TaskMessage::Sync => {
@@ -546,12 +558,15 @@ impl Reducer for Details {
                 }
                 state.opened = true;
                 let activity = self.activity.clone();
-                let title = format!("#{} {}", state.task.0, state.title);
+                // Named the way every other row-scoped line is; see
+                // `TaskMessage::Sync`.
+                let name = format!("#{} {}", state.task.0, state.title);
+                let title = name.clone();
                 Command::batch([
                     Command::on_teardown(async move {
                         activity.push(format!("closed details: {title}"));
                     }),
-                    Command::perform(request(state.title.clone()), DetailsMessage::Loaded)
+                    Command::perform(request(name), DetailsMessage::Loaded)
                         // The same id every row's sync uses. Two boundaries,
                         // two slots.
                         .cancellable(CommandId::new(SYNC))
@@ -675,7 +690,7 @@ fn seed() -> Vec<Message> {
 fn view(state: &App, frame: &mut Frame<'_>) {
     let [header, body, activity, footer] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Min(8),
+        Constraint::Min(10),
         Constraint::Length(7),
         Constraint::Length(3),
     ])
@@ -683,8 +698,8 @@ fn view(state: &App, frame: &mut Frame<'_>) {
 
     let [nav_area, tasks_area, details_area] = Layout::horizontal([
         Constraint::Length(24),
-        Constraint::Percentage(40),
-        Constraint::Percentage(60),
+        Constraint::Percentage(36),
+        Constraint::Percentage(64),
     ])
     .areas(body);
 
@@ -848,6 +863,7 @@ fn add_task(state: &mut App, title: String) -> Command<Message> {
     // Insertion into an absent key records no removal: nothing was running
     // under it to tear down. The key is fresh, so this is that case and never
     // the replacing one.
+    state.activity.push(format!("added: #{} {}", id.0, title));
     state.tasks.insert(
         id,
         TaskState::new(id, title, "Add notes in the details pane.".to_owned()),
@@ -937,7 +953,7 @@ fn save_notes(state: &mut App) -> Command<Message> {
     task.notes = notes;
     state
         .activity
-        .push(format!("updated notes for '{}'", task.title));
+        .push(format!("updated notes for #{} {}", task_id.0, task.title));
     state.status = "Saved the notes";
     // The row's own sync is the row's to run, so it is asked for through the
     // boundary rather than started here.
@@ -1148,6 +1164,19 @@ mod tests {
         values.pop().expect("the length was just asserted")
     }
 
+    /// The lines a teardown hook wrote, which is what most of these rows are
+    /// about. The log also carries the entries a reduce writes — `added:`,
+    /// `deleted:` — which `dashboard.rs` writes too.
+    fn teardowns(activity: &ActivityLog) -> Vec<String> {
+        activity
+            .entries()
+            .into_iter()
+            .filter(|line| {
+                line.starts_with("stopped watching: ") || line.starts_with("closed details: ")
+            })
+            .collect()
+    }
+
     fn recorded(activity: &ActivityLog, line: &str) -> bool {
         activity.entries().iter().any(|entry| entry == line)
     }
@@ -1269,7 +1298,7 @@ mod tests {
         add_task_and_sync(&mut driver, &script);
         add_task_and_sync(&mut driver, &script);
         assert!(
-            activity.entries().is_empty(),
+            teardowns(&activity).is_empty(),
             "an insert into an absent key removes no instance, so nothing is torn down"
         );
 
@@ -1302,6 +1331,9 @@ mod tests {
         assert_eq!(
             activity.entries(),
             vec![
+                // What a reduce wrote, which `dashboard.rs` writes too.
+                "added: #1 alpha".to_owned(),
+                "added: #2 beta".to_owned(),
                 "closed details: #1 alpha".to_owned(),
                 "closed details: #2 beta".to_owned(),
                 "stopped watching: #2 beta".to_owned(),
@@ -1347,7 +1379,7 @@ mod tests {
         let first = deliver(&mut driver, &script);
         let second = deliver(&mut driver, &script);
         assert!(
-            activity.entries().is_empty(),
+            teardowns(&activity).is_empty(),
             "the replaced occupant never handled its `Open`, so it had registered nothing"
         );
 
@@ -1360,7 +1392,7 @@ mod tests {
         driver.settle(TURNS, || recorded(&activity, "closed details: #1 alpha"));
 
         assert_eq!(
-            activity.entries(),
+            teardowns(&activity),
             vec!["closed details: #1 alpha".to_owned()],
             "one removal, one line: the second `Open` armed nothing"
         );
@@ -1401,7 +1433,7 @@ mod tests {
         });
 
         assert_eq!(
-            activity.entries().len(),
+            teardowns(&activity).len(),
             2,
             "the row and the pane opened on it, and nothing else"
         );
