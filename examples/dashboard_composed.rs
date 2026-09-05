@@ -51,19 +51,25 @@
 //!   boundary nothing to do. `Navigation` and `Activity` are exactly that case
 //!   and are composed anyway, for the organisation rather than the separation.
 //! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
-//!   from the task list, and Esc closes the pane, where `dashboard.rs` reloads
-//!   the notes into a panel that is always there.
-//! - **The activity log carries the same entries, plus two kinds this file
-//!   has and that one cannot.** The teardown lines a removal fires, and the
-//!   completion lines the children's runs write — `synced:`, `loaded details:`
-//!   — which `dashboard.rs` has no counterpart for because it runs no commands.
-//!   Every row-scoped line names the row's key, because here there is one and
-//!   two rows added with `n` share a title.
+//!   from the task list, and Esc closes the pane, where `dashboard.rs` rereads
+//!   the selected task's notes into a panel that is always there.
+//! - **The activity log carries the same entries and more of its own.** The
+//!   teardown lines a removal fires; the completion lines the children's runs
+//!   write (`synced:`, `loaded details:`), which `dashboard.rs` has no
+//!   counterpart for because it runs no commands; `reloaded:`, for a key it
+//!   does not have; and the terminal-error line, which it prints to stderr on
+//!   its way out instead. Every row-scoped line names the row's key, because
+//!   here there is one and two rows added with `n` share a title.
 //! - **The status line is fixed before the child runs**, for every operation
 //!   a boundary claims. `dashboard.rs`'s root runs those updates itself and
 //!   can report what they produced — "Selected section: Today"; here the root
 //!   sets the line where it dispatches the message, so nothing the child
 //!   computes can appear in it.
+//! - **The details buffer does not follow the selection.** `dashboard.rs`
+//!   rereads the panel from the selected task on every task message, so moving
+//!   the selection throws an unsaved edit away; here the occupant is fixed to
+//!   the task it was opened for, because a `Slot` holds an instance rather than
+//!   a view of whatever is selected.
 //! - **The tasks arrive as messages** rather than as initial state, because
 //!   `init`'s command crosses no boundary and a row's setup has to. That they
 //!   start with the same notes and none marked done is not composition's doing
@@ -1383,12 +1389,18 @@ mod tests {
         deliver(&mut driver, &script);
         driver.settle(TURNS, || recorded(&activity, "stopped watching: #1 alpha"));
 
+        // Without the script's own `added:` lines, which are setup rather than
+        // subject and which put the comparison exactly on `ACTIVITY_LIMIT`: one
+        // more entry from anywhere would evict the *first* of them and report a
+        // missing head, sending a maintainer to the wrong end of the list.
+        let written: Vec<String> = activity
+            .entries()
+            .into_iter()
+            .filter(|line| !line.starts_with("added: "))
+            .collect();
         assert_eq!(
-            activity.entries(),
+            written,
             vec![
-                // What a reduce wrote, which `dashboard.rs` writes too.
-                "added: #1 alpha".to_owned(),
-                "added: #2 beta".to_owned(),
                 "closed details: #1 alpha".to_owned(),
                 "closed details: #2 beta".to_owned(),
                 "reloaded: #2 beta".to_owned(),
