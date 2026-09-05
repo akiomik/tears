@@ -1,16 +1,19 @@
 # Testing Guidelines
 
 This document describes repository-wide test structure and async test
-synchronization rules, which claims belong in a test rather than in prose, and
-one obligation about prose that no test can carry.
+synchronization rules, and one obligation about prose that no test can carry.
 
 ## Prose Describing Code Is Read Again When That Code Changes
 
-A sentence that a change makes false is one only that change can notice. This
-holds wherever prose describes code — a module header in `src/`, an example's
-own header, a comment over the line it explains — and it is not a question of
-where the claim lives or of what a test could hold instead. It is the reason to
-open the file's own documentation when finishing an edit to the file.
+A sentence that a change makes false is one only that change can notice. Nothing
+compiles it, no test covers it, and the next reader has no way to tell it was
+ever true.
+
+So an edit is not finished until the file's own documentation has been read
+again — the module header, the doc on the item, the comment over the line. And
+when the edit renames or removes something another file could have named, search
+for the name: prose in one file pins behavior in another, and the file being
+changed cannot tell.
 
 ## Test Placement
 
@@ -30,29 +33,6 @@ the contract:
   need private access.
 - Use integration tests for end-to-end runtime behavior, public API contracts,
   and interactions between runtime components.
-
-## What an Example May Assert
-
-An example teaches with prose as much as with code, and prose is claims. Two of
-them are worth being deliberate about.
-
-**An example does not describe another example's behavior.** A pointer names the
-other file and what it is there for; a copy states something that file does,
-which it is free to stop doing without knowing the copy exists. "For a
-structured state-management example, see `x.rs`" is a pointer, borrowing how
-`x.rs` describes itself. "`x.rs` reports each retry attempt" is a copy, and it
-survives only until `x.rs` reports something else. Where two examples exist to
-be compared, the comparison is stated once — in the one that exists because of
-it — and the other carries a pointer.
-
-**A behavioral claim a reader would act on is better held by a test.** A comment
-claiming what happens three functions away is checked by a reader holding two
-places in their head at once; a test claiming it is checked by a run.
-Converting one is not a deletion: the explanation is worth keeping, and a test
-is where it keeps. Then break the code the test describes and watch it fail,
-because a test that cannot fail is the comment again with more syntax.
-
-Neither is a reason for a header to stop saying what its file is for.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 

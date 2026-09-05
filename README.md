@@ -289,7 +289,8 @@ cargo test --example command_cancellation
 cargo test --example dashboard
 ```
 
-Repository-wide test conventions live in [docs/testing.md](docs/testing.md).
+Repository-wide test conventions, and one about keeping prose true when the
+code under it changes, live in [docs/testing.md](docs/testing.md).
 
 ## Optional Features
 
