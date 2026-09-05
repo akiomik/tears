@@ -215,15 +215,22 @@ impl App {
     fn update_details(&mut self, msg: DetailMessage) {
         let outcome = self.details.update(msg);
 
-        if outcome.save_requested {
-            if let Some(task) = self.tasks.selected_task_mut() {
-                task.notes.clone_from(&self.details.notes);
-                self.activity
-                    .push(format!("updated notes for {}", task.title));
-                self.status.set_info("Saved task notes");
+        match outcome.action {
+            DetailAction::Save => {
+                if let Some(task) = self.tasks.selected_task_mut() {
+                    task.notes.clone_from(&self.details.notes);
+                    self.activity
+                        .push(format!("updated notes for {}", task.title));
+                    self.status.set_info("Saved task notes");
+                }
             }
-        } else {
-            self.status.set_info(outcome.status);
+            // Esc throws the edits away and reads the selected task again,
+            // which is what the panel's hint offers and what `Reset` names.
+            DetailAction::Reset => {
+                self.details.sync_from_task(self.tasks.selected_task());
+                self.status.set_info(outcome.status);
+            }
+            DetailAction::Keep => self.status.set_info(outcome.status),
         }
     }
 
@@ -438,24 +445,45 @@ struct DetailState {
     notes: String,
 }
 
+/// What the details panel wants the root to do with its buffer.
+///
+/// The panel holds a copy of the selected task's notes and cannot reach the
+/// task itself, so both of the interesting outcomes are requests to the root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailAction {
+    /// Leave the buffer and the task as they are.
+    Keep,
+    /// Write the buffer onto the selected task.
+    Save,
+    /// Throw the buffer away and read the selected task again.
+    Reset,
+}
+
 #[derive(Debug, Clone)]
 struct DetailOutcome {
     status: String,
-    save_requested: bool,
+    action: DetailAction,
 }
 
 impl DetailOutcome {
     fn status(status: impl Into<String>) -> Self {
         Self {
             status: status.into(),
-            save_requested: false,
+            action: DetailAction::Keep,
         }
     }
 
     fn save(status: impl Into<String>) -> Self {
         Self {
             status: status.into(),
-            save_requested: true,
+            action: DetailAction::Save,
+        }
+    }
+
+    fn reset(status: impl Into<String>) -> Self {
+        Self {
+            status: status.into(),
+            action: DetailAction::Reset,
         }
     }
 }
@@ -490,7 +518,7 @@ impl DetailState {
                 DetailOutcome::status("Editing notes")
             }
             DetailMessage::Save => DetailOutcome::save("Saved task notes"),
-            DetailMessage::Reset => DetailOutcome::status("No changes saved"),
+            DetailMessage::Reset => DetailOutcome::reset("Reloaded the selected task"),
         }
     }
 
@@ -583,8 +611,9 @@ impl StatusState {
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     match key.code {
         // Guarded like the other printable keys below, so `q` stays typable in
-        // the details editor. This panel is always present — Esc reloads the
-        // notes rather than leaving — so Tab is how you get out of it.
+        // the details editor. This panel is always present, and Esc rereads the
+        // selected task's notes rather than leaving, so Tab is how you get out
+        // of this focus.
         KeyCode::Char('q') if focus != Focus::Details => Command::message(Message::Quit).into(),
         KeyCode::Tab => Command::message(Message::FocusNext).into(),
         KeyCode::Up => match focus {
@@ -761,6 +790,31 @@ mod tests {
         store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Input('q'))));
 
         assert_eq!(store.state().details.notes, format!("{notes}q"));
+        store.finish();
+    }
+
+    /// Esc throws the buffer away and reads the selected task again, which is
+    /// what the panel's hint offers and what `Reset` names.
+    #[test]
+    fn escape_rereads_the_selected_task_s_notes() {
+        let mut store = TestStore::<App>::new(());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let original = store.state().details.notes.clone();
+
+        store.send(key(KeyCode::Char('x')));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Input('x'))));
+        assert_eq!(store.state().details.notes, format!("{original}x"));
+
+        store.send(key(KeyCode::Esc));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Reset)));
+
+        assert_eq!(
+            store.state().details.notes,
+            original,
+            "the edit is gone and the task's own notes are back"
+        );
         store.finish();
     }
 
