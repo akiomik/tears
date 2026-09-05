@@ -58,8 +58,9 @@
 //!   write (`synced:`, `loaded details:`), which `dashboard.rs` has no
 //!   counterpart for because nothing there completes with a value later — its
 //!   commands hand a message straight back; `reloaded:`, for a key it
-//!   does not have; and the terminal-error line, which it prints to stderr on
-//!   its way out instead. Every row-scoped line names the row's key, because
+//!   does not have; and the terminal-error line, which this file records and
+//!   `main` prints after restoring the terminal, where `dashboard.rs` prints it
+//!   from inside the run. Every row-scoped line names the row's key, because
 //!   here there is one and two rows added with `n` share a title.
 //! - **The status line is fixed before the child runs**, for every operation
 //!   a boundary claims. `dashboard.rs`'s root runs those updates itself and
@@ -408,9 +409,12 @@ impl Reducer for Root {
                 // removals happen.
                 //
                 // A *repeat* is kept, and is the other thing entirely: a held
-                // key is repetition the reader is asking for, so holding Enter
-                // does replace the pane, over and over, exactly as pressing it
-                // twice would. Testing for `Press` would drop those with the
+                // key is repetition the reader is asking for. It is not the
+                // same as the duplicate above, though — `open_details` moves
+                // the focus, so a held Enter opens the pane once and then
+                // saves into it, while the press and its release are both
+                // decoded before either lands and so both see the focus that
+                // opens. Testing for `Press` would drop the repeats with the
                 // releases, and a held Down would move the selection once.
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     key_message(state, key).map_or_else(Command::none, |message| {
@@ -429,6 +433,10 @@ impl Reducer for Root {
                 _ => Command::none(),
             },
             Message::TerminalError(error) => {
+                // Recorded rather than printed. The quit below ends the run
+                // and `main` restores the terminal immediately after, so this
+                // is the only report there is — and `main` prints it once the
+                // screen it would have been drawn on is gone.
                 state.activity.push(format!("terminal error: {error}"));
                 Command::quit()
             }
@@ -1157,11 +1165,20 @@ async fn main() -> Result<()> {
         input: seed(),
         keyboard: true,
     };
-    let program = dashboard(activity).into_program(init, view);
+    let program = dashboard(activity.clone()).into_program(init, view);
 
     let mut terminal = ratatui::init();
     let result = ProgramRuntime::new(program, setup).run(&mut terminal).await;
     ratatui::restore();
+
+    // What the run had to say and could not show. A terminal error quits, so
+    // the pane holding this line is never drawn again; printing it here is
+    // after the restore rather than into a screen that is about to go.
+    for line in activity.entries() {
+        if let Some(reason) = line.strip_prefix("terminal error: ") {
+            eprintln!("Terminal error: {reason}");
+        }
+    }
 
     let _exit = result?;
     Ok(())
@@ -1898,5 +1915,29 @@ mod tests {
             chord(&state, KeyCode::Char('x')).is_none(),
             "while another chord inserts no character"
         );
+    }
+
+    /// A terminal error is recorded, because the quit that follows it leaves
+    /// nowhere to draw the report.
+    ///
+    /// `main` prints the recorded line after restoring the terminal. What this
+    /// row holds is the half the program owns: that the reason is written down
+    /// at all, rather than lost with the screen.
+    #[test]
+    fn a_terminal_error_leaves_a_reason_behind() {
+        let activity = ActivityLog::default();
+        let (mut state, _bootstrap) = init(Setup {
+            activity: activity.clone(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        let quit = Root.reduce(&mut state, Message::TerminalError("broken pipe".to_owned()));
+
+        assert!(
+            recorded(&activity, "terminal error: broken pipe"),
+            "the reason is written down where `main` can still read it"
+        );
+        assert!(!quit.is_none(), "and the run ends");
     }
 }
