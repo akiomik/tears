@@ -219,7 +219,7 @@ impl App {
             if let Some(task) = self.tasks.selected_task_mut() {
                 task.notes.clone_from(&self.details.notes);
                 self.activity
-                    .push(format!("Updated notes for '{}'", task.title));
+                    .push(format!("updated notes for {}", task.title));
                 self.status.set_info("Saved task notes");
             }
         } else {

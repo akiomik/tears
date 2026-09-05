@@ -53,13 +53,21 @@
 //! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
 //!   from the task list, and Esc closes the pane, where `dashboard.rs` reloads
 //!   the notes into a panel that is always there.
-//! - **The activity log carries the same entries, plus the teardown lines** a
-//!   removal fires here and nothing fires there. Every row-scoped line names
-//!   the row's key, because here there is one and two rows added with `n` share
-//!   a title.
+//! - **The activity log carries the same entries, plus two kinds this file
+//!   has and that one cannot.** The teardown lines a removal fires, and the
+//!   completion lines the children's runs write — `synced:`, `loaded details:`
+//!   — which `dashboard.rs` has no counterpart for because it runs no commands.
+//!   Every row-scoped line names the row's key, because here there is one and
+//!   two rows added with `n` share a title.
+//! - **The status line names the request, not the outcome**, for the three
+//!   operations a boundary claims. `dashboard.rs`'s root runs those updates
+//!   itself and reports what they did; here the root sets the line where it
+//!   dispatches the message, before the child has run.
 //! - **The tasks arrive as messages** rather than as initial state, because
-//!   `init`'s command crosses no boundary and a row's setup has to. They start
-//!   with the same notes and none marked done as a result.
+//!   `init`'s command crosses no boundary and a row's setup has to. That they
+//!   start with the same notes and none marked done is not composition's doing
+//!   but `AddTask`'s: it carries a title and nothing else, and a setup message
+//!   carrying more would cross the same boundary just as well.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`
@@ -373,8 +381,20 @@ impl Reducer for Root {
                 // otherwise turn one keystroke into two messages, and in this
                 // file two `AddTask`s or two `OpenDetails` are two removals
                 // and two teardown lines.
-                Event::Key(key) if key.kind == KeyEventKind::Press => key_message(state, key.code)
-                    .map_or_else(Command::none, |message| Command::message(message).into()),
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    key_message(state, key.code).map_or_else(Command::none, |message| {
+                        // A boundary claims a child-addressed message, so the
+                        // root never sees it land and the arms for those below
+                        // are unreachable. Its status is set here, at the
+                        // dispatch, which is why the line says what was asked
+                        // for rather than what happened: what happened is the
+                        // child's, and a child reports to its own state.
+                        if let Some(status) = child_status(&message) {
+                            state.status = status;
+                        }
+                        Command::message(message).into()
+                    })
+                }
                 _ => Command::none(),
             },
             Message::TerminalError(error) => {
@@ -410,7 +430,8 @@ impl Reducer for Root {
                 Command::none()
             }
             Message::SaveNotes => save_notes(state),
-            // Claimed by a boundary above this reducer and never routed here.
+            // Claimed by a boundary above this reducer and never routed here;
+            // `child_status` is where these get their status line.
             Message::Navigation(_)
             | Message::Task(..)
             | Message::Details(_)
@@ -994,6 +1015,22 @@ fn editing_notes(state: &App) -> bool {
     state.focus == Focus::Details && state.details.is_present()
 }
 
+/// The status line a child-addressed message deserves.
+///
+/// Read at the dispatch rather than at the landing, because a boundary claims
+/// these and the root's `reduce` never sees them. That fixes what the line can
+/// say: `dashboard.rs`'s root runs the child update itself and can report the
+/// outcome — "Selected section: Today" — while this one is naming the request.
+const fn child_status(message: &Message) -> Option<&'static str> {
+    match message {
+        Message::Navigation(_) => Some("Selected another section"),
+        Message::Task(_, TaskMessage::Toggle) => Some("Toggled the task"),
+        Message::Activity(_) => Some("Cleared the activity log"),
+        Message::Details(_) => Some("Editing the notes"),
+        _ => None,
+    }
+}
+
 /// The message a key press asks for, if any.
 fn key_message(state: &App, code: KeyCode) -> Option<Message> {
     match code {
@@ -1069,6 +1106,7 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    use crossterm::event::{KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
     use tears::reducer::Program;
@@ -1175,6 +1213,11 @@ mod tests {
                 line.starts_with("stopped watching: ") || line.starts_with("closed details: ")
             })
             .collect()
+    }
+
+    /// The message the terminal subscription produces for a key press.
+    fn key_press(code: KeyCode) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
     }
 
     fn recorded(activity: &ActivityLog, line: &str) -> bool {
@@ -1575,6 +1618,43 @@ mod tests {
             state.selected,
             Some(TaskId(1)),
             "and the new last row when the deleted one was last"
+        );
+    }
+
+    /// A key press that a boundary will claim still moves the status line.
+    ///
+    /// The root's arms for those messages are unreachable — a boundary takes
+    /// them first — so a status set when they land would never be set at all.
+    /// It is set at the dispatch instead, which is also why it names the
+    /// request: the outcome belongs to a child the root has not run yet.
+    #[test]
+    fn a_child_addressed_key_still_moves_the_status_line() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+
+        state.focus = Focus::Navigation;
+        let _navigating = Root.reduce(&mut state, key_press(KeyCode::Down));
+        assert_eq!(
+            state.status, "Selected another section",
+            "the navigation child claims the message, so the root says so here"
+        );
+
+        state.focus = Focus::Activity;
+        let _clearing = Root.reduce(&mut state, key_press(KeyCode::Char('c')));
+        assert_eq!(
+            state.status, "Cleared the activity log",
+            "and the same for the log child"
+        );
+
+        state.focus = Focus::Tasks;
+        let _toggling = Root.reduce(&mut state, key_press(KeyCode::Char(' ')));
+        assert_eq!(
+            state.status, "Toggled the task",
+            "and for a row, which is claimed by key"
         );
     }
 }
