@@ -32,12 +32,12 @@ const ACTIVITY_LIMIT: usize = 8;
 
 /// Where the run leaves a reason `main` can print once the terminal is back.
 ///
-/// A handle rather than a field of the state, and for the reason
-/// `dashboard_composed.rs` has one: a terminal error quits, `main` restores the
+/// A handle rather than a field of the state, and the same one
+/// `dashboard_composed.rs` has: a terminal error quits, `main` restores the
 /// terminal immediately after, and anything written to the screen — or to
 /// stderr while the alternate screen is up — goes with it. The report has to
 /// outlive the run to be a report at all.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct ExitReason(Arc<Mutex<Option<String>>>);
 
 impl ExitReason {
@@ -122,7 +122,7 @@ enum ActivityMessage {
     Clear,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct App {
     reason: ExitReason,
     focus: Focus,

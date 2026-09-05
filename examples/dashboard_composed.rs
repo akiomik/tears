@@ -58,9 +58,7 @@
 //!   write (`synced:`, `loaded details:`), which `dashboard.rs` has no
 //!   counterpart for because nothing there completes with a value later — its
 //!   commands hand a message straight back; `reloaded:`, for a key it
-//!   does not have; and the terminal-error line, which this file records and
-//!   `main` prints after restoring the terminal, where `dashboard.rs` prints it
-//!   from inside the run. Every row-scoped line names the row's key, because
+//!   does not have. Every row-scoped line names the row's key, because
 //!   here there is one and two rows added with `n` share a title.
 //! - **The status line is fixed before the child runs**, for every operation
 //!   a boundary claims. `dashboard.rs`'s root runs those updates itself and
@@ -117,14 +115,6 @@ const SYNC: &str = "sync";
 /// How long the stand-in requests take.
 const REQUEST_MS: u64 = 900;
 
-/// What a terminal-error line is written under.
-///
-/// Named once because two places have to agree on it: the reduce that records
-/// the reason, and the `main` that reads it back after restoring the terminal.
-/// A literal at each end would let one change silently and leave the other
-/// matching nothing.
-const TERMINAL_ERROR: &str = "terminal error: ";
-
 /// How many activity lines the pane keeps.
 const ACTIVITY_LIMIT: usize = 8;
 
@@ -160,6 +150,30 @@ impl ActivityLog {
         self.0
             .lock()
             .expect("the activity log lock is not poisoned")
+    }
+}
+
+/// Where the run leaves a reason `main` can print once the terminal is back.
+///
+/// A handle of its own rather than a line in the activity log, and the same one
+/// `dashboard.rs` has: a terminal error quits, `main` restores the terminal
+/// immediately after, and anything written to the screen — or to stderr while
+/// the alternate screen is up — goes with it. The report has to outlive the run
+/// to be a report at all, and a log the pane never draws again is not where it
+/// can do that.
+#[derive(Clone, Debug, Default)]
+struct ExitReason(Arc<Mutex<Option<String>>>);
+
+impl ExitReason {
+    fn set(&self, reason: String) {
+        *self.0.lock().expect("the exit reason lock is not poisoned") = Some(reason);
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("the exit reason lock is not poisoned")
+            .take()
     }
 }
 
@@ -201,6 +215,8 @@ impl Focus {
 struct Setup {
     /// The activity log the reducers, the finalizers and the view share.
     activity: ActivityLog,
+    /// Where a terminal error is left for `main`.
+    reason: ExitReason,
     /// Messages dispatched at startup.
     ///
     /// `init`'s command is the *root's* command: it crosses no boundary, so
@@ -301,6 +317,7 @@ enum ActivityMessage {
 
 /// The root state. Each child's state is a field of it.
 struct App {
+    reason: ExitReason,
     focus: Focus,
     navigation: NavigationState,
     tasks: Keyed<TaskId, TaskState>,
@@ -441,11 +458,11 @@ impl Reducer for Root {
                 _ => Command::none(),
             },
             Message::TerminalError(error) => {
-                // Recorded rather than printed. The quit below ends the run
-                // and `main` restores the terminal immediately after, so this
-                // is the only report there is — and `main` prints it once the
-                // screen it would have been drawn on is gone.
-                state.activity.push(format!("{TERMINAL_ERROR}{error}"));
+                // Recorded rather than printed, and not into the activity log:
+                // the quit below ends the run and `main` restores the terminal
+                // immediately after, so the pane that would have shown it is
+                // never drawn again.
+                state.reason.set(error);
                 Command::quit()
             }
             Message::Quit => Command::quit(),
@@ -727,10 +744,12 @@ fn dashboard(activity: ActivityLog) -> impl Reducer<State = App, Message = Messa
 fn init(setup: Setup) -> (App, Command<Message>) {
     let Setup {
         activity,
+        reason,
         input,
         keyboard,
     } = setup;
     let state = App {
+        reason,
         focus: Focus::Navigation,
         navigation: NavigationState::new(),
         tasks: Keyed::new(),
@@ -1179,24 +1198,23 @@ async fn main() -> Result<()> {
 
     let activity = ActivityLog::default();
     activity.push("Application started".to_owned());
+    let reason = ExitReason::default();
     let setup = Setup {
         activity: activity.clone(),
+        reason: reason.clone(),
         input: seed(),
         keyboard: true,
     };
-    let program = dashboard(activity.clone()).into_program(init, view);
+    let program = dashboard(activity).into_program(init, view);
 
     let mut terminal = ratatui::init();
     let result = ProgramRuntime::new(program, setup).run(&mut terminal).await;
     ratatui::restore();
 
-    // What the run had to say and could not show. A terminal error quits, so
-    // the pane holding this line is never drawn again; printing it here is
-    // after the restore rather than into a screen that is about to go.
-    for line in activity.entries() {
-        if let Some(reason) = line.strip_prefix(TERMINAL_ERROR) {
-            eprintln!("Terminal error: {reason}");
-        }
+    // What the run had to say and could not show, now that there is a screen
+    // to say it on.
+    if let Some(reason) = reason.take() {
+        eprintln!("Terminal error: {reason}");
     }
 
     let _exit = result?;
@@ -1233,6 +1251,7 @@ mod tests {
     ) -> TestDriver<impl Program<Flags = Setup>, TestBackend> {
         let setup = Setup {
             activity: activity.clone(),
+            reason: ExitReason::default(),
             input,
             keyboard: false,
         };
@@ -1619,6 +1638,7 @@ mod tests {
     fn q_is_typed_into_the_notes_editor_only_while_one_is_open() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1661,6 +1681,7 @@ mod tests {
     fn escaping_an_empty_pane_leaves_it_without_claiming_a_close() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1704,6 +1725,7 @@ mod tests {
     fn the_selection_clamps_and_survives_a_delete_in_place() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1766,6 +1788,7 @@ mod tests {
     fn a_child_addressed_key_still_moves_the_status_line() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1802,6 +1825,7 @@ mod tests {
     fn a_repeat_is_an_instruction_and_a_release_is_not() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1833,6 +1857,7 @@ mod tests {
     fn a_key_needing_a_selection_reports_when_there_is_none() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1864,6 +1889,7 @@ mod tests {
     fn reloading_a_row_discards_what_was_local_to_it() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1898,6 +1924,7 @@ mod tests {
     fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
+            reason: ExitReason::default(),
             input: Vec::new(),
             keyboard: false,
         });
@@ -1975,18 +2002,20 @@ mod tests {
     /// at all, rather than lost with the screen.
     #[test]
     fn a_terminal_error_leaves_a_reason_behind() {
-        let activity = ActivityLog::default();
+        let reason = ExitReason::default();
         let (mut state, _bootstrap) = init(Setup {
-            activity: activity.clone(),
+            activity: ActivityLog::default(),
+            reason: reason.clone(),
             input: Vec::new(),
             keyboard: false,
         });
 
         let quit = Root.reduce(&mut state, Message::TerminalError("broken pipe".to_owned()));
 
-        assert!(
-            recorded(&activity, "terminal error: broken pipe"),
-            "the reason is written down where `main` can still read it"
+        assert_eq!(
+            reason.take().as_deref(),
+            Some("broken pipe"),
+            "the reason is left where `main` can still read it"
         );
         assert!(!quit.is_none(), "and the run ends");
     }
