@@ -24,39 +24,29 @@ the contract:
 
 ## What an Example May Assert
 
-An example teaches with prose as much as with code, and prose is claims. A
-claim stays true by itself when it describes the code it annotates. When it
-describes something else — another example, a different part of the same file,
-an item's semantics — its truth lives where that thing lives, and the copy in
-the example goes stale the next time that thing changes.
+An example teaches with prose as much as with code, and prose is claims. Two of
+them are worth being deliberate about.
 
-Where each kind belongs:
-
-| Claim | Owner | Form in an example |
-| --- | --- | --- |
-| what an item the example merely uses does | that item's rustdoc | name it, do not restate it |
-| how another example behaves | that example | a pointer to what it is for, and no more |
-| what this file does elsewhere in itself | a test | the test's name and its assertions |
-| why the code below is written this way | the comment | prose, as now |
-
-**An item the example merely uses is described by its own rustdoc.** An example
-may of course describe what it exists to demonstrate; that is what it is for.
-What rots is a claim about an item picked up along the way, restated as the
-reason for a line, and changed later without the example hearing about it.
-
-**Turning a claim about the file's own behavior into a test is a conversion,
-not a deletion.** Run it — `cargo test --example <name>`, with whatever
-`--features` that example's own header names — and watch it pass, then break the
-code it describes and watch it fail.
-
-**A pointer to another example may say what it is for, not how it behaves.**
-"For a larger state-management example, see `x.rs`" keeps working when `x.rs`
-changes. "`x.rs` prints it from inside the run" is a copy of `x.rs`'s behavior,
-and `x.rs` is free to change without knowing the copy exists. Where two examples
+**A file does not describe another file's behavior.** "For a larger
+state-management example, see `x.rs`" keeps working when `x.rs` changes.
+"`x.rs` prints it from inside the run" is a copy of `x.rs`'s behavior, and
+`x.rs` is free to change without knowing the copy exists. Where two examples
 exist to be compared, the comparison is stated once — in the one that exists
 because of it — and the other carries a pointer.
 
-These rules are about examples.
+**A behavioral claim a reader would act on is better held by a test.** A comment
+claiming what happens three functions away is checked by a reader holding two
+places in their head at once; a test claiming it is checked by a run. Converting
+one is not a deletion: the explanation is worth keeping, and a test is where it
+keeps. Run it with `cargo test --example <name>`, plus whatever `--features` the
+example's own header names, and watch it pass, then break the code it describes
+and watch it fail.
+
+Neither is a reason for an example's header to stop saying what the example
+shows. What a header needs is re-reading: when a change makes a sentence in it
+false, the change is the only thing that can notice.
+
+These two are about examples; nothing here is a rule for `src/`.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 

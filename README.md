@@ -281,7 +281,7 @@ its own paused time context) and does not execute subscription sources — it
 observes only the *declared* set via `subscription_ids`. See the
 [`tears::testing`](https://docs.rs/tears/latest/tears/testing/) module docs for
 the full contract, including deterministic time without `TestStore`. Worked,
-runnable tests ship with three of the examples:
+runnable tests ship with these examples:
 
 ```bash
 cargo test --example command_timeout_retry
