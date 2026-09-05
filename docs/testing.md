@@ -34,7 +34,7 @@ Where each kind belongs:
 
 | Claim | Owner | Form in an example |
 | --- | --- | --- |
-| what a framework item does | that item's rustdoc | a link, not a restatement |
+| what a framework item does | that item's rustdoc | name the item, do not restate it |
 | when and why to reach for a shape | whichever document in `docs/` owns the subject | a reference |
 | how another example behaves | that example | a pointer to what it is for, and no more |
 | what this file does elsewhere in itself | a test | the test's name and its assertions |
@@ -42,21 +42,15 @@ Where each kind belongs:
 | a number some list in the same artifact has to agree with | — | do not write one |
 
 **Turning a claim about the file's own behavior into a test is a conversion,
-not a deletion.** A comment claiming what happens three functions away is
-checked by a reader holding two places in their head at once; a test claiming
-it is checked by a run. Run the converted claim — `cargo test --example <name>`,
-with whatever `--features` that example's own header names — and watch it pass,
-then break the code it describes and watch it fail: a test nothing reaches is a
-comment with more syntax.
+not a deletion.** Run it — `cargo test --example <name>`, with whatever
+`--features` that example's own header names — and watch it pass, then break the
+code it describes and watch it fail.
 
-Check that the runs you rely on reach it. Naming one example fails loudly when
-its features are missing — `cargo test --example <name>` either runs the test or
-says what to enable — while a wildcard selection does not: `--examples` and
-`--all-targets`, which `just test` and CI use, pass over an example whose
-`required-features` are not enabled and succeed anyway. So when what you
-converted sits in a gated example, check that the recipe you are relying on
-enables its features; `just test` takes them from `build_features` in the
-`justfile`.
+`just test` and CI reach every example, feature-gated ones included: both pass
+`build_features`, which `just test-doc-packaged` checks against the crate's own
+feature table. A bare `cargo test --all-targets` enables nothing and passes over
+what it cannot build without saying so, which is worth knowing before reading a
+green summary as coverage.
 
 **A pointer to another example may say what it is for, not how it behaves.**
 "For a larger state-management example, see `x.rs`" keeps working when `x.rs`
@@ -69,18 +63,9 @@ because of it — and the other carries a pointer.
 counting**, and it goes stale in silence when the list grows: "three things"
 over four items is wrong and nothing fails. A measurement a run produced is a
 different thing and stays: an interleaving count, a number of hook calls
-observed where one was expected, a number of consecutive green runs. Nothing a
-later edit does changes what a past run measured.
+observed where one was expected.
 
-These rules are about examples, which is where the failure showed up. Read the
-other way they are why rustdoc rarely has it: an item's documentation sits
-against the item.
-
-The failure this is aimed at was watched happening in #360's review: one
-comment was wrong, corrected, and wrong again, each correction describing the
-change and not the sentences that the change had invalidated. A claim held by a
-test does not have that shape — nothing else has to be re-read for it to keep
-holding, and when it stops holding, a run says so.
+These rules are about examples, which is where the failure showed up.
 
 ## Why Test Helpers Are Duplicated Instead of Shared
 
