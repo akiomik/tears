@@ -289,9 +289,7 @@ cargo test --example command_cancellation
 cargo test --example dashboard
 ```
 
-Repository-wide test conventions live in [docs/testing.md](docs/testing.md),
-along with the rule that prose describing code is read again when that code
-changes.
+Repository-wide test conventions live in [docs/testing.md](docs/testing.md).
 
 ## Optional Features
 
@@ -352,10 +350,13 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 Design contracts and invariants live in [docs/rfcs](docs/rfcs/README.md).
 If you are writing or amending an RFC, run the
 [pre-review checklist](docs/rfcs/pre-review-checklist.md) before
-requesting review. Testing conventions, and the rule that prose describing
-code is read again when that code changes, are documented in
+requesting review. Testing conventions are documented in
 [docs/testing.md](docs/testing.md), and the release procedure in
 [docs/releasing.md](docs/releasing.md).
+
+An edit is not finished until the file's own documentation has been read
+again and corrected where the change made it false: the module header, the
+doc on the item, the comment over the line.
 
 ---
 

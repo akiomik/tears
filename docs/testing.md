@@ -1,12 +1,7 @@
 # Testing Guidelines
 
 This document describes repository-wide test structure and async test
-synchronization rules, and an obligation about documentation.
-
-## Prose Describing Code Is Read Again When That Code Changes
-
-An edit is not finished until the file's own documentation has been read again:
-the module header, the doc on the item, the comment over the line.
+synchronization rules.
 
 ## Test Placement
 
