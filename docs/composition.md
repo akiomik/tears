@@ -86,6 +86,15 @@ the root reducer, so the root keeps exactly the messages that are its own.
   instance's scope. The removed instance's subscriptions stop, its in-flight
   commands are cancelled, and the cleanup hooks it registered run.
 
+- **It discards what it cannot route.** A message addressed to a key the
+  collection no longer holds, or to a slot with no occupant, reaches no reducer
+  and is dropped — with no diagnostic, and with no way for the sender to learn
+  it went nowhere. That is reachable from ordinary code: a root that returns
+  `Command::message` for a row, and an update that removes the row before the
+  message is delivered, leaves the row's work simply not done. Where that
+  matters, keep the decision and the work in one reduce rather than splitting
+  them across a message.
+
 Building initial state records nothing: `Keyed::from_iter` and an insert into an
 absent key remove no instance, so growing a collection during `init` is fine.
 The four shapes that *do* record belong inside a `reduce`, where the boundary

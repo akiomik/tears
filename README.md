@@ -325,9 +325,9 @@ cargo test --example command_cancellation
 cargo test --example dashboard
 ```
 
-A composed `Program` is driven with `tears::testing::TestDriver` rather than
-`TestStore`, which takes an `Application`; `examples/dashboard_composed.rs`
-carries worked `TestDriver` tests:
+`TestStore` takes an `Application`, so a composed `Program` is driven with
+`tears::testing::TestDriver` instead; `examples/dashboard_composed.rs` carries
+worked `TestDriver` tests:
 
 ```bash
 cargo test --example dashboard_composed
