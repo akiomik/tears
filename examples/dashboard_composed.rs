@@ -59,10 +59,11 @@
 //!   — which `dashboard.rs` has no counterpart for because it runs no commands.
 //!   Every row-scoped line names the row's key, because here there is one and
 //!   two rows added with `n` share a title.
-//! - **The status line names the request, not the outcome**, for the three
-//!   operations a boundary claims. `dashboard.rs`'s root runs those updates
-//!   itself and reports what they did; here the root sets the line where it
-//!   dispatches the message, before the child has run.
+//! - **The status line is fixed before the child runs**, for every operation
+//!   a boundary claims. `dashboard.rs`'s root runs those updates itself and
+//!   can report what they produced — "Selected section: Today"; here the root
+//!   sets the line where it dispatches the message, so nothing the child
+//!   computes can appear in it.
 //! - **The tasks arrive as messages** rather than as initial state, because
 //!   `init`'s command crosses no boundary and a row's setup has to. That they
 //!   start with the same notes and none marked done is not composition's doing
@@ -376,11 +377,14 @@ impl Reducer for Root {
     fn reduce(&self, state: &mut App, message: Message) -> Command<Message> {
         match message {
             Message::Terminal(event) => match event {
-                // Presses only. A terminal that reports releases too — Windows,
-                // or a session with the kitty keyboard protocol on — would
-                // otherwise turn one keystroke into two messages, and in this
-                // file two `AddTask`s or two `OpenDetails` are two removals
-                // and two teardown lines.
+                // Presses only. A terminal that reports releases too —
+                // Windows, or a session with the kitty keyboard protocol on —
+                // would otherwise turn one keystroke into two messages, and
+                // every operation here is one a reader means to perform once:
+                // `n` would add two rows rather than the one asked for, and
+                // Enter would open the pane and then replace it with a second
+                // pane on the same row — a removal the reader never asked for,
+                // in a file about which removals happen.
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     key_message(state, key.code).map_or_else(Command::none, |message| {
                         // A boundary claims a child-addressed message, so the
@@ -902,15 +906,22 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
     // Inserting over an occupied key is a replacement, and a replacement is a
     // removal: the boundary tears the old instance's runs down before this
     // command's spawns start the successor's.
-    let title = task.title.clone();
+    let task_title = task.title.clone();
     state.tasks.insert(
         id,
-        TaskState::new(id, title, "Reloaded from the server.".to_owned()),
+        TaskState::new(
+            id,
+            task_title.clone(),
+            "Reloaded from the server.".to_owned(),
+        ),
     );
     // The pane was opened for the instance that just left, and it holds that
     // instance's title and notes; leaving it open would let a later
     // `SaveNotes` write them back over the reload.
     close_details_opened_on(state, id);
+    state
+        .activity
+        .push(format!("reloaded: #{} {}", id.0, task_title));
     state.status = "Reloaded the task";
     Command::message(Message::Task(id, TaskMessage::Watch)).into()
 }
@@ -1019,8 +1030,9 @@ fn editing_notes(state: &App) -> bool {
 ///
 /// Read at the dispatch rather than at the landing, because a boundary claims
 /// these and the root's `reduce` never sees them. That fixes what the line can
-/// say: `dashboard.rs`'s root runs the child update itself and can report the
-/// outcome — "Selected section: Today" — while this one is naming the request.
+/// say before the child has run: nothing the child computes can appear in it,
+/// so where `dashboard.rs` reports "Selected section: Today" — its root having
+/// run the child update itself — these name the operation and stop there.
 const fn child_status(message: &Message) -> Option<&'static str> {
     match message {
         Message::Navigation(_) => Some("Selected another section"),
@@ -1379,6 +1391,7 @@ mod tests {
                 "added: #2 beta".to_owned(),
                 "closed details: #1 alpha".to_owned(),
                 "closed details: #2 beta".to_owned(),
+                "reloaded: #2 beta".to_owned(),
                 "stopped watching: #2 beta".to_owned(),
                 // The root's own line, written by the reduce that removed the
                 // row, before the teardown it originated ran.
