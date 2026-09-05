@@ -1,21 +1,14 @@
 # Testing Guidelines
 
 This document describes repository-wide test structure and async test
-synchronization rules, and an obligation about prose that no test can carry.
+synchronization rules, and one obligation about prose that no test can carry.
 
 ## Prose Describing Code Is Read Again When That Code Changes
 
-A sentence that a change makes false is one only that change can notice. Nothing
-compiles it, no test covers it, and the next reader has no way to tell it was
-ever true.
-
-So an edit is not finished until the file's own documentation has been read
-again — the module header, the doc on the item, the comment over the line.
-
-Prose in one file also pins behavior in another, and finding those is a harder
-search than it looks: the [RFC pre-review checklist](rfcs/pre-review-checklist.md)
-records which searches have turned up stale restatements and which have gone
-straight past them.
+A change that makes a sentence about the code false is caught by nothing in the
+build and nothing in the tests. So an edit is not finished until the file's own
+documentation has been read again: the module header, the doc on the item, the
+comment over the line.
 
 ## Test Placement
 
