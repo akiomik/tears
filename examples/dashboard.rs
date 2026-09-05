@@ -171,7 +171,7 @@ impl Application for App {
         ])
         .areas(body);
 
-        Self::render_header(frame, header);
+        Self::render_header(frame, header, self.focus);
         self.navigation
             .render(frame, nav_area, self.focus == Focus::Navigation);
         self.tasks
@@ -232,8 +232,14 @@ impl App {
         self.status.set_info("Cleared activity log");
     }
 
-    fn render_header(frame: &mut Frame, area: Rect) {
-        let text = "Dashboard state example | Tab: focus | q: quit";
+    fn render_header(frame: &mut Frame, area: Rect, focus: Focus) {
+        // `q` is text while the details editor has it, so the hint follows the
+        // guard in `handle_key_event` rather than contradicting it.
+        let text = if focus == Focus::Details {
+            "Dashboard state example | Tab: leave the editor"
+        } else {
+            "Dashboard state example | Tab: focus | q: quit"
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Structured State");

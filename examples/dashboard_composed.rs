@@ -690,8 +690,15 @@ fn view(state: &App, frame: &mut Frame<'_>) {
 
     frame.render_widget(
         Paragraph::new(format!(
-            "Composed dashboard · {} | Tab: focus | q: quit",
-            state.navigation.selected_label()
+            "Composed dashboard · {} | Tab: focus | {}",
+            state.navigation.selected_label(),
+            // `q` is text while the notes editor has it, so the hint follows
+            // the guard rather than contradicting it.
+            if editing_notes(state) {
+                "esc: close pane"
+            } else {
+                "q: quit"
+            }
         ))
         .block(
             Block::default()
