@@ -85,7 +85,6 @@ the root reducer, so the root keeps exactly the messages that are its own.
   — and the boundary turns each recorded removal into one teardown of that
   instance's scope. The removed instance's subscriptions stop, its in-flight
   commands are cancelled, and the cleanup hooks it registered run.
-
 - **It discards what it cannot route.** A message addressed to a key the
   collection no longer holds, or to a slot with no occupant, reaches no reducer
   and is dropped — with no diagnostic, and with no way for the sender to learn

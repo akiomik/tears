@@ -1004,6 +1004,10 @@ fn save_notes(state: &mut App) -> Command<Message> {
 /// to differ in structure, and a selection that wrapped here would read as
 /// something composition did.
 fn select(state: &mut App, forward: bool) {
+    // Before the guard below, so an empty list still moves the line: every
+    // other operation reports, and `dashboard.rs` reports here too, so going
+    // silent would leave the footer describing whatever came before it.
+    state.status = "Selected another task";
     let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
     if keys.is_empty() {
         return;
@@ -1018,7 +1022,6 @@ fn select(state: &mut App, forward: bool) {
         None => 0,
     };
     state.selected = keys.get(next).copied();
-    state.status = "Selected another task";
 }
 
 /// Whether a key press is going into the notes editor.
@@ -1643,6 +1646,14 @@ mod tests {
             state.selected,
             Some(TaskId(1)),
             "and the new last row when the deleted one was last"
+        );
+
+        let _emptied = Root.reduce(&mut state, Message::DeleteTask(TaskId(1)));
+        let _nowhere_to_go = Root.reduce(&mut state, Message::SelectNext);
+        assert_eq!(
+            state.status, "Selected another task",
+            "an empty list has nowhere to move to, and still reports rather \
+             than leaving the last operation's line standing"
         );
     }
 
