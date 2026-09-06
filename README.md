@@ -233,10 +233,10 @@ feature, one child per row of a `Keyed` collection, or an optionally-present
 child in a `Slot` — and `into_program` closes the stack into a runnable
 `Program` for `ProgramRuntime`. Every boundary qualifies the identities its
 child produces with its own segment, so rows declaring the same subscription or
-keying the same command do not collide. The two that hold a collection —
-`for_each` and `presented` — additionally tear a removed child's runs down, so
-no removal leaks a run; `scope` composes one child in place, where there is no
-collection for an instance to leave.
+keying the same command do not collide. The two whose child can leave —
+`for_each` over a `Keyed` collection and `presented` over a `Slot` —
+additionally tear a departed child's runs down, so no removal leaks a run;
+`scope` composes one child in place, and that child is always there.
 
 An `Application` is run through an adapter over the same kernel, so this is a
 way to write a program rather than a second runtime. See

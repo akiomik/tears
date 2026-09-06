@@ -275,13 +275,15 @@ impl App {
             DetailAction::Reset => {
                 let reloaded = self.tasks.selected_task().is_some();
                 self.details.sync_from_task(self.tasks.selected_task());
-                // With no task there is nothing to reread, and the panel says
-                // so; the footer must not claim otherwise, for the reason the
-                // `Save` arm above has an `else`.
+                // With no task there is nothing to reread, but the panel is
+                // emptied all the same — so this arm is not the `Save` arm's
+                // no-op, and the footer says what became of what was typed
+                // rather than only why.
                 if reloaded {
                     self.status.set_info(outcome.status);
                 } else {
-                    self.status.set_info("No task selected");
+                    self.status
+                        .set_info("Discarded the notes; no task selected");
                 }
             }
             DetailAction::Keep => self.status.set_info(outcome.status),
@@ -1178,12 +1180,19 @@ mod tests {
         }
         assert!(store.state().tasks.tasks.is_empty());
 
+        store.send(Message::Details(DetailMessage::Input('a')));
+        assert!(store.state().details.notes.ends_with('a'));
+
         store.send(Message::Details(DetailMessage::Reset));
 
+        assert!(
+            store.state().details.notes.is_empty(),
+            "the panel is emptied, so this is not a no-op"
+        );
         assert_eq!(
             store.state().status.message,
-            "No task selected",
-            "there was nothing to reread"
+            "Discarded the notes; no task selected",
+            "and the footer says what became of what was typed"
         );
         store.finish();
     }
