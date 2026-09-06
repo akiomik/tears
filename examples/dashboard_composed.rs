@@ -487,16 +487,10 @@ impl Reducer for Root {
                 // The pane is the only place edited notes live until
                 // `SaveNotes` writes them onto the task, so closing one whose
                 // buffer has moved away from the task throws those edits away.
-                // Named for the reason `open_details` and `reload_task` name
-                // what they discard — and only when the two actually differ,
-                // so an Esc straight after a save does not report the loss of
-                // notes that already reached the task.
-                let unsaved = state.details.get().is_some_and(|open| {
-                    state
-                        .tasks
-                        .get(&open.task)
-                        .is_some_and(|task| task.notes != open.notes)
-                });
+                // Read before the close that causes it; [`unsaved_notes`]
+                // carries why this removal reports the buffer and two others
+                // do not.
+                let unsaved = unsaved_notes(state);
                 // Esc is guarded on the focus rather than on `editing_notes`,
                 // so it is the way out of a `Details` focus with nothing behind
                 // it — which is also why the status has to say which of the two
@@ -1012,7 +1006,9 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
         .activity
         .push(format!("reloaded: #{} {}", id.0, task_title));
     // Says what the successor threw away, because a cleared checkbox is
-    // otherwise the only sign that it did.
+    // otherwise the only sign that it did. The pane's buffer goes with it and
+    // is not named apart from it: the reload overwrites the row's notes either
+    // way, so a save would have bought nothing. See [`unsaved_notes`].
     state.status = "Reloaded the task, discarding its local state";
     Command::message(Message::Task(id, TaskMessage::Watch)).into()
 }
@@ -1044,27 +1040,48 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
             .map(|index| index.min(keys.len().saturating_sub(1)))
             .and_then(|index| keys.get(index).copied());
     }
+    // The row is what left, and a pane open on it went too. That buffer is not
+    // reported as a loss of its own for the reason [`unsaved_notes`] gives:
+    // there is no surviving row a save could have put the notes on.
     state.status = "Deleted the task";
     Command::none()
 }
 
 /// Presents the details pane for a row.
+/// Whether the open pane holds notes the task does not.
+///
+/// [`save_notes`] is the only thing that copies the buffer onto the task, so
+/// this is exactly "pressing Enter first would have kept it" — which is what
+/// decides which removals report the buffer separately.
+///
+/// `Message::CloseDetails` and [`open_details`] over an occupant ask, because
+/// the task the pane was opened for keeps its notes: the edit is the only thing
+/// that goes, and a save would have preserved it.
+///
+/// [`reload_task`] and [`delete_task`] do not ask, and not because their loss is
+/// smaller. Reload overwrites the row's notes with the server's copy and delete
+/// takes the row away, so under both, a reader who had pressed Enter first would
+/// have lost the notes just the same. Naming the buffer there would offer a
+/// remedy that does not exist. What those two discard is the row, and that is
+/// what their own status says.
+fn unsaved_notes(state: &App) -> bool {
+    state.details.get().is_some_and(|open| {
+        state
+            .tasks
+            .get(&open.task)
+            .is_some_and(|task| task.notes != open.notes)
+    })
+}
+
 fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
     let Some(task) = state.tasks.get(&id) else {
         state.status = "That task is gone";
         return Command::none();
     };
     // A replacement is a removal, and the occupant it removes may hold edits
-    // nobody saved — the same loss `CloseDetails` reports, read the same way
-    // and before the `present` that causes it. What replaces the pane is a
-    // different pane, so the old buffer leaves the screen along with any sign
-    // of what was in it.
-    let unsaved = state.details.get().is_some_and(|open| {
-        state
-            .tasks
-            .get(&open.task)
-            .is_some_and(|task| task.notes != open.notes)
-    });
+    // nobody saved — the same loss `CloseDetails` reports, read before the
+    // `present` that causes it.
+    let unsaved = unsaved_notes(state);
     // Presenting over an occupied slot is a replacement too, for the same
     // reason `ReloadTask` is.
     let replaced = state
@@ -1619,6 +1636,15 @@ mod tests {
         // subject. They are also the two the log would shed first — it sits
         // exactly on `ACTIVITY_LIMIT` — so dropping them here keeps this
         // comparison about the teardowns rather than about the buffer's size.
+        // Reading the eviction question off the log instead of off arithmetic
+        // done in a review: a line added above would push this one out first,
+        // and this fails naming that rather than leaving the comparison below
+        // to fail about its own contents.
+        assert_eq!(
+            activity.entries().first().map(String::as_str),
+            Some("added: #1 alpha"),
+            "the log still holds its oldest line, so nothing below is missing for want of room"
+        );
         let written: Vec<String> = activity
             .entries()
             .into_iter()
@@ -2221,6 +2247,54 @@ mod tests {
             "the reason is left where `main` can still read it"
         );
         assert!(!quit.is_none(), "and the run ends");
+    }
+
+    /// The two removals that take the row do not report the buffer separately,
+    /// and this pins that rather than leaving it to the prose.
+    ///
+    /// Both close a pane open on the row, so both lose whatever was typed into
+    /// it. Neither names it, because neither offers the remedy naming it would
+    /// imply: the reload overwrites the row's notes and the delete takes the row,
+    /// so a reader who had pressed Enter first would have lost the notes anyway.
+    /// A drift toward `CloseDetails`'s wording here would be that offer.
+    #[test]
+    fn a_removal_that_takes_the_row_does_not_report_the_buffer_apart_from_it() {
+        for (message, expected) in [
+            (
+                Message::ReloadTask(TaskId(1)),
+                "Reloaded the task, discarding its local state",
+            ),
+            (Message::DeleteTask(TaskId(1)), "Deleted the task"),
+        ] {
+            let (mut state, _bootstrap) = init(Setup {
+                activity: ActivityLog::default(),
+                reason: ExitReason::default(),
+                input: Vec::new(),
+                keyboard: false,
+            });
+            let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+            let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+            state
+                .details
+                .get_mut()
+                .expect("the pane is open")
+                .notes
+                .push('!');
+            assert!(
+                unsaved_notes(&state),
+                "the buffer has moved away from the task, which is the loss under test"
+            );
+
+            let _removed = Root.reduce(&mut state, message);
+            assert!(
+                !state.details.is_present(),
+                "the pane open on the row went with it, so the edit is gone"
+            );
+            assert_eq!(
+                state.status, expected,
+                "and the status is about the row, not about the buffer"
+            );
+        }
     }
 
     /// Opening a pane over an open one replaces its occupant, and says so.
