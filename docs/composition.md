@@ -136,9 +136,11 @@ itself.
 ## Testing a composition
 
 `TestStore` takes an `Application`, so a composed program is driven with
-`tears::testing::TestDriver` instead: it constructs from the same inputs the
-production entry point takes, boots the program, and steps whole passes, with
-the sends a producer makes released one grant at a time. The rows in
+`tears::testing::TestDriver` instead — not because the driver is
+composition's, but because it is the surface that runs what the store only
+declares. It constructs from the same inputs the production entry point takes,
+boots the program, and steps whole passes, with the sends a producer makes
+released one grant at a time. The rows in
 `dashboard_composed.rs` that build a `TestDriver` drive that example's own stack
 that way — the same `Reducer` value `main` runs, closed with the same `init` and
 `view`, and started from a `Setup` carrying a scripted input instead of the

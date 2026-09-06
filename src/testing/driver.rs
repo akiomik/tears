@@ -514,6 +514,34 @@ impl DriverState {
 }
 
 /// The same-topology scripted driver (RFC 0008 §9.3).
+///
+/// # Where a driver test runs
+///
+/// On a plain `#[test]`. A driver turns its own Tokio runtime and later drops
+/// it, and Tokio refuses both on a thread that already has another runtime
+/// entered: `block_on` cannot block a thread that is driving tasks, and a
+/// runtime cannot be dropped from inside one. The rule is about those two
+/// threads — the one that drives and the one that drops — and about nothing
+/// else.
+///
+/// In particular it is not about where the driver was built. Both
+/// constructors only build an executor and return, which Tokio allows
+/// anywhere, so a driver built inside `#[tokio::test]` is built successfully
+/// and what fails is the first call that turns the executor — on a driver
+/// that has not booted that is [`boot`](Self::boot), and every driving call
+/// turns it sooner or later — or, if the test makes no such call, the drop
+/// at the end of it. Neither message is this
+/// crate's: both come from Tokio, naming a runtime rather than a driver.
+///
+/// A driving call that finds the state table against it answers before the
+/// executor is reached, so on a driver that never booted it is this crate's
+/// own misuse message that arrives, naming no runtime.
+///
+/// This layer runs no ambient-runtime check of its own. [`TestStore`] has
+/// one, because RFC 0008 INV-T10 puts it there, and INV-T10 is the store's
+/// alone — §9.3 states no such rejection for this surface.
+///
+/// [`TestStore`]: crate::testing::TestStore
 pub struct TestDriver<P: Program, B: Backend> {
     /// The driver's own current-thread executor.
     ///
@@ -546,9 +574,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// # Panics
     ///
-    /// Panics when a Tokio runtime is already entered on this thread: the
-    /// driver owns the executor it turns, and a driving call inside another
-    /// runtime cannot turn it.
+    /// Panics when the executor cannot be built. An ambient Tokio runtime is
+    /// not rejected here: a driver built inside one is built successfully and
+    /// can then be neither driven nor dropped there, as this type's placement
+    /// rule states.
     #[must_use]
     pub fn new(program: P, flags: P::Flags, config: RuntimeConfig, terminal: Terminal<B>) -> Self {
         let executor = Builder::new_current_thread()
@@ -587,7 +616,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// # Panics
     ///
-    /// Panics when the multi-worker executor cannot be built.
+    /// Panics when the multi-worker executor cannot be built. This executor
+    /// is the driver's own like [`new`](Self::new)'s, so an ambient Tokio
+    /// runtime is not rejected here either and this type's placement rule
+    /// holds unchanged.
     #[must_use]
     pub fn on_worker_threads(
         program: P,
@@ -651,6 +683,11 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics when the driver has already booted: the state table admits
     /// `boot` in exactly one position.
+    ///
+    /// Panics too when called on a thread that has another Tokio runtime
+    /// entered. Turning the executor is what that runtime refuses, and `boot`
+    /// is the first call that turns it — this type's placement rule, refused
+    /// by Tokio rather than by anything here.
     pub fn boot(&mut self) -> StepReport<B::Error> {
         assert!(
             self.state == DriverState::Constructed,
@@ -696,7 +733,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// # Panics
     ///
     /// Panics when the driver has not booted or has terminated (RFC 0008
-    /// §9.3's state table).
+    /// §9.3's state table), and — once past that — when called on a thread
+    /// that has another Tokio runtime entered, which is this type's placement
+    /// rule and not this layer's refusal.
     pub fn step_pass(&mut self, woken_by: WakeSource) -> Result<StepReport<B::Error>, NotReady> {
         self.assert_running("step_pass");
         let stepped = {
@@ -800,7 +839,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// # Panics
     ///
     /// Panics when `max_turns` is spent with the grant unresolved, reporting
-    /// how many turns were consumed, and outside the running state.
+    /// how many turns were consumed, and outside the running state. Panics
+    /// too when called on a thread that has another Tokio runtime entered and
+    /// the grant is not already resolved, since that is when it turns the
+    /// executor — this type's placement rule.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the call consumes the token by contract: a token that survived its resolution \
@@ -910,7 +952,10 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics while a grant is outstanding, stranded or not; panics when
     /// `max_turns` is spent with `until` still false, reporting how many
-    /// turns were consumed; and panics outside the running state.
+    /// turns were consumed; and panics outside the running state. Panics too
+    /// when called on a thread that has another Tokio runtime entered and
+    /// `until` is false on entry, since that is when it turns the executor —
+    /// this type's placement rule.
     pub fn settle(&mut self, max_turns: usize, mut until: impl FnMut() -> bool) {
         self.assert_running("settle");
         assert!(
@@ -1241,10 +1286,85 @@ mod tests {
     use crate::command::{Command, CommandId};
     use crate::kernel::conformance::support::{
         Beacon, Script, TEST_TURNS, cap, config, driver, driver_with, failing_driver,
-        marking_effect, parking_effect, sending_effect, silent_effect,
+        marking_effect, parking_effect, sending_effect, silent_effect, threaded_driver_with,
     };
     use crate::kernel::lane::SendGate;
     use crate::subscription::mock::MockSource;
+
+    // The type's placement rule, both halves. Construction is not what
+    // refuses — each row below reaches the line after its constructor — so
+    // the rule is held by what the driver cannot do next, and the rows are
+    // the things owning a runtime entails. Without them the rule is prose
+    // only, which is how this file previously carried a `# Panics` claim that
+    // said construction refuses when nothing does.
+    //
+    // Each `expected` is Tokio's own wording, which no invariant here
+    // controls. The coupling is deliberate: the rule *is* Tokio's refusal, so
+    // there is nothing of ours to match instead, and matching the operation is
+    // what keeps the two halves apart — a bare `should_panic` would let the
+    // driving row pass on a state-table assert. A Tokio reword turns these red
+    // with nothing wrong in tears, loudly rather than silently, and this
+    // paragraph is the one-step diagnosis.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    async fn a_driver_cannot_be_driven_inside_a_runtime() {
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        driver.boot();
+    }
+
+    // The half a driving row cannot reach: unwinding from the panic above
+    // suppresses this one, because Tokio's shutdown returns early while the
+    // thread is panicking. A test that only constructs still fails, which is
+    // why the rule is about living in an async context rather than about
+    // driving in one.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot drop a runtime")]
+    async fn a_driver_cannot_be_dropped_inside_a_runtime() {
+        let (driver, _journal) = driver(Script::new(Command::none()));
+
+        drop(driver);
+    }
+
+    // The order the two refusals come in. A driving call the state table is
+    // against never reaches the executor, so on a driver that never booted it
+    // is this crate that answers, naming no runtime — which is why the rows
+    // above drive through `boot`, the one call a constructed driver admits.
+    #[tokio::test]
+    #[should_panic(expected = "`step_pass` is misuse in the constructed state")]
+    async fn the_state_table_answers_before_the_runtime_does() {
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        drop(driver.step_pass(WakeSource::Data));
+    }
+
+    // And the half that says which thread the rule is about. Building inside
+    // a runtime is not what it refuses: this driver is built inside one and
+    // then driven and dropped outside, and nothing objects. The rows above
+    // would all still pass if the rule were about the construction site, so
+    // this is the one that separates the two readings.
+    #[test]
+    fn the_construction_site_is_not_what_refuses() {
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to build the driver inside");
+        let (mut driver, _journal) = host.block_on(async { driver(Script::new(Command::none())) });
+
+        driver.boot();
+    }
+
+    // The other constructor, which owns its executor the same way and so
+    // carries the same rule. It needs a row of its own because the two rows
+    // above reach `TestDriver::new` and nothing else would fail if this
+    // constructor stopped owning what it builds.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot drop a runtime")]
+    async fn a_multi_worker_driver_cannot_be_dropped_inside_a_runtime() {
+        let (driver, _journal) = threaded_driver_with(Script::new(Command::none()), config());
+
+        drop(driver);
+    }
 
     // §9.3's state table, first row: `boot` is legal exactly once.
     #[test]
