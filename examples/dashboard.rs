@@ -296,13 +296,7 @@ impl App {
     }
 
     fn render_header(frame: &mut Frame, area: Rect, focus: Focus) {
-        // `q` is text while the details editor has it, so the hint follows the
-        // guard in `handle_key_event` rather than contradicting it.
-        let text = if focus == Focus::Details {
-            "Dashboard state example | Tab: leave the editor"
-        } else {
-            "Dashboard state example | Tab: focus | q: quit"
-        };
+        let text = header_text(focus);
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Structured State");
@@ -558,6 +552,21 @@ impl DetailOutcome {
             status: status.into(),
             action: DetailAction::Reset,
         }
+    }
+}
+
+/// The header, which names a quit that works at the focus it is read from.
+///
+/// `q` is text while the details editor has it, so the hint follows the guard
+/// in `handle_key_event` rather than contradicting it. Dropping `q` there left
+/// no quit named at all: `Tab` and then `q` still works, but `Ctrl+C` is the
+/// one that does not ask the reader to leave first, and raw mode means the
+/// application is the only thing that can answer it.
+const fn header_text(focus: Focus) -> &'static str {
+    if matches!(focus, Focus::Details) {
+        "Dashboard state example | Tab: leave the editor | Ctrl+C: quit"
+    } else {
+        "Dashboard state example | Tab: focus | q: quit"
     }
 }
 
@@ -830,6 +839,38 @@ mod tests {
             KeyModifiers::empty(),
             kind,
         )))
+    }
+
+    /// The header names a quit that answers where it is read.
+    ///
+    /// `q` is text once the editor has the focus, so the header stops naming it
+    /// there — and naming only `Tab` left that focus with no quit named at all.
+    /// This reads the key each branch offers rather than trusting the two to
+    /// stay in step with the guard in `handle_key_event`.
+    #[test]
+    fn the_header_names_a_quit_that_answers_where_it_is_read() {
+        assert!(
+            header_text(Focus::Tasks).contains("q: quit"),
+            "away from the editor the header offers `q`"
+        );
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(key(KeyCode::Char('q')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+
+        assert!(
+            header_text(Focus::Details).contains("Ctrl+C: quit"),
+            "in the editor it offers the chord instead, because `q` is text"
+        );
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        store.send(chord(KeyCode::Char('c')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
     }
 
     /// The panel's hint names only keys that work where it is read.

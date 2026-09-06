@@ -804,13 +804,7 @@ fn view(state: &App, frame: &mut Frame<'_>) {
         Paragraph::new(format!(
             "Composed dashboard · {} | Tab: focus | {}",
             state.navigation.selected_label(),
-            // `q` is text while the notes editor has it, so the hint follows
-            // the guard rather than contradicting it.
-            if editing_notes(state) {
-                "esc: close pane"
-            } else {
-                "q: quit"
-            }
+            header_keys(editing_notes(state))
         ))
         .block(
             Block::default()
@@ -883,6 +877,21 @@ fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
         ))),
         area,
     );
+}
+
+/// The header's second half, which names a quit that works where it is read.
+///
+/// `q` is text while the notes editor has it, so the hint follows the guard
+/// rather than contradicting it. Naming only `esc: close pane` there left no
+/// quit named at all: closing the pane and then pressing `q` still works, but
+/// `Ctrl+C` is the one that does not ask the reader to leave first, and raw
+/// mode means the application is the only thing that can answer it.
+const fn header_keys(editing: bool) -> &'static str {
+    if editing {
+        "esc: close pane | Ctrl+C: quit"
+    } else {
+        "q: quit"
+    }
 }
 
 /// The open pane's hint, which is guarded because every key in it is.
@@ -2313,6 +2322,59 @@ mod tests {
                 "and the status is about the row, not about the buffer"
             );
         }
+    }
+
+    /// The header names a quit that answers where it is read.
+    ///
+    /// `q` is text once the notes editor has the pane, so the header stops
+    /// naming it there — and naming only the pane's own key left that focus
+    /// with no quit named at all. This reads the key each branch offers rather
+    /// than trusting the two to stay in step with the guard.
+    #[test]
+    fn the_header_names_a_quit_that_answers_where_it_is_read() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        assert!(!editing_notes(&state), "nothing is open yet");
+        assert!(
+            header_keys(false).contains("q: quit"),
+            "outside the editor the header offers `q`"
+        );
+        assert!(
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "and `q` is answered there"
+        );
+
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert!(
+            editing_notes(&state),
+            "the pane has the focus and an occupant"
+        );
+        assert!(
+            header_keys(true).contains("Ctrl+C: quit"),
+            "in the editor it offers the chord instead"
+        );
+        assert!(
+            matches!(
+                key_message(
+                    &state,
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+                ),
+                Some(Message::Quit)
+            ),
+            "and the chord is answered there"
+        );
+        assert!(
+            matches!(
+                bare(&state, KeyCode::Char('q')),
+                Some(Message::Details(DetailsMessage::Input('q')))
+            ),
+            "which is why the header stops naming `q` here"
+        );
     }
 
     /// The open pane's hint names only keys that work where it is read.
