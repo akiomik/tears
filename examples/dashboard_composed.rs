@@ -1047,7 +1047,6 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     Command::none()
 }
 
-/// Presents the details pane for a row.
 /// Whether the open pane holds notes the task does not.
 ///
 /// [`save_notes`] is the only thing that copies the buffer onto the task, so
@@ -1073,6 +1072,7 @@ fn unsaved_notes(state: &App) -> bool {
     })
 }
 
+/// Presents the details pane for a row.
 fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
     let Some(task) = state.tasks.get(&id) else {
         state.status = "That task is gone";
