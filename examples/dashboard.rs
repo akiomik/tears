@@ -405,13 +405,26 @@ impl TaskListState {
 
     fn update(&mut self, msg: TaskMessage) -> TaskOutcome {
         match msg {
+            // Clamping at an end leaves the selection where it was, and
+            // saying it moved would be the footer reporting an operation that
+            // did not happen.
             TaskMessage::Up => {
+                let before = self.selected;
                 self.selected = self.selected.saturating_sub(1);
-                TaskOutcome::status("Selected previous task")
+                if self.selected == before {
+                    TaskOutcome::status("Nothing further that way")
+                } else {
+                    TaskOutcome::status("Selected previous task")
+                }
             }
             TaskMessage::Down => {
+                let before = self.selected;
                 self.selected = (self.selected + 1).min(self.tasks.len().saturating_sub(1));
-                TaskOutcome::status("Selected next task")
+                if self.selected == before {
+                    TaskOutcome::status("Nothing further that way")
+                } else {
+                    TaskOutcome::status("Selected next task")
+                }
             }
             TaskMessage::Toggle => self.toggle_selected(),
             TaskMessage::Add => self.add_task(),
@@ -898,6 +911,26 @@ mod tests {
             original,
             "the edit is gone and the task's own notes are back"
         );
+        store.finish();
+    }
+
+    /// Moving the selection past an end says nothing moved.
+    ///
+    /// The list clamps, so the selection stays where it was, and reporting a
+    /// move would be the footer describing an operation that did not happen.
+    #[test]
+    fn a_selection_move_past_an_end_says_nothing_moved() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().tasks.selected, 0);
+
+        store.send(Message::Tasks(TaskMessage::Up));
+        assert_eq!(store.state().tasks.selected, 0, "already at the top");
+        assert_eq!(store.state().status.message, "Nothing further that way");
+
+        store.send(Message::Tasks(TaskMessage::Down));
+        assert_eq!(store.state().tasks.selected, 1);
+        assert_eq!(store.state().status.message, "Selected next task");
         store.finish();
     }
 

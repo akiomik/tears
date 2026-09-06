@@ -241,8 +241,8 @@ enum Message {
     /// A key that needs a selected row arrived with none.
     ///
     /// A message rather than nothing, so the footer stops describing whatever
-    /// came before it — the reason `select` sets its status before the guard
-    /// that returns early on an empty collection.
+    /// came before it. An empty collection gets this answer too, so one
+    /// condition has one line however it was asked for.
     NoTaskSelected,
     /// Adds a task under a **freshly allocated** key.
     ///
@@ -1092,21 +1092,28 @@ const fn no_task_selected(state: &mut App) -> Command<Message> {
 /// to differ in structure, and a selection that wrapped here would read as
 /// something composition did.
 fn select(state: &mut App, forward: bool) {
+    // An empty collection does not arrive here: the root answers that with
+    // `no_task_selected`, so both ways of asking for a row that is not there
+    // give one answer.
     let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
-    if keys.is_empty() {
-        return;
-    }
-    state.status = "Selected another task";
     let position = state
         .selected
         .and_then(|selected| keys.iter().position(|key| *key == selected));
-    let last = keys.len() - 1;
+    let last = keys.len().saturating_sub(1);
     let next = match position {
         Some(index) if forward => (index + 1).min(last),
         Some(index) => index.saturating_sub(1),
         None => 0,
     };
-    state.selected = keys.get(next).copied();
+    let moved = keys.get(next).copied();
+    // Clamping at an end leaves the selection where it was, and saying it moved
+    // would be the footer reporting an operation that did not happen.
+    state.status = if moved == state.selected {
+        "Nothing further that way"
+    } else {
+        "Selected another task"
+    };
+    state.selected = moved;
 }
 
 /// Whether a key press is going into the notes editor.
@@ -1127,6 +1134,10 @@ fn editing_notes(state: &App) -> bool {
 /// say before the child has run: nothing the child computes can appear in it,
 /// so where `dashboard.rs` reports "Selected section: Today" — its root having
 /// run the child update itself — these name the operation and stop there.
+///
+/// A line set here cannot be left standing as a lie. A root message that
+/// removes what the child was addressed to writes its own status when it
+/// lands, and a landing is always after the dispatch that queued it.
 const fn child_status(message: &Message) -> Option<&'static str> {
     match message {
         Message::Navigation(_) => Some("Selected another section"),
@@ -1784,6 +1795,10 @@ mod tests {
             Some(TaskId(3)),
             "the last row is an end, not a wrap"
         );
+        assert_eq!(
+            state.status, "Nothing further that way",
+            "and the footer does not report a move that did not happen"
+        );
         for _ in 0..3 {
             let _upwards = Root.reduce(&mut state, Message::SelectPrev);
         }
@@ -1890,9 +1905,9 @@ mod tests {
 
     /// A key that needs a selected row says so when there is none.
     ///
-    /// Silence would leave the footer describing the operation before it — the
-    /// reason `select` sets its status ahead of its own empty-collection
-    /// guard.
+    /// Silence would leave the footer describing the operation before it. A
+    /// selection move over an empty collection gets the same line, so the
+    /// condition has one answer.
     #[test]
     fn a_key_needing_a_selection_reports_when_there_is_none() {
         let (mut state, _bootstrap) = init(Setup {
