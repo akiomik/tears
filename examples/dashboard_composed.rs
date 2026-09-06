@@ -428,19 +428,13 @@ impl Reducer for Root {
                 // Not releases. A terminal that reports them — Windows, or a
                 // session with the kitty keyboard protocol on — sends two
                 // events for one press, and the second would be acted on: `n`
-                // would add two rows where one was asked for, and Enter would
-                // open the pane and then replace it with a second pane on the
-                // same row — a removal nobody asked for, in a file about which
-                // removals happen.
+                // would add two rows where one was asked for, and `d` would
+                // delete twice.
                 //
-                // A *repeat* is kept, and is the other thing entirely: a held
-                // key is repetition the reader is asking for. It is not the
-                // same as the duplicate above, though — `open_details` moves
-                // the focus, so a held Enter opens the pane once and then
-                // saves into it, while the press and its release are both
-                // decoded before either lands and so both see the focus that
-                // opens. Testing for `Press` would drop the repeats with the
-                // releases, and a held Down would move the selection once.
+                // A *repeat* is kept: a held key is repetition the reader is
+                // asking for, and testing for `Press` would drop those with
+                // the releases, leaving a held Down to move the selection
+                // once.
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     key_message(state, key).map_or_else(Command::none, |message| {
                         // A boundary claims a child-addressed message, so the
@@ -1125,10 +1119,11 @@ const fn child_status(message: &Message) -> Option<&'static str> {
 
 /// The message a key press asks for, if any.
 ///
-/// Every binding here is for an unmodified key. Raw mode delivers no SIGINT, so
-/// a reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
+/// Every binding here is for an unmodified key, apart from a shifted character,
+/// which is how an uppercase letter arrives. Raw mode delivers no SIGINT, so a
+/// reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
 /// bound to — clearing the activity log — while Ctrl+D and Ctrl+R would have
-/// deleted and reloaded a row, and Ctrl+Enter would have replaced the pane's
+/// deleted and reloaded a row, and Shift+Enter would have replaced the pane's
 /// occupant, which is a removal.
 fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
     // The way out of raw mode, from any focus: the notes editor holds `q` but
@@ -1136,16 +1131,19 @@ fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Message::Quit);
     }
-    // Every binding below is for an unmodified key, so a chord this
-    // application does not bind is answered here rather than falling through
-    // to the bare key's. Above the match and not on the character arms,
-    // because `Enter`, `Up`/`Down`, `Tab`, `Esc` and `Backspace` arrive with
-    // modifiers too: Ctrl+Enter would open the pane — replacing an occupant,
-    // which is a removal — and Alt+q would quit.
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    {
+    // Every binding below is for an unmodified key, with one exception: a
+    // shifted character on its way into the notes editor, which is how an
+    // uppercase letter arrives. Anything else carrying a modifier is a chord
+    // this application does not bind and must not fall through to the bare
+    // key's. Testing for `CONTROL` and `ALT` alone leaves four of the six
+    // through — Shift+Enter would open the pane, replacing an occupant, which
+    // is a removal, and Shift+Down would move the selection. Letting `SHIFT`
+    // through generally is no better: it would reach the row bindings, where
+    // `d` deletes.
+    let shifted_text = editing_notes(state)
+        && matches!(key.code, KeyCode::Char(_))
+        && key.modifiers == KeyModifiers::SHIFT;
+    if !key.modifiers.is_empty() && !shifted_text {
         return None;
     }
     match key.code {
@@ -1926,13 +1924,15 @@ mod tests {
         );
     }
 
-    /// A `CONTROL` chord runs no bare-key binding, and Ctrl+C leaves.
+    /// A modified key runs no bare-key binding, and Ctrl+C leaves.
     ///
     /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
     /// event. Without the guard it would have found whatever `c` is bound to —
-    /// and Ctrl+D and Ctrl+R would have found the destructive two.
+    /// and Ctrl+D and Ctrl+R would have found the destructive two. `SHIFT` is
+    /// the exception, and only on a character: that is how an uppercase letter
+    /// arrives.
     #[test]
-    fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
+    fn a_modified_key_runs_no_bare_binding_and_ctrl_c_leaves() {
         let (mut state, _bootstrap) = init(Setup {
             activity: ActivityLog::default(),
             reason: ExitReason::default(),
@@ -1958,7 +1958,13 @@ mod tests {
             KeyCode::Up,
             KeyCode::Down,
         ] {
-            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT,
+                KeyModifiers::SUPER,
+                KeyModifiers::META,
+            ] {
                 assert!(
                     chord(&state, code, modifiers).is_none(),
                     "{code:?} with {modifiers:?} is a chord this application does not bind"
@@ -1995,14 +2001,24 @@ mod tests {
         for (code, modifiers) in [
             (KeyCode::Char('x'), KeyModifiers::CONTROL),
             (KeyCode::Char('q'), KeyModifiers::ALT),
+            (KeyCode::Char('d'), KeyModifiers::SUPER),
             (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::SHIFT),
             (KeyCode::Esc, KeyModifiers::ALT),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
         ] {
             assert!(
                 chord(&state, code, modifiers).is_none(),
                 "{code:?} with {modifiers:?} neither edits nor leaves"
             );
         }
+        assert!(
+            matches!(
+                chord(&state, KeyCode::Char('X'), KeyModifiers::SHIFT),
+                Some(Message::Details(DetailsMessage::Input('X')))
+            ),
+            "while a shifted character is how an uppercase letter arrives"
+        );
     }
 
     /// A terminal error is recorded, because the quit that follows it leaves

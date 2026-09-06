@@ -168,10 +168,9 @@ impl Application for App {
             // Not releases. A terminal that reports them — Windows, or a
             // session with the kitty keyboard protocol on — sends two events
             // for one press, and the second would be acted on. A *repeat* is
-            // kept, and is the other thing entirely: a held key is repetition
-            // the reader is asking for. Testing for `Press` would drop those
-            // with the releases, and a held Down would move the selection
-            // once.
+            // kept: a held key is repetition the reader is asking for, and
+            // testing for `Press` would drop those with the releases, leaving
+            // a held Down to move the selection once.
             Message::Terminal(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                 return handle_key_event(self.focus, key);
             }
@@ -654,8 +653,9 @@ impl StatusState {
     }
 }
 
-/// Every binding here is for an unmodified key. Raw mode delivers no SIGINT, so
-/// a reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
+/// Every binding here is for an unmodified key, apart from a shifted character,
+/// which is how an uppercase letter arrives. Raw mode delivers no SIGINT, so a
+/// reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
 /// bound to — clearing the activity log — and Ctrl+D would have deleted a task.
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     // The way out of raw mode, from any focus: the details editor holds `q`
@@ -663,14 +663,18 @@ fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Command::message(Message::Quit).into();
     }
-    // Every binding below is for an unmodified key, so a chord this
-    // application does not bind is answered here rather than falling through
-    // to the bare key's. Above the match and not on the character arms,
-    // because `Enter`, `Up`/`Down`, `Tab` and `Esc` arrive with modifiers too.
-    if key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    {
+    // Every binding below is for an unmodified key, with one exception: a
+    // shifted character on its way into the details editor, which is how an
+    // uppercase letter arrives. Anything else carrying a modifier is a chord
+    // this application does not bind and must not fall through to the bare
+    // key's. Testing for `CONTROL` and `ALT` alone leaves four of the six
+    // through — Shift+Down would move the task selection. Letting `SHIFT`
+    // through generally is no better: it would reach the task bindings, where
+    // `d` deletes.
+    let shifted_text = focus == Focus::Details
+        && matches!(key.code, KeyCode::Char(_))
+        && key.modifiers == KeyModifiers::SHIFT;
+    if !key.modifiers.is_empty() && !shifted_text {
         return Command::none();
     }
     match key.code {
@@ -897,13 +901,14 @@ mod tests {
         store.finish();
     }
 
-    /// A `CONTROL` chord runs no bare-key binding, and Ctrl+C leaves.
+    /// A modified key runs no bare-key binding, and Ctrl+C leaves.
     ///
     /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
     /// event; without the guard it would have cleared the activity log, and
-    /// Ctrl+D would have deleted the selected task.
+    /// Ctrl+D would have deleted the selected task. Shift+Down would have moved
+    /// the selection.
     #[test]
-    fn a_control_chord_runs_no_bare_binding_and_ctrl_c_leaves() {
+    fn a_modified_key_runs_no_bare_binding_and_ctrl_c_leaves() {
         let mut store = TestStore::<App>::new(ExitReason::default());
         store.send(Message::FocusNext);
         assert_eq!(store.state().focus, Focus::Tasks);
@@ -919,7 +924,13 @@ mod tests {
             KeyCode::Tab,
             KeyCode::Down,
         ] {
-            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT,
+                KeyModifiers::SUPER,
+                KeyModifiers::META,
+            ] {
                 store.send(chord_with(code, modifiers));
             }
         }
