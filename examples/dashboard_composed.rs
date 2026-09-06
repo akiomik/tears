@@ -885,6 +885,23 @@ fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// The open pane's hint, which is guarded because every key in it is.
+///
+/// `Type to edit` and `Enter to save` need [`editing_notes`] and `Esc to close`
+/// needs a `Details` focus, which with the slot occupied is the same condition.
+/// Printed at every focus, the line named keys that do something else where it
+/// was read: at `Focus::Tasks` the `Enter` arm above the editor's reopens the
+/// pane over this occupant, and a replacement discards the buffer the line was
+/// offering to save. The empty branch above is worded the way it is for the
+/// weaker version of this — a key that is merely inert.
+const fn details_hint(focus: Focus) -> &'static str {
+    if matches!(focus, Focus::Details) {
+        "Type to edit, Enter to save, Esc to close."
+    } else {
+        "Tab to this pane to edit, save or close it."
+    }
+}
+
 fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
     let text = state.details.get().map_or_else(
         // Names something reachable from where it is printed, without
@@ -897,12 +914,13 @@ fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
         || "No details open. Press Enter on a task in the task list.".to_owned(),
         |open| {
             format!(
-                "#{} {} · {}s{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to close.",
+                "#{} {} · {}s{}\n\nNotes:\n{}_\n\n{}",
                 open.task.0,
                 open.title,
                 open.ticks,
                 if open.loading { " (loading)" } else { "" },
-                open.notes
+                open.notes,
+                details_hint(state.focus)
             )
         },
     );
@@ -2295,6 +2313,58 @@ mod tests {
                 "and the status is about the row, not about the buffer"
             );
         }
+    }
+
+    /// The open pane's hint names only keys that work where it is read.
+    ///
+    /// Not merely a nicety: the pane is drawn at every focus, and at
+    /// `Focus::Tasks` the `Enter` arm above the editor's reopens the pane over
+    /// this occupant. A replacement is a removal, so the key the line offered
+    /// as a save is the one that throws the buffer away.
+    #[test]
+    fn the_open_panes_hint_names_keys_that_work_where_it_is_read() {
+        assert_eq!(
+            details_hint(Focus::Details),
+            "Type to edit, Enter to save, Esc to close.",
+            "at the focus that has all three, the line names all three"
+        );
+        for focus in [Focus::Tasks, Focus::Activity, Focus::Navigation] {
+            assert_eq!(
+                details_hint(focus),
+                "Tab to this pane to edit, save or close it.",
+                "and anywhere else it names where the keys have to land instead"
+            );
+        }
+
+        // The decode the guard exists for, read rather than argued.
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+        state.focus = Focus::Tasks;
+        assert!(
+            matches!(
+                bare(&state, KeyCode::Enter),
+                Some(Message::OpenDetails(TaskId(1)))
+            ),
+            "with the pane open behind another focus, Enter reopens rather than saves"
+        );
+
+        let _reopened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Replaced the open details pane, discarding notes nobody saved",
+            "and that is the removal, so a hint promising a save there promises the opposite"
+        );
     }
 
     /// Opening a pane over an open one replaces its occupant, and says so.

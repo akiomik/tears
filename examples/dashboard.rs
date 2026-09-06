@@ -561,6 +561,22 @@ impl DetailOutcome {
     }
 }
 
+/// The details panel's hint, which is guarded because every key in it is.
+///
+/// `Enter` and `Esc` both require a `Details` focus, and at `Focus::Tasks` the
+/// letters belong to the list — `d` deletes the selected row and `r` reloads
+/// it. This is the milder half of the pair: here `Enter` elsewhere is inert
+/// rather than destructive, where `dashboard_composed.rs` turns it into a
+/// replacement that discards the buffer. The line is wrong the same way in
+/// both.
+const fn details_hint(focused: bool) -> &'static str {
+    if focused {
+        "Type to edit, Enter to save, Esc to reload selected task."
+    } else {
+        "Tab to this pane to edit, save or reload its notes."
+    }
+}
+
 impl DetailState {
     fn from_task(task: Option<&Task>) -> Self {
         let Some(task) = task else {
@@ -602,8 +618,10 @@ impl DetailState {
             "Details"
         };
         let text = format!(
-            "{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to reload selected task.",
-            self.title, self.notes
+            "{}\n\nNotes:\n{}_\n\n{}",
+            self.title,
+            self.notes,
+            details_hint(focused)
         );
         let paragraph = Paragraph::new(text)
             .wrap(Wrap { trim: false })
@@ -812,6 +830,38 @@ mod tests {
             KeyModifiers::empty(),
             kind,
         )))
+    }
+
+    /// The panel's hint names only keys that work where it is read.
+    ///
+    /// The panel is drawn at every focus, and the keys it names are not: `Enter`
+    /// and `Esc` need a `Details` focus, and at `Focus::Tasks` the letters are
+    /// the list's — `d` deletes the selected row. `dashboard_composed.rs` has
+    /// the sharper version of the same line, where the promised save is a
+    /// replacement that discards the buffer.
+    #[test]
+    fn the_panel_hint_names_keys_that_work_where_it_is_read() {
+        assert_eq!(
+            details_hint(true),
+            "Type to edit, Enter to save, Esc to reload selected task.",
+            "with the focus, the line names the keys it has"
+        );
+        assert_eq!(
+            details_hint(false),
+            "Tab to this pane to edit, save or reload its notes.",
+            "without it, the line names where those keys have to land instead"
+        );
+
+        // The decode the guard exists for, read rather than argued.
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Tasks);
+
+        // No `receive_matching` follows, and `finish` is what makes that an
+        // assertion: away from the panel the key decodes to `Command::none()`,
+        // so the store has nothing to deliver. A save would be a message here.
+        store.send(key(KeyCode::Enter));
+        store.finish();
     }
 
     /// Sending the child message directly walks focus through the panels.
