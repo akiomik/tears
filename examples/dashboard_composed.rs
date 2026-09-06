@@ -67,10 +67,10 @@
 //!   sets the line where it dispatches the message, so nothing the child
 //!   computes can appear in it.
 //! - **The details buffer does not follow the selection.** `dashboard.rs`
-//!   rereads the panel from the selected task on every task message, so moving
-//!   the selection throws an unsaved edit away; here the occupant is fixed to
-//!   the task it was opened for, because a `Slot` holds an instance rather than
-//!   a view of whatever is selected.
+//!   rereads the panel whenever the selected task can have changed — a move, an
+//!   add, a delete — so any of those throws an unsaved edit away; here the
+//!   occupant is fixed to the task it was opened for, because a `Slot` holds an
+//!   instance rather than a view of whatever is selected.
 //! - **The tasks arrive as messages** rather than being built into the initial
 //!   state. `init` could build them — `Keyed::from_iter` records no removal, so
 //!   growing a collection there is fine — and this file routes them through
@@ -78,7 +78,9 @@
 //!   cannot do is start work *under a child's scope*, so the row's own setup is
 //!   a message either way. That the rows start with the same notes and none
 //!   marked done is `AddTask`'s doing rather than composition's: it carries a
-//!   title and nothing else.
+//!   title and nothing else. So is the row selected at startup — adding a task
+//!   selects it, so this binary opens on the last of the three where
+//!   `dashboard.rs` opens on the first.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`

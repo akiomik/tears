@@ -236,8 +236,17 @@ impl App {
     }
 
     fn update_tasks(&mut self, msg: TaskMessage) {
+        let selected_before = self.tasks.selected;
         let outcome = self.tasks.update(msg);
-        self.details.sync_from_task(self.tasks.selected_task());
+        // Rereading the panel throws away whatever was typed into it, so it
+        // runs only where the selected task can have changed: the index moved,
+        // or a row was added or removed under it. A move that clamped at an end
+        // changed nothing, and the footer says so.
+        if self.tasks.selected != selected_before
+            || matches!(msg, TaskMessage::Add | TaskMessage::Delete)
+        {
+            self.details.sync_from_task(self.tasks.selected_task());
+        }
 
         if let Some(entry) = outcome.activity {
             self.activity.push(entry);
@@ -946,6 +955,43 @@ mod tests {
             store.send(Message::Tasks(msg));
             assert_eq!(store.state().status.message, "No task selected");
         }
+        store.finish();
+    }
+
+    /// A selection move that changed nothing leaves the notes alone.
+    ///
+    /// Rereading the panel throws away what was typed into it, and a move that
+    /// clamped at an end changed which task is selected not at all — so doing
+    /// it there would discard an edit while the footer said nothing happened.
+    #[test]
+    fn a_move_that_changed_nothing_keeps_the_edit() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let notes = store.state().details.notes.clone();
+        store.send(Message::Details(DetailMessage::Input('x')));
+
+        store.send(Message::Tasks(TaskMessage::Up));
+
+        assert_eq!(
+            store.state().status.message,
+            "Nothing further that way",
+            "the selection was already at the top"
+        );
+        assert_eq!(
+            store.state().details.notes,
+            format!("{notes}x"),
+            "so the edit is still there"
+        );
+
+        // A move that does change the selection rereads, which is what the
+        // reread is for.
+        store.send(Message::Tasks(TaskMessage::Down));
+        assert_eq!(
+            store.state().details.notes,
+            store.state().tasks.tasks[1].notes
+        );
         store.finish();
     }
 
