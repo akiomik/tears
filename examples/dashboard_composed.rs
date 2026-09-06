@@ -961,6 +961,10 @@ fn add_task(state: &mut App, title: String) -> Command<Message> {
 /// Replaces a row's instance with a fresh one under the same key.
 fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
     let Some(task) = state.tasks.get(&id) else {
+        // The key was read off a state this message had not been applied to
+        // yet, and the row has gone since — the hazard `Message::AddTask`
+        // describes, arriving at a reader instead of at a collection.
+        state.status = "That task is gone";
         return Command::none();
     };
     // Inserting over an occupied key is a replacement, and a replacement is a
@@ -1021,6 +1025,7 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
 /// Presents the details pane for a row.
 fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
     let Some(task) = state.tasks.get(&id) else {
+        state.status = "That task is gone";
         return Command::none();
     };
     // Presenting over an occupied slot is a replacement too, for the same
@@ -1047,10 +1052,12 @@ fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
 /// Writes the pane's edited notes onto the task it was opened for.
 fn save_notes(state: &mut App) -> Command<Message> {
     let Some(open) = state.details.get() else {
+        state.status = "No details pane is open";
         return Command::none();
     };
     let (task_id, notes) = (open.task, open.notes.clone());
     let Some(task) = state.tasks.get_mut(&task_id) else {
+        state.status = "That task is gone";
         return Command::none();
     };
     task.notes = notes;
@@ -1447,6 +1454,17 @@ mod tests {
             alpha_sync,
             CommandId::new(SYNC),
             "and no run occupies the unqualified id the reducers wrote"
+        );
+        // `Segment::Details` is the third variant and `beta` is `TaskId(2)`, so
+        // this is the pair whose segments differ in nothing but the type the
+        // structural key carries with them.
+        assert_ne!(
+            beta_timer, details_timer,
+            "a key and a fixed segment that erase to the same value are still two"
+        );
+        assert_ne!(
+            beta_sync, details_load,
+            "and so are the runs keyed under them"
         );
     }
 
@@ -2074,6 +2092,46 @@ mod tests {
         assert_eq!(
             state.status, "Opened the details pane, replacing the one that was open",
             "the slot was occupied, so the occupant went"
+        );
+    }
+
+    /// A key read against a row that has gone since says so.
+    ///
+    /// `Message::AddTask` describes the hazard: a key handler reads the
+    /// selection off a state the messages already in flight have not been
+    /// applied to, so `d` and then `r` in quick succession both name the row
+    /// `d` is about to remove. The second arrives at a collection that no
+    /// longer holds it, and going quiet there would leave the footer reporting
+    /// the delete as though the reload had worked.
+    #[test]
+    fn an_operation_on_a_row_that_has_gone_says_so() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _deleted = Root.reduce(&mut state, Message::DeleteTask(TaskId(1)));
+        assert_eq!(state.status, "Deleted the task");
+
+        for message in [
+            Message::ReloadTask(TaskId(1)),
+            Message::OpenDetails(TaskId(1)),
+        ] {
+            state.status = "Untouched";
+            let _late = Root.reduce(&mut state, message);
+            assert_eq!(
+                state.status, "That task is gone",
+                "the row was read before the delete landed"
+            );
+        }
+
+        state.status = "Untouched";
+        let _nothing_open = Root.reduce(&mut state, Message::SaveNotes);
+        assert_eq!(
+            state.status, "No details pane is open",
+            "and a save with no pane says that instead"
         );
     }
 }
