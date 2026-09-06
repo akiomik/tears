@@ -405,9 +405,13 @@ impl TaskListState {
 
     fn update(&mut self, msg: TaskMessage) -> TaskOutcome {
         match msg {
-            // Clamping at an end leaves the selection where it was, and
-            // saying it moved would be the footer reporting an operation that
-            // did not happen.
+            TaskMessage::Up | TaskMessage::Down if self.tasks.is_empty() => {
+                TaskOutcome::status("No task selected")
+            }
+            // An empty list is not an end, and `Toggle` and `Delete` below
+            // already answer it. Clamping at a real end leaves the selection
+            // where it was, and saying it moved would be the footer reporting
+            // an operation that did not happen.
             TaskMessage::Up => {
                 let before = self.selected;
                 self.selected = self.selected.saturating_sub(1);
@@ -931,6 +935,17 @@ mod tests {
         store.send(Message::Tasks(TaskMessage::Down));
         assert_eq!(store.state().tasks.selected, 1);
         assert_eq!(store.state().status.message, "Selected next task");
+
+        // An empty list is not an end: `Toggle` and `Delete` answer it with
+        // "No task selected", and a move has to agree with them.
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+        for msg in [TaskMessage::Up, TaskMessage::Down] {
+            store.send(Message::Tasks(msg));
+            assert_eq!(store.state().status.message, "No task selected");
+        }
         store.finish();
     }
 

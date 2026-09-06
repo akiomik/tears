@@ -33,9 +33,10 @@
 //! or a replacing [`Slot::present`]. The boundary turns each of those into a
 //! teardown of that instance's scope, so its timer stops and its in-flight sync
 //! is cancelled without this file asking for either. The `on_teardown` hooks
-//! each child registers write the line you see in the activity pane when it
-//! happens — a finalizer produces no message by design, so the log it writes to
-//! is a handle rather than a message.
+//! each child registers write the line the activity pane carries. A finalizer
+//! produces no message by design — which is why the log is a handle rather than
+//! a message, and why the pane shows that line the next time something draws
+//! rather than at the moment the hook runs.
 //!
 //! Cross-child work stays the root's. Saving the details pane's notes back
 //! onto the task it was opened for touches two children, so it is a root
@@ -1133,16 +1134,20 @@ fn editing_notes(state: &App) -> bool {
 /// these and the root's `reduce` never sees them. That fixes what the line can
 /// say before the child has run: nothing the child computes can appear in it,
 /// so where `dashboard.rs` reports "Selected section: Today" — its root having
-/// run the child update itself — these name the operation and stop there.
+/// run the child update itself — these name what was asked for and stop there.
+/// Naming an outcome would be claiming one: the navigation list clamps at its
+/// ends, clearing an empty log clears nothing, and a backspace on an empty
+/// buffer removes nothing, and this line is written before any of that is
+/// known.
 ///
 /// A line set here cannot be left standing as a lie. A root message that
 /// removes what the child was addressed to writes its own status when it
 /// lands, and a landing is always after the dispatch that queued it.
 const fn child_status(message: &Message) -> Option<&'static str> {
     match message {
-        Message::Navigation(_) => Some("Selected another section"),
-        Message::Task(_, TaskMessage::Toggle) => Some("Toggled the task"),
-        Message::Activity(_) => Some("Cleared the activity log"),
+        Message::Navigation(_) => Some("Moving through the sections"),
+        Message::Task(_, TaskMessage::Toggle) => Some("Toggling the task"),
+        Message::Activity(_) => Some("Clearing the activity log"),
         Message::Details(_) => Some("Editing the notes"),
         _ => None,
     }
@@ -1852,21 +1857,21 @@ mod tests {
         state.focus = Focus::Navigation;
         let _navigating = Root.reduce(&mut state, key_press(KeyCode::Down));
         assert_eq!(
-            state.status, "Selected another section",
+            state.status, "Moving through the sections",
             "the navigation child claims the message, so the root says so here"
         );
 
         state.focus = Focus::Activity;
         let _clearing = Root.reduce(&mut state, key_press(KeyCode::Char('c')));
         assert_eq!(
-            state.status, "Cleared the activity log",
+            state.status, "Clearing the activity log",
             "and the same for the log child"
         );
 
         state.focus = Focus::Tasks;
         let _toggling = Root.reduce(&mut state, key_press(KeyCode::Char(' ')));
         assert_eq!(
-            state.status, "Toggled the task",
+            state.status, "Toggling the task",
             "and for a row, which is claimed by key"
         );
     }
