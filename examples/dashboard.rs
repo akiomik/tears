@@ -901,6 +901,28 @@ mod tests {
         store.finish();
     }
 
+    /// A terminal error leaves a reason behind, because the quit that follows
+    /// it leaves nowhere to draw the report.
+    ///
+    /// `main` prints the recorded line after restoring the terminal. What this
+    /// row holds is the half the application owns: that the reason is written
+    /// down at all, rather than lost with the screen.
+    #[test]
+    fn a_terminal_error_leaves_a_reason_behind() {
+        let reason = ExitReason::default();
+        let mut store = TestStore::<App>::new(reason.clone());
+
+        store.send(Message::TerminalError("broken pipe".to_owned()));
+        store.receive_quit();
+
+        assert_eq!(
+            reason.take().as_deref(),
+            Some("broken pipe"),
+            "the reason is left where `main` can still read it"
+        );
+        store.finish();
+    }
+
     /// A modified key runs no bare-key binding, and Ctrl+C leaves.
     ///
     /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key

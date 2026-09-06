@@ -460,18 +460,20 @@ impl Reducer for Root {
                 Command::quit()
             }
             Message::Quit => Command::quit(),
-            Message::NoTaskSelected => {
-                state.status = "No task selected";
-                Command::none()
-            }
+            Message::NoTaskSelected => no_task_selected(state),
             Message::FocusNext => {
                 state.focus = state.focus.next();
                 state.status = "Changed focus";
                 Command::none()
             }
             Message::SelectPrev | Message::SelectNext => {
-                let forward = matches!(message, Message::SelectNext);
-                select(state, forward);
+                if state.tasks.is_empty() {
+                    // The same answer the four keys that need a row give, for
+                    // the same condition. Reporting a move instead would be
+                    // this example teaching two things about one state.
+                    return no_task_selected(state);
+                }
+                select(state, matches!(message, Message::SelectNext));
                 Command::none()
             }
             Message::AddTask(title) => add_task(state, title),
@@ -1074,20 +1076,27 @@ fn save_notes(state: &mut App) -> Command<Message> {
     Command::message(Message::Task(task_id, TaskMessage::Sync)).into()
 }
 
+/// What a key that needs a selected row reports when there is none.
+///
+/// One place holds the line, because two of them mean it: the message a key
+/// decodes to when nothing is selected, and a selection move over an empty
+/// collection.
+const fn no_task_selected(state: &mut App) -> Command<Message> {
+    state.status = "No task selected";
+    Command::none()
+}
+
 /// Moves the task selection, stopping at the ends.
 ///
 /// Clamped and not wrapped, because `dashboard.rs` clamps: the pair is meant
 /// to differ in structure, and a selection that wrapped here would read as
 /// something composition did.
 fn select(state: &mut App, forward: bool) {
-    // Before the guard below, so an empty list still moves the line: every
-    // other operation reports, and `dashboard.rs` reports here too, so going
-    // silent would leave the footer describing whatever came before it.
-    state.status = "Selected another task";
     let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
     if keys.is_empty() {
         return;
     }
+    state.status = "Selected another task";
     let position = state
         .selected
         .and_then(|selected| keys.iter().position(|key| *key == selected));
@@ -1803,9 +1812,9 @@ mod tests {
         let _emptied = Root.reduce(&mut state, Message::DeleteTask(TaskId(1)));
         let _nowhere_to_go = Root.reduce(&mut state, Message::SelectNext);
         assert_eq!(
-            state.status, "Selected another task",
-            "an empty list has nowhere to move to, and still reports rather \
-             than leaving the last operation's line standing"
+            state.status, "No task selected",
+            "an empty list gets the answer the other four keys give, not a \
+             move it did not make"
         );
     }
 
