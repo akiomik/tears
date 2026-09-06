@@ -225,14 +225,49 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 
 Create custom subscriptions by implementing the `SubscriptionSource` trait.
 
+### Composing Reducers
+
+A `Reducer` owns one state transition and the subscriptions that state declares.
+`scope`, `for_each` and `presented` compose one under a parent — a sibling
+feature, one child per row of a `Keyed` collection, or an optionally-present
+child in a `Slot` — and `into_program` closes the stack into a runnable
+`Program` for `ProgramRuntime`. Every boundary qualifies the identities its
+child produces with its own segment, so rows declaring the same subscription or
+keying the same command do not collide. The two whose child can leave —
+`for_each` over a `Keyed` collection and `presented` over a `Slot` —
+additionally tear a departed child's runs down, so no removal leaks a run;
+`scope` composes one child in place, and that child is always there.
+
+An `Application` is run through an adapter over the same kernel, so this is a
+way to write a program rather than a second runtime. See
+[docs/composition.md](docs/composition.md) for when the rewrite is worth it, and
+[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) for
+`dashboard.rs` written the other way.
+
 ## Examples
 
-Check out the [`examples/`](examples/) directory for more examples:
+Check out the [`examples/`](examples/) directory. They fall into two groups,
+and each group is named after what a reader arrives knowing.
+
+### Application structure
+
+Named after the application, because someone choosing a structure knows the
+shape of their problem and not yet the name of the API. The first three are a
+scale, each one the previous grown; the fourth is the third one rewritten, so
+read it beside `dashboard.rs` rather than after it.
 
 - [`counter.rs`](examples/counter.rs) - A simple counter with timer and keyboard input
-- [`panic_hook.rs`](examples/panic_hook.rs) - Restoring the terminal on panic with `install_panic_hook`
 - [`views.rs`](examples/views.rs) - Multiple view states with navigation and conditional subscriptions
-- [`dashboard.rs`](examples/dashboard.rs) - Structured state management with nested state and child messages
+- [`dashboard.rs`](examples/dashboard.rs) - Structured state management, with the root owning the wiring
+- [`dashboard_composed.rs`](examples/dashboard_composed.rs) - The same application with composed reducers: a keyed collection of child reducers, an optionally-present child, automatic scope application and teardown of removed children
+
+### Framework features
+
+Named after the API item they demonstrate, because that is what a reader
+arrives looking for. `http_todo.rs` carries both, as a feature that needs a
+real application to be worth showing.
+
+- [`panic_hook.rs`](examples/panic_hook.rs) - Restoring the terminal on panic with `install_panic_hook`
 - [`signals.rs`](examples/signals.rs) - OS signal handling with graceful shutdown (SIGINT, SIGTERM, etc.)
 - [`command_timeout_retry.rs`](examples/command_timeout_retry.rs) - Enforcing a `Command` deadline with `timeout` and recovering from failures with `retry`
 - [`command_cancellation.rs`](examples/command_cancellation.rs) - Cancelling superseded in-flight commands with `cancellable`/`cancellable_with` and `CancelPolicy`
@@ -246,9 +281,10 @@ Run an example:
 
 ```bash
 cargo run --example counter
-cargo run --example panic_hook
 cargo run --example views
 cargo run --example dashboard
+cargo run --example dashboard_composed
+cargo run --example panic_hook
 cargo run --example signals
 cargo run --example command_timeout_retry
 cargo run --example command_cancellation
@@ -287,6 +323,14 @@ runnable tests ship with these examples:
 cargo test --example command_timeout_retry
 cargo test --example command_cancellation
 cargo test --example dashboard
+```
+
+`TestStore` takes an `Application`, so a composed `Program` is driven with
+`tears::testing::TestDriver` instead; `examples/dashboard_composed.rs` carries
+worked `TestDriver` tests:
+
+```bash
+cargo test --example dashboard_composed
 ```
 
 Repository-wide test conventions live in [docs/testing.md](docs/testing.md).

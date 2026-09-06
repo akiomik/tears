@@ -1,4 +1,4 @@
-//! Structured state management example.
+//! Structured state management, with the root owning the wiring.
 //!
 //! This example shows how to organize a larger application without putting all
 //! state and update logic in one place:
@@ -7,16 +7,51 @@
 //! - Each child state updates only its own local data.
 //! - The root coordinates cross-component effects such as activity logging.
 //!
+//! That is the right shape while every child is a single instance whose
+//! command ids and subscriptions the root can keep distinct by choosing
+//! distinct values. [`dashboard_composed.rs`](dashboard_composed.rs) is this
+//! same application written with composed reducers, for when a child exists in
+//! more than one instance at a time or comes and goes: there the task list is a
+//! keyed collection with one child reducer per row and the details pane is an
+//! optionally-present child, and each boundary qualifies its child's identities
+//! and tears a removed child's runs down. `docs/composition.md` is the guide to
+//! choosing between the two.
+//!
 //! Run with: cargo run --example dashboard
 
+use std::sync::{Arc, Mutex};
+
 use color_eyre::eyre::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tears::prelude::*;
 use tears::subscription::terminal::TerminalEvents;
 
 const ACTIVITY_LIMIT: usize = 8;
+
+/// Where the run leaves a reason `main` can print once the terminal is back.
+///
+/// A handle rather than a field of the state, and the same one
+/// `dashboard_composed.rs` has: a terminal error quits, `main` restores the
+/// terminal immediately after, and anything written to the screen — or to
+/// stderr while the alternate screen is up — goes with it. The report has to
+/// outlive the run to be a report at all.
+#[derive(Clone, Debug, Default)]
+struct ExitReason(Arc<Mutex<Option<String>>>);
+
+impl ExitReason {
+    fn set(&self, reason: String) {
+        *self.0.lock().expect("the exit reason lock is not poisoned") = Some(reason);
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("the exit reason lock is not poisoned")
+            .take()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -89,6 +124,7 @@ enum ActivityMessage {
 
 #[derive(Debug, Clone)]
 struct App {
+    reason: ExitReason,
     focus: Focus,
     navigation: NavigationState,
     tasks: TaskListState,
@@ -99,14 +135,15 @@ struct App {
 
 impl Application for App {
     type Message = Message;
-    type Flags = ();
+    type Flags = ExitReason;
 
-    fn new(_flags: ()) -> (Self, Command<Message>) {
+    fn new(reason: ExitReason) -> (Self, Command<Message>) {
         let tasks = TaskListState::new();
         let details = DetailState::from_task(tasks.selected_task());
 
         (
             Self {
+                reason,
                 focus: Focus::Navigation,
                 navigation: NavigationState::new(),
                 tasks,
@@ -128,10 +165,21 @@ impl Application for App {
             Message::Tasks(msg) => self.update_tasks(msg),
             Message::Details(msg) => self.update_details(msg),
             Message::Activity(msg) => self.update_activity(msg),
-            Message::Terminal(Event::Key(key)) => return handle_key_event(self.focus, key),
+            // Not releases. A terminal that reports them — Windows, or a
+            // session with the kitty keyboard protocol on — sends two events
+            // for one press, and the second would be acted on. A *repeat* is
+            // kept: a held key is repetition the reader is asking for, and
+            // testing for `Press` would drop those with the releases, leaving
+            // a held Down to move the selection once.
+            Message::Terminal(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                return handle_key_event(self.focus, key);
+            }
             Message::Terminal(_) => {}
             Message::TerminalError(e) => {
-                eprintln!("Terminal error: {e}");
+                // Recorded rather than printed: the quit below ends the run and
+                // `main` restores the terminal immediately after, so this is
+                // reported once there is a screen left to report it on.
+                self.reason.set(e);
                 return Command::quit();
             }
             Message::Quit => return Command::quit(),
@@ -156,7 +204,7 @@ impl Application for App {
         ])
         .areas(body);
 
-        Self::render_header(frame, header);
+        Self::render_header(frame, header, self.focus);
         self.navigation
             .render(frame, nav_area, self.focus == Focus::Navigation);
         self.tasks
@@ -188,8 +236,17 @@ impl App {
     }
 
     fn update_tasks(&mut self, msg: TaskMessage) {
+        let selected_before = self.tasks.selected;
+        let count_before = self.tasks.tasks.len();
         let outcome = self.tasks.update(msg);
-        self.details.sync_from_task(self.tasks.selected_task());
+        // Rereading the panel throws away whatever was typed into it, so it
+        // runs only where the selected task can have changed: the selection
+        // moved, or the list grew or shrank under it. Asking what kind of
+        // message this was instead would reread on a delete that deleted
+        // nothing, and on nothing else it would get right.
+        if self.tasks.selected != selected_before || self.tasks.tasks.len() != count_before {
+            self.details.sync_from_task(self.tasks.selected_task());
+        }
 
         if let Some(entry) = outcome.activity {
             self.activity.push(entry);
@@ -200,15 +257,36 @@ impl App {
     fn update_details(&mut self, msg: DetailMessage) {
         let outcome = self.details.update(msg);
 
-        if outcome.save_requested {
-            if let Some(task) = self.tasks.selected_task_mut() {
-                task.notes.clone_from(&self.details.notes);
-                self.activity
-                    .push(format!("Updated notes for '{}'", task.title));
-                self.status.set_info("Saved task notes");
+        match outcome.action {
+            DetailAction::Save => {
+                if let Some(task) = self.tasks.selected_task_mut() {
+                    task.notes.clone_from(&self.details.notes);
+                    self.activity
+                        .push(format!("updated notes for {}", task.title));
+                    self.status.set_info(outcome.status);
+                } else {
+                    // Silence here would leave the footer reporting the edit
+                    // that was not saved.
+                    self.status.set_info("No task selected");
+                }
             }
-        } else {
-            self.status.set_info(outcome.status);
+            // Esc throws the edits away and reads the selected task again,
+            // which is what the panel's hint offers and what `Reset` names.
+            DetailAction::Reset => {
+                let reloaded = self.tasks.selected_task().is_some();
+                self.details.sync_from_task(self.tasks.selected_task());
+                // With no task there is nothing to reread, but the panel is
+                // emptied all the same — so this arm is not the `Save` arm's
+                // no-op, and the footer says what became of what was typed
+                // rather than only why.
+                if reloaded {
+                    self.status.set_info(outcome.status);
+                } else {
+                    self.status
+                        .set_info("Discarded the notes; no task selected");
+                }
+            }
+            DetailAction::Keep => self.status.set_info(outcome.status),
         }
     }
 
@@ -217,8 +295,8 @@ impl App {
         self.status.set_info("Cleared activity log");
     }
 
-    fn render_header(frame: &mut Frame, area: Rect) {
-        let text = "Dashboard state example | Tab: focus | q: quit";
+    fn render_header(frame: &mut Frame, area: Rect, focus: Focus) {
+        let text = header_text(focus);
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Structured State");
@@ -332,13 +410,30 @@ impl TaskListState {
 
     fn update(&mut self, msg: TaskMessage) -> TaskOutcome {
         match msg {
+            TaskMessage::Up | TaskMessage::Down if self.tasks.is_empty() => {
+                TaskOutcome::status("No task selected")
+            }
+            // An empty list is not an end, and `Toggle` and `Delete` below
+            // already answer it. Clamping at a real end leaves the selection
+            // where it was, and saying it moved would be the footer reporting
+            // an operation that did not happen.
             TaskMessage::Up => {
+                let before = self.selected;
                 self.selected = self.selected.saturating_sub(1);
-                TaskOutcome::status("Selected previous task")
+                if self.selected == before {
+                    TaskOutcome::status("Nothing further that way")
+                } else {
+                    TaskOutcome::status("Selected previous task")
+                }
             }
             TaskMessage::Down => {
+                let before = self.selected;
                 self.selected = (self.selected + 1).min(self.tasks.len().saturating_sub(1));
-                TaskOutcome::status("Selected next task")
+                if self.selected == before {
+                    TaskOutcome::status("Nothing further that way")
+                } else {
+                    TaskOutcome::status("Selected next task")
+                }
             }
             TaskMessage::Toggle => self.toggle_selected(),
             TaskMessage::Add => self.add_task(),
@@ -381,7 +476,7 @@ impl TaskListState {
 
     fn delete_selected(&mut self) -> TaskOutcome {
         if self.tasks.is_empty() {
-            return TaskOutcome::status("No task to delete");
+            return TaskOutcome::status("No task selected");
         }
 
         let removed = self.tasks.remove(self.selected);
@@ -417,25 +512,77 @@ struct DetailState {
     notes: String,
 }
 
+/// What the details panel wants the root to do with its buffer.
+///
+/// The panel holds a copy of the selected task's notes and cannot reach the
+/// task itself, so both of the interesting outcomes are requests to the root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailAction {
+    /// Leave the buffer and the task as they are.
+    Keep,
+    /// Write the buffer onto the selected task.
+    Save,
+    /// Throw the buffer away and read the selected task again.
+    Reset,
+}
+
 #[derive(Debug, Clone)]
 struct DetailOutcome {
     status: String,
-    save_requested: bool,
+    action: DetailAction,
 }
 
 impl DetailOutcome {
     fn status(status: impl Into<String>) -> Self {
         Self {
             status: status.into(),
-            save_requested: false,
+            action: DetailAction::Keep,
         }
     }
 
     fn save(status: impl Into<String>) -> Self {
         Self {
             status: status.into(),
-            save_requested: true,
+            action: DetailAction::Save,
         }
+    }
+
+    fn reset(status: impl Into<String>) -> Self {
+        Self {
+            status: status.into(),
+            action: DetailAction::Reset,
+        }
+    }
+}
+
+/// The header, which names a quit that works at the focus it is read from.
+///
+/// `q` is text while the details editor has it, so the hint follows the guard
+/// in `handle_key_event` rather than contradicting it. Dropping `q` there left
+/// no quit named at all: `Tab` and then `q` still works, but `Ctrl+C` is the
+/// one that does not ask the reader to leave first, and raw mode means the
+/// application is the only thing that can answer it.
+const fn header_text(focus: Focus) -> &'static str {
+    if matches!(focus, Focus::Details) {
+        "Dashboard state example | Tab: leave the editor | Ctrl+C: quit"
+    } else {
+        "Dashboard state example | Tab: focus | q: quit"
+    }
+}
+
+/// The details panel's hint, which is guarded because every key in it is.
+///
+/// `Enter` and `Esc` both require a `Details` focus, and at `Focus::Tasks` the
+/// letters belong to the list — `d` deletes the selected row and `r` reloads
+/// it. This is the milder half of the pair: here `Enter` elsewhere is inert
+/// rather than destructive, where `dashboard_composed.rs` turns it into a
+/// replacement that discards the buffer. The line is wrong the same way in
+/// both.
+const fn details_hint(focused: bool) -> &'static str {
+    if focused {
+        "Type to edit, Enter to save, Esc to reload selected task."
+    } else {
+        "Tab to this pane to edit, save or reload its notes."
     }
 }
 
@@ -469,7 +616,7 @@ impl DetailState {
                 DetailOutcome::status("Editing notes")
             }
             DetailMessage::Save => DetailOutcome::save("Saved task notes"),
-            DetailMessage::Reset => DetailOutcome::status("No changes saved"),
+            DetailMessage::Reset => DetailOutcome::reset("Reloaded the selected task"),
         }
     }
 
@@ -480,8 +627,10 @@ impl DetailState {
             "Details"
         };
         let text = format!(
-            "{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to reload selected task.",
-            self.title, self.notes
+            "{}\n\nNotes:\n{}_\n\n{}",
+            self.title,
+            self.notes,
+            details_hint(focused)
         );
         let paragraph = Paragraph::new(text)
             .wrap(Wrap { trim: false })
@@ -559,9 +708,35 @@ impl StatusState {
     }
 }
 
+/// Raw mode delivers no SIGINT, so Ctrl+C arrives here as an ordinary key
+/// event; what the guards below make of it and of every other modified key is
+/// written where they are.
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
+    // The way out of raw mode, from any focus: the details editor holds `q`
+    // but nothing holds this.
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return Command::message(Message::Quit).into();
+    }
+    // Every binding below is for an unmodified key, with one exception: a
+    // shifted character on its way into the details editor, which is how an
+    // uppercase letter arrives. Anything else carrying a modifier is a chord
+    // this application does not bind and must not fall through to the bare
+    // key's. Testing for `CONTROL` and `ALT` alone leaves four of the six
+    // through — Shift+Down would move the task selection. Letting `SHIFT`
+    // through generally is no better: it would reach the task bindings, where
+    // `d` deletes.
+    let shifted_text = focus == Focus::Details
+        && matches!(key.code, KeyCode::Char(_))
+        && key.modifiers == KeyModifiers::SHIFT;
+    if !key.modifiers.is_empty() && !shifted_text {
+        return Command::none();
+    }
     match key.code {
-        KeyCode::Char('q') => Command::message(Message::Quit).into(),
+        // Guarded like the other printable keys below, so `q` stays typable in
+        // the details editor. This panel is always present, and Esc rereads the
+        // selected task's notes rather than leaving, so Tab is how you get out
+        // of this focus.
+        KeyCode::Char('q') if focus != Focus::Details => Command::message(Message::Quit).into(),
         KeyCode::Tab => Command::message(Message::FocusNext).into(),
         KeyCode::Up => match focus {
             Focus::Navigation => {
@@ -613,11 +788,18 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
 
     // Run application at 60 FPS
-    let runtime = Runtime::<App>::new(());
+    let reason = ExitReason::default();
+    let runtime = Runtime::<App>::new(reason.clone());
     let result = runtime.run(&mut terminal).await;
 
     // Restore terminal
     ratatui::restore();
+
+    // What the run had to say and could not show, now that there is a screen
+    // to say it on.
+    if let Some(reason) = reason.take() {
+        eprintln!("Terminal error: {reason}");
+    }
 
     result?;
 
@@ -632,7 +814,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyModifiers;
     use tears::testing::TestStore;
 
     /// Builds the `Terminal` message a keystroke would produce, so a test can
@@ -641,10 +822,93 @@ mod tests {
         Message::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
     }
 
+    /// The same held with `CONTROL`.
+    fn chord(code: KeyCode) -> Message {
+        chord_with(code, KeyModifiers::CONTROL)
+    }
+
+    /// The same under any modifiers.
+    fn chord_with(code: KeyCode, modifiers: KeyModifiers) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
+    }
+
+    /// The same for the other two kinds a terminal can report.
+    fn key_of(code: KeyCode, kind: KeyEventKind) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::empty(),
+            kind,
+        )))
+    }
+
+    /// The header names a quit that answers where it is read.
+    ///
+    /// `q` is text once the editor has the focus, so the header stops naming it
+    /// there — and naming only `Tab` left that focus with no quit named at all.
+    /// This reads the key each branch offers rather than trusting the two to
+    /// stay in step with the guard in `handle_key_event`.
+    #[test]
+    fn the_header_names_a_quit_that_answers_where_it_is_read() {
+        assert!(
+            header_text(Focus::Tasks).contains("q: quit"),
+            "away from the editor the header offers `q`"
+        );
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(key(KeyCode::Char('q')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+
+        assert!(
+            header_text(Focus::Details).contains("Ctrl+C: quit"),
+            "in the editor it offers the chord instead, because `q` is text"
+        );
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        store.send(chord(KeyCode::Char('c')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+    }
+
+    /// The panel's hint names only keys that work where it is read.
+    ///
+    /// The panel is drawn at every focus, and the keys it names are not: `Enter`
+    /// and `Esc` need a `Details` focus, and at `Focus::Tasks` the letters are
+    /// the list's — `d` deletes the selected row. `dashboard_composed.rs` has
+    /// the sharper version of the same line, where the promised save is a
+    /// replacement that discards the buffer.
+    #[test]
+    fn the_panel_hint_names_keys_that_work_where_it_is_read() {
+        assert_eq!(
+            details_hint(true),
+            "Type to edit, Enter to save, Esc to reload selected task.",
+            "with the focus, the line names the keys it has"
+        );
+        assert_eq!(
+            details_hint(false),
+            "Tab to this pane to edit, save or reload its notes.",
+            "without it, the line names where those keys have to land instead"
+        );
+
+        // The decode the guard exists for, read rather than argued.
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Tasks);
+
+        // No `receive_matching` follows, and `finish` is what makes that an
+        // assertion: away from the panel the key decodes to `Command::none()`,
+        // so the store has nothing to deliver. A save would be a message here.
+        store.send(key(KeyCode::Enter));
+        store.finish();
+    }
+
     /// Sending the child message directly walks focus through the panels.
     #[test]
     fn focus_next_cycles_through_panels() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert_eq!(store.state().focus, Focus::Navigation);
 
         store.send(Message::FocusNext);
@@ -659,7 +923,7 @@ mod tests {
     /// `Command::message(FocusNext)` the store delivers as the next message.
     #[test]
     fn tab_key_emits_focus_next() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
 
         store.send(key(KeyCode::Tab));
         store.receive_matching(|msg| matches!(msg, Message::FocusNext));
@@ -672,7 +936,7 @@ mod tests {
     /// entry.
     #[test]
     fn toggle_marks_selected_task_done() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert!(!store.state().tasks.tasks[0].done);
         let activity_before = store.state().activity.entries.len();
 
@@ -687,7 +951,7 @@ mod tests {
     /// id counter keeps advancing.
     #[test]
     fn add_then_delete_returns_to_original_count() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
         assert_eq!(store.state().tasks.tasks.len(), 3);
         assert_eq!(store.state().tasks.next_id, 4);
 
@@ -705,11 +969,348 @@ mod tests {
     /// quit request.
     #[test]
     fn quit_key_requests_shutdown() {
-        let mut store = TestStore::<App>::new(());
+        let mut store = TestStore::<App>::new(ExitReason::default());
 
         store.send(key(KeyCode::Char('q')));
         store.receive_matching(|msg| matches!(msg, Message::Quit));
         store.receive_quit();
+        store.finish();
+    }
+
+    /// The details panel is a text field, so 'q' is a character there rather
+    /// than a request to quit. Tab is how you leave that focus.
+    #[test]
+    fn quit_key_is_text_while_the_details_panel_has_focus() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let notes = store.state().details.notes.clone();
+
+        store.send(key(KeyCode::Char('q')));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Input('q'))));
+
+        assert_eq!(store.state().details.notes, format!("{notes}q"));
+        store.finish();
+    }
+
+    /// Esc throws the buffer away and reads the selected task again, which is
+    /// what the panel's hint offers and what `Reset` names.
+    #[test]
+    fn escape_rereads_the_selected_task_s_notes() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let original = store.state().details.notes.clone();
+
+        store.send(key(KeyCode::Char('x')));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Input('x'))));
+        assert_eq!(store.state().details.notes, format!("{original}x"));
+
+        store.send(key(KeyCode::Esc));
+        store.receive_matching(|msg| matches!(msg, Message::Details(DetailMessage::Reset)));
+
+        assert_eq!(
+            store.state().details.notes,
+            original,
+            "the edit is gone and the task's own notes are back"
+        );
+        store.finish();
+    }
+
+    /// Moving the selection past an end says nothing moved.
+    ///
+    /// The list clamps, so the selection stays where it was, and reporting a
+    /// move would be the footer describing an operation that did not happen.
+    #[test]
+    fn a_selection_move_past_an_end_says_nothing_moved() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().tasks.selected, 0);
+
+        store.send(Message::Tasks(TaskMessage::Up));
+        assert_eq!(store.state().tasks.selected, 0, "already at the top");
+        assert_eq!(store.state().status.message, "Nothing further that way");
+
+        store.send(Message::Tasks(TaskMessage::Down));
+        assert_eq!(store.state().tasks.selected, 1);
+        assert_eq!(store.state().status.message, "Selected next task");
+
+        // An empty list is not an end: `Toggle` and `Delete` answer it with
+        // "No task selected", and a move has to agree with them.
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+        for msg in [TaskMessage::Up, TaskMessage::Down] {
+            store.send(Message::Tasks(msg));
+            assert_eq!(store.state().status.message, "No task selected");
+        }
+        store.finish();
+    }
+
+    /// A selection move that changed nothing leaves the notes alone.
+    ///
+    /// Rereading the panel throws away what was typed into it, and a move that
+    /// clamped at an end changed which task is selected not at all — so doing
+    /// it there would discard an edit while the footer said nothing happened.
+    #[test]
+    fn a_move_that_changed_nothing_keeps_the_edit() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+        let notes = store.state().details.notes.clone();
+        store.send(Message::Details(DetailMessage::Input('x')));
+
+        store.send(Message::Tasks(TaskMessage::Up));
+
+        assert_eq!(
+            store.state().status.message,
+            "Nothing further that way",
+            "the selection was already at the top"
+        );
+        assert_eq!(
+            store.state().details.notes,
+            format!("{notes}x"),
+            "so the edit is still there"
+        );
+
+        // A move that does change the selection rereads, which is what the
+        // reread is for.
+        store.send(Message::Tasks(TaskMessage::Down));
+        assert_eq!(
+            store.state().details.notes,
+            store.state().tasks.tasks[1].notes
+        );
+
+        // A delete that deleted nothing is the same case as a move that moved
+        // nothing, and the message kind cannot tell them apart. The messages
+        // below are sent directly, so no focus is walked: only
+        // `handle_key_event` reads it.
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+        store.send(Message::Details(DetailMessage::Input('y')));
+        let typed = store.state().details.notes.clone();
+
+        store.send(Message::Tasks(TaskMessage::Delete));
+
+        assert_eq!(
+            store.state().status.message,
+            "No task selected",
+            "there was nothing to delete"
+        );
+        assert_eq!(
+            store.state().details.notes,
+            typed,
+            "so the edit is still there"
+        );
+        store.finish();
+    }
+
+    /// Ctrl+C leaves, and only Ctrl+C.
+    ///
+    /// A chord that merely *contains* `CONTROL` is one this application does
+    /// not bind, so it asks for nothing — `finish` is the assertion, since it
+    /// fails on output left unaccounted for and a `Message::Quit` this row
+    /// never receives is output. The quit itself is never applied: it would
+    /// take that message being received and `update` returning
+    /// `Command::quit()`.
+    #[test]
+    fn a_chord_that_merely_contains_control_is_not_the_quit() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::SUPER,
+        ] {
+            store.send(chord_with(KeyCode::Char('c'), modifiers));
+        }
+
+        store.finish();
+    }
+
+    /// A terminal error leaves a reason behind, because the quit that follows
+    /// it leaves nowhere to draw the report.
+    ///
+    /// `main` prints the recorded line after restoring the terminal. What this
+    /// row holds is the half the application owns: that the reason is written
+    /// down at all, rather than lost with the screen.
+    #[test]
+    fn a_terminal_error_leaves_a_reason_behind() {
+        let reason = ExitReason::default();
+        let mut store = TestStore::<App>::new(reason.clone());
+
+        store.send(Message::TerminalError("broken pipe".to_owned()));
+        store.receive_quit();
+
+        assert_eq!(
+            reason.take().as_deref(),
+            Some("broken pipe"),
+            "the reason is left where `main` can still read it"
+        );
+        store.finish();
+    }
+
+    /// A modified key runs no bare-key binding, and Ctrl+C leaves.
+    ///
+    /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
+    /// event; without the guard it would have cleared the activity log, and
+    /// Ctrl+D would have deleted the selected task. Shift+Down would have moved
+    /// the selection.
+    #[test]
+    fn a_modified_key_runs_no_bare_binding_and_ctrl_c_leaves() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Tasks);
+        let before = store.state().tasks.tasks.len();
+
+        // Not only the characters: `Enter`, the arrows, `Tab` and `Esc` arrive
+        // with modifiers too.
+        let selected = store.state().tasks.selected;
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('n'),
+            KeyCode::Char(' '),
+            KeyCode::Tab,
+            KeyCode::Down,
+        ] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT,
+                KeyModifiers::SUPER,
+                KeyModifiers::HYPER,
+                KeyModifiers::META,
+            ] {
+                store.send(chord_with(code, modifiers));
+            }
+        }
+        assert_eq!(
+            store.state().tasks.tasks.len(),
+            before,
+            "no chord added or deleted a task"
+        );
+        assert_eq!(
+            store.state().tasks.selected,
+            selected,
+            "and none moved the selection"
+        );
+        assert_eq!(
+            store.state().focus,
+            Focus::Tasks,
+            "and none cycled the focus"
+        );
+
+        store.send(chord(KeyCode::Char('c')));
+        store.receive_matching(|msg| matches!(msg, Message::Quit));
+        store.receive_quit();
+        store.finish();
+    }
+
+    /// Saving with no task selected says so rather than leaving the footer
+    /// reporting the edit it did not write.
+    #[test]
+    fn saving_without_a_task_reports_rather_than_going_silent() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+
+        store.send(Message::Details(DetailMessage::Input('a')));
+        assert_eq!(store.state().status.message, "Editing notes");
+
+        store.send(Message::Details(DetailMessage::Save));
+
+        assert_eq!(
+            store.state().status.message,
+            "No task selected",
+            "the save wrote nothing and says so"
+        );
+        store.finish();
+    }
+
+    /// Saving reports through the outcome the panel returned rather than a
+    /// copy of it, so the two cannot drift.
+    #[test]
+    fn saving_reports_the_panel_s_own_status() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+
+        store.send(Message::Details(DetailMessage::Input('x')));
+        store.send(Message::Details(DetailMessage::Save));
+
+        assert!(
+            store.state().tasks.tasks[0].notes.ends_with('x'),
+            "the edit reached the task"
+        );
+        assert_eq!(
+            store.state().status.message,
+            "Saved task notes",
+            "and the footer says what the panel asked it to"
+        );
+        store.finish();
+    }
+
+    /// Escaping with no task selected says so rather than reporting a reload
+    /// that had nothing to read.
+    #[test]
+    fn escaping_without_a_task_reports_rather_than_claiming_a_reload() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+
+        store.send(Message::Details(DetailMessage::Input('a')));
+        assert!(store.state().details.notes.ends_with('a'));
+
+        store.send(Message::Details(DetailMessage::Reset));
+
+        assert!(
+            store.state().details.notes.is_empty(),
+            "the panel is emptied, so this is not a no-op"
+        );
+        assert_eq!(
+            store.state().status.message,
+            "Discarded the notes; no task selected",
+            "and the footer says what became of what was typed"
+        );
+        store.finish();
+    }
+
+    /// A terminal that reports releases as well as presses sends two events
+    /// per keystroke. The release is not an instruction; a repeat is.
+    #[test]
+    fn a_key_release_asks_for_nothing_and_a_repeat_asks() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        assert_eq!(store.state().focus, Focus::Navigation);
+
+        store.send(key_of(KeyCode::Tab, KeyEventKind::Release));
+        assert_eq!(
+            store.state().focus,
+            Focus::Navigation,
+            "the release is not a second Tab"
+        );
+
+        // The protocol that reports releases is the one that reports a held
+        // key, so a filter written as `== Press` would drop these too.
+        store.send(key_of(KeyCode::Tab, KeyEventKind::Repeat));
+        store.receive_matching(|msg| matches!(msg, Message::FocusNext));
+        assert_eq!(
+            store.state().focus,
+            Focus::Tasks,
+            "a held Tab keeps cycling"
+        );
         store.finish();
     }
 }

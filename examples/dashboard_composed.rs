@@ -1,0 +1,2553 @@
+//! [`dashboard.rs`](dashboard.rs) written with composed reducers.
+//!
+//! The same application: a navigation list, a task list, a details pane for
+//! the selected task, an activity log and a status line, cycled through with
+//! Tab. What differs is who owns the wiring.
+//!
+//! In `dashboard.rs` the root owns it. `App::update` matches every child
+//! variant and forwards it, `App::subscriptions` is the root's alone, and any
+//! work a task started would be the root's to stop when that task is deleted.
+//! That is the right shape while every child is a single instance whose
+//! identities the root can keep distinct by hand.
+//!
+//! Here the task list is a [`Keyed`] collection with one child reducer per
+//! row, and the details pane is a [`Slot`] whose occupant comes and goes. Both
+//! break that assumption: every row wants the same timer and the same command
+//! id, and only the row it belongs to tells two of them apart. So:
+//!
+//! - [`ReducerExt::scope`] composes the two fixed siblings (`Navigation` and
+//!   `Activity`) under segments of their own.
+//! - [`ReducerExt::for_each`] composes one `Task` per row, each under its key.
+//! - [`ReducerExt::presented`] composes the `Details` occupant.
+//! - [`ReducerExt::into_program`] closes the stack with the two root-level
+//!   functions composition has no place for: `init` and `view`.
+//!
+//! Every timer below is declared on the **same interval** and every command
+//! keyed with the **same** `CommandId::new(SYNC)`. Written by hand those are
+//! collisions: one timer shared by every row, one sync slot for the whole
+//! application. Composed they are not, and no `.scoped(...)` call appears
+//! anywhere in this file.
+//!
+//! Removal is the other half. A row leaves through [`Keyed::remove`] or is
+//! replaced by [`Keyed::insert`]; the occupant leaves through [`Slot::dismiss`]
+//! or a replacing [`Slot::present`]. The boundary turns each of those into a
+//! teardown of that instance's scope, so its timer stops and its in-flight sync
+//! is cancelled without this file asking for either. The `on_teardown` hooks
+//! each child registers write the line the activity pane carries. A finalizer
+//! produces no message by design — which is why the log is a handle rather than
+//! a message, and why the pane shows that line the next time something draws
+//! rather than at the moment the hook runs.
+//!
+//! Cross-child work stays the root's. Saving the details pane's notes back
+//! onto the task it was opened for touches two children, so it is a root
+//! message; see `Message::SaveNotes`.
+//!
+//! A diff of the two files shows more than the wiring. What is worth knowing
+//! before reading one:
+//!
+//! - The **row children and the pane's occupant** have runs of their own — a
+//!   timer and a keyed request each — where `dashboard.rs` has neither, its one
+//!   subscription being the root's terminal source. That is not incidental:
+//!   qualification and teardown are about runs, so a child with none gives a
+//!   boundary nothing to do. `Navigation` and `Activity` are exactly that case
+//!   and are composed anyway, for the organisation rather than the separation.
+//! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
+//!   from the task list, and Esc closes the pane, where `dashboard.rs` rereads
+//!   the selected task's notes into a panel that is always there.
+//! - **The activity log carries the same entries and more of its own.** The
+//!   teardown lines a removal fires; the completion lines the children's runs
+//!   write (`synced:`, `loaded details:`), which `dashboard.rs` has no
+//!   counterpart for because nothing there completes with a value later — its
+//!   commands hand a message straight back; `reloaded:`, for a key it
+//!   does not have. Every row-scoped line names the row's key, because
+//!   here there is one and two rows added with `n` share a title.
+//! - **The status line is fixed before the child runs**, for every operation
+//!   a boundary claims. `dashboard.rs`'s root runs those updates itself and
+//!   can report what they produced — "Selected section: Today"; here the root
+//!   sets the line where it dispatches the message, so nothing the child
+//!   computes can appear in it.
+//! - **The details buffer does not follow the selection.** `dashboard.rs`
+//!   rereads the panel whenever the selected task can have changed — a move, an
+//!   add, a delete — so any of those throws an unsaved edit away; here the
+//!   occupant is fixed to the task it was opened for, because a `Slot` holds an
+//!   instance rather than a view of whatever is selected.
+//! - **The tasks arrive as messages** rather than being built into the initial
+//!   state. `init` could build them — `Keyed::from_iter` records no removal, so
+//!   growing a collection there is fine — and this file routes them through
+//!   `AddTask` so the seed and the `n` key take one path. What `init`'s command
+//!   cannot do is start work *under a child's scope*, so the row's own setup is
+//!   a message either way. That the rows start with the same notes and none
+//!   marked done is `AddTask`'s doing rather than composition's: it carries a
+//!   title and nothing else. So is the row selected at startup — adding a task
+//!   selects it, so this binary opens on the last of the three where
+//!   `dashboard.rs` opens on the first.
+//!
+//! Run with: `cargo run --example dashboard_composed`
+//! Test with: `cargo test --example dashboard_composed`
+
+use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use color_eyre::eyre::Result;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::stream;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use tears::ProgramRuntime;
+use tears::command::CommandId;
+use tears::prelude::*;
+use tears::reducer::{Keyed, Reducer, ReducerExt, Slot};
+use tears::subscription::terminal::TerminalEvents;
+use tears::subscription::time::{Timer, TimerEvent};
+use tokio::time::sleep;
+
+/// The interval every timer in this example is declared on.
+///
+/// Deliberately one constant: `Timer`'s subscription key *is* its interval, so
+/// every declaration below carries the same raw identity. What keeps them from
+/// collapsing into one subscription is the segment each boundary applies.
+const TICK_MS: u64 = 1_000;
+
+/// The command id every stand-in request in this example runs under.
+///
+/// Deliberately one constant too. Keyed on it without a boundary, two rows'
+/// syncs would cancel each other; under `for_each` they are two slots.
+const SYNC: &str = "sync";
+
+/// How long the stand-in requests take.
+const REQUEST_MS: u64 = 900;
+
+/// How many activity lines the pane keeps.
+const ACTIVITY_LIMIT: usize = 8;
+
+/// The activity log, shared by the reducers that write to it and the teardown
+/// finalizers that report through it.
+///
+/// It is a handle rather than a plain `Vec` for one reason:
+/// [`Command::on_teardown`] takes a future with `Output = ()`, so a finalizer
+/// cannot send a message and needs somewhere to write that outlives the reduce
+/// that registered it. Everything else about it is ordinary state — it is the
+/// `Activity` child's whole state, and the root view renders it.
+#[derive(Clone, Default)]
+struct ActivityLog(Arc<Mutex<Vec<String>>>);
+
+impl ActivityLog {
+    fn push(&self, entry: String) {
+        let mut entries = self.entries_mut();
+        entries.push(entry);
+        if entries.len() > ACTIVITY_LIMIT {
+            entries.remove(0);
+        }
+    }
+
+    fn clear(&self) {
+        self.entries_mut().clear();
+    }
+
+    fn entries(&self) -> Vec<String> {
+        self.entries_mut().clone()
+    }
+
+    fn entries_mut(&self) -> MutexGuard<'_, Vec<String>> {
+        self.0
+            .lock()
+            .expect("the activity log lock is not poisoned")
+    }
+}
+
+/// Where the run leaves a reason `main` can print once the terminal is back.
+///
+/// A handle of its own rather than a line in the activity log, and the same one
+/// `dashboard.rs` has: a terminal error quits, `main` restores the terminal
+/// immediately after, and anything written to the screen — or to stderr while
+/// the alternate screen is up — goes with it. The report has to outlive the run
+/// to be a report at all, and a log the pane never draws again is not where it
+/// can do that.
+#[derive(Clone, Debug, Default)]
+struct ExitReason(Arc<Mutex<Option<String>>>);
+
+impl ExitReason {
+    fn set(&self, reason: String) {
+        *self.0.lock().expect("the exit reason lock is not poisoned") = Some(reason);
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("the exit reason lock is not poisoned")
+            .take()
+    }
+}
+
+/// The fixed segments this composition uses.
+///
+/// A `for_each` boundary segments by the row's own key, so only the three
+/// fixed-segment boundaries need a value here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Segment {
+    Navigation,
+    Activity,
+    Details,
+}
+
+/// A task's key, and therefore its segment at the row boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TaskId(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Navigation,
+    Tasks,
+    Details,
+    Activity,
+}
+
+impl Focus {
+    const fn next(self) -> Self {
+        match self {
+            Self::Navigation => Self::Tasks,
+            Self::Tasks => Self::Details,
+            Self::Details => Self::Activity,
+            Self::Activity => Self::Navigation,
+        }
+    }
+}
+
+/// What the program is started with.
+struct Setup {
+    /// The activity log the reducers, the finalizers and the view share.
+    activity: ActivityLog,
+    /// Where a terminal error is left for `main`.
+    reason: ExitReason,
+    /// Messages dispatched at startup.
+    ///
+    /// `init`'s command is the *root's* command: it crosses no boundary, so
+    /// nothing it starts is scoped to a child. Work that belongs to a child
+    /// therefore starts as a message routed through the boundary — which is
+    /// what these are — rather than as a command returned from here.
+    input: Vec<Message>,
+    /// Whether the root reads the terminal. The runnable binary does; a test
+    /// driving this program scripts `input` instead and leaves the terminal
+    /// alone.
+    keyboard: bool,
+}
+
+#[derive(Debug)]
+enum Message {
+    Terminal(Event),
+    TerminalError(String),
+    Quit,
+    FocusNext,
+    SelectPrev,
+    SelectNext,
+    /// A key that needs a selected row arrived with none.
+    ///
+    /// A message rather than nothing, so the footer stops describing whatever
+    /// came before it. An empty collection gets this answer too, so one
+    /// condition has one line however it was asked for.
+    NoTaskSelected,
+    /// Adds a task under a **freshly allocated** key.
+    ///
+    /// The key is chosen by the reduce and not by the caller on purpose. A
+    /// caller reading `next_id` off the state reads a value the `AddTask`
+    /// messages already in flight have not been applied to yet, so two of them
+    /// would name the same key — and inserting over an occupied key is a
+    /// replacement, which would tear the first row down instead of adding a
+    /// second.
+    AddTask(String),
+    DeleteTask(TaskId),
+    /// Discards a row's instance and starts a fresh one under the same key.
+    ///
+    /// The successor is the server's version of the task, so everything local
+    /// to the instance that left is gone with it: the `done` flag, and any
+    /// notes `SaveNotes` had written into it. That is what a replacement is
+    /// here — the old instance is torn down and the new one starts fresh — and
+    /// carrying state across would make it something else.
+    ReloadTask(TaskId),
+    OpenDetails(TaskId),
+    CloseDetails,
+    /// Writes the occupant's edited notes onto the task it was opened for.
+    ///
+    /// Two children, so the root does it: a child is handed its own projected
+    /// state and can reach neither the collection it sits beside nor the slot
+    /// it sits in.
+    SaveNotes,
+    Navigation(NavigationMessage),
+    Task(TaskId, TaskMessage),
+    Details(DetailsMessage),
+    Activity(ActivityMessage),
+}
+
+#[derive(Debug)]
+enum NavigationMessage {
+    Up,
+    Down,
+}
+
+#[derive(Debug)]
+enum TaskMessage {
+    /// The row's one-time setup, routed through the row boundary so the hook it
+    /// registers anchors at the row's scope.
+    ///
+    /// **Handled idempotently**, because nothing guarantees it arrives once: a
+    /// key press asks for it through `Command::message`, so two presses decided
+    /// against the same state produce two of these, and every registration a
+    /// scope holds is fired by the teardown that selects it. A second
+    /// registration would put two lines in the activity log for one removal.
+    Watch,
+    Toggle,
+    Sync,
+    Synced(String),
+    Tick,
+}
+
+#[derive(Debug)]
+enum DetailsMessage {
+    /// The occupant's one-time setup, for the reason [`TaskMessage::Watch`] is,
+    /// and handled idempotently for the same reason.
+    Open,
+    Loaded(String),
+    Input(char),
+    Backspace,
+    Tick,
+}
+
+#[derive(Debug)]
+enum ActivityMessage {
+    Clear,
+}
+
+/// The root state. Each child's state is a field of it.
+struct App {
+    reason: ExitReason,
+    focus: Focus,
+    navigation: NavigationState,
+    tasks: Keyed<TaskId, TaskState>,
+    details: Slot<DetailsState>,
+    activity: ActivityLog,
+    status: &'static str,
+    selected: Option<TaskId>,
+    next_id: u32,
+    keyboard: bool,
+}
+
+struct NavigationState {
+    items: Vec<&'static str>,
+    selected: usize,
+}
+
+impl NavigationState {
+    fn new() -> Self {
+        Self {
+            items: vec!["Inbox", "Today", "Upcoming", "Archive"],
+            selected: 0,
+        }
+    }
+
+    fn selected_label(&self) -> &'static str {
+        self.items[self.selected]
+    }
+}
+
+struct TaskState {
+    /// The row's own key.
+    ///
+    /// Redundant with the key the collection holds it under, and kept anyway:
+    /// a child is handed its own state and nothing else, so this is how a hook
+    /// it registers can name which row it was.
+    id: TaskId,
+    title: String,
+    done: bool,
+    notes: String,
+    /// Whether this instance's setup has already run; see [`TaskMessage::Watch`].
+    watched: bool,
+    syncing: bool,
+    ticks: u32,
+}
+
+impl TaskState {
+    const fn new(id: TaskId, title: String, notes: String) -> Self {
+        Self {
+            id,
+            title,
+            done: false,
+            notes,
+            watched: false,
+            syncing: false,
+            ticks: 0,
+        }
+    }
+}
+
+struct DetailsState {
+    task: TaskId,
+    title: String,
+    notes: String,
+    /// Whether this instance's setup has already run; see [`DetailsMessage::Open`].
+    opened: bool,
+    loading: bool,
+    ticks: u32,
+}
+
+impl DetailsState {
+    const fn new(task: TaskId, title: String, notes: String) -> Self {
+        Self {
+            task,
+            title,
+            notes,
+            opened: false,
+            loading: true,
+            ticks: 0,
+        }
+    }
+}
+
+/// A stand-in for a request to a server.
+async fn request(what: String) -> String {
+    sleep(Duration::from_millis(REQUEST_MS)).await;
+    what
+}
+
+/// The heartbeat every child with runs of its own declares, on the one shared
+/// interval.
+fn tick<Msg: Send + 'static>(to_message: fn(TimerEvent) -> Msg) -> Subscription<Msg> {
+    Subscription::new(Timer::new(
+        NonZeroU64::new(TICK_MS).expect("the tick interval is non-zero"),
+    ))
+    .map(to_message)
+}
+
+/// The root reducer: what none of the boundaries claimed lands here.
+struct Root;
+
+impl Reducer for Root {
+    type State = App;
+    type Message = Message;
+
+    fn reduce(&self, state: &mut App, message: Message) -> Command<Message> {
+        match message {
+            Message::Terminal(event) => match event {
+                // Not releases. A terminal that reports them — Windows, or a
+                // session with the kitty keyboard protocol on — sends two
+                // events for one press, and the second would be acted on: `n`
+                // would add two rows where one was asked for, and `d` would
+                // delete twice.
+                //
+                // A *repeat* is kept: a held key is repetition the reader is
+                // asking for, and testing for `Press` would drop those with
+                // the releases, leaving a held Down to move the selection
+                // once.
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    key_message(state, key).map_or_else(Command::none, |message| {
+                        // A boundary claims a child-addressed message, so the
+                        // root never sees it land and the arms for those below
+                        // are unreachable. Its status is set here, at the
+                        // dispatch, which is why the line says what was asked
+                        // for rather than what happened: what happened is the
+                        // child's, and a child reports to its own state.
+                        if let Some(status) = child_status(&message) {
+                            state.status = status;
+                        }
+                        Command::message(message).into()
+                    })
+                }
+                _ => Command::none(),
+            },
+            Message::TerminalError(error) => {
+                // Recorded rather than printed, and not into the activity log:
+                // the quit below ends the run and `main` restores the terminal
+                // immediately after, so the pane that would have shown it is
+                // never drawn again.
+                state.reason.set(error);
+                Command::quit()
+            }
+            Message::Quit => Command::quit(),
+            Message::NoTaskSelected => no_task_selected(state),
+            Message::FocusNext => {
+                state.focus = state.focus.next();
+                state.status = "Changed focus";
+                Command::none()
+            }
+            Message::SelectPrev | Message::SelectNext => {
+                if state.tasks.is_empty() {
+                    // The same answer the four keys that need a row give, for
+                    // the same condition. Reporting a move instead would be
+                    // this example teaching two things about one state.
+                    return no_task_selected(state);
+                }
+                select(state, matches!(message, Message::SelectNext));
+                Command::none()
+            }
+            Message::AddTask(title) => add_task(state, title),
+            Message::ReloadTask(id) => reload_task(state, id),
+            Message::DeleteTask(id) => delete_task(state, id),
+            Message::OpenDetails(id) => open_details(state, id),
+            Message::CloseDetails => {
+                // The pane is the only place edited notes live until
+                // `SaveNotes` writes them onto the task, so closing one whose
+                // buffer has moved away from the task throws those edits away.
+                // Read before the close that causes it; [`unsaved_notes`]
+                // carries why this removal reports the buffer and two others
+                // do not.
+                let unsaved = unsaved_notes(state);
+                // Esc is guarded on the focus rather than on `editing_notes`,
+                // so it is the way out of a `Details` focus with nothing behind
+                // it — which is also why the status has to say which of the two
+                // happened. Dismissing an empty slot removes no instance and
+                // records nothing.
+                state.status = match (close_details(state), unsaved) {
+                    (true, true) => "Closed the details pane, discarding notes nobody saved",
+                    (true, false) => "Closed the details pane",
+                    (false, _) => "Left the details pane",
+                };
+                Command::none()
+            }
+            Message::SaveNotes => save_notes(state),
+            // Claimed by a boundary above this reducer and never routed here;
+            // `child_status` is where these get their status line.
+            Message::Navigation(_)
+            | Message::Task(..)
+            | Message::Details(_)
+            | Message::Activity(_) => Command::none(),
+        }
+    }
+
+    fn subscriptions(&self, state: &App) -> Vec<Subscription<Message>> {
+        if !state.keyboard {
+            return Vec::new();
+        }
+        vec![
+            Subscription::new(TerminalEvents::new()).map(|result| match result {
+                Ok(event) => Message::Terminal(event),
+                Err(error) => Message::TerminalError(error.to_string()),
+            }),
+        ]
+    }
+}
+
+/// A fixed sibling with no runs of its own: `scope` buys code organisation
+/// here, not identity separation.
+struct Navigation;
+
+impl Reducer for Navigation {
+    type State = NavigationState;
+    type Message = NavigationMessage;
+
+    fn reduce(
+        &self,
+        state: &mut NavigationState,
+        message: NavigationMessage,
+    ) -> Command<NavigationMessage> {
+        match message {
+            NavigationMessage::Up => state.selected = state.selected.saturating_sub(1),
+            NavigationMessage::Down => {
+                state.selected = (state.selected + 1).min(state.items.len().saturating_sub(1));
+            }
+        }
+        Command::none()
+    }
+}
+
+/// The other fixed sibling.
+struct Activity;
+
+impl Reducer for Activity {
+    type State = ActivityLog;
+    type Message = ActivityMessage;
+
+    fn reduce(
+        &self,
+        state: &mut ActivityLog,
+        message: ActivityMessage,
+    ) -> Command<ActivityMessage> {
+        match message {
+            ActivityMessage::Clear => state.clear(),
+        }
+        Command::none()
+    }
+}
+
+/// One row of the keyed collection.
+struct Task {
+    activity: ActivityLog,
+}
+
+impl Reducer for Task {
+    type State = TaskState;
+    type Message = TaskMessage;
+
+    fn reduce(&self, state: &mut TaskState, message: TaskMessage) -> Command<TaskMessage> {
+        match message {
+            TaskMessage::Watch => {
+                if state.watched {
+                    // Inert, like the occupant's re-entry path: the first
+                    // `Watch` this instance saw already asked for the sync, and
+                    // a second request here would cancel that one in flight
+                    // under the shared id. Idempotent in its effect and not
+                    // only in its registration.
+                    return Command::none();
+                }
+                state.watched = true;
+                let activity = self.activity.clone();
+                let title = format!("#{} {}", state.id.0, state.title);
+                Command::batch([
+                    // Registered here rather than at the root, so it anchors at
+                    // this row's scope and the row's own teardown selects it. A
+                    // registration made outside a boundary anchors at the root,
+                    // which no teardown reaches.
+                    Command::on_teardown(async move {
+                        activity.push(format!("stopped watching: {title}"));
+                    }),
+                    Command::message(TaskMessage::Sync).into(),
+                ])
+            }
+            TaskMessage::Toggle => {
+                state.done = !state.done;
+                let verb = if state.done { "completed" } else { "reopened" };
+                self.activity
+                    .push(format!("{verb}: #{} {}", state.id.0, state.title));
+                Command::message(TaskMessage::Sync).into()
+            }
+            TaskMessage::Sync => {
+                state.syncing = true;
+                // Named the way the teardown line is: two rows added with `n`
+                // share a title, and an activity log that cannot tell them
+                // apart is the one thing this example must not have.
+                let title = format!("#{} {}", state.id.0, state.title);
+                Command::perform(request(title), TaskMessage::Synced)
+                    .cancellable(CommandId::new(SYNC))
+                    .into()
+            }
+            TaskMessage::Synced(title) => {
+                state.syncing = false;
+                self.activity.push(format!("synced: {title}"));
+                Command::none()
+            }
+            TaskMessage::Tick => {
+                state.ticks += 1;
+                Command::none()
+            }
+        }
+    }
+
+    fn subscriptions(&self, _state: &TaskState) -> Vec<Subscription<TaskMessage>> {
+        vec![tick(|TimerEvent::Tick| TaskMessage::Tick)]
+    }
+}
+
+/// The optionally-present child.
+struct Details {
+    activity: ActivityLog,
+}
+
+impl Reducer for Details {
+    type State = DetailsState;
+    type Message = DetailsMessage;
+
+    fn reduce(&self, state: &mut DetailsState, message: DetailsMessage) -> Command<DetailsMessage> {
+        match message {
+            DetailsMessage::Open => {
+                if state.opened {
+                    return Command::none();
+                }
+                state.opened = true;
+                let activity = self.activity.clone();
+                // Named the way every other row-scoped line is; see
+                // `TaskMessage::Sync`.
+                let name = format!("#{} {}", state.task.0, state.title);
+                let title = name.clone();
+                Command::batch([
+                    Command::on_teardown(async move {
+                        activity.push(format!("closed details: {title}"));
+                    }),
+                    Command::perform(request(name), DetailsMessage::Loaded)
+                        // The same id every row's sync uses. Two boundaries,
+                        // two slots.
+                        .cancellable(CommandId::new(SYNC))
+                        .into(),
+                ])
+            }
+            DetailsMessage::Loaded(title) => {
+                state.loading = false;
+                self.activity.push(format!("loaded details: {title}"));
+                Command::none()
+            }
+            DetailsMessage::Input(character) => {
+                state.notes.push(character);
+                Command::none()
+            }
+            DetailsMessage::Backspace => {
+                state.notes.pop();
+                Command::none()
+            }
+            DetailsMessage::Tick => {
+                state.ticks += 1;
+                Command::none()
+            }
+        }
+    }
+
+    fn subscriptions(&self, _state: &DetailsState) -> Vec<Subscription<DetailsMessage>> {
+        vec![tick(|TimerEvent::Tick| DetailsMessage::Tick)]
+    }
+}
+
+/// The composition: one root and four boundaries over it.
+///
+/// Each call adds one boundary and the result is still a reducer over the
+/// root's state and message, which is why they chain. The outermost boundary
+/// gets first refusal on a message; what no boundary claims reaches [`Root`].
+fn dashboard(activity: ActivityLog) -> impl Reducer<State = App, Message = Message> {
+    Root.scope(
+        Navigation,
+        Segment::Navigation,
+        |state| &state.navigation,
+        |state| &mut state.navigation,
+        |message| match message {
+            Message::Navigation(inner) => Ok(inner),
+            other => Err(other),
+        },
+        Message::Navigation,
+    )
+    .scope(
+        Activity,
+        Segment::Activity,
+        |state| &state.activity,
+        |state| &mut state.activity,
+        |message| match message {
+            Message::Activity(inner) => Ok(inner),
+            other => Err(other),
+        },
+        Message::Activity,
+    )
+    .for_each(
+        Task {
+            activity: activity.clone(),
+        },
+        |state| &state.tasks,
+        |state| &mut state.tasks,
+        |message| match message {
+            Message::Task(id, inner) => Ok((id, inner)),
+            other => Err(other),
+        },
+        Message::Task,
+    )
+    .presented(
+        Details { activity },
+        Segment::Details,
+        |state| &state.details,
+        |state| &mut state.details,
+        |message| match message {
+            Message::Details(inner) => Ok(inner),
+            other => Err(other),
+        },
+        Message::Details,
+    )
+}
+
+/// The root's initial state and the command dispatched at bootstrap.
+fn init(setup: Setup) -> (App, Command<Message>) {
+    let Setup {
+        activity,
+        reason,
+        input,
+        keyboard,
+    } = setup;
+    let state = App {
+        reason,
+        focus: Focus::Navigation,
+        navigation: NavigationState::new(),
+        tasks: Keyed::new(),
+        details: Slot::empty(),
+        activity,
+        status: "Ready",
+        selected: None,
+        next_id: 1,
+        keyboard,
+    };
+    (state, Command::stream(stream::iter(input)).into())
+}
+
+/// The tasks the runnable binary starts with, as the startup messages that
+/// route each one through the row boundary.
+fn seed() -> Vec<Message> {
+    [
+        "Review release checklist",
+        "Update onboarding guide",
+        "Plan next subscription API",
+    ]
+    .into_iter()
+    .map(|label| Message::AddTask(label.to_owned()))
+    .collect()
+}
+
+/// The root view. `Reducer` has no `view` and only `Program` does, so
+/// composing child panes is ordinary function calls over the root state.
+fn view(state: &App, frame: &mut Frame<'_>) {
+    let [header, body, activity, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(10),
+        Constraint::Length(7),
+        Constraint::Length(3),
+    ])
+    .areas(frame.area());
+
+    let [nav_area, tasks_area, details_area] = Layout::horizontal([
+        Constraint::Length(24),
+        Constraint::Percentage(36),
+        Constraint::Percentage(64),
+    ])
+    .areas(body);
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Composed dashboard · {} | Tab: focus | {}",
+            state.navigation.selected_label(),
+            header_keys(editing_notes(state))
+        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Reducer Composition"),
+        ),
+        header,
+    );
+    render_navigation(state, frame, nav_area);
+    render_tasks(state, frame, tasks_area);
+    render_details(state, frame, details_area);
+    render_activity(state, frame, activity);
+    frame.render_widget(
+        Paragraph::new(format!("Status: {}", state.status))
+            .block(Block::default().borders(Borders::ALL).title("Status")),
+        footer,
+    );
+}
+
+fn pane_title(label: &str, focused: bool) -> String {
+    if focused {
+        format!("{label} [focused]")
+    } else {
+        label.to_owned()
+    }
+}
+
+fn render_navigation(state: &App, frame: &mut Frame<'_>, area: Rect) {
+    let items = state
+        .navigation
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let marker = if index == state.navigation.selected {
+                ">"
+            } else {
+                " "
+            };
+            ListItem::new(format!("{marker} {label}"))
+        });
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(pane_title("Navigation", state.focus == Focus::Navigation)),
+        ),
+        area,
+    );
+}
+
+fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
+    let items = state.tasks.iter().map(|(id, task)| {
+        let marker = if state.selected == Some(*id) {
+            ">"
+        } else {
+            " "
+        };
+        let checkbox = if task.done { "[x]" } else { "[ ]" };
+        let sync = if task.syncing { " (syncing)" } else { "" };
+        ListItem::new(format!(
+            "{marker} {checkbox} #{} {} · {}s{sync}",
+            id.0, task.title, task.ticks
+        ))
+    });
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+            "{} (up/down, space, n, d, r, enter)",
+            pane_title("Tasks", state.focus == Focus::Tasks)
+        ))),
+        area,
+    );
+}
+
+/// The header's second half, which names a quit that works where it is read.
+///
+/// `q` is text while the notes editor has it, so the hint follows the guard
+/// rather than contradicting it. Naming only `esc: close pane` there left no
+/// quit named at all: closing the pane and then pressing `q` still works, but
+/// `Ctrl+C` is the one that does not ask the reader to leave first, and raw
+/// mode means the application is the only thing that can answer it.
+const fn header_keys(editing: bool) -> &'static str {
+    if editing {
+        "esc: close pane | Ctrl+C: quit"
+    } else {
+        "q: quit"
+    }
+}
+
+/// The open pane's hint, which is guarded because every key in it is.
+///
+/// `Type to edit` and `Enter to save` need [`editing_notes`] and `Esc to close`
+/// needs a `Details` focus, which with the slot occupied is the same condition.
+/// Printed at every focus, the line named keys that do something else where it
+/// was read: at `Focus::Tasks` the `Enter` arm above the editor's reopens the
+/// pane over this occupant, and a replacement discards the buffer the line was
+/// offering to save. The empty branch above is worded the way it is for the
+/// weaker version of this — a key that is merely inert.
+const fn details_hint(focus: Focus) -> &'static str {
+    if matches!(focus, Focus::Details) {
+        "Type to edit, Enter to save, Esc to close."
+    } else {
+        "Tab to this pane to edit, save or close it."
+    }
+}
+
+fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
+    let text = state.details.get().map_or_else(
+        // Names something reachable from where it is printed, without
+        // naming a focus or a number of keys to get out of one: this pane is
+        // drawn whenever the slot is empty, at every focus, so an instruction
+        // to Tab to the task list was wrong for a reader already in it. Enter
+        // is inert at a `Details` focus — the slot is empty, so neither the
+        // task list's arm nor the editor's claims it — which is why the hint
+        // says where the key has to land and not only which key it is.
+        || "No details open. Press Enter on a task in the task list.".to_owned(),
+        |open| {
+            format!(
+                "#{} {} · {}s{}\n\nNotes:\n{}_\n\n{}",
+                open.task.0,
+                open.title,
+                open.ticks,
+                if open.loading { " (loading)" } else { "" },
+                open.notes,
+                details_hint(state.focus)
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(text).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(pane_title("Details", state.focus == Focus::Details)),
+        ),
+        area,
+    );
+}
+
+fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
+    let items: Vec<ListItem<'_>> = state
+        .activity
+        .entries()
+        .iter()
+        .rev()
+        .map(|entry| ListItem::new(format!("- {entry}")))
+        .collect();
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+            "{} (c: clear)",
+            pane_title("Activity", state.focus == Focus::Activity)
+        ))),
+        area,
+    );
+}
+
+/// Dismisses the details pane, reporting whether there was an occupant to
+/// dismiss.
+///
+/// Dismissal is a removal, so the slot's boundary tears the occupant's runs
+/// down — but only when there was one, which is why the caller is told: an
+/// empty slot records nothing, and the status must not claim a close that did
+/// not happen.
+///
+/// Restoring the focus is this function's other half, and it guards nothing:
+/// [`editing_notes`] already asks the slot, so a `Details` focus over an empty
+/// slot swallows no key. What it buys is that the focus does not sit on a pane
+/// the user cannot see.
+fn close_details(state: &mut App) -> bool {
+    let dismissed = state.details.dismiss().is_some();
+    if state.focus == Focus::Details {
+        state.focus = Focus::Tasks;
+    }
+    dismissed
+}
+
+/// The same, but only when the pane is open on `task`.
+fn close_details_opened_on(state: &mut App, task: TaskId) {
+    if state.details.get().is_some_and(|open| open.task == task) {
+        close_details(state);
+    }
+}
+
+/// Adds a task under a freshly allocated key.
+fn add_task(state: &mut App, title: String) -> Command<Message> {
+    let id = TaskId(state.next_id);
+    state.next_id += 1;
+    // Insertion into an absent key records no removal: nothing was running
+    // under it to tear down. The key is fresh, so this is that case and never
+    // the replacing one.
+    state.activity.push(format!("added: #{} {}", id.0, title));
+    state.tasks.insert(
+        id,
+        TaskState::new(id, title, "Add notes in the details pane.".to_owned()),
+    );
+    state.selected = Some(id);
+    state.status = "Added a task";
+    Command::message(Message::Task(id, TaskMessage::Watch)).into()
+}
+
+/// Replaces a row's instance with a fresh one under the same key.
+fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
+    let Some(task) = state.tasks.get(&id) else {
+        // The key was read off a state this message had not been applied to
+        // yet, and the row has gone since — the hazard `Message::AddTask`
+        // describes, arriving at a reader instead of at a collection.
+        state.status = "That task is gone";
+        return Command::none();
+    };
+    // Inserting over an occupied key is a replacement, and a replacement is a
+    // removal: the boundary tears the old instance's runs down before this
+    // command's spawns start the successor's.
+    let task_title = task.title.clone();
+    state.tasks.insert(
+        id,
+        TaskState::new(
+            id,
+            task_title.clone(),
+            "Reloaded from the server.".to_owned(),
+        ),
+    );
+    // The pane was opened for the instance that just left, and it holds that
+    // instance's title and notes; leaving it open would let a later
+    // `SaveNotes` write them back over the reload.
+    close_details_opened_on(state, id);
+    state
+        .activity
+        .push(format!("reloaded: #{} {}", id.0, task_title));
+    // Says what the successor threw away, because a cleared checkbox is
+    // otherwise the only sign that it did. The pane's buffer goes with it and
+    // is not named apart from it: the reload overwrites the row's notes either
+    // way, so a save would have bought nothing. See [`unsaved_notes`].
+    state.status = "Reloaded the task, discarding its local state";
+    Command::message(Message::Task(id, TaskMessage::Watch)).into()
+}
+
+/// Removes a row.
+fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
+    // Read before the removal, because it is a position in the collection and
+    // the removal is what changes it.
+    let position = state.tasks.keys().position(|key| *key == id);
+    // `remove` records the removal; the row boundary drains it in this same
+    // reduce and merges the row's teardown into the command returned here.
+    // Nothing below asks for that.
+    let Some(task) = state.tasks.remove(&id) else {
+        state.status = "That task is gone";
+        return Command::none();
+    };
+    state
+        .activity
+        .push(format!("deleted: #{} {}", id.0, task.title));
+    // A details pane open on the row that just left goes with it, and the
+    // slot's own boundary originates that teardown.
+    close_details_opened_on(state, id);
+    if state.selected == Some(id) {
+        // The row that moved up into the position, or the new last row when
+        // the deleted one was last — `dashboard.rs`'s behaviour, expressed
+        // over keys instead of indices.
+        let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
+        state.selected = position
+            .map(|index| index.min(keys.len().saturating_sub(1)))
+            .and_then(|index| keys.get(index).copied());
+    }
+    // The row is what left, and a pane open on it went too. That buffer is not
+    // reported as a loss of its own for the reason [`unsaved_notes`] gives:
+    // there is no surviving row a save could have put the notes on.
+    state.status = "Deleted the task";
+    Command::none()
+}
+
+/// Whether the open pane holds notes the task does not.
+///
+/// [`save_notes`] is the only thing that copies the buffer onto the task, so
+/// this is exactly "pressing Enter first would have kept it" — which is what
+/// decides which removals report the buffer separately.
+///
+/// `Message::CloseDetails` and [`open_details`] over an occupant ask, because
+/// the task the pane was opened for keeps its notes: the edit is the only thing
+/// that goes, and a save would have preserved it.
+///
+/// [`reload_task`] and [`delete_task`] do not ask, and not because their loss is
+/// smaller. Reload overwrites the row's notes with the server's copy and delete
+/// takes the row away, so under both, a reader who had pressed Enter first would
+/// have lost the notes just the same. Naming the buffer there would offer a
+/// remedy that does not exist. What those two discard is the row, and that is
+/// what their own status says.
+fn unsaved_notes(state: &App) -> bool {
+    state.details.get().is_some_and(|open| {
+        state
+            .tasks
+            .get(&open.task)
+            .is_some_and(|task| task.notes != open.notes)
+    })
+}
+
+/// Presents the details pane for a row.
+fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
+    let Some(task) = state.tasks.get(&id) else {
+        state.status = "That task is gone";
+        return Command::none();
+    };
+    // A replacement is a removal, and the occupant it removes may hold edits
+    // nobody saved — the same loss `CloseDetails` reports, read before the
+    // `present` that causes it.
+    let unsaved = unsaved_notes(state);
+    // Presenting over an occupied slot is a replacement too, for the same
+    // reason `ReloadTask` is.
+    let replaced = state
+        .details
+        .present(DetailsState::new(
+            id,
+            task.title.clone(),
+            task.notes.clone(),
+        ))
+        .is_some();
+    state.focus = Focus::Details;
+    state.status = match (replaced, unsaved) {
+        (true, true) => "Replaced the open details pane, discarding notes nobody saved",
+        (true, false) => "Opened the details pane, replacing the one that was open",
+        (false, _) => "Opened the details pane",
+    };
+    Command::message(Message::Details(DetailsMessage::Open)).into()
+}
+
+/// Writes the pane's edited notes onto the task it was opened for.
+fn save_notes(state: &mut App) -> Command<Message> {
+    let Some(open) = state.details.get() else {
+        state.status = "No details pane is open";
+        return Command::none();
+    };
+    let (task_id, notes) = (open.task, open.notes.clone());
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        // Defensive, and unreachable through the keys: both paths that remove
+        // a row — `delete_task` and `reload_task` — close a pane opened on it
+        // first, and the reload puts a row back under the same key. No status
+        // here, because a line nobody can reach is a line nobody can check.
+        return Command::none();
+    };
+    task.notes = notes;
+    state
+        .activity
+        .push(format!("updated notes for #{} {}", task_id.0, task.title));
+    state.status = "Saved the notes";
+    // The row's own sync is the row's to run, so it is asked for through the
+    // boundary rather than started here.
+    Command::message(Message::Task(task_id, TaskMessage::Sync)).into()
+}
+
+/// What a key that needs a selected row reports when there is none.
+///
+/// One place holds the line, because two of them mean it: the message a key
+/// decodes to when nothing is selected, and a selection move over an empty
+/// collection.
+const fn no_task_selected(state: &mut App) -> Command<Message> {
+    state.status = "No task selected";
+    Command::none()
+}
+
+/// Moves the task selection, stopping at the ends.
+///
+/// Clamped and not wrapped, because `dashboard.rs` clamps: the pair is meant
+/// to differ in structure, and a selection that wrapped here would read as
+/// something composition did.
+fn select(state: &mut App, forward: bool) {
+    // An empty collection does not arrive here: the root answers that with
+    // `no_task_selected`, so both ways of asking for a row that is not there
+    // give one answer.
+    let keys: Vec<TaskId> = state.tasks.keys().copied().collect();
+    let position = state
+        .selected
+        .and_then(|selected| keys.iter().position(|key| *key == selected));
+    let last = keys.len().saturating_sub(1);
+    let next = match position {
+        Some(index) if forward => (index + 1).min(last),
+        Some(index) => index.saturating_sub(1),
+        None if forward => 0,
+        None => last,
+    };
+    let moved = keys.get(next).copied();
+    // Clamping at an end leaves the selection where it was, and saying it moved
+    // would be the footer reporting an operation that did not happen.
+    state.status = if moved == state.selected {
+        "Nothing further that way"
+    } else {
+        "Selected another task"
+    };
+    state.selected = moved;
+}
+
+/// Whether a key press is going into the notes editor.
+///
+/// Focus alone does not answer that. The pane lives in a `Slot`, and
+/// [`Focus::next`] walks through `Details` whether or not the slot is occupied,
+/// so most of the time that focus has no editor behind it. A guard written
+/// against the focus would swallow keys — `q` included — into a boundary with
+/// no occupant to claim them.
+fn editing_notes(state: &App) -> bool {
+    state.focus == Focus::Details && state.details.is_present()
+}
+
+/// The status line a child-addressed message deserves.
+///
+/// Read at the dispatch rather than at the landing, because a boundary claims
+/// these and the root's `reduce` never sees them. That fixes what the line can
+/// say before the child has run: nothing the child computes can appear in it,
+/// so where `dashboard.rs` reports "Selected section: Today" — its root having
+/// run the child update itself — these name what was asked for and stop there.
+/// Naming an outcome would be claiming one: the navigation list clamps at its
+/// ends, clearing an empty log clears nothing, and a backspace on an empty
+/// buffer removes nothing, and this line is written before any of that is
+/// known.
+///
+/// A line set here cannot be left standing as a lie. A root message that
+/// removes what the child was addressed to writes its own status when it
+/// lands, and a landing is always after the dispatch that queued it.
+const fn child_status(message: &Message) -> Option<&'static str> {
+    match message {
+        Message::Navigation(_) => Some("Moving through the sections"),
+        Message::Task(_, TaskMessage::Toggle) => Some("Toggling the task"),
+        Message::Activity(_) => Some("Clearing the activity log"),
+        Message::Details(_) => Some("Editing the notes"),
+        _ => None,
+    }
+}
+
+/// The message a key press asks for, if any.
+///
+/// Raw mode delivers no SIGINT, so Ctrl+C arrives here as an ordinary key
+/// event; what the guards below make of it and of every other modified key is
+/// written where they are.
+fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
+    // The way out of raw mode, from any focus: the notes editor holds `q` but
+    // nothing holds this.
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+        return Some(Message::Quit);
+    }
+    // Every binding below is for an unmodified key, with one exception: a
+    // shifted character on its way into the notes editor, which is how an
+    // uppercase letter arrives. Anything else carrying a modifier is a chord
+    // this application does not bind and must not fall through to the bare
+    // key's. Testing for `CONTROL` and `ALT` alone leaves four of the six
+    // through — Shift+Enter would open the pane, replacing an occupant, which
+    // is a removal, and Shift+Down would move the selection. Letting `SHIFT`
+    // through generally is no better: it would reach the row bindings, where
+    // `d` deletes.
+    let shifted_text = editing_notes(state)
+        && matches!(key.code, KeyCode::Char(_))
+        && key.modifiers == KeyModifiers::SHIFT;
+    if !key.modifiers.is_empty() && !shifted_text {
+        return None;
+    }
+    match key.code {
+        // Guarded like every other printable key below, so `q` stays typable
+        // in the notes editor. Esc closes the pane, which is how you leave it.
+        KeyCode::Char('q') if !editing_notes(state) => Some(Message::Quit),
+        KeyCode::Tab => Some(Message::FocusNext),
+        KeyCode::Up => match state.focus {
+            Focus::Navigation => Some(Message::Navigation(NavigationMessage::Up)),
+            Focus::Tasks => Some(Message::SelectPrev),
+            _ => None,
+        },
+        KeyCode::Down => match state.focus {
+            Focus::Navigation => Some(Message::Navigation(NavigationMessage::Down)),
+            Focus::Tasks => Some(Message::SelectNext),
+            _ => None,
+        },
+        KeyCode::Char(' ') if state.focus == Focus::Tasks => {
+            Some(state.selected.map_or(Message::NoTaskSelected, |id| {
+                Message::Task(id, TaskMessage::Toggle)
+            }))
+        }
+        KeyCode::Char('n') if state.focus == Focus::Tasks => {
+            Some(Message::AddTask("New task".to_owned()))
+        }
+        KeyCode::Char('d') if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::DeleteTask),
+        ),
+        KeyCode::Char('r') if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::ReloadTask),
+        ),
+        KeyCode::Enter if state.focus == Focus::Tasks => Some(
+            state
+                .selected
+                .map_or(Message::NoTaskSelected, Message::OpenDetails),
+        ),
+        KeyCode::Char('c') if state.focus == Focus::Activity => {
+            Some(Message::Activity(ActivityMessage::Clear))
+        }
+        KeyCode::Enter if editing_notes(state) => Some(Message::SaveNotes),
+        KeyCode::Esc if state.focus == Focus::Details => Some(Message::CloseDetails),
+        KeyCode::Backspace if editing_notes(state) => {
+            Some(Message::Details(DetailsMessage::Backspace))
+        }
+        KeyCode::Char(character) if editing_notes(state) => {
+            Some(Message::Details(DetailsMessage::Input(character)))
+        }
+        _ => None,
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    color_eyre::install()?;
+
+    let activity = ActivityLog::default();
+    activity.push("Application started".to_owned());
+    let reason = ExitReason::default();
+    let setup = Setup {
+        activity: activity.clone(),
+        reason: reason.clone(),
+        input: seed(),
+        keyboard: true,
+    };
+    let program = dashboard(activity).into_program(init, view);
+
+    let mut terminal = ratatui::init();
+    let result = ProgramRuntime::new(program, setup).run(&mut terminal).await;
+    ratatui::restore();
+
+    // What the run had to say and could not show, now that there is a screen
+    // to say it on.
+    if let Some(reason) = reason.take() {
+        eprintln!("Terminal error: {reason}");
+    }
+
+    let _exit = result?;
+    Ok(())
+}
+
+/// Deterministic tests for this example's composition.
+///
+/// The rows that build a `TestDriver` (RFC 0008 §9) drive the composed
+/// `Program` itself — `TestStore` takes an `Application`, so it cannot. The
+/// rest call the root reducer and the key decoder directly, which is a cheaper
+/// loop that crosses no boundary and would pass with the composition taken
+/// out. Run them with `cargo test --example dashboard_composed`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::{Backend, TestBackend};
+    use tears::reducer::Program;
+    use tears::testing::{Confirmed, RunKind, RunName, StepReport, TestDriver, WakeSource};
+    use tears::{RuntimeConfig, SubscriptionId};
+
+    /// The turn budget every driving call below states.
+    const TURNS: usize = 64;
+
+    /// The program `main` runs, driven message by message.
+    ///
+    /// The same `dashboard` stack, closed with the same `init` and the same
+    /// `view`. Only the `Setup` differs: a scripted `input` instead of the
+    /// binary's seed, and `keyboard` off so the run reads no terminal.
+    fn scripted(
+        activity: &ActivityLog,
+        input: Vec<Message>,
+    ) -> TestDriver<impl Program<Flags = Setup>, TestBackend> {
+        let setup = Setup {
+            activity: activity.clone(),
+            reason: ExitReason::default(),
+            input,
+            keyboard: false,
+        };
+        let terminal = Terminal::new(TestBackend::new(80, 24)).expect("the test backend is built");
+        TestDriver::new(
+            dashboard(activity.clone()).into_program(init, view),
+            setup,
+            RuntimeConfig::new(),
+            terminal,
+        )
+    }
+
+    /// Releases one of `run`'s sends and runs the pass that delivers it.
+    fn deliver<P: Program, B: Backend>(
+        driver: &mut TestDriver<P, B>,
+        run: &RunName,
+    ) -> StepReport<B::Error> {
+        let token = driver.grant(run.clone()).expect("no grant is outstanding");
+        assert_eq!(
+            driver.confirm(TURNS, token),
+            Confirmed::Accepted,
+            "the released send reached the data lane"
+        );
+        let report = driver
+            .step_pass(WakeSource::Data)
+            .expect("the data lane is ready");
+        assert!(
+            report.terminated.is_none(),
+            "the pass did not terminate the program"
+        );
+        report
+    }
+
+    /// The one anonymous run a step started — the message a reduce asked for.
+    fn anonymous<E>(report: &StepReport<E>, what: &str) -> RunName {
+        one(
+            report
+                .started
+                .iter()
+                .filter(|run| run.kind() == RunKind::Anonymous)
+                .cloned()
+                .collect(),
+            what,
+        )
+    }
+
+    /// The subscription identities a step started.
+    fn subscriptions<E>(report: &StepReport<E>) -> Vec<SubscriptionId> {
+        report
+            .started
+            .iter()
+            .filter_map(|run| match run.kind() {
+                RunKind::Subscription(id) => Some(id),
+                RunKind::Keyed(_) | RunKind::Anonymous => None,
+            })
+            .collect()
+    }
+
+    /// The command identities the keyed runs a step started carry.
+    fn keys<E>(report: &StepReport<E>) -> Vec<CommandId> {
+        report
+            .started
+            .iter()
+            .filter_map(|run| match run.kind() {
+                RunKind::Keyed(id) => Some(id),
+                RunKind::Subscription(_) | RunKind::Anonymous => None,
+            })
+            .collect()
+    }
+
+    fn one<T>(mut values: Vec<T>, what: &str) -> T {
+        assert_eq!(values.len(), 1, "expected exactly one {what}");
+        values.pop().expect("the length was just asserted")
+    }
+
+    /// The lines a teardown hook wrote, which is what most of these rows are
+    /// about. The log also carries the entries a reduce writes — `added:`,
+    /// `deleted:` — which `dashboard.rs` writes too.
+    fn teardowns(activity: &ActivityLog) -> Vec<String> {
+        activity
+            .entries()
+            .into_iter()
+            .filter(|line| {
+                line.starts_with("stopped watching: ") || line.starts_with("closed details: ")
+            })
+            .collect()
+    }
+
+    /// What an unmodified key press decodes to.
+    fn bare(state: &App, code: KeyCode) -> Option<Message> {
+        key_message(state, KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    /// The message the terminal subscription produces for a key press.
+    fn key_press(code: KeyCode) -> Message {
+        key_of(code, KeyEventKind::Press)
+    }
+
+    /// The same for the other two kinds a terminal can report.
+    fn key_of(code: KeyCode, kind: KeyEventKind) -> Message {
+        Message::Terminal(Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::empty(),
+            kind,
+        )))
+    }
+
+    /// Hands the driver turns and waits for nothing.
+    ///
+    /// A claim that a hook did *not* fire has to be made after whatever would
+    /// have fired has had its chance: a finalizer is a spawned run, so it does
+    /// not write its line in the pass that tore its scope down.
+    fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns: usize) {
+        let mut spent = 0_usize;
+        driver.settle(turns + 1, || {
+            spent += 1;
+            spent > turns
+        });
+    }
+
+    fn recorded(activity: &ActivityLog, line: &str) -> bool {
+        activity.entries().iter().any(|entry| entry == line)
+    }
+
+    /// Adds one task and drives it to the keyed sync its row runs, returning
+    /// the identities that row's boundary produced.
+    fn add_task_and_sync<P: Program, B: Backend>(
+        driver: &mut TestDriver<P, B>,
+        script: &RunName,
+    ) -> (SubscriptionId, CommandId) {
+        let report = deliver(driver, script);
+        let timer = one(subscriptions(&report), "row timer");
+        let watch = anonymous(&report, "row setup message");
+        let report = deliver(driver, &watch);
+        let sync = anonymous(&report, "row sync message");
+        (timer, one(keys(&deliver(driver, &sync)), "row sync"))
+    }
+
+    /// Every timer in this composition is declared on one interval and every
+    /// request keyed under one command id, and no two of them collide.
+    ///
+    /// That is the boundary's doing and nothing else's: `dashboard` writes no
+    /// `.scoped(...)`, and neither does any reducer in this file.
+    #[test]
+    fn identical_child_identities_stay_apart_under_their_boundaries() {
+        let activity = ActivityLog::default();
+        // `AddTask` allocates the key, so the two rows below are `TaskId(1)`
+        // and `TaskId(2)` in script order and the later messages can name them.
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::AddTask("beta".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+            ],
+        );
+
+        // Nothing declares a subscription over state that is not there yet, so
+        // bootstrap starts the scripted input and nothing else.
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        assert!(
+            subscriptions(&boot).is_empty(),
+            "no row and no occupant, so no timer"
+        );
+        let script = anonymous(&boot, "scripted input run");
+
+        let (alpha_timer, alpha_sync) = add_task_and_sync(&mut driver, &script);
+        let (beta_timer, beta_sync) = add_task_and_sync(&mut driver, &script);
+
+        // The occupant declares the same timer again and keys its load with
+        // the same id, one boundary over.
+        let report = deliver(&mut driver, &script);
+        let details_timer = one(subscriptions(&report), "occupant timer");
+        let open = anonymous(&report, "occupant setup message");
+        let details_load = one(keys(&deliver(&mut driver, &open)), "occupant load");
+
+        assert_ne!(
+            alpha_timer, beta_timer,
+            "each row's timer is qualified by that row's key, so the two rows declaring the same \
+             interval are two subscriptions"
+        );
+        assert_ne!(
+            alpha_timer, details_timer,
+            "and the slot's segment separates the occupant's timer from a row's"
+        );
+        assert_ne!(
+            alpha_sync, beta_sync,
+            "each row's sync is keyed under that row's segment, so one row's sync cannot cancel \
+             another's"
+        );
+        assert_ne!(
+            alpha_sync, details_load,
+            "nor can the occupant's load, one boundary over"
+        );
+        assert_ne!(
+            alpha_sync,
+            CommandId::new(SYNC),
+            "and no run occupies the unqualified id the reducers wrote"
+        );
+        // `Segment::Details` is the third variant and `beta` is `TaskId(2)`, so
+        // this is the pair whose segments differ in nothing but the type the
+        // structural key carries with them.
+        assert_ne!(
+            beta_timer, details_timer,
+            "a key and a fixed segment that erase to the same value are still two"
+        );
+        assert_ne!(
+            beta_sync, details_load,
+            "and so are the runs keyed under them"
+        );
+    }
+
+    /// The four removal shapes a boundary tears down, and the one thing that is
+    /// not a removal.
+    ///
+    /// The comparison below is exact, and holds however long the run takes:
+    /// the rows' keyed requests sleep in real time, but `deliver` grants a
+    /// named run and `settle` grants nothing, so a request that finishes waits
+    /// at the gate and its `synced:` or `loaded details:` line is never
+    /// written.
+    ///
+    /// Nothing in this file calls `Command::teardown`: each `stopped watching`
+    /// and `closed details` line below is a hook a child registered, fired by
+    /// the teardown its boundary originated when the instance left.
+    #[test]
+    fn every_removal_tears_its_instance_down() {
+        let activity = ActivityLog::default();
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::AddTask("beta".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+                // Presenting over an occupied slot: a replacement, which is a
+                // removal of the occupant.
+                Message::OpenDetails(TaskId(2)),
+                // An occupied slot dismissed.
+                Message::CloseDetails,
+                // Inserting over an occupied key: a replacement, one collection
+                // over. The slot is empty by now, so this pass tears exactly
+                // one instance down and the order below stays the removal
+                // order rather than a race between two finalizers.
+                Message::ReloadTask(TaskId(2)),
+                // A row leaving the keyed collection.
+                Message::DeleteTask(TaskId(1)),
+            ],
+        );
+
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        let script = anonymous(&boot, "scripted input run");
+
+        // Both rows added and set up, so both have a hook registered under
+        // their own key.
+        add_task_and_sync(&mut driver, &script);
+        add_task_and_sync(&mut driver, &script);
+        spend_turns(&mut driver, TURNS);
+        assert!(
+            teardowns(&activity).is_empty(),
+            "an insert into an absent key removes no instance, so nothing is torn down"
+        );
+
+        // The slot's first occupant, set up the same way.
+        let report = deliver(&mut driver, &script);
+        let open = anonymous(&report, "occupant setup message");
+        deliver(&mut driver, &open);
+
+        // Replacing the occupant removes it.
+        let report = deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "closed details: #1 alpha"));
+        let open = anonymous(&report, "occupant setup message");
+        deliver(&mut driver, &open);
+
+        // Dismissing the slot removes its occupant.
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "closed details: #2 beta"));
+
+        // Replacing a row removes it, and the successor starts fresh under the
+        // same key.
+        let report = deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: #2 beta"));
+        let watch = anonymous(&report, "row setup message");
+        deliver(&mut driver, &watch);
+
+        // Removing a row removes it, and leaves the successor row alone.
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "stopped watching: #1 alpha"));
+
+        // Without the script's own `added:` lines, which are setup rather than
+        // subject. They are also the two the log would shed first — it sits
+        // exactly on `ACTIVITY_LIMIT` — so dropping them here keeps this
+        // comparison about the teardowns rather than about the buffer's size.
+        // Reading the eviction question off the log instead of off arithmetic
+        // done in a review: a line added above would push this one out first,
+        // and this fails naming that rather than leaving the comparison below
+        // to fail about its own contents.
+        assert_eq!(
+            activity.entries().first().map(String::as_str),
+            Some("added: #1 alpha"),
+            "the log still holds its oldest line, so nothing below is missing for want of room"
+        );
+        let written: Vec<String> = activity
+            .entries()
+            .into_iter()
+            .filter(|line| !line.starts_with("added: "))
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                "closed details: #1 alpha".to_owned(),
+                "closed details: #2 beta".to_owned(),
+                "reloaded: #2 beta".to_owned(),
+                "stopped watching: #2 beta".to_owned(),
+                // The root's own line, written by the reduce that removed the
+                // row, before the teardown it originated ran.
+                "deleted: #1 alpha".to_owned(),
+                "stopped watching: #1 alpha".to_owned(),
+            ],
+            "one teardown per removal, in removal order, and none for the successor row that is \
+             still present"
+        );
+    }
+
+    /// A child's setup message is not guaranteed to arrive once, and a second
+    /// one must not arm a second hook.
+    ///
+    /// Two `Enter` presses decided against the same state both ask to open the
+    /// pane. The first occupant is replaced before it ever handles its `Open`,
+    /// so it registered nothing and its removal reports nothing; both `Open`
+    /// messages then reach the survivor. Every registration a scope holds is
+    /// fired by the teardown that selects it, so a child that armed on each
+    /// would put two lines in the log for one removal.
+    #[test]
+    fn a_repeated_setup_message_arms_one_hook() {
+        let activity = ActivityLog::default();
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+                Message::OpenDetails(TaskId(1)),
+                Message::CloseDetails,
+            ],
+        );
+
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        let script = anonymous(&boot, "scripted input run");
+        add_task_and_sync(&mut driver, &script);
+
+        // Both opens land before either `Open` is delivered, which is what a
+        // second key press ahead of the first message looks like.
+        // The replaced occupant had registered nothing: a hook is armed by the
+        // child's own `Open`, which has not been delivered, and one armed at
+        // the root would anchor where the slot's teardown cannot reach it. So
+        // the removal here fires nothing, and the line below is the whole of
+        // what this row claims.
+        let first = deliver(&mut driver, &script);
+        let second = deliver(&mut driver, &script);
+
+        let first = anonymous(&first, "occupant setup message");
+        let second = anonymous(&second, "occupant setup message");
+        deliver(&mut driver, &first);
+        deliver(&mut driver, &second);
+
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || recorded(&activity, "closed details: #1 alpha"));
+
+        assert_eq!(
+            teardowns(&activity),
+            vec!["closed details: #1 alpha".to_owned()],
+            "one removal, one line: the second `Open` armed nothing"
+        );
+    }
+
+    /// Replacing a row closes a pane opened on the instance that left.
+    ///
+    /// The pane holds the replaced instance's title and notes, so leaving it
+    /// open would let a later `SaveNotes` write them back over the reload.
+    ///
+    /// Both teardowns are originated by the same reduce, so this asserts which
+    /// hooks fired and not the order they finished in.
+    #[test]
+    fn replacing_a_row_closes_a_pane_opened_on_it() {
+        let activity = ActivityLog::default();
+        let mut driver = scripted(
+            &activity,
+            vec![
+                Message::AddTask("alpha".to_owned()),
+                Message::OpenDetails(TaskId(1)),
+                Message::ReloadTask(TaskId(1)),
+            ],
+        );
+
+        let boot = driver.boot();
+        assert!(boot.terminated.is_none(), "bootstrap did not terminate");
+        let script = anonymous(&boot, "scripted input run");
+        add_task_and_sync(&mut driver, &script);
+
+        let report = deliver(&mut driver, &script);
+        let open = anonymous(&report, "occupant setup message");
+        deliver(&mut driver, &open);
+
+        deliver(&mut driver, &script);
+        driver.settle(TURNS, || {
+            recorded(&activity, "stopped watching: #1 alpha")
+                && recorded(&activity, "closed details: #1 alpha")
+        });
+
+        assert_eq!(
+            teardowns(&activity).len(),
+            2,
+            "the row and the pane opened on it, and nothing else"
+        );
+    }
+
+    /// `q` quits unless the notes editor is actually there to receive it.
+    ///
+    /// The pane is a `Slot` and the focus cycle passes through `Details`
+    /// either way, so a guard written against the focus alone would swallow
+    /// `q` into a boundary with no occupant — leaving a focus the header still
+    /// advertises `q: quit` from, where it does nothing.
+    #[test]
+    fn q_is_typed_into_the_notes_editor_only_while_one_is_open() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        state.focus = Focus::Details;
+        assert!(
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "the focus is on an empty pane, so there is no editor to type into"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        assert!(
+            matches!(
+                bare(&state, KeyCode::Char('q')),
+                Some(Message::Details(DetailsMessage::Input('q')))
+            ),
+            "with an occupant the key is text"
+        );
+
+        state.focus = Focus::Tasks;
+        assert!(
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "and an open pane the focus is not on does not hold the key"
+        );
+    }
+
+    /// Esc leaves a `Details` focus whether or not a pane is behind it, and
+    /// says which of the two it did.
+    ///
+    /// It is guarded on the focus and not on `editing_notes`, because a focus
+    /// with an empty slot behind it still needs a way out. Dismissing an empty
+    /// slot removes no instance, so reporting a close there would describe a
+    /// teardown that never happened, in the file whose subject is which
+    /// removals produce which teardowns.
+    #[test]
+    fn escaping_an_empty_pane_leaves_it_without_claiming_a_close() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        state.focus = Focus::Details;
+        let _nothing_to_close = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.focus,
+            Focus::Tasks,
+            "the focus is restored either way, which is what makes Esc the way out"
+        );
+        assert_eq!(
+            state.status, "Left the details pane",
+            "there was no occupant, so nothing was closed"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        state.focus = Focus::Details;
+        let _closed = Root.reduce(&mut state, Message::CloseDetails);
+        assert!(
+            !state.details.is_present(),
+            "an occupant is dismissed, which is the removal the boundary tears down"
+        );
+        assert_eq!(
+            state.status, "Closed the details pane",
+            "and only then does the status say so"
+        );
+    }
+
+    /// Closing an occupied pane is the one removal that can lose work, so the
+    /// status says when it does — and only then. The buffer is the sole home
+    /// of an edit until [`save_notes`] copies it onto the task, which makes
+    /// "the two differ" exactly "there is something to lose". A pane closed
+    /// straight after a save has nothing outstanding, and a footer that
+    /// mourned notes there would read as if the save had not landed.
+    #[test]
+    fn closing_a_pane_says_when_it_throws_an_edit_away() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let id = *state.tasks.keys().next().expect("the row was inserted");
+        let stored = state
+            .tasks
+            .get(&id)
+            .expect("the row was inserted")
+            .notes
+            .clone();
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(id));
+        // What a `DetailsMessage::Input` leaves behind. The claim under test
+        // is the root's reading of the buffer, and the boundary that carries
+        // the key press is what the `TestDriver` rows exercise.
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+
+        let _closed = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.status, "Closed the details pane, discarding notes nobody saved",
+            "the buffer had moved away from the task, and closing it is where that went"
+        );
+        assert_eq!(
+            state
+                .tasks
+                .get(&id)
+                .expect("the row outlives the pane")
+                .notes,
+            stored,
+            "and the task still holds what it held, which is what makes it a loss"
+        );
+
+        let _reopened = Root.reduce(&mut state, Message::OpenDetails(id));
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open again")
+            .notes
+            .push('!');
+        let _saved = Root.reduce(&mut state, Message::SaveNotes);
+        let _closed_again = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.status, "Closed the details pane",
+            "the edit reached the task, so this close threw nothing away"
+        );
+    }
+
+    /// The selection behaves as `dashboard.rs`'s does: it stops at the ends,
+    /// and a delete leaves it on the row that moved up into the position.
+    ///
+    /// Neither is composition's doing, which is the point — the pair is meant
+    /// to differ in structure, so a selection that wrapped or jumped to the
+    /// first row would read as something a boundary did.
+    #[test]
+    fn the_selection_clamps_and_survives_a_delete_in_place() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..3 {
+            let _watch = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "adding selects the row it added"
+        );
+
+        let _at_the_end = Root.reduce(&mut state, Message::SelectNext);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "the last row is an end, not a wrap"
+        );
+        assert_eq!(
+            state.status, "Nothing further that way",
+            "and the footer does not report a move that did not happen"
+        );
+        for _ in 0..3 {
+            let _upwards = Root.reduce(&mut state, Message::SelectPrev);
+        }
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "and so is the first, after one step past it"
+        );
+
+        state.selected = Some(TaskId(2));
+        let _middle = Root.reduce(&mut state, Message::DeleteTask(TaskId(2)));
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "the row that moved up into the deleted one's position"
+        );
+
+        state.selected = Some(TaskId(3));
+        let _last = Root.reduce(&mut state, Message::DeleteTask(TaskId(3)));
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "and the new last row when the deleted one was last"
+        );
+
+        let _emptied = Root.reduce(&mut state, Message::DeleteTask(TaskId(1)));
+        let _nowhere_to_go = Root.reduce(&mut state, Message::SelectNext);
+        assert_eq!(
+            state.status, "No task selected",
+            "an empty list gets the answer the other four keys give, not a \
+             move it did not make"
+        );
+    }
+
+    /// A key press that a boundary will claim still moves the status line.
+    ///
+    /// The root's arms for those messages are unreachable — a boundary takes
+    /// them first — so a status set when they land would never be set at all.
+    /// It is set at the dispatch instead, which is also why it names the
+    /// request: the outcome belongs to a child the root has not run yet.
+    #[test]
+    fn a_child_addressed_key_still_moves_the_status_line() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+
+        state.focus = Focus::Navigation;
+        let _navigating = Root.reduce(&mut state, key_press(KeyCode::Down));
+        assert_eq!(
+            state.status, "Moving through the sections",
+            "the navigation child claims the message, so the root says so here"
+        );
+
+        state.focus = Focus::Activity;
+        let _clearing = Root.reduce(&mut state, key_press(KeyCode::Char('c')));
+        assert_eq!(
+            state.status, "Clearing the activity log",
+            "and the same for the log child"
+        );
+
+        state.focus = Focus::Tasks;
+        let _toggling = Root.reduce(&mut state, key_press(KeyCode::Char(' ')));
+        assert_eq!(
+            state.status, "Toggling the task",
+            "and for a row, which is claimed by key"
+        );
+    }
+
+    /// A held key is an instruction; the release after it is not.
+    ///
+    /// The protocol that reports releases is the one that reports repeats, so
+    /// a filter written as `== Press` would drop both and a held Down would
+    /// move the selection once.
+    #[test]
+    fn a_repeat_is_an_instruction_and_a_release_is_not() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..2 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+        state.focus = Focus::Tasks;
+        state.selected = Some(TaskId(1));
+
+        assert!(
+            !Root
+                .reduce(&mut state, key_of(KeyCode::Down, KeyEventKind::Repeat))
+                .is_none(),
+            "a repeat asks for the move a press would have asked for"
+        );
+        assert!(
+            Root.reduce(&mut state, key_of(KeyCode::Down, KeyEventKind::Release))
+                .is_none(),
+            "and the release after it asks for nothing"
+        );
+    }
+
+    /// A key that needs a selected row says so when there is none.
+    ///
+    /// Silence would leave the footer describing the operation before it. A
+    /// selection move over an empty collection gets the same line, so the
+    /// condition has one answer.
+    #[test]
+    fn a_key_needing_a_selection_reports_when_there_is_none() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        state.focus = Focus::Tasks;
+        assert_eq!(state.selected, None, "nothing has been added");
+
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('d'),
+            KeyCode::Char('r'),
+            KeyCode::Enter,
+        ] {
+            assert!(
+                matches!(bare(&state, code), Some(Message::NoTaskSelected)),
+                "{code:?} needs a row and there is none, so it reports rather than \
+                 leaving the last operation's line standing"
+            );
+        }
+
+        let _reported = Root.reduce(&mut state, Message::NoTaskSelected);
+        assert_eq!(state.status, "No task selected");
+    }
+
+    /// Reloading a row is a replacement, so the successor starts fresh and
+    /// everything local to the instance that left goes with it.
+    ///
+    /// A cleared checkbox is otherwise the only sign, so the status says it.
+    #[test]
+    fn reloading_a_row_discards_what_was_local_to_it() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let row = state
+            .tasks
+            .get_mut(&TaskId(1))
+            .expect("the row that was just added");
+        row.done = true;
+        row.notes = "edited and saved".to_owned();
+
+        let _reloaded = Root.reduce(&mut state, Message::ReloadTask(TaskId(1)));
+
+        let row = state.tasks.get(&TaskId(1)).expect("the successor");
+        assert!(!row.done, "the done flag was the old instance's");
+        assert_ne!(
+            row.notes, "edited and saved",
+            "and so were the notes saved into it"
+        );
+        assert_eq!(
+            state.status, "Reloaded the task, discarding its local state",
+            "which the reader is told, since the cleared checkbox is the only other sign"
+        );
+    }
+
+    /// A modified key runs no bare-key binding, and Ctrl+C leaves.
+    ///
+    /// Raw mode delivers no SIGINT, so Ctrl+C arrives as an ordinary key
+    /// event. Without the guard it would have found whatever `c` is bound to —
+    /// and Ctrl+D and Ctrl+R would have found the destructive two. `SHIFT` is
+    /// the exception, and only on a character: that is how an uppercase letter
+    /// arrives.
+    #[test]
+    fn a_modified_key_runs_no_bare_binding_and_ctrl_c_leaves() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+
+        let chord =
+            |state: &App, code, modifiers| key_message(state, KeyEvent::new(code, modifiers));
+
+        // Not only the characters: `Enter`, the arrows, `Tab`, `Esc` and
+        // `Backspace` arrive with modifiers too, and Ctrl+Enter would open the
+        // pane — replacing an occupant, which is a removal.
+        state.focus = Focus::Tasks;
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('r'),
+            KeyCode::Char(' '),
+            KeyCode::Char('n'),
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Up,
+            KeyCode::Down,
+        ] {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
+                KeyModifiers::SHIFT,
+                KeyModifiers::SUPER,
+                KeyModifiers::HYPER,
+                KeyModifiers::META,
+            ] {
+                assert!(
+                    chord(&state, code, modifiers).is_none(),
+                    "{code:?} with {modifiers:?} is a chord this application does not bind"
+                );
+            }
+        }
+
+        state.focus = Focus::Activity;
+        assert!(
+            matches!(
+                chord(&state, KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(Message::Quit)
+            ),
+            "Ctrl+C leaves rather than clearing the log the bare key clears"
+        );
+        assert!(
+            chord(&state, KeyCode::Char('c'), KeyModifiers::ALT).is_none(),
+            "while Alt+c is bound to nothing and clears nothing"
+        );
+
+        state.details.present(DetailsState::new(
+            TaskId(1),
+            "alpha".to_owned(),
+            String::new(),
+        ));
+        state.focus = Focus::Details;
+        assert!(
+            matches!(
+                chord(&state, KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(Message::Quit)
+            ),
+            "and from the notes editor too, which holds the bare `q` but not this"
+        );
+        for (code, modifiers) in [
+            // Ctrl+C leaves, and only Ctrl+C: a chord that merely contains
+            // `CONTROL` is one this application does not bind.
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL),
+            (KeyCode::Char('q'), KeyModifiers::ALT),
+            (KeyCode::Char('d'), KeyModifiers::SUPER),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::SHIFT),
+            (KeyCode::Esc, KeyModifiers::ALT),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+        ] {
+            assert!(
+                chord(&state, code, modifiers).is_none(),
+                "{code:?} with {modifiers:?} neither edits nor leaves"
+            );
+        }
+        assert!(
+            matches!(
+                chord(&state, KeyCode::Char('X'), KeyModifiers::SHIFT),
+                Some(Message::Details(DetailsMessage::Input('X')))
+            ),
+            "while a shifted character is how an uppercase letter arrives"
+        );
+    }
+
+    /// A terminal error is recorded, because the quit that follows it leaves
+    /// nowhere to draw the report.
+    ///
+    /// `main` prints the recorded line after restoring the terminal. What this
+    /// row holds is the half the program owns: that the reason is written down
+    /// at all, rather than lost with the screen.
+    #[test]
+    fn a_terminal_error_leaves_a_reason_behind() {
+        let reason = ExitReason::default();
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: reason.clone(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        let quit = Root.reduce(&mut state, Message::TerminalError("broken pipe".to_owned()));
+
+        assert_eq!(
+            reason.take().as_deref(),
+            Some("broken pipe"),
+            "the reason is left where `main` can still read it"
+        );
+        assert!(!quit.is_none(), "and the run ends");
+    }
+
+    /// The two removals that take the row do not report the buffer separately,
+    /// and this pins that rather than leaving it to the prose.
+    ///
+    /// Both close a pane open on the row, so both lose whatever was typed into
+    /// it. Neither names it, because neither offers the remedy naming it would
+    /// imply: the reload overwrites the row's notes and the delete takes the row,
+    /// so a reader who had pressed Enter first would have lost the notes anyway.
+    /// A drift toward `CloseDetails`'s wording here would be that offer.
+    #[test]
+    fn a_removal_that_takes_the_row_does_not_report_the_buffer_apart_from_it() {
+        for (message, expected) in [
+            (
+                Message::ReloadTask(TaskId(1)),
+                "Reloaded the task, discarding its local state",
+            ),
+            (Message::DeleteTask(TaskId(1)), "Deleted the task"),
+        ] {
+            let (mut state, _bootstrap) = init(Setup {
+                activity: ActivityLog::default(),
+                reason: ExitReason::default(),
+                input: Vec::new(),
+                keyboard: false,
+            });
+            let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+            let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+            state
+                .details
+                .get_mut()
+                .expect("the pane is open")
+                .notes
+                .push('!');
+            assert!(
+                unsaved_notes(&state),
+                "the buffer has moved away from the task, which is the loss under test"
+            );
+
+            let _removed = Root.reduce(&mut state, message);
+            assert!(
+                !state.details.is_present(),
+                "the pane open on the row went with it, so the edit is gone"
+            );
+            assert_eq!(
+                state.status, expected,
+                "and the status is about the row, not about the buffer"
+            );
+        }
+    }
+
+    /// The header names a quit that answers where it is read.
+    ///
+    /// `q` is text once the notes editor has the pane, so the header stops
+    /// naming it there — and naming only the pane's own key left that focus
+    /// with no quit named at all. This reads the key each branch offers rather
+    /// than trusting the two to stay in step with the guard.
+    #[test]
+    fn the_header_names_a_quit_that_answers_where_it_is_read() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        assert!(!editing_notes(&state), "nothing is open yet");
+        assert!(
+            header_keys(false).contains("q: quit"),
+            "outside the editor the header offers `q`"
+        );
+        assert!(
+            matches!(bare(&state, KeyCode::Char('q')), Some(Message::Quit)),
+            "and `q` is answered there"
+        );
+
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert!(
+            editing_notes(&state),
+            "the pane has the focus and an occupant"
+        );
+        assert!(
+            header_keys(true).contains("Ctrl+C: quit"),
+            "in the editor it offers the chord instead"
+        );
+        assert!(
+            matches!(
+                key_message(
+                    &state,
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+                ),
+                Some(Message::Quit)
+            ),
+            "and the chord is answered there"
+        );
+        assert!(
+            matches!(
+                bare(&state, KeyCode::Char('q')),
+                Some(Message::Details(DetailsMessage::Input('q')))
+            ),
+            "which is why the header stops naming `q` here"
+        );
+    }
+
+    /// The open pane's hint names only keys that work where it is read.
+    ///
+    /// Not merely a nicety: the pane is drawn at every focus, and at
+    /// `Focus::Tasks` the `Enter` arm above the editor's reopens the pane over
+    /// this occupant. A replacement is a removal, so the key the line offered
+    /// as a save is the one that throws the buffer away.
+    #[test]
+    fn the_open_panes_hint_names_keys_that_work_where_it_is_read() {
+        assert_eq!(
+            details_hint(Focus::Details),
+            "Type to edit, Enter to save, Esc to close.",
+            "at the focus that has all three, the line names all three"
+        );
+        for focus in [Focus::Tasks, Focus::Activity, Focus::Navigation] {
+            assert_eq!(
+                details_hint(focus),
+                "Tab to this pane to edit, save or close it.",
+                "and anywhere else it names where the keys have to land instead"
+            );
+        }
+
+        // The decode the guard exists for, read rather than argued.
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+        state.focus = Focus::Tasks;
+        assert!(
+            matches!(
+                bare(&state, KeyCode::Enter),
+                Some(Message::OpenDetails(TaskId(1)))
+            ),
+            "with the pane open behind another focus, Enter reopens rather than saves"
+        );
+
+        let _reopened = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Replaced the open details pane, discarding notes nobody saved",
+            "and that is the removal, so a hint promising a save there promises the opposite"
+        );
+    }
+
+    /// Opening a pane over an open one replaces its occupant, and says so.
+    ///
+    /// A replacement is a removal, and the occupant it removes can hold edits
+    /// nobody saved. `reload_task` reports what it discarded for the same
+    /// reason; nothing but the status distinguishes the three cases here.
+    /// The discard is reported on the same terms `CloseDetails` reports it
+    /// on — only when the buffer had moved away from the task — so a
+    /// replacement of an untouched pane does not mourn notes that were never
+    /// typed.
+    #[test]
+    fn opening_a_pane_over_an_open_one_says_it_replaced_it() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..2 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+
+        let _first = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Opened the details pane",
+            "the slot was empty, so nothing was removed"
+        );
+
+        let _second = Root.reduce(&mut state, Message::OpenDetails(TaskId(2)));
+        assert_eq!(
+            state.status, "Opened the details pane, replacing the one that was open",
+            "the slot was occupied, but its buffer still matched the task"
+        );
+
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+        let _third = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Replaced the open details pane, discarding notes nobody saved",
+            "this occupant held an edit, and the replacement is where it went"
+        );
+    }
+
+    /// With nothing selected, a move goes to the end it started from.
+    ///
+    /// The application cannot reach that state: `selected` is `None` only when
+    /// the collection is empty, and the root answers an empty collection before
+    /// `select` is called. This pins what the arm does rather than covering a
+    /// path, so the direction cannot be dropped without something failing.
+    #[test]
+    fn a_move_with_nothing_selected_goes_to_the_end_it_started_from() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..3 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+
+        state.selected = None;
+        select(&mut state, true);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "forward from nowhere is the first row"
+        );
+
+        state.selected = None;
+        select(&mut state, false);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "and backward is the last, not the first again"
+        );
+    }
+
+    /// A key read against a row that has gone since says so.
+    ///
+    /// `Message::AddTask` describes the hazard: a key handler reads the
+    /// selection off a state the messages already in flight have not been
+    /// applied to, so `d` and then `r` in quick succession both name the row
+    /// `d` is about to remove. The second arrives at a collection that no
+    /// longer holds it, and going quiet there would leave the footer reporting
+    /// the delete as though the reload had worked.
+    #[test]
+    fn an_operation_on_a_row_that_has_gone_says_so() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let _deleted = Root.reduce(&mut state, Message::DeleteTask(TaskId(1)));
+        assert_eq!(state.status, "Deleted the task");
+
+        for message in [
+            Message::ReloadTask(TaskId(1)),
+            Message::OpenDetails(TaskId(1)),
+            Message::DeleteTask(TaskId(1)),
+        ] {
+            state.status = "Untouched";
+            let _late = Root.reduce(&mut state, message);
+            assert_eq!(
+                state.status, "That task is gone",
+                "the row was read before the delete landed"
+            );
+        }
+
+        state.status = "Untouched";
+        let _nothing_open = Root.reduce(&mut state, Message::SaveNotes);
+        assert_eq!(
+            state.status, "No details pane is open",
+            "and a save with no pane says that instead"
+        );
+    }
+}
