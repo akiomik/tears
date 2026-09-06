@@ -325,9 +325,28 @@ cargo test --example command_cancellation
 cargo test --example dashboard
 ```
 
-`TestStore` takes an `Application`, so a composed `Program` is driven with
-`tears::testing::TestDriver` instead; `examples/dashboard_composed.rs` carries
-worked `TestDriver` tests:
+[`tears::testing::TestDriver`](https://docs.rs/tears/latest/tears/testing/struct.TestDriver.html)
+drives the production kernel a pass at a time: the same construction path, the
+same runtime-owned tasks, with the test scripting what production decides for
+itself. An order the driver establishes is therefore never evidence of a
+production order. It takes a `Program` where `TestStore` takes an
+`Application` — a composed stack becomes one through `into_program`, and an
+`Application` becomes one through
+[`tears::reducer::AppProgram`](https://docs.rs/tears/latest/tears/reducer/struct.AppProgram.html),
+the adapter the `Runtime` facade already applies — and it too is written on a
+plain `#[test]`, for a reason of its own: it owns the executor it turns, and
+inside another runtime that executor can be neither turned nor dropped.
+
+Driving the real kernel is what puts two things within reach. A declared
+subscription source runs; and in a composed program, the teardown a boundary
+originates when a child leaves runs too, where `TestStore` has no boundary to
+originate one. So reach for `TestStore` when the assertion is about an
+`Application`'s `update` transitions and command effects, and for `TestDriver`
+when it is about a source running at all, or a child's arrival and removal
+across passes — but not about *when* a time-gated source produces, which needs
+a paused runtime the driver cannot be given.
+
+`examples/dashboard_composed.rs` carries worked `TestDriver` tests:
 
 ```bash
 cargo test --example dashboard_composed
