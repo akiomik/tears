@@ -880,7 +880,11 @@ fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
 
 fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
     let text = state.details.get().map_or_else(
-        || "No details open. Select a task and press Enter.".to_owned(),
+        // Names something reachable from where it is printed. Enter does
+        // nothing at this focus — the slot is empty, so neither the task
+        // list's arm nor the editor's claims it — and a hint pointing at an
+        // inert key is the footer's silence one pane over.
+        || "No details open. Tab to the task list and press Enter on a task.".to_owned(),
         |open| {
             format!(
                 "#{} {} · {}s{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to close.",
