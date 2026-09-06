@@ -281,7 +281,7 @@ its own paused time context) and does not execute subscription sources — it
 observes only the *declared* set via `subscription_ids`. See the
 [`tears::testing`](https://docs.rs/tears/latest/tears/testing/) module docs for
 the full contract, including deterministic time without `TestStore`. Worked,
-runnable tests ship with the command examples:
+runnable tests ship with these examples:
 
 ```bash
 cargo test --example command_timeout_retry
@@ -353,6 +353,11 @@ If you are writing or amending an RFC, run the
 requesting review. Testing conventions are documented in
 [docs/testing.md](docs/testing.md), and the release procedure in
 [docs/releasing.md](docs/releasing.md).
+
+An edit is not finished until the changed file's own documentation has been
+read again — the module doc, every doc comment under it, the comments in the
+body — and any disagreement with the code fixed on one side or the other,
+explicitly.
 
 ---
 
