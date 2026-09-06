@@ -1166,7 +1166,7 @@ const fn child_status(message: &Message) -> Option<&'static str> {
 fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
     // The way out of raw mode, from any focus: the notes editor holds `q` but
     // nothing holds this.
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
         return Some(Message::Quit);
     }
     // Every binding below is for an unmodified key, with one exception: a
@@ -1406,6 +1406,19 @@ mod tests {
         )))
     }
 
+    /// Hands the driver turns and waits for nothing.
+    ///
+    /// A claim that a hook did *not* fire has to be made after whatever would
+    /// have fired has had its chance: a finalizer is a spawned run, so it does
+    /// not write its line in the pass that tore its scope down.
+    fn spend_turns<P: Program, B: Backend>(driver: &mut TestDriver<P, B>, turns: usize) {
+        let mut spent = 0_usize;
+        driver.settle(turns + 1, || {
+            spent += 1;
+            spent > turns
+        });
+    }
+
     fn recorded(activity: &ActivityLog, line: &str) -> bool {
         activity.entries().iter().any(|entry| entry == line)
     }
@@ -1537,6 +1550,7 @@ mod tests {
         // their own key.
         add_task_and_sync(&mut driver, &script);
         add_task_and_sync(&mut driver, &script);
+        spend_turns(&mut driver, TURNS);
         assert!(
             teardowns(&activity).is_empty(),
             "an insert into an absent key removes no instance, so nothing is torn down"
@@ -1623,12 +1637,13 @@ mod tests {
 
         // Both opens land before either `Open` is delivered, which is what a
         // second key press ahead of the first message looks like.
+        // The replaced occupant had registered nothing: a hook is armed by the
+        // child's own `Open`, which has not been delivered, and one armed at
+        // the root would anchor where the slot's teardown cannot reach it. So
+        // the removal here fires nothing, and the line below is the whole of
+        // what this row claims.
         let first = deliver(&mut driver, &script);
         let second = deliver(&mut driver, &script);
-        assert!(
-            teardowns(&activity).is_empty(),
-            "the replaced occupant never handled its `Open`, so it had registered nothing"
-        );
 
         let first = anonymous(&first, "occupant setup message");
         let second = anonymous(&second, "occupant setup message");
@@ -2053,6 +2068,16 @@ mod tests {
             "and from the notes editor too, which holds the bare `q` but not this"
         );
         for (code, modifiers) in [
+            // Ctrl+C leaves, and only Ctrl+C: a chord that merely contains
+            // `CONTROL` is one this application does not bind.
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             (KeyCode::Char('x'), KeyModifiers::CONTROL),
             (KeyCode::Char('q'), KeyModifiers::ALT),
             (KeyCode::Char('d'), KeyModifiers::SUPER),

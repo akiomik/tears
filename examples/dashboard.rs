@@ -686,7 +686,7 @@ impl StatusState {
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     // The way out of raw mode, from any focus: the details editor holds `q`
     // but nothing holds this.
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
         return Command::message(Message::Quit).into();
     }
     // Every binding below is for an unmodified key, with one exception: a
@@ -994,20 +994,15 @@ mod tests {
         );
 
         // A delete that deleted nothing is the same case as a move that moved
-        // nothing, and the message kind cannot tell them apart.
-        store.send(Message::FocusNext);
-        store.send(Message::FocusNext);
-        store.send(Message::FocusNext);
+        // nothing, and the message kind cannot tell them apart. The messages
+        // below are sent directly, so no focus is walked: only
+        // `handle_key_event` reads it.
         for _ in 0..3 {
             store.send(Message::Tasks(TaskMessage::Delete));
         }
         assert!(store.state().tasks.tasks.is_empty());
-        store.send(Message::FocusNext);
-        store.send(Message::FocusNext);
         store.send(Message::Details(DetailMessage::Input('y')));
         let typed = store.state().details.notes.clone();
-        store.send(Message::FocusNext);
-        store.send(Message::FocusNext);
 
         store.send(Message::Tasks(TaskMessage::Delete));
 
@@ -1021,6 +1016,26 @@ mod tests {
             typed,
             "so the edit is still there"
         );
+        store.finish();
+    }
+
+    /// Ctrl+C leaves, and only Ctrl+C.
+    ///
+    /// A chord that merely *contains* `CONTROL` is one this application does
+    /// not bind, so it asks for nothing — `finish` is the assertion, since it
+    /// fails on output left unaccounted for and a quit request is output.
+    #[test]
+    fn a_chord_that_merely_contains_control_is_not_the_quit() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::SUPER,
+        ] {
+            store.send(chord_with(KeyCode::Char('c'), modifiers));
+        }
+
         store.finish();
     }
 
