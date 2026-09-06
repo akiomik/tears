@@ -2016,6 +2016,7 @@ mod tests {
                 KeyModifiers::ALT,
                 KeyModifiers::SHIFT,
                 KeyModifiers::SUPER,
+                KeyModifiers::HYPER,
                 KeyModifiers::META,
             ] {
                 assert!(

@@ -237,14 +237,14 @@ impl App {
 
     fn update_tasks(&mut self, msg: TaskMessage) {
         let selected_before = self.tasks.selected;
+        let count_before = self.tasks.tasks.len();
         let outcome = self.tasks.update(msg);
         // Rereading the panel throws away whatever was typed into it, so it
-        // runs only where the selected task can have changed: the index moved,
-        // or a row was added or removed under it. A move that clamped at an end
-        // changed nothing, and the footer says so.
-        if self.tasks.selected != selected_before
-            || matches!(msg, TaskMessage::Add | TaskMessage::Delete)
-        {
+        // runs only where the selected task can have changed: the selection
+        // moved, or the list grew or shrank under it. Asking what kind of
+        // message this was instead would reread on a delete that deleted
+        // nothing, and on nothing else it would get right.
+        if self.tasks.selected != selected_before || self.tasks.tasks.len() != count_before {
             self.details.sync_from_task(self.tasks.selected_task());
         }
 
@@ -992,6 +992,35 @@ mod tests {
             store.state().details.notes,
             store.state().tasks.tasks[1].notes
         );
+
+        // A delete that deleted nothing is the same case as a move that moved
+        // nothing, and the message kind cannot tell them apart.
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        for _ in 0..3 {
+            store.send(Message::Tasks(TaskMessage::Delete));
+        }
+        assert!(store.state().tasks.tasks.is_empty());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        store.send(Message::Details(DetailMessage::Input('y')));
+        let typed = store.state().details.notes.clone();
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+
+        store.send(Message::Tasks(TaskMessage::Delete));
+
+        assert_eq!(
+            store.state().status.message,
+            "No task selected",
+            "there was nothing to delete"
+        );
+        assert_eq!(
+            store.state().details.notes,
+            typed,
+            "so the edit is still there"
+        );
         store.finish();
     }
 
@@ -1045,6 +1074,7 @@ mod tests {
                 KeyModifiers::ALT,
                 KeyModifiers::SHIFT,
                 KeyModifiers::SUPER,
+                KeyModifiers::HYPER,
                 KeyModifiers::META,
             ] {
                 store.send(chord_with(code, modifiers));
