@@ -484,15 +484,28 @@ impl Reducer for Root {
             Message::DeleteTask(id) => delete_task(state, id),
             Message::OpenDetails(id) => open_details(state, id),
             Message::CloseDetails => {
+                // The pane is the only place edited notes live until
+                // `SaveNotes` writes them onto the task, so closing one whose
+                // buffer has moved away from the task throws those edits away.
+                // Named for the reason `open_details` and `reload_task` name
+                // what they discard — and only when the two actually differ,
+                // so an Esc straight after a save does not report the loss of
+                // notes that already reached the task.
+                let unsaved = state.details.get().is_some_and(|open| {
+                    state
+                        .tasks
+                        .get(&open.task)
+                        .is_some_and(|task| task.notes != open.notes)
+                });
                 // Esc is guarded on the focus rather than on `editing_notes`,
                 // so it is the way out of a `Details` focus with nothing behind
                 // it — which is also why the status has to say which of the two
                 // happened. Dismissing an empty slot removes no instance and
                 // records nothing.
-                state.status = if close_details(state) {
-                    "Closed the details pane"
-                } else {
-                    "Left the details pane"
+                state.status = match (close_details(state), unsaved) {
+                    (true, true) => "Closed the details pane, discarding notes nobody saved",
+                    (true, false) => "Closed the details pane",
+                    (false, _) => "Left the details pane",
                 };
                 Command::none()
             }
@@ -880,11 +893,14 @@ fn render_tasks(state: &App, frame: &mut Frame<'_>, area: Rect) {
 
 fn render_details(state: &App, frame: &mut Frame<'_>, area: Rect) {
     let text = state.details.get().map_or_else(
-        // Names something reachable from where it is printed. Enter does
-        // nothing at this focus — the slot is empty, so neither the task
-        // list's arm nor the editor's claims it — and a hint pointing at an
-        // inert key is the footer's silence one pane over.
-        || "No details open. Tab to the task list and press Enter on a task.".to_owned(),
+        // Names something reachable from where it is printed, without
+        // naming a focus or a number of keys to get out of one: this pane is
+        // drawn whenever the slot is empty, at every focus, so an instruction
+        // to Tab to the task list was wrong for a reader already in it. Enter
+        // is inert at a `Details` focus — the slot is empty, so neither the
+        // task list's arm nor the editor's claims it — which is why the hint
+        // says where the key has to land and not only which key it is.
+        || "No details open. Press Enter on a task in the task list.".to_owned(),
         |open| {
             format!(
                 "#{} {} · {}s{}\n\nNotes:\n{}_\n\nType to edit, Enter to save, Esc to close.",
@@ -1038,6 +1054,17 @@ fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
         state.status = "That task is gone";
         return Command::none();
     };
+    // A replacement is a removal, and the occupant it removes may hold edits
+    // nobody saved — the same loss `CloseDetails` reports, read the same way
+    // and before the `present` that causes it. What replaces the pane is a
+    // different pane, so the old buffer leaves the screen along with any sign
+    // of what was in it.
+    let unsaved = state.details.get().is_some_and(|open| {
+        state
+            .tasks
+            .get(&open.task)
+            .is_some_and(|task| task.notes != open.notes)
+    });
     // Presenting over an occupied slot is a replacement too, for the same
     // reason `ReloadTask` is.
     let replaced = state
@@ -1049,12 +1076,10 @@ fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
         ))
         .is_some();
     state.focus = Focus::Details;
-    // A replacement is a removal, and the occupant it removes may hold edits
-    // nobody saved. Said for the reason `reload_task` says what it discarded.
-    state.status = if replaced {
-        "Opened the details pane, replacing the one that was open"
-    } else {
-        "Opened the details pane"
+    state.status = match (replaced, unsaved) {
+        (true, true) => "Replaced the open details pane, discarding notes nobody saved",
+        (true, false) => "Opened the details pane, replacing the one that was open",
+        (false, _) => "Opened the details pane",
     };
     Command::message(Message::Details(DetailsMessage::Open)).into()
 }
@@ -1796,6 +1821,70 @@ mod tests {
         );
     }
 
+    /// Closing an occupied pane is the one removal that can lose work, so the
+    /// status says when it does — and only then. The buffer is the sole home
+    /// of an edit until [`save_notes`] copies it onto the task, which makes
+    /// "the two differ" exactly "there is something to lose". A pane closed
+    /// straight after a save has nothing outstanding, and a footer that
+    /// mourned notes there would read as if the save had not landed.
+    #[test]
+    fn closing_a_pane_says_when_it_throws_an_edit_away() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+
+        let _added = Root.reduce(&mut state, Message::AddTask("alpha".to_owned()));
+        let id = *state.tasks.keys().next().expect("the row was inserted");
+        let stored = state
+            .tasks
+            .get(&id)
+            .expect("the row was inserted")
+            .notes
+            .clone();
+        let _opened = Root.reduce(&mut state, Message::OpenDetails(id));
+        // What a `DetailsMessage::Input` leaves behind. The claim under test
+        // is the root's reading of the buffer, and the boundary that carries
+        // the key press is what the `TestDriver` rows exercise.
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+
+        let _closed = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.status, "Closed the details pane, discarding notes nobody saved",
+            "the buffer had moved away from the task, and closing it is where that went"
+        );
+        assert_eq!(
+            state
+                .tasks
+                .get(&id)
+                .expect("the row outlives the pane")
+                .notes,
+            stored,
+            "and the task still holds what it held, which is what makes it a loss"
+        );
+
+        let _reopened = Root.reduce(&mut state, Message::OpenDetails(id));
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open again")
+            .notes
+            .push('!');
+        let _saved = Root.reduce(&mut state, Message::SaveNotes);
+        let _closed_again = Root.reduce(&mut state, Message::CloseDetails);
+        assert_eq!(
+            state.status, "Closed the details pane",
+            "the edit reached the task, so this close threw nothing away"
+        );
+    }
+
     /// The selection behaves as `dashboard.rs`'s does: it stops at the ends,
     /// and a delete leaves it on the row that moved up into the position.
     ///
@@ -2138,7 +2227,11 @@ mod tests {
     ///
     /// A replacement is a removal, and the occupant it removes can hold edits
     /// nobody saved. `reload_task` reports what it discarded for the same
-    /// reason; nothing but the status distinguishes the two cases here.
+    /// reason; nothing but the status distinguishes the three cases here.
+    /// The discard is reported on the same terms `CloseDetails` reports it
+    /// on — only when the buffer had moved away from the task — so a
+    /// replacement of an untouched pane does not mourn notes that were never
+    /// typed.
     #[test]
     fn opening_a_pane_over_an_open_one_says_it_replaced_it() {
         let (mut state, _bootstrap) = init(Setup {
@@ -2160,7 +2253,19 @@ mod tests {
         let _second = Root.reduce(&mut state, Message::OpenDetails(TaskId(2)));
         assert_eq!(
             state.status, "Opened the details pane, replacing the one that was open",
-            "the slot was occupied, so the occupant went"
+            "the slot was occupied, but its buffer still matched the task"
+        );
+
+        state
+            .details
+            .get_mut()
+            .expect("the pane is open")
+            .notes
+            .push('!');
+        let _third = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Replaced the open details pane, discarding notes nobody saved",
+            "this occupant held an edit, and the replacement is where it went"
         );
     }
 
