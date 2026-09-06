@@ -254,7 +254,7 @@ impl App {
                     task.notes.clone_from(&self.details.notes);
                     self.activity
                         .push(format!("updated notes for {}", task.title));
-                    self.status.set_info("Saved task notes");
+                    self.status.set_info(outcome.status);
                 } else {
                     // Silence here would leave the footer reporting the edit
                     // that was not saved.
@@ -976,6 +976,30 @@ mod tests {
             store.state().status.message,
             "No task selected",
             "the save wrote nothing and says so"
+        );
+        store.finish();
+    }
+
+    /// Saving reports through the outcome the panel returned rather than a
+    /// copy of it, so the two cannot drift.
+    #[test]
+    fn saving_reports_the_panel_s_own_status() {
+        let mut store = TestStore::<App>::new(ExitReason::default());
+        store.send(Message::FocusNext);
+        store.send(Message::FocusNext);
+        assert_eq!(store.state().focus, Focus::Details);
+
+        store.send(Message::Details(DetailMessage::Input('x')));
+        store.send(Message::Details(DetailMessage::Save));
+
+        assert!(
+            store.state().tasks.tasks[0].notes.ends_with('x'),
+            "the edit reached the task"
+        );
+        assert_eq!(
+            store.state().status.message,
+            "Saved task notes",
+            "and the footer says what the panel asked it to"
         );
         store.finish();
     }

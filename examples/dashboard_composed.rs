@@ -1001,6 +1001,7 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     // reduce and merges the row's teardown into the command returned here.
     // Nothing below asks for that.
     let Some(task) = state.tasks.remove(&id) else {
+        state.status = "That task is gone";
         return Command::none();
     };
     state
@@ -1057,7 +1058,10 @@ fn save_notes(state: &mut App) -> Command<Message> {
     };
     let (task_id, notes) = (open.task, open.notes.clone());
     let Some(task) = state.tasks.get_mut(&task_id) else {
-        state.status = "That task is gone";
+        // Defensive, and unreachable through the keys: both paths that remove
+        // a row — `delete_task` and `reload_task` — close a pane opened on it
+        // first, and the reload puts a row back under the same key. No status
+        // here, because a line nobody can reach is a line nobody can check.
         return Command::none();
     };
     task.notes = notes;
@@ -2118,6 +2122,7 @@ mod tests {
         for message in [
             Message::ReloadTask(TaskId(1)),
             Message::OpenDetails(TaskId(1)),
+            Message::DeleteTask(TaskId(1)),
         ] {
             state.status = "Untouched";
             let _late = Root.reduce(&mut state, message);
