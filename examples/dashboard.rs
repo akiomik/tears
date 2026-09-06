@@ -1023,7 +1023,10 @@ mod tests {
     ///
     /// A chord that merely *contains* `CONTROL` is one this application does
     /// not bind, so it asks for nothing — `finish` is the assertion, since it
-    /// fails on output left unaccounted for and a quit request is output.
+    /// fails on output left unaccounted for and a `Message::Quit` this row
+    /// never receives is output. The quit itself is never applied: it would
+    /// take that message being received and `update` returning
+    /// `Command::quit()`.
     #[test]
     fn a_chord_that_merely_contains_control_is_not_the_quit() {
         let mut store = TestStore::<App>::new(ExitReason::default());
