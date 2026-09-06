@@ -1110,7 +1110,8 @@ fn select(state: &mut App, forward: bool) {
     let next = match position {
         Some(index) if forward => (index + 1).min(last),
         Some(index) => index.saturating_sub(1),
-        None => 0,
+        None if forward => 0,
+        None => last,
     };
     let moved = keys.get(next).copied();
     // Clamping at an end leaves the selection where it was, and saying it moved
@@ -1161,12 +1162,9 @@ const fn child_status(message: &Message) -> Option<&'static str> {
 
 /// The message a key press asks for, if any.
 ///
-/// Every binding here is for an unmodified key, apart from a shifted character,
-/// which is how an uppercase letter arrives. Raw mode delivers no SIGINT, so a
-/// reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
-/// bound to — clearing the activity log — while Ctrl+D and Ctrl+R would have
-/// deleted and reloaded a row, and Shift+Enter would have replaced the pane's
-/// occupant, which is a removal.
+/// Raw mode delivers no SIGINT, so Ctrl+C arrives here as an ordinary key
+/// event; what the guards below make of it and of every other modified key is
+/// written where they are.
 fn key_message(state: &App, key: KeyEvent) -> Option<Message> {
     // The way out of raw mode, from any focus: the notes editor holds `q` but
     // nothing holds this.
@@ -1518,6 +1516,12 @@ mod tests {
 
     /// The four removal shapes a boundary tears down, and the one thing that is
     /// not a removal.
+    ///
+    /// The comparison below is exact, and holds however long the run takes:
+    /// the rows' keyed requests sleep in real time, but `deliver` grants a
+    /// named run and `settle` grants nothing, so a request that finishes waits
+    /// at the gate and its `synced:` or `loaded details:` line is never
+    /// written.
     ///
     /// Nothing in this file calls `Command::teardown`: each `stopped watching`
     /// and `closed details` line below is a hook a child registered, fired by
@@ -2157,6 +2161,41 @@ mod tests {
         assert_eq!(
             state.status, "Opened the details pane, replacing the one that was open",
             "the slot was occupied, so the occupant went"
+        );
+    }
+
+    /// With nothing selected, a move goes to the end it started from.
+    ///
+    /// The application cannot reach that state: `selected` is `None` only when
+    /// the collection is empty, and the root answers an empty collection before
+    /// `select` is called. This pins what the arm does rather than covering a
+    /// path, so the direction cannot be dropped without something failing.
+    #[test]
+    fn a_move_with_nothing_selected_goes_to_the_end_it_started_from() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..3 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+
+        state.selected = None;
+        select(&mut state, true);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(1)),
+            "forward from nowhere is the first row"
+        );
+
+        state.selected = None;
+        select(&mut state, false);
+        assert_eq!(
+            state.selected,
+            Some(TaskId(3)),
+            "and backward is the last, not the first again"
         );
     }
 

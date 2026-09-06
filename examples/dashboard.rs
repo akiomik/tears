@@ -679,10 +679,9 @@ impl StatusState {
     }
 }
 
-/// Every binding here is for an unmodified key, apart from a shifted character,
-/// which is how an uppercase letter arrives. Raw mode delivers no SIGINT, so a
-/// reader pressing Ctrl+C to leave would otherwise have run whatever `c` is
-/// bound to — clearing the activity log — and Ctrl+D would have deleted a task.
+/// Raw mode delivers no SIGINT, so Ctrl+C arrives here as an ordinary key
+/// event; what the guards below make of it and of every other modified key is
+/// written where they are.
 fn handle_key_event(focus: Focus, key: KeyEvent) -> Command<Message> {
     // The way out of raw mode, from any focus: the details editor holds `q`
     // but nothing holds this.
