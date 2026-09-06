@@ -1031,13 +1031,22 @@ fn open_details(state: &mut App, id: TaskId) -> Command<Message> {
     };
     // Presenting over an occupied slot is a replacement too, for the same
     // reason `ReloadTask` is.
-    state.details.present(DetailsState::new(
-        id,
-        task.title.clone(),
-        task.notes.clone(),
-    ));
+    let replaced = state
+        .details
+        .present(DetailsState::new(
+            id,
+            task.title.clone(),
+            task.notes.clone(),
+        ))
+        .is_some();
     state.focus = Focus::Details;
-    state.status = "Opened the details pane";
+    // A replacement is a removal, and the occupant it removes may hold edits
+    // nobody saved. Said for the reason `reload_task` says what it discarded.
+    state.status = if replaced {
+        "Opened the details pane, replacing the one that was open"
+    } else {
+        "Opened the details pane"
+    };
     Command::message(Message::Details(DetailsMessage::Open)).into()
 }
 
@@ -1221,11 +1230,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Deterministic tests for this example's composition, driven by
-/// `tears::testing::TestDriver` (RFC 0008 §9). `TestStore` takes an
-/// `Application`, which is what `dashboard.rs`'s tests use; a composed
-/// `Program` is driven here instead. Run them with
-/// `cargo test --example dashboard_composed`.
+/// Deterministic tests for this example's composition.
+///
+/// The rows that build a `TestDriver` (RFC 0008 §9) drive the composed
+/// `Program` itself — `TestStore` takes an `Application`, so it cannot. The
+/// rest call the root reducer and the key decoder directly, which is a cheaper
+/// loop that crosses no boundary and would pass with the composition taken
+/// out. Run them with `cargo test --example dashboard_composed`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2018,5 +2029,35 @@ mod tests {
             "the reason is left where `main` can still read it"
         );
         assert!(!quit.is_none(), "and the run ends");
+    }
+
+    /// Opening a pane over an open one replaces its occupant, and says so.
+    ///
+    /// A replacement is a removal, and the occupant it removes can hold edits
+    /// nobody saved. `reload_task` reports what it discarded for the same
+    /// reason; nothing but the status distinguishes the two cases here.
+    #[test]
+    fn opening_a_pane_over_an_open_one_says_it_replaced_it() {
+        let (mut state, _bootstrap) = init(Setup {
+            activity: ActivityLog::default(),
+            reason: ExitReason::default(),
+            input: Vec::new(),
+            keyboard: false,
+        });
+        for _ in 0..2 {
+            let _added = Root.reduce(&mut state, Message::AddTask("task".to_owned()));
+        }
+
+        let _first = Root.reduce(&mut state, Message::OpenDetails(TaskId(1)));
+        assert_eq!(
+            state.status, "Opened the details pane",
+            "the slot was empty, so nothing was removed"
+        );
+
+        let _second = Root.reduce(&mut state, Message::OpenDetails(TaskId(2)));
+        assert_eq!(
+            state.status, "Opened the details pane, replacing the one that was open",
+            "the slot was occupied, so the occupant went"
+        );
     }
 }
