@@ -776,9 +776,10 @@ impl SubscriptionSource for ProbeSource {
 /// A pass is a synchronous region — RFC 0014 §3.5's four stages run without
 /// the driving task yielding — so the only way a producer commits inside one
 /// is for the producer to run on a thread the pass is not occupying. That is
-/// what [`threaded_driver_with`] supplies, and it is the whole of what the
-/// worker threads are for: **the determinism is this handshake's, never the
-/// scheduler's.**
+/// what [`threaded_driver_with`] supplies, and the whole of what *its* worker
+/// threads are for: **the determinism is this handshake's, never the
+/// scheduler's.** [`worker_driver`]'s workers exist for a different reason
+/// and need none of this.
 ///
 /// The two halves rendezvous like this. The reducer, running on the driving
 /// thread inside the batch, calls [`open_and_await_commit`] — it opens the
@@ -1030,6 +1031,23 @@ impl Script {
             "a gated source needs `threaded_driver_with`: on the current-thread executor its \
              hold runs on the driving thread and declines, so the window it exists to open is \
              never open"
+        );
+    }
+
+    /// Rejects this script at a constructor that opens no gate.
+    ///
+    /// A different reason from [`Self::assert_ungated`]'s, and the same
+    /// placement for the same cause: the executor here has workers, so the
+    /// hold is taken and holds, and what it meets is the shutdown with
+    /// nothing left to release it — the join blocks and the binary hangs
+    /// with no test named. Every constructor that builds a multi-worker
+    /// driver without [`GatedDriver`]'s release has to say this, so it lives
+    /// here rather than at one of them.
+    fn assert_gate_free(&self) {
+        assert!(
+            self.gates().is_empty(),
+            "a gated script needs `threaded_driver_with`: this constructor opens no gate before \
+             its executor shuts down, so a held quiescence hangs the run rather than failing it"
         );
     }
 
@@ -1334,16 +1352,38 @@ pub fn threaded_driver_with(script: Script, config: RuntimeConfig) -> (GatedDriv
     )
 }
 
+/// A multi-worker driver with no gate handling, for a row whose subject is
+/// [`TestDriver::on_worker_threads`].
+///
+/// [`threaded_driver_with`] wraps its driver so the gates open before the
+/// executor goes; this one names the constructor at the call site instead.
+/// It does not make a row *detect* the constructor — both executors refuse
+/// alike, checked by mutation.
+pub fn worker_driver(script: Script) -> (TestDriver<Scripted, TestBackend>, Journal) {
+    script.assert_gate_free();
+    let journal = Journal::default();
+    let program = Scripted {
+        journal: journal.clone(),
+    };
+    (
+        TestDriver::on_worker_threads(program, script, config(), terminal(), cap(2)),
+        journal,
+    )
+}
+
 /// A [`TestDriver`] that opens its script's [`QuiescenceGate`]s before it
 /// shuts its executor down.
 ///
-/// This is the only multi-worker driver there is, and that is the point.
-/// A held quiescence with nothing to release it is a hang rather than a
-/// failure, so nothing about the release is left for a series to remember:
-/// there is no second constructor to reach for, no guard to bind, no
-/// position to get right, and no gate argument that can disagree with the
-/// one [`ProbeSource::gated`] handed the script. A script with no gated
-/// source carries no gates and this costs it an empty vector.
+/// This is the only multi-worker driver a gated script can reach, and that is
+/// the point. A held quiescence with nothing to release it is a hang rather
+/// than a failure, so nothing about the release is left for a series to
+/// remember: no second constructor that would take a gated script, no guard
+/// to bind, no position to get right, and no gate argument that can disagree
+/// with the one [`ProbeSource::gated`] handed the script. A script with no
+/// gated source carries no gates and this costs it an empty vector. What
+/// keeps the first of those true is [`worker_driver`], which builds the same
+/// executor without this wrapper and refuses a gated script at its own
+/// constructor.
 ///
 /// It is a plain deref to the driver otherwise: the release is all this
 /// adds.

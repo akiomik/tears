@@ -334,9 +334,10 @@ production order. It takes a `Program` where `TestStore` takes an
 `Application` becomes one through
 [`tears::reducer::AppProgram`](https://docs.rs/tears/latest/tears/reducer/struct.AppProgram.html),
 the adapter the `Runtime` facade already applies — and it too is written on a
-plain `#[test]`, for a reason of its own: it owns the executor it turns, and
-turning that one blocks the calling thread, which Tokio refuses on a thread
-already driving tasks.
+plain `#[test]`, for a reason of its own: turning the executor it owns blocks
+the calling thread, and so does dropping it, and Tokio refuses to block a
+thread that is already driving tasks. So a `#[tokio::test]` that builds a
+driver in its own body and never drives it still fails, at the drop.
 
 Driving the real kernel is what puts two things within reach. A declared
 subscription source runs; and in a composed program, the teardown a boundary

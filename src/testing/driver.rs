@@ -514,13 +514,34 @@ impl DriverState {
 }
 
 /// The same-topology scripted driver (RFC 0008 §9.3).
+///
+/// It drives a [`Program`]: a composed stack becomes one through
+/// [`ReducerExt::into_program`](crate::reducer::ReducerExt::into_program),
+/// an [`Application`](crate::Application) through
+/// [`AppProgram`](crate::reducer::AppProgram).
+///
+/// # Where a driver test runs
+///
+/// On a plain `#[test]`. Turning the executor blocks the calling thread and
+/// so does dropping it, and Tokio refuses to block a thread that is itself
+/// driving a runtime's tasks. That is narrower than being in one: a thread
+/// holding an entered handle, a worker inside `block_in_place`, and a
+/// `spawn_blocking` thread all satisfy `Handle::try_current` and take a
+/// driver. Construction blocks on nothing and so refuses nothing: a driver
+/// built under `#[tokio::test]` is built, and fails at the first call that
+/// blocks or at the drop.
+///
+/// [`TestStore`](crate::testing::TestStore) rejects an ambient runtime at
+/// construction. That is INV-T10's, and INV-T10 is the store's alone.
 pub struct TestDriver<P: Program, B: Backend> {
-    /// The driver's own current-thread executor.
+    /// The driver's own executor.
     ///
     /// The driving calls are synchronous and turn this executor themselves,
     /// which is what lets a whole script read as a sequence of statements.
-    /// Current-thread is also the range the determinism claim is verified
-    /// over (RFC 0008 §9.8).
+    /// [`TestDriver::new`] builds a current-thread one, and current-thread is
+    /// also the range the determinism claim is verified over (RFC 0008 §9.8);
+    /// [`TestDriver::on_worker_threads`] builds a multi-worker one, outside
+    /// that range by design.
     executor: Executor,
     kernel: Kernel<P>,
     terminal: Terminal<B>,
@@ -546,9 +567,8 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// # Panics
     ///
-    /// Panics when a Tokio runtime is already entered on this thread: the
-    /// driver owns the executor it turns, and a driving call inside another
-    /// runtime cannot turn it.
+    /// Panics when the executor cannot be built. An ambient Tokio runtime is
+    /// not rejected here: construction blocks on nothing.
     #[must_use]
     pub fn new(program: P, flags: P::Flags, config: RuntimeConfig, terminal: Terminal<B>) -> Self {
         let executor = Builder::new_current_thread()
@@ -587,7 +607,8 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// # Panics
     ///
-    /// Panics when the multi-worker executor cannot be built.
+    /// Panics when the multi-worker executor cannot be built. Like
+    /// [`new`](Self::new), it blocks on nothing.
     #[must_use]
     pub fn on_worker_threads(
         program: P,
@@ -651,6 +672,15 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics when the driver has already booted: the state table admits
     /// `boot` in exactly one position.
+    ///
+    /// Panics too when called on a thread that is driving a Tokio runtime's
+    /// tasks, which Tokio refuses rather than this layer.
+    ///
+    /// Panics too when the step terminates the program and the terminated
+    /// kernel's join set does not drain inside the settle bound — the one
+    /// wait this layer chooses for itself rather than taking from a script,
+    /// whose budget is mechanism: what a caller can rely on is that it is
+    /// finite and fails on its bound.
     pub fn boot(&mut self) -> StepReport<B::Error> {
         assert!(
             self.state == DriverState::Constructed,
@@ -697,6 +727,16 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics when the driver has not booted or has terminated (RFC 0008
     /// §9.3's state table).
+    ///
+    /// Panics too when called on a thread that is driving a Tokio runtime's
+    /// tasks, which Tokio refuses rather than this layer. A refused step is no
+    /// way out: the readiness read happens inside the block.
+    ///
+    /// Panics too when the step terminates the program and the terminated
+    /// kernel's join set does not drain inside the settle bound — the one
+    /// wait this layer chooses for itself rather than taking from a script,
+    /// whose budget is mechanism: what a caller can rely on is that it is
+    /// finite and fails on its bound.
     pub fn step_pass(&mut self, woken_by: WakeSource) -> Result<StepReport<B::Error>, NotReady> {
         self.assert_running("step_pass");
         let stepped = {
@@ -800,7 +840,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// # Panics
     ///
     /// Panics when `max_turns` is spent with the grant unresolved, reporting
-    /// how many turns were consumed, and outside the running state.
+    /// how many turns were consumed, and outside the running state. Panics
+    /// too when it turns the executor on a thread that is driving a Tokio
+    /// runtime's tasks: the turn is where it blocks.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the call consumes the token by contract: a token that survived its resolution \
@@ -910,7 +952,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     ///
     /// Panics while a grant is outstanding, stranded or not; panics when
     /// `max_turns` is spent with `until` still false, reporting how many
-    /// turns were consumed; and panics outside the running state.
+    /// turns were consumed; and panics outside the running state. Panics too
+    /// when it turns the executor on a thread that is driving a Tokio
+    /// runtime's tasks: the turn is where it blocks.
     pub fn settle(&mut self, max_turns: usize, mut until: impl FnMut() -> bool) {
         self.assert_running("settle");
         assert!(
@@ -1237,14 +1281,344 @@ mod tests {
     use super::*;
 
     use std::io::ErrorKind;
+    use std::thread;
+
+    use tokio::runtime::Handle;
+    use tokio::task::{block_in_place, spawn_blocking};
 
     use crate::command::{Command, CommandId};
     use crate::kernel::conformance::support::{
-        Beacon, Script, TEST_TURNS, cap, config, driver, driver_with, failing_driver,
-        marking_effect, parking_effect, sending_effect, silent_effect,
+        Beacon, Feed, ProbeSource, QuiescenceGate, Script, TEST_TURNS, cap, config, driver,
+        driver_with, failing_driver, marking_effect, parking_effect, sending_effect, silent_effect,
+        worker_driver,
     };
     use crate::kernel::lane::SendGate;
     use crate::subscription::mock::MockSource;
+
+    // The driving-thread rule, held by rows rather than by prose — the
+    // `# Panics` claim this file used to carry was false for as long as
+    // nothing exercised it.
+    //
+    // Each `should_panic` names the operation Tokio refuses, so a driving row
+    // cannot pass on a state-table assert instead.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    async fn a_driver_cannot_be_driven_on_a_thread_driving_tasks() {
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        driver.boot();
+    }
+
+    // The same on a multi-worker host: the body still drives, whatever the
+    // workers beside it do.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[should_panic(expected = "Cannot start a runtime")]
+    async fn a_multi_thread_test_body_is_a_driving_thread() {
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        driver.boot();
+    }
+
+    // The drop half, which the driving rows cannot reach: unwinding suppresses
+    // this panic. That guard is Tokio's, not ours — were a version bump to
+    // drop it, those rows would abort the process instead of failing.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot drop a runtime")]
+    async fn a_driver_cannot_be_dropped_on_a_thread_driving_tasks() {
+        let (driver, _journal) = driver(Script::new(Command::none()));
+
+        drop(driver);
+    }
+
+    // The order the two refusals come in. A driving call the state table is
+    // against never reaches the executor, so on a driver that never booted it
+    // is this crate that answers, naming no runtime — which is why the rows
+    // above drive through `boot`, the one call a constructed driver admits.
+    #[tokio::test]
+    #[should_panic(expected = "`step_pass` is misuse in the constructed state")]
+    async fn the_state_table_answers_before_the_runtime_does() {
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        drop(driver.step_pass(WakeSource::Data));
+    }
+
+    // A worker released from driving for the duration: `Handle::try_current`
+    // succeeds, and the driver turns and drops there anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_in_place_releases_the_thread_from_driving() {
+        // Through a spawn, because that is what puts the closure on a worker.
+        // `Runtime::block_on` drives the future on the calling thread, so a
+        // `block_in_place` written directly in this body would run on the test
+        // thread and take Tokio's other arm — the one that only exits the
+        // runtime context, never handing a core off. The arm this row is about
+        // is the worker's.
+        // The premise, taken as an identity rather than a name: libtest names
+        // its thread after this test's path, so a guard spelled against that
+        // name would pass vacuously the moment the module moved.
+        let driving = thread::current().id();
+        tokio::spawn(async move {
+            block_in_place(|| {
+                assert_ne!(
+                    thread::current().id(),
+                    driving,
+                    "the closure has to be on a worker, not the thread `block_on` drives"
+                );
+                assert!(
+                    Handle::try_current().is_ok(),
+                    "the worker is still a runtime's own"
+                );
+                let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+                driver.boot();
+            });
+        })
+        .await
+        .expect("the spawned task neither panics nor is aborted");
+    }
+
+    // A refused step blocks before it refuses, so the precondition is asserted
+    // on this thread first — without it the row would pass on a ready step.
+    #[test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    fn a_refused_step_blocks_before_it_refuses() {
+        let (mut driver, _journal) = driver(Script::new(parking_effect([7])));
+        driver.boot();
+        // The precondition, taken where it can be observed. Without it the row
+        // is vacuous: the panic below fires at the block's entry, so it would
+        // arrive just the same on a step that was ready, and the claim about
+        // refusal would rest on nothing. A refused step drives nothing, so
+        // taking one here leaves the call below the same call.
+        assert_eq!(
+            driver.step_pass(WakeSource::Data).err(),
+            Some(NotReady),
+            "nothing has reached the data lane, so the step is refused"
+        );
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to step inside");
+
+        host.block_on(async { drop(driver.step_pass(WakeSource::Data)) });
+    }
+
+    // `confirm` and `settle` panic *when they turn*, which claims something
+    // about their returns that precede a turn. Both sides get a row.
+    #[test]
+    fn a_settle_that_needs_no_turn_does_not_reach_the_executor() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        driver.boot();
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to settle inside");
+
+        host.block_on(async { driver.settle(0, || true) });
+    }
+
+    // `confirm`'s no-turn arm: the run is still held, so the reclaim arm is
+    // out, and a budget of zero leaves the resolution against the budget
+    // assert. Hoisting the turn reddens this row and the spent-budget one.
+    #[test]
+    fn a_confirm_that_needs_no_turn_does_not_reach_the_executor() {
+        let ended = Beacon::default();
+        let (mut driver, _journal) = driver(Script::new(Command::batch([
+            marking_effect(ended.clone()),
+            parking_effect([7]),
+        ])));
+        let parker = driver.boot().started[1].clone();
+        driver.settle(TEST_TURNS, || ended.marked());
+        let token = driver.grant(parker).expect("no other grant");
+        driver
+            .step_pass(WakeSource::ProducerExit)
+            .expect("the marking run's exit is observable");
+        assert_eq!(
+            driver.try_confirm(&token),
+            Some(Confirmed::Accepted),
+            "the gate holds the terminal, so the confirm below needs no turn"
+        );
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to confirm inside");
+
+        host.block_on(async {
+            assert_eq!(driver.confirm(0, token), Confirmed::Accepted);
+        });
+    }
+
+    // `confirm`'s other pre-turn return, the reclaim arm: the run's exit is
+    // reflected, so the grant can never reach the lane and a budget of zero
+    // still answers without turning.
+    #[test]
+    fn a_confirm_that_reclaims_does_not_reach_the_executor() {
+        let beacon = Beacon::default();
+        let (mut driver, _journal) = driver(Script::new(Command::batch([
+            marking_effect(beacon.clone()),
+            silent_effect(),
+        ])));
+        let ended = driver.boot().started[0].clone();
+        driver.settle(TEST_TURNS, || beacon.marks() > 0);
+        let token = driver.grant(ended).expect("the bookkeeping still holds it");
+        driver
+            .step_pass(WakeSource::ProducerExit)
+            .expect("the settled run's exit is observable");
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to confirm inside");
+
+        host.block_on(async {
+            assert_eq!(driver.confirm(0, token), Confirmed::Reclaimed);
+        });
+    }
+
+    // `settle`'s spent budget, which `confirm`'s row below holds for `confirm`
+    // alone.
+    #[test]
+    #[should_panic(expected = "bounded `settle` exhausted")]
+    fn a_spent_settle_budget_answers_before_the_executor_does() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        driver.boot();
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to settle inside");
+
+        host.block_on(async { driver.settle(0, || false) });
+    }
+
+    // The spent budget answers before the first turn, in this crate's words.
+    #[test]
+    #[should_panic(expected = "unresolved after 0 executor turns")]
+    fn a_spent_confirm_budget_answers_before_the_executor_does() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        let run = driver.boot().started[0].clone();
+        let token = driver.grant(run).expect("no other grant");
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to confirm inside");
+
+        host.block_on(async {
+            let _confirmed = driver.confirm(0, token);
+        });
+    }
+
+    // And a budget that admits a turn reaches it, where Tokio answers.
+    #[test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    fn a_confirm_that_turns_blocks_on_the_executor() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        let run = driver.boot().started[0].clone();
+        let token = driver.grant(run).expect("no other grant");
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to confirm inside");
+
+        host.block_on(async {
+            let _confirmed = driver.confirm(1, token);
+        });
+    }
+
+    // The same for `settle`: a predicate that stays false spends the budget
+    // through turns, and the first of them is where it blocks.
+    #[test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    fn a_settle_that_turns_blocks_on_the_executor() {
+        let (mut driver, _journal) = driver(Script::new(silent_effect()));
+        driver.boot();
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to settle inside");
+
+        host.block_on(async { driver.settle(1, || false) });
+    }
+
+    // A blocking-pool thread: `spawn_blocking` runs its closure where blocking
+    // is the point, so nothing here is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spawn_blocking_thread_is_not_a_driving_thread() {
+        spawn_blocking(|| {
+            assert!(
+                Handle::try_current().is_ok(),
+                "the pool thread is still a runtime's own"
+            );
+            let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+            driver.boot();
+        })
+        .await
+        .expect("the blocking task neither panics nor is aborted");
+    }
+
+    // The store's check is not this rule: `Handle::try_current` succeeds here
+    // and the driver runs anyway.
+    #[test]
+    fn an_entered_handle_is_not_a_driving_thread() {
+        let host = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a host runtime to enter");
+        let _entered = host.enter();
+        assert!(
+            Handle::try_current().is_ok(),
+            "the guard is what makes this thread's context a runtime's"
+        );
+        let (mut driver, _journal) = driver(Script::new(Command::none()));
+
+        driver.boot();
+    }
+
+    // Nor is it the construction site: built under a runtime, driven outside.
+    #[test]
+    fn the_construction_site_is_not_what_refuses() {
+        let host = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a host runtime to build the driver inside");
+        let (mut driver, _journal) = host.block_on(async { driver(Script::new(Command::none())) });
+
+        driver.boot();
+    }
+
+    // `worker_driver`'s refusal, which nothing else reaches: deleting the
+    // `assert_gate_free` call leaves every other row green, and the failure it
+    // prevents is a hang with no test named rather than a red row.
+    #[test]
+    #[should_panic(expected = "a gated script needs `threaded_driver_with`")]
+    fn a_gated_script_is_refused_by_the_gate_free_constructor() {
+        let gate = QuiescenceGate::default();
+        let source = ProbeSource::gated("a", gate);
+
+        drop(worker_driver(
+            Script::new(Command::none()).feeding([Feed::new(source)]),
+        ));
+    }
+
+    // The other constructor, on both halves. Neither row detects it — both
+    // executors refuse alike, checked by mutation — so what they buy is that
+    // `on_worker_threads` is exercised at all.
+    //
+    // The driving half.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot start a runtime")]
+    async fn a_multi_worker_driver_cannot_be_driven_on_a_thread_driving_tasks() {
+        let (mut driver, _journal) = worker_driver(Script::new(Command::none()));
+
+        driver.boot();
+    }
+
+    // And the drop half.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot drop a runtime")]
+    async fn a_multi_worker_driver_cannot_be_dropped_on_a_thread_driving_tasks() {
+        let (driver, _journal) = worker_driver(Script::new(Command::none()));
+
+        drop(driver);
+    }
 
     // §9.3's state table, first row: `boot` is legal exactly once.
     #[test]
