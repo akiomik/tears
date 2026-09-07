@@ -247,15 +247,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
+        id: criterion
         # `--bench <name>` (singular, per-target) rather than `--benches`
         # (plural): the plural form implicitly also runs the lib's unit
         # tests, duplicating what the `test` job's matrix already covers.
         # Criterion's own test mode is the smoke profile for it: one
         # iteration, no sample, so what it gates is that it still compiles
-        # and runs.
+        # and runs. Both criterion benches are named, since no gate executes
+        # either anywhere else — `just test` selects targets explicitly now,
+        # and the load harness has the step after this one.
+        #
+        # The exit codes are collected rather than left to `bash -e`, so a red
+        # `gauge` does not stop `kernel_scan` from reporting: they measure
+        # different things and one failing says nothing about the other.
+        # Separate steps would carry the same property, given the condition
+        # the step below has; one step keeps that condition to a single
+        # place.
+        #
+        # This job is advisory either way: `Benchmarks` is not among `main`'s
+        # required contexts, so what a name here buys is a red job, not a
+        # blocked merge.
         run: |
-          cargo test --bench kernel_scan --features ${{ needs.versions.outputs.features }}
+          status=0
+          cargo test --bench gauge --features ${{ needs.versions.outputs.features }} || status=1
+          cargo test --bench kernel_scan --features ${{ needs.versions.outputs.features }} || status=1
+          exit $status
       - name: Run the load harness's smoke profiles
+        # Reached whenever the step above ran at all, red or green: the
+        # criterion benches say nothing about this one, and this is the
+        # invocation carrying §6's completion and sequence-integrity gate.
+        # `!cancelled()` is what lifts the default `success()` a condition
+        # without a status-check function would otherwise keep; the
+        # conclusion clause then excludes the case that leaves nothing to
+        # measure, a setup step having failed and skipped the step above.
+        if: ${{ !cancelled() && steps.criterion.conclusion != 'skipped' }}
         # The full scenarios of the load harness leave CI: they are
         # deliberate acceptance/regression runs (RFC 0006 §5.1, RFC 0007
         # §5–6, RFC 0014 §13.5), and their latency numbers gate nothing on a
