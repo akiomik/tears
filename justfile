@@ -73,14 +73,20 @@ user_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserr
 # would go unlinted and unchecked — coverage that `--all-features` did have
 # and there is no reason to give up. It stays out of `user_features` because a
 # dependant is documented not to enable it.
+#
+# `test` no longer passes `--all-targets`, so that coverage now comes from the
+# recipes that pass it *with this feature set*: `clippy`, which the gates run,
+# and `clippy-fix`, which they do not. `clippy-loom` and `build-all` pass
+# `--all-targets` too, under `loom-core` and under no features, so neither
+# reaches a `required-features` bench.
 build_features := user_features + ",bench-internals"
 
 # Default recipe to display help
 default:
     @just --list
 
-# `test` passes `--all-targets`, which suppresses the implicit doctest run, so
-# `test-doc` has to be listed separately here and in `pre-commit`; without it
+# `test` passes explicit target flags, which suppress the implicit doctest run,
+# so `test-doc` has to be listed separately here and in `pre-commit`; without it
 # nothing compiles the examples in rustdoc comments or in the
 # `cfg(doctest)`-included migration guide.
 
@@ -121,9 +127,39 @@ clippy-loom:
 clippy-fix:
     cargo clippy --fix --all-targets --features {{build_features}} --allow-dirty --allow-staged
 
-# Run all tests
+# Benches are not among the targets below, for the reason `ci.yml`'s `test`
+# job already excludes them there: the load harness (`kernel_load`) has a
+# custom `main` that ignores `cargo test`'s `--test` flag, so `--all-targets`
+# runs its full scenarios rather than a smoke pass. That is a deliberate
+# acceptance run (RFC 0006 §5.1, RFC 0007 §5-6, RFC 0014 §13.5), not something
+# a gate should take on every invocation.
+#
+# Type-checking them still blocks a merge: `Clippy` is a required context and
+# runs this justfile's `clippy`, which keeps `--all-targets`. What stops
+# blocking is linking and running one — neither `clippy` nor the MSRV job's
+# `cargo check --all-targets` produces a binary, and `Benchmarks`, the only
+# job that does, is not among `main`'s required contexts. Before this change
+# the only thing in any gate that built and ran a bench was this recipe.
+#
+# No local gate executes one either. `bench-smoke` is the only recipe that
+# runs a bench at all, and it is in neither `check` nor `pre-commit`; it also
+# reaches the harness through `cargo bench`, whose profile inherits `release`,
+# so nothing runs `kernel_load` with `debug_assertions` on any more.
+#
+# Typing it by hand gives that much back — the harness only. `gauge` and
+# `kernel_scan` lose their last local runner here and get no replacement,
+# which is #370. Given no argument the harness runs the acceptance matrix —
+# not the probe sweep, which is named-rows only — the 22 minutes this recipe
+# just stopped taking, so pass the profiles `bench-smoke` does, under the test
+# profile instead:
+#
+#     features=$(just --evaluate build_features)
+#     cargo test --bench kernel_load --features "$features" -- --self-test
+#     cargo test --bench kernel_load --features "$features" -- --smoke
+
+# Run the tests
 test:
-    cargo test --all-targets --features {{build_features}}
+    cargo test --lib --bins --tests --examples --features {{build_features}}
 
 # The same two-pass shape as `clippy` / `clippy-loom`: `build_features`
 # excludes `loom-core`, so the pass above cannot even compile the `cell_core`
