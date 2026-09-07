@@ -325,9 +325,31 @@ cargo test --example command_cancellation
 cargo test --example dashboard
 ```
 
-`TestStore` takes an `Application`, so a composed `Program` is driven with
-`tears::testing::TestDriver` instead; `examples/dashboard_composed.rs` carries
-worked `TestDriver` tests:
+[`tears::testing::TestDriver`](https://docs.rs/tears/latest/tears/testing/struct.TestDriver.html)
+drives the production kernel a pass at a time: the same construction path, the
+same runtime-owned tasks, with the test scripting what production decides for
+itself. An order the driver establishes is therefore never evidence of a
+production order. It takes a `Program` where `TestStore` takes an
+`Application` — a composed stack becomes one through `into_program`, and an
+`Application` becomes one through
+[`tears::reducer::AppProgram`](https://docs.rs/tears/latest/tears/reducer/struct.AppProgram.html),
+the adapter the `Runtime` facade already applies — and it too is written on a
+plain `#[test]`, for a reason of its own: it owns the executor it turns, and
+turning that one blocks the calling thread, which Tokio refuses on a thread
+already driving tasks.
+
+Driving the real kernel is what puts two things within reach. A declared
+subscription source runs; and in a composed program, the teardown a boundary
+originates when a child leaves runs too, where `TestStore` has no boundary to
+originate one. So reach for `TestStore` when the assertion is about an
+`Application`'s `update` transitions and command effects, and for `TestDriver`
+when it is about a source running at all, or — in a composed program — a
+child's arrival and removal across passes. Not about *when* a time-gated
+source produces, though: that needs a paused runtime the driver cannot be
+given, and so a different test shape, the one *deterministic time without
+`TestStore`* describes in the module docs linked above.
+
+`examples/dashboard_composed.rs` carries worked `TestDriver` tests:
 
 ```bash
 cargo test --example dashboard_composed
