@@ -38,7 +38,7 @@ See the [Optional Features](#optional-features) section for information about en
 
 ### Minimal Example
 
-Every tears application implements the `Application` trait with four required methods:
+A tears application implements the `Application` trait, which has four required methods ([Composing Reducers](#composing-reducers) is the other way to write a program):
 
 ```rust
 use tears::prelude::*;
@@ -213,18 +213,6 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 - **Subscriptions**: External event sources (keyboard, timers, network, etc.)
 - **Commands**: Asynchronous side effects that produce messages
 
-### Built-in Subscriptions
-
-- **Terminal Events** (`terminal::TerminalEvents`): Keyboard, mouse, and resize events
-- **Timer** (`time::Timer`): Periodic tick events
-- **Signal** (`signal::Signal`): OS signal handling (Unix/Windows)
-- **WebSocket** (`websocket::WebSocket`, requires `ws`): Real-time bidirectional communication
-- **Query** (`http::Query`, requires `http`): HTTP data fetching with caching
-- **Mutation** (`http::Mutation`, requires `http`): HTTP data modifications
-- **MockSource** (`mock::MockSource`): Controllable mock for testing
-
-Create custom subscriptions by implementing the `SubscriptionSource` trait.
-
 ### Composing Reducers
 
 A `Reducer` owns one state transition and the subscriptions that state declares.
@@ -237,12 +225,28 @@ keying the same command do not collide. The two whose child can leave —
 `for_each` over a `Keyed` collection and `presented` over a `Slot` —
 additionally tear a departed child's runs down, so no removal leaks a run;
 `scope` composes one child in place, and that child is always there.
+`Command::teardown` is the manual primitive behind the teardowns `for_each`
+and `presented` perform, and `Command::on_teardown` registers a finalizer to
+run when a teardown selects the scope it was built at; one built at a scope
+nothing tears down never runs.
 
 An `Application` is run through an adapter over the same kernel, so this is a
 way to write a program rather than a second runtime. See
 [docs/composition.md](docs/composition.md) for when the rewrite is worth it, and
 [`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) for
 `dashboard.rs` written the other way.
+
+### Built-in Subscriptions
+
+- **Terminal Events** (`terminal::TerminalEvents`): Keyboard, mouse, and resize events
+- **Timer** (`time::Timer`): Periodic tick events
+- **Signal** (`signal::Signal`): OS signal handling (Unix/Windows)
+- **WebSocket** (`websocket::WebSocket`, requires `ws`): Real-time bidirectional communication
+- **Query** (`http::Query`, requires `http`): HTTP data fetching with caching
+- **Mutation** (`http::Mutation`, requires `http`): HTTP data modifications
+- **MockSource** (`mock::MockSource`): Controllable mock for testing
+
+Create custom subscriptions by implementing the `SubscriptionSource` trait.
 
 ## Examples
 
