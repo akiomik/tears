@@ -741,10 +741,7 @@ scenarios stay out of CI: they run as
 deliberate acceptance or regression runs (§5), on any machine, with RFC
 0006 §5.1's scoping unchanged — a full run carries acceptance force only
 on the reference machine, and runs on other machines are
-regression-informative, never acceptance. The job's other bench invocations
-are the registry scan and the isolated producer-gauge cost; the subscription
-bench it also ran went with the subscription manager it measured, whose
-reconciliation the kernel's run registry now owns.
+regression-informative, never acceptance.
 
 **The recipe carries the kernel harness's profile.** RFC 0014 §13.5's
 load harness for the reducer-first kernel (`benches/kernel_load.rs`) is
