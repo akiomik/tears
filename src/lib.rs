@@ -1,8 +1,12 @@
 //! # Tears - TUI Elm Architecture Runtime System
 //!
-//! Tears is a TUI (Text User Interface) framework based on the Elm Architecture (TEA),
-//! built on top of [ratatui](https://ratatui.rs/). It provides a clean and type-safe
-//! way to build terminal applications using a functional, message-driven architecture.
+//! Tears is a TUI (Text User Interface) framework built on top of
+//! [ratatui](https://ratatui.rs/). It is based on the Elm Architecture (TEA),
+//! with reducer composition in the style of [The Composable
+//! Architecture][tca] (TCA), and provides a clean and type-safe way to build
+//! terminal applications using a functional, message-driven architecture.
+//!
+//! [tca]: https://github.com/pointfreeco/swift-composable-architecture
 //!
 //! ## Architecture
 //!
