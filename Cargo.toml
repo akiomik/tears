@@ -3,13 +3,13 @@ name = "tears"
 version = "0.11.0"
 edition = "2024"
 authors = ["Akiomi Kamakura <akiomik@gmail.com>"]
-description = "A simple and elegant framework for building TUI applications using The Elm Architecture (TEA)"
+description = "A simple and elegant TUI framework with The Elm Architecture (TEA) and TCA-style reducer composition"
 documentation = "https://docs.rs/tears"
 homepage = "https://github.com/akiomik/tears"
 repository = "https://github.com/akiomik/tears"
 license = "Apache-2.0"
 readme = "README.md"
-keywords = ["tui", "tea", "elm-architecture", "ratatui", "framework"]
+keywords = ["tui", "tea", "elm-architecture", "ratatui", "tca"]
 categories = ["command-line-interface", "asynchronous"]
 rust-version = "1.88.0"
 # Anchored with a leading slash: an include pattern without one is a

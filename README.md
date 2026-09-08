@@ -7,13 +7,14 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.88.0%2B-blue.svg)](https://www.rust-lang.org)
 [![codecov](https://codecov.io/gh/akiomik/tears/graph/badge.svg?token=QF9SO8I0AM)](https://codecov.io/gh/akiomik/tears)
 
-A simple and elegant framework for building TUI applications using **The Elm Architecture (TEA)**.
+A simple and elegant TUI framework with **The Elm Architecture (TEA)** and **TCA**-style reducer composition.
 
 Built on top of [ratatui](https://ratatui.rs/), Tears provides a clean, type-safe, and functional approach to terminal user interface development.
 
 ## Features
 
 - 🎯 **Simple & Predictable**: Based on The Elm Architecture - easy to reason about and test
+- 🧩 **Composable**: Split a program into feature reducers with `scope`, `for_each` and `presented`
 - 🔄 **Async-First**: Built-in support for async operations via Commands
 - 📡 **Subscriptions**: Handle terminal events, timers, and custom event sources
 - 🧪 **Testable**: Pure functions for update logic make testing straightforward
@@ -397,6 +398,7 @@ tears = { version = "0.11", features = ["http"] }
 Tears is inspired by battle-tested architectures:
 
 - **[Elm](https://elm-lang.org/)**: The original Elm Architecture
+- **[The Composable Architecture (TCA)](https://github.com/pointfreeco/swift-composable-architecture)**: Reducer composition, effect cancellation IDs, and the exhaustive testing surface
 - **[iced](https://github.com/iced-rs/iced)**: Rust GUI framework (v0.12 design)
 - **[Bubble Tea](https://github.com/charmbracelet/bubbletea)**: Go TUI framework with TEA
 
