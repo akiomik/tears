@@ -15,13 +15,34 @@
 //! 5. **Subscriptions**: External event sources (keyboard, timers, etc.)
 //! 6. **Commands**: Asynchronous operations and runtime directives
 //!
+//! There are two ways to write such a program, over one execution path.
+//! [`Application`] and its [`Runtime`] entry point are the facade: one type
+//! holds the state and supplies `new`, `update`, `view` and `subscriptions`.
+//! Under them is the [`reducer`] core, where [`Reducer`](reducer::Reducer)
+//! is the state transition and a stack of composition combinators closes
+//! into a [`Program`](reducer::Program). [`ProgramRuntime`] runs any
+//! [`Program`](reducer::Program). [`Runtime`] and [`ProgramRuntime`] build
+//! the same kernel and drive the same pass loop, so the choice changes how a
+//! program is written and not how it is executed. `examples/dashboard.rs` and
+//! `examples/dashboard_composed.rs` are one application written both ways.
+//!
 //! ## Core Components
 //!
 //! - [`Application`]: The main trait that defines your application
 //! - [`Runtime`]: Manages the application lifecycle and event loop
 //! - [`Command`]: Represents asynchronous side effects and runtime directives
-//! - [`Subscription`]: Represents ongoing event sources
+//! - [`EffectCommand`]: The value every effect constructor returns, and the
+//!   only one [`cancellable`](EffectCommand::cancellable) can be called on
+//! - [`Subscription`]: Represents ongoing event sources, built from a
+//!   [`SubscriptionSource`] implementation and identified by a
+//!   [`SubscriptionId`]
 //! - [`install_panic_hook`]: Restores the terminal if the application panics
+//! - [`reducer::Reducer`]: A state transition and the subscriptions that
+//!   state declares
+//! - [`reducer::Program`]: A reducer that can be run — it produces its
+//!   initial state and renders
+//! - [`ProgramRuntime`]: Runs any [`reducer::Program`]
+//! - [`Exit`]: [`ProgramRuntime::run`]'s success type
 //!
 //! ## Example
 //!
