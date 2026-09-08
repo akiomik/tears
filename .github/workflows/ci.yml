@@ -248,30 +248,16 @@ jobs:
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
         id: criterion
-        # `--bench <name>` (singular, per-target) rather than `--benches`
-        # (plural): the plural form implicitly also runs the lib's unit
-        # tests, duplicating what the `test` job's matrix already covers.
-        # Criterion's own test mode is the smoke profile for it: one
-        # iteration, no sample, so what it gates is that it still compiles
-        # and runs. Both criterion benches are named, since no gate executes
-        # either anywhere else — `just test` selects targets explicitly now,
-        # and the load harness has the step after this one.
-        #
-        # The exit codes are collected rather than left to `bash -e`, so a red
-        # `gauge` does not stop `kernel_scan` from reporting: they measure
-        # different things and one failing says nothing about the other.
-        # Separate steps would carry the same property, given the condition
-        # the step below has; one step keeps that condition to a single
-        # place.
+        # Invoked through `just`, like the step below, so the bench names are
+        # not a copy of the recipe's and a contributor runs what this runs.
+        # The recipe states the rest: why the invocation names each target
+        # rather than passing `--benches`, and why the set it passes is
+        # `bench-internals` rather than the wider one this step passed before.
         #
         # This job is advisory either way: `Benchmarks` is not among `main`'s
-        # required contexts, so what a name here buys is a red job, not a
+        # required contexts, so a bench failing here is a red job, not a
         # blocked merge.
-        run: |
-          status=0
-          cargo test --bench gauge --features ${{ needs.versions.outputs.features }} || status=1
-          cargo test --bench kernel_scan --features ${{ needs.versions.outputs.features }} || status=1
-          exit $status
+        run: just bench-test
       - name: Run the load harness's smoke profiles
         # Reached whenever the step above ran at all, red or green: the
         # criterion benches say nothing about this one, and this is the

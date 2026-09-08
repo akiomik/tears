@@ -47,6 +47,14 @@
 # reproducible, the mechanism is not established, so treat the numbers above as
 # the reason and re-measure before widening either list. See issue #298.
 
+# The crate's one bench-only feature: what the benches' `required-features`
+# name and what all three bench recipes build under. `build_features` adds it
+# to `user_features` so that the `--all-targets` passes reach the bench
+# targets at all. Singular on purpose — `test-doc-packaged` matches it against
+# one entry of the crate's feature table, so a second bench-only feature is a
+# change to make here rather than a value to append.
+bench_feature := "bench-internals"
+
 # Every feature a dependant can name: the crate's feature table minus the two
 # build-only entries. All three TLS backends are here because they coexist and
 # a doctest gated on one must not go uncompiled because another was picked.
@@ -79,7 +87,7 @@ user_features := "dashmap,http,native-tls,rustls,rustls-tls-webpki-roots,thiserr
 # and `clippy-fix`, which they do not. `clippy-loom` and `build-all` pass
 # `--all-targets` too, under `loom-core` and under no features, so neither
 # reaches a `required-features` bench.
-build_features := user_features + ",bench-internals"
+build_features := user_features + "," + bench_feature
 
 # Default recipe to display help
 default:
@@ -141,21 +149,16 @@ clippy-fix:
 # job that does, is not among `main`'s required contexts. Before this change
 # the only thing in any gate that built and ran a bench was this recipe.
 #
-# No local gate executes one either. `bench-smoke` is the only recipe that
-# runs a bench at all, and it is in neither `check` nor `pre-commit`; it also
-# reaches the harness through `cargo bench`, whose profile inherits `release`,
-# so nothing runs `kernel_load` with `debug_assertions` on any more.
+# No local gate executes one either: `bench`, `bench-test` and `bench-smoke`
+# are in neither `check` nor `pre-commit`. What none of them covers is
+# `kernel_load` with `debug_assertions` on, since `bench-smoke` reaches it
+# through `cargo bench`, whose profile inherits `release`. Typing it by hand
+# gives that back, with a profile argument because the harness given none runs
+# the acceptance matrix — the 22 minutes this recipe just stopped taking:
 #
-# Typing it by hand gives that much back — the harness only. `gauge` and
-# `kernel_scan` lose their last local runner here and get no replacement,
-# which is #370. Given no argument the harness runs the acceptance matrix —
-# not the probe sweep, which is named-rows only — the 22 minutes this recipe
-# just stopped taking, so pass the profiles `bench-smoke` does, under the test
-# profile instead:
-#
-#     features=$(just --evaluate build_features)
-#     cargo test --bench kernel_load --features "$features" -- --self-test
-#     cargo test --bench kernel_load --features "$features" -- --smoke
+#     feature=$(just --evaluate bench_feature)
+#     cargo test --bench kernel_load --features "$feature" -- --self-test
+#     cargo test --bench kernel_load --features "$feature" -- --smoke
 
 # Run the tests
 test:
@@ -259,7 +262,8 @@ test-doc-packaged:
     # inside jq so the two sides cannot disagree on collation.
     jq -e --arg have '{{user_features}}' '
       ([.packages[0].features | keys[]
-        | select(. != "default" and . != "loom-core" and . != "bench-internals")]
+        | select(. != "default" and . != "loom-core"
+                 and . != "{{bench_feature}}")]
        | sort) as $want
       | ($have | split(",") | map(select(length > 0)) | sort) as $got
       | if $want == $got then true
@@ -301,9 +305,42 @@ test-doc-packaged:
 test-loom:
     RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test --features loom-core --lib -- cell_core accounting_core
 
-# Run criterion benchmarks
-bench:
-    cargo bench
+# Naming each target is what keeps `kernel_load` out: a bare `cargo bench`
+# carrying the feature reaches it, and given no argument its `main` runs the
+# full acceptance matrix — a deliberate acceptance run, reached by argument
+# through `bench-smoke` or by hand. `--benches` would reach it too, and the
+# lib besides: running its unit tests under `cargo test`, which the `test`
+# job's matrix already covers, and compiling them only to skip them under
+# `cargo bench`. Every `[[bench]]` quotes the feature in its own
+# `required-features`, and the two forms fail differently without it: a named
+# target errors — `requires the features: bench-internals` — while the bare
+# `cargo bench` this replaced skipped all three and exited 0.
+#
+# `bench_feature` is what those targets require, what both bench files
+# document and what `bench-smoke` passes, so `bench` measures under the
+# configuration its recorded numbers were taken under: criterion keys a stored
+# baseline on the benchmark id alone, so a wider set would be compared against
+# them and the build configuration reported as a regression. `bench-test`
+# takes the same set rather than the `build_features` the Benchmarks job
+# passed before, which trades the wide set's link-and-run coverage — the
+# narrow set had none for these two — for the narrow set's. Type-checking the
+# wide set survives in `Clippy`, the MSRV job's `cargo check --all-targets`,
+# `clippy` and `clippy-fix`, none of which links a binary.
+#
+# Each name is spelled once per recipe rather than held in a variable a loop
+# reads: two lines to edit when a criterion bench is added, and nothing checks
+# either shape against `Cargo.toml`'s `[[bench]]` names anyway, which is #371.
+_criterion subcommand name:
+    cargo {{subcommand}} --bench {{name}} --features "{{bench_feature}}"
+
+# Measure the criterion benchmarks
+bench: (_criterion "bench" "gauge") (_criterion "bench" "kernel_scan")
+
+# Criterion's test mode: one iteration and no sample, so what it proves is that
+# the benches still build and run, not what they cost.
+
+# Run the criterion benchmarks in test mode
+bench-test: (_criterion "test" "gauge") (_criterion "test" "kernel_scan")
 
 # RFC 0007 §6 and RFC 0014 §13.5; the CI Benchmarks profile.
 # Latency-assertion-free: proves the harness builds and the reduced rows
@@ -312,8 +349,8 @@ bench:
 
 # Run the load harness's smoke profiles
 bench-smoke:
-    cargo bench --bench kernel_load --features bench-internals -- --self-test
-    cargo bench --bench kernel_load --features bench-internals -- --smoke
+    cargo bench --bench kernel_load --features "{{bench_feature}}" -- --self-test
+    cargo bench --bench kernel_load --features "{{bench_feature}}" -- --smoke
 
 # Build the library
 build:
