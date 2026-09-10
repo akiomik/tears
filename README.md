@@ -421,17 +421,9 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 Contributions are welcome! Please feel free to submit issues or pull requests.
 
-Design contracts and invariants live in [docs/rfcs](docs/rfcs/README.md).
-If you are writing or amending an RFC, run the
-[pre-review checklist](docs/rfcs/pre-review-checklist.md) before
-requesting review. Testing conventions are documented in
-[docs/testing.md](docs/testing.md), and the release procedure in
-[docs/releasing.md](docs/releasing.md).
-
-An edit is not finished until the changed file's own documentation has been
-read again — the module doc, every doc comment under it, the comments in the
-body — and any disagreement with the code fixed on one side or the other,
-explicitly.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the conventions a change here follows
+and points at the documents that hold the rest — the RFC process, the API
+guidelines, the testing conventions and the release procedure.
 
 ---
 
