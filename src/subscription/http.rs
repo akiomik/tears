@@ -20,10 +20,20 @@
 //!
 //! # Example
 //!
-// Not compiled: the `impl` is partial and the types are placeholders. #385
-// tracks turning this and its siblings into real doctests, which for this one
-// means a complete `Application`.
-//! ```rust,ignore
+//! ```rust
+//! # use ratatui::Frame;
+//! # use tears::subscription::http::QueryError;
+//! # #[derive(Clone)]
+//! # struct User;
+//! # struct UserData;
+//! # async fn fetch_user() -> Result<User, QueryError> { Ok(User) }
+//! # async fn update_user_api(_input: UserData) -> Result<User, QueryError> { Ok(User) }
+//! # enum Message {
+//! #     UserQuery(QueryResult<User>),
+//! #     UpdateUser(UserData),
+//! #     UserUpdated(User),
+//! #     UpdateFailed(String),
+//! # }
 //! use tears::prelude::*;
 //! use tears::subscription::http::{Mutation, Query, QueryClient, QueryResult};
 //! use std::sync::Arc;
@@ -34,6 +44,16 @@
 //! }
 //!
 //! impl Application for App {
+//! #     type Message = Message;
+//! #     type Flags = ();
+//! #     fn new((): ()) -> (Self, Command<Message>) {
+//! #         let app = App {
+//! #             query_client: Arc::new(QueryClient::new()),
+//! #             user_result: None,
+//! #         };
+//! #         (app, Command::none())
+//! #     }
+//! #     fn view(&self, _frame: &mut Frame<'_>) {}
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![
 //!             Subscription::new(Query::new(
@@ -63,6 +83,10 @@
 //!             }
 //!             Message::UserUpdated(_) => {
 //!                 self.query_client.invalidate("user-123");
+//!                 Command::none()
+//!             }
+//!             Message::UpdateFailed(_) => {
+//!                 // Handle error
 //!                 Command::none()
 //!             }
 //!         }
