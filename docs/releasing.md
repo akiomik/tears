@@ -142,14 +142,11 @@ compiler reports none of it.
   an addition only the changelog names is one a reader has to already know
   to look for.
 
-  Feature-gated API is where presence is genuinely at stake, and this step
-  cannot fix it. docs.rs builds with `default`, which is empty, so nothing
-  under `ws` or `http` reaches it at all
-  ([#351](https://github.com/akiomik/tears/issues/351)). Until that is
-  settled, prose is the only reach such an addition has — and the
-  crate-root `## Optional Features` section is prose docs.rs does render,
-  so it is the half of "the README and the crate-root docs" that reaches a
-  reader who is already there.
+  Feature-gated API is the one case where presence rather than
+  discoverability is at stake: it reaches docs.rs only if the build there
+  enables its feature. Check that a new addition's feature is enabled —
+  `[package.metadata.docs.rs]` is where to look — since one that is not
+  leaves the addition absent there rather than merely hard to find.
 - Everything under `Changed` and `Removed` may have invalidated an example.
   The doctests cover rustdoc and the migration guides; the README's fenced
   blocks are compiled by nothing and have to be read.

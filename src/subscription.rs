@@ -40,10 +40,20 @@
 //! ## Transaction-based (HTTP)
 //!
 //! ```rust,ignore
+//! use tears::Subscription;
 //! use tears::subscription::http::Query;
 //!
-//! // In update():
-//! Query::new(client).fetch(id, fetch_fn, Message::UserLoaded)
+//! // In subscriptions(), over the Arc<QueryClient> the model holds: a fresh
+//! // one each pass gives the query a new identity, and it refetches instead
+//! // of serving what it retained.
+//! vec![
+//!     Subscription::new(Query::new(
+//!         "user-123",
+//!         || Box::pin(fetch_user()),
+//!         self.query_client.clone(),
+//!     ))
+//!     .map(Message::UserQuery),
+//! ]
 //! ```
 //!
 //! # Built-in Subscriptions
@@ -61,6 +71,14 @@
 #![cfg_attr(
     not(feature = "ws"),
     doc = "- `websocket::WebSocket` - WebSocket connections (requires `ws` feature)"
+)]
+#![cfg_attr(
+    feature = "http",
+    doc = "- [`http::Query`] - HTTP data fetching with retention (requires `http` feature)"
+)]
+#![cfg_attr(
+    not(feature = "http"),
+    doc = "- `http::Query` - HTTP data fetching with retention (requires `http` feature)"
 )]
 //!
 //!
