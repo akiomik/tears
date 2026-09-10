@@ -290,6 +290,44 @@ test-doc-packaged:
              | error
         end' <<<"$meta" >/dev/null
 
+    # And the manifest's `[package.metadata.docs.rs]` list, hand-written like
+    # the two above and, until this arm, held against nothing: a rename that
+    # updates the feature table and both lists above leaves this one naming a
+    # feature the crate no longer has, and `docs/releasing.md` prices a failed
+    # documentation build as not fixed by cutting another version.
+    #
+    # Held against `build_features` — which the arm above has just held
+    # against the feature table — rather than against that table itself,
+    # because the subset is what makes `doc-declared` a narrowing of the
+    # `Documentation` job rather than a different build, and `loom-core` is a
+    # feature that removes code. An absent table or an empty list fails here
+    # too; that state is what #351 reported.
+    #
+    # `features` is the only key allowed, `rustdoc-args` included — what the
+    # `doc_auto_cfg` pass #351 leaves open would add that one, and until
+    # `doc-declared` renders under it too the two would disagree in silence.
+    # Same for `all-features`, `no-default-features` and `cargo-args`, which
+    # settle the feature set somewhere neither can read. Adding a key is a
+    # name here and a line there. Which names belong in the list stays a
+    # judgment `Cargo.toml` records and no jq reaches; a `dep/feature` entry
+    # would fail, and there is none.
+    jq -e --arg have '{{build_features}}' '
+      ($have | split(",") | map(select(length > 0))) as $rendered
+      | (.packages[0].metadata.docs.rs // {}) as $table
+      | ($table.features // []) as $docs
+      | ([$table | keys[] | select(. != "features")]) as $unheld
+      | if ($unheld | length) > 0 then
+          ("package.metadata.docs.rs sets \($unheld | join(",")): only features "
+           + "is held here and rendered by doc-declared, so teach both or drop it") | error
+        elif ($docs | length) == 0 then
+          "package.metadata.docs.rs.features is missing or empty" | error
+        else ($docs - $rendered) as $outside
+          | if ($outside | length) == 0 then true
+            else "package.metadata.docs.rs.features is not a subset of build_features: \($outside | join(","))"
+                 | error
+            end
+        end' <<<"$meta" >/dev/null
+
     cargo package --no-verify --allow-dirty
     rm -rf "${out:?}/${pkg}"
     tar xzf "${out}/${pkg}.crate" -C "$out"
@@ -375,6 +413,34 @@ doc:
 # Generate documentation without opening
 doc-build:
     cargo doc --no-deps
+
+# Both of the `Documentation` job's renders go through here, so the flags are
+# written once and the feature set is the only thing that differs between
+# them — which is what makes a failure in either attributable to the set it
+# was given.
+
+# Build the documentation with warnings denied, under the features given
+doc-strict features:
+    RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --features "{{features}}"
+
+# `[package.metadata.docs.rs]`'s list is a subset of `build_features` —
+# `test-doc-packaged` holds it to one — and `build_features` is what that
+# job's other render uses, so what this adds is the render under the subset:
+# an intra-doc link to an item `bench-internals` gates resolves there and
+# fails here.
+#
+# The list is read rather than retyped, which would make a fourth copy of a
+# feature list. The job runs this, so what it catches is caught on the PR
+# that introduces it.
+
+# Build the documentation under the feature list the manifest declares for it
+doc-declared:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    meta=$(cargo metadata --no-deps --format-version 1)
+    features=$(jq -r '.packages[0].metadata.docs.rs.features // [] | join(",")' <<<"$meta")
+    [[ -n $features ]] || { echo "package.metadata.docs.rs.features is missing or empty" >&2; exit 1; }
+    {{just_executable()}} doc-strict "$features"
 
 # Generate code coverage report
 coverage:

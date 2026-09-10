@@ -329,10 +329,17 @@ jobs:
         with:
           toolchain: ${{ needs.versions.outputs.pinned }}
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@just
       - name: Build documentation
-        run: cargo doc --no-deps --features ${{ needs.versions.outputs.features }}
-        env:
-          RUSTDOCFLAGS: -D warnings
+        run: just doc-strict "${{ needs.versions.outputs.features }}"
+      # The set above is a superset of the one `[package.metadata.docs.rs]`
+      # declares, so a rustdoc error that only the narrower set produces
+      # passes the step above: an intra-doc link to an item `bench-internals`
+      # gates resolves there and not here. Invoked via `just` so the local and
+      # CI invocations are identical, and so the narrower list is read from
+      # the manifest rather than restated here.
+      - name: Build documentation under the declared feature list
+        run: just doc-declared
 
   doctest:
     name: Doc Tests
