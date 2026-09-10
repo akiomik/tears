@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-11
+
+### Fixed
+
+- `TestDriver::boot` and `TestDriver::step_pass` no longer report a correctly
+  drained kernel as a hang on the step that terminates the program. The
+  quiescent wait that runs at termination polled its condition before each
+  executor turn and never after the last one, so a kernel whose join set
+  drained *on* that final turn was never observed draining: the wait ran out
+  its budget and panicked with "the terminated kernel's join set did not
+  drain", naming a cause that had not happened. The bound now moves before
+  the turn, which is the shape the driver's other bounded waits already use
+
 ## [0.11.0] - 2026-08-29
 
 > Upgrading from 0.10.x? The
@@ -1216,7 +1229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive API documentation with examples
 - Counter example demonstrating timer and keyboard input
 
-[unreleased]: https://github.com/akiomik/tears/compare/v0.11.0...HEAD
+[unreleased]: https://github.com/akiomik/tears/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/akiomik/tears/releases/tag/v0.11.1
 [0.11.0]: https://github.com/akiomik/tears/releases/tag/v0.11.0
 [0.10.2]: https://github.com/akiomik/tears/releases/tag/v0.10.2
 [0.10.1]: https://github.com/akiomik/tears/releases/tag/v0.10.1

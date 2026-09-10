@@ -1,6 +1,6 @@
 [package]
 name = "tears"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 authors = ["Akiomi Kamakura <akiomik@gmail.com>"]
 description = "A simple and elegant TUI framework with The Elm Architecture (TEA) and TCA-style reducer composition"
