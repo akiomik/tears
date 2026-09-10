@@ -665,8 +665,10 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// This allows you to adapt a command that produces messages of one type
     /// to produce messages of another type. This is particularly useful when
-    /// composing commands from different parts of your application or when
-    /// working with generic operations like HTTP mutations.
+    /// composing commands from different parts of your application.
+    ///
+    /// [`EffectCommand::map`] does this to an effect that has not been
+    /// converted into a `Command` yet.
     ///
     /// # Arguments
     ///
@@ -690,31 +692,6 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// // Map it to your application's message type
     /// let cmd = cmd.map(Message::DataLoaded);
-    /// ```
-    ///
-    /// # Advanced Example with Mutation
-    ///
-    /// ```rust,ignore
-    /// use tears::prelude::*;
-    /// use tears::subscription::http::{Mutation, QueryError};
-    ///
-    /// enum Message {
-    ///     UserUpdated(User),
-    ///     UpdateFailed(String),
-    /// }
-    ///
-    /// // Carry the mutation's effect into a command
-    /// let cmd: Command<Result<User, QueryError>> = Mutation::mutate(
-    ///     user_data,
-    ///     |input| Box::pin(async move { update_user_api(input).await }),
-    /// )
-    /// .into();
-    ///
-    /// // Map it to your application's message type
-    /// let cmd = cmd.map(|result| match result {
-    ///     Ok(user) => Message::UserUpdated(user),
-    ///     Err(e) => Message::UpdateFailed(e.to_string()),
-    /// });
     /// ```
     pub fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Command<T>
     where

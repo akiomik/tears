@@ -26,35 +26,32 @@
 //!
 //! ## Stream-based (WebSocket)
 //!
-//! ```rust,ignore
-//! use tears::subscription::websocket::{WebSocket, WebSocketMessage, WebSocketCommand};
-//! use tokio::sync::mpsc;
+//! The subscription holds one connection open and hands over a sender when it
+//! connects, so a send is a control operation on that connection rather than a
+//! command to start.
 //!
-//! struct App {
-//!     ws_sender: Option<mpsc::UnboundedSender<WebSocketCommand>>,
-//! }
-//!
-//! // Store sender on connection, use it to send messages immediately
-//! ```
+#![cfg_attr(
+    feature = "ws",
+    doc = "See [`websocket::WebSocket`] for the worked example (requires `ws` feature)."
+)]
+#![cfg_attr(
+    not(feature = "ws"),
+    doc = "See `websocket::WebSocket` for the worked example (requires `ws` feature)."
+)]
 //!
 //! ## Transaction-based (HTTP)
 //!
-//! ```rust,ignore
-//! use tears::Subscription;
-//! use tears::subscription::http::Query;
+//! A query is declared like any other subscription, over the client the model
+//! holds; that client is what retains results between passes.
 //!
-//! // In subscriptions(), over the Arc<QueryClient> the model holds: a fresh
-//! // one each pass gives the query a new identity, and it refetches instead
-//! // of serving what it retained.
-//! vec![
-//!     Subscription::new(Query::new(
-//!         "user-123",
-//!         || Box::pin(fetch_user()),
-//!         self.query_client.clone(),
-//!     ))
-//!     .map(Message::UserQuery),
-//! ]
-//! ```
+#![cfg_attr(
+    feature = "http",
+    doc = "See the [`http`] module for the worked example (requires `http` feature)."
+)]
+#![cfg_attr(
+    not(feature = "http"),
+    doc = "See the `http` module for the worked example (requires `http` feature)."
+)]
 //!
 //! # Built-in Subscriptions
 //!

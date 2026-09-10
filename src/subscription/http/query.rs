@@ -387,6 +387,16 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 /// never takes effect. **To change the request, change the key** (for example
 /// by including the varying parameter in it).
 ///
+/// # Where the client lives
+///
+/// Hold the [`QueryClient`] in the model and clone the `Arc` into each query.
+/// The client's id is part of the subscription's identity, alongside the query
+/// key above, so a client constructed inside
+/// [`Application::subscriptions`](crate::Application::subscriptions) gives the
+/// query a new identity every pass — and a client just constructed retains
+/// nothing, so each pass fetches again instead of serving what the one before
+/// it retained.
+///
 /// # Example
 ///
 /// ```rust
