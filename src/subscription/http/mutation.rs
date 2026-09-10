@@ -21,7 +21,14 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use std::sync::Arc;
+//! # use ratatui::Frame;
+//! # use tears::subscription::http::QueryClient;
+//! # struct User;
+//! # struct UserData;
+//! # async fn update_user_api(_input: UserData) -> Result<User, QueryError> { Ok(User) }
+//! # struct App { query_client: Arc<QueryClient> }
 //! use tears::prelude::*;
 //! use tears::subscription::http::{Mutation, QueryError};
 //!
@@ -31,6 +38,14 @@
 //!     UpdateFailed(String),
 //! }
 //!
+//! # impl Application for App {
+//! #     type Message = Message;
+//! #     type Flags = ();
+//! #     fn new((): ()) -> (Self, Command<Message>) {
+//! #         (App { query_client: Arc::new(QueryClient::new()) }, Command::none())
+//! #     }
+//! #     fn view(&self, _frame: &mut Frame<'_>) {}
+//! #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
 //! fn update(&mut self, msg: Message) -> Command<Message> {
 //!     match msg {
 //!         Message::UpdateUser(data) => {
@@ -57,6 +72,7 @@
 //!         }
 //!     }
 //! }
+//! # }
 //! ```
 
 use std::marker::PhantomData;
@@ -126,7 +142,12 @@ impl<T> MutationResult<T> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use tears::subscription::http::{Mutation, QueryError};
+/// # struct User;
+/// # struct UserData;
+/// # async fn update_user_api(_input: UserData) -> Result<User, QueryError> { Ok(User) }
+/// # let user_data = UserData;
 /// let cmd = Mutation::mutate(
 ///     user_data,
 ///     |input| Box::pin(async move { update_user_api(input).await }),
@@ -153,7 +174,10 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # struct User;
+    /// # struct UserData;
+    /// # async fn update_user_api(_input: UserData) -> Result<User, QueryError> { Ok(User) }
     /// use tears::prelude::*;
     /// use tears::subscription::http::{Mutation, QueryError};
     ///

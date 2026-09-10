@@ -21,7 +21,13 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use ratatui::Frame;
+//! # use tears::subscription::http::QueryError;
+//! # #[derive(Clone)]
+//! # struct User;
+//! # async fn fetch_user() -> Result<User, QueryError> { Ok(User) }
+//! # enum Message { UserQuery(QueryResult<User>), RefreshUser }
 //! use tears::prelude::*;
 //! use tears::subscription::http::{Query, QueryClient, QueryResult};
 //! use std::sync::Arc;
@@ -32,6 +38,16 @@
 //! }
 //!
 //! impl Application for App {
+//! #     type Message = Message;
+//! #     type Flags = ();
+//! #     fn new((): ()) -> (Self, Command<Message>) {
+//! #         let app = App {
+//! #             query_client: Arc::new(QueryClient::new()),
+//! #             user_result: None,
+//! #         };
+//! #         (app, Command::none())
+//! #     }
+//! #     fn view(&self, _frame: &mut Frame<'_>) {}
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![
 //!             Subscription::new(Query::new(
@@ -185,7 +201,21 @@ impl QueryClient {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use ratatui::Frame;
+    /// # use tears::prelude::*;
+    /// # use tears::subscription::http::QueryClient;
+    /// # enum Message { UserUpdated }
+    /// # struct App { query_client: Arc<QueryClient> }
+    /// # impl Application for App {
+    /// #     type Message = Message;
+    /// #     type Flags = ();
+    /// #     fn new((): ()) -> (Self, Command<Message>) {
+    /// #         (App { query_client: Arc::new(QueryClient::new()) }, Command::none())
+    /// #     }
+    /// #     fn view(&self, _frame: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
     /// fn update(&mut self, msg: Message) -> Command<Message> {
     ///     match msg {
     ///         Message::UserUpdated => {
@@ -194,6 +224,7 @@ impl QueryClient {
     ///         }
     ///     }
     /// }
+    /// # }
     /// ```
     pub fn invalidate<K>(&self, key: K)
     where
@@ -358,7 +389,12 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use tears::subscription::http::{QueryError, QueryResult};
+/// # #[derive(Clone)]
+/// # struct User;
+/// # async fn fetch_user() -> Result<User, QueryError> { Ok(User) }
+/// # enum Message { UserQuery(QueryResult<User>) }
 /// use tears::Subscription;
 /// use tears::subscription::http::{Query, QueryClient};
 /// use std::sync::Arc;
@@ -397,7 +433,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use tears::subscription::http::{Query, QueryClient, QueryError};
+    /// # #[derive(Clone)]
+    /// # struct User;
+    /// # async fn fetch_user_from_api() -> Result<User, QueryError> { Ok(User) }
+    /// # let query_client = Arc::new(QueryClient::new());
     /// let query = Query::new(
     ///     "user-123",
     ///     || Box::pin(async {
