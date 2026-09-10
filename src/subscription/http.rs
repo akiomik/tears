@@ -1,12 +1,12 @@
 //! HTTP query and mutation support with retained data.
 //!
-//! This module provides subscription-based HTTP queries and command-based mutations,
+//! This module provides subscription-based HTTP queries and one-off mutations,
 //! similar to SWR or TanStack Query.
 //!
 //! # Capabilities
 //!
 //! - **Queries**: Subscription-based data fetching with automatic retention and refetching
-//! - **Mutations**: Command-based data modifications (POST, PUT, DELETE, etc.)
+//! - **Mutations**: One-off data modifications (POST, PUT, DELETE, etc.)
 //! - **Retention management**: Automatic retained-data invalidation and updates
 //!
 //! # Feature Flag

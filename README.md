@@ -244,10 +244,11 @@ way to write a program rather than a second runtime. See
 - **Signal** (`signal::Signal`): OS signal handling (Unix/Windows)
 - **WebSocket** (`websocket::WebSocket`, requires `ws`): Real-time bidirectional communication
 - **Query** (`http::Query`, requires `http`): HTTP data fetching with caching
-- **Mutation** (`http::Mutation`, requires `http`): HTTP data modifications
 - **MockSource** (`mock::MockSource`): Controllable mock for testing
 
 Create custom subscriptions by implementing the `SubscriptionSource` trait.
+`http::Mutation` does not implement it: a mutation is a one-off effect,
+dispatched from `update` rather than declared in `subscriptions`.
 
 ## Examples
 
