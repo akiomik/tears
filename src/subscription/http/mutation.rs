@@ -6,16 +6,16 @@
 //! # Design Pattern: Transaction-based Operations
 //!
 //! HTTP mutations use the **transaction-based** pattern. Each mutation operation
-//! returns a `Command` because HTTP requests are discrete side effects with clear
-//! start and end points. This design maintains TEA principles and makes operations
-//! testable and composable.
+//! returns an [`EffectCommand`] because HTTP requests are discrete side effects
+//! with clear start and end points. This design maintains TEA principles and
+//! makes operations testable and composable.
 //!
 //! Unlike queries which are subscriptions, mutations are one-off operations that
-//! return a Command. After a successful mutation, you typically want to invalidate
-//! related queries to trigger refetching.
+//! return an [`EffectCommand`]. After a successful mutation, you typically want
+//! to invalidate related queries to trigger refetching.
 //!
-//! [`Mutation::mutate`] returns a `Command<Result<_, QueryError>>` and does not
-//! emit [`MutationState`] values by itself. [`MutationState`] and
+//! [`Mutation::mutate`] returns an `EffectCommand<Result<_, QueryError>>` and
+//! does not emit [`MutationState`] values by itself. [`MutationState`] and
 //! [`MutationResult`] are helper types for applications that want to store
 //! mutation status in their own model.
 //!
@@ -44,6 +44,7 @@
 //!                 Ok(user) => Message::UserUpdated(user),
 //!                 Err(e) => Message::UpdateFailed(e.to_string()),
 //!             })
+//!             .into()
 //!         }
 //!         Message::UserUpdated(_) => {
 //!             // Invalidate user query to refetch
@@ -68,8 +69,8 @@ use super::query::QueryError;
 
 /// The state of a mutation result.
 ///
-/// This is a helper type for application models. [`Mutation::mutate`] returns a
-/// `Command<Result<_, QueryError>>`; it does not automatically emit
+/// This is a helper type for application models. [`Mutation::mutate`] returns an
+/// `EffectCommand<Result<_, QueryError>>`; it does not automatically emit
 /// `MutationState` values.
 #[derive(Debug, Clone)]
 pub enum MutationState<T> {
@@ -120,18 +121,15 @@ impl<T> MutationResult<T> {
 
 /// A mutation for performing data modifications (POST, PUT, PATCH, DELETE).
 ///
-/// Mutations are one-off operations that return a `Command`. Unlike queries,
-/// they don't maintain state or cache results.
+/// Mutations are one-off operations that return an [`EffectCommand`]. Unlike
+/// queries, they don't maintain state or cache results.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let cmd = Mutation::mutate(
 ///     user_data,
-///     |input| Box::pin(async move {
-///         http_client.put("/api/user").json(&input).send().await
-///     }),
-///     Message::UserUpdated,
+///     |input| Box::pin(async move { update_user_api(input).await }),
 /// );
 /// ```
 pub struct Mutation<I, O> {
@@ -143,10 +141,10 @@ where
     I: Send + 'static,
     O: Send + 'static,
 {
-    /// Executes a mutation and returns a `Command`.
+    /// Executes a mutation and returns an [`EffectCommand`].
     ///
     /// The returned command produces `Result<O, QueryError>` which can be mapped
-    /// to your application's message type using [`Command::map`].
+    /// to your application's message type using [`EffectCommand::map`].
     ///
     /// # Arguments
     ///

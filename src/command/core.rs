@@ -695,19 +695,26 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// # Advanced Example with Mutation
     ///
     /// ```rust,ignore
-    /// use tears::subscription::http::Mutation;
+    /// use tears::prelude::*;
+    /// use tears::subscription::http::{Mutation, QueryError};
     ///
     /// enum Message {
     ///     UserUpdated(User),
     ///     UpdateFailed(String),
     /// }
     ///
-    /// // Mutation returns Command<Result<User, Error>>
-    /// let cmd = Mutation::mutate(user_data, update_user_api)
-    ///     .map(|result| match result {
-    ///         Ok(user) => Message::UserUpdated(user),
-    ///         Err(e) => Message::UpdateFailed(e.to_string()),
-    ///     });
+    /// // Carry the mutation's effect into a command
+    /// let cmd: Command<Result<User, QueryError>> = Mutation::mutate(
+    ///     user_data,
+    ///     |input| Box::pin(async move { update_user_api(input).await }),
+    /// )
+    /// .into();
+    ///
+    /// // Map it to your application's message type
+    /// let cmd = cmd.map(|result| match result {
+    ///     Ok(user) => Message::UserUpdated(user),
+    ///     Err(e) => Message::UpdateFailed(e.to_string()),
+    /// });
     /// ```
     pub fn map<T>(self, f: impl Fn(Msg) -> T + Send + 'static) -> Command<T>
     where
