@@ -38,6 +38,14 @@ include = [
     "/CHANGELOG.md",
 ]
 
+# What docs.rs builds with. `grep -rn 'feature = "' src/` returns the four
+# features that gate an item there, and these are the two that gate documented
+# ones — the feature table declares `bench-internals` and `loom-core` not for
+# normal builds. `--all-features` renders the same item pages as these two, so
+# it would build `loom` and every TLS backend for nothing a reader sees.
+[package.metadata.docs.rs]
+features = ["http", "ws"]
+
 [features]
 default = []
 

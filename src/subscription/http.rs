@@ -3,17 +3,29 @@
 //! This module provides subscription-based HTTP queries and command-based mutations,
 //! similar to SWR or TanStack Query.
 //!
-//! # Features
+//! # Capabilities
 //!
 //! - **Queries**: Subscription-based data fetching with automatic retention and refetching
 //! - **Mutations**: Command-based data modifications (POST, PUT, DELETE, etc.)
 //! - **Retention management**: Automatic retained-data invalidation and updates
 //!
+//! # Feature Flag
+//!
+//! The types in this module need the `http` feature:
+//!
+//! ```toml
+//! [dependencies]
+//! tears = { version = "0.11", features = ["http"] }
+//! ```
+//!
 //! # Example
 //!
+// Not compiled: the `impl` is partial and the types are placeholders. #385
+// tracks turning this and its siblings into real doctests, which for this one
+// means a complete `Application`.
 //! ```rust,ignore
 //! use tears::prelude::*;
-//! use tears::subscription::http::{Query, QueryClient, Mutation};
+//! use tears::subscription::http::{Mutation, Query, QueryClient, QueryResult};
 //! use std::sync::Arc;
 //!
 //! struct App {
@@ -40,11 +52,14 @@
 //!                 Command::none()
 //!             }
 //!             Message::UpdateUser(data) => {
-//!                 Mutation::mutate(data, update_user_api)
-//!                     .map(|result| match result {
-//!                         Ok(user) => Message::UserUpdated(user),
-//!                         Err(e) => Message::UpdateFailed(e.to_string()),
-//!                     })
+//!                 Mutation::mutate(data, |input| {
+//!                     Box::pin(async move { update_user_api(input).await })
+//!                 })
+//!                 .map(|result| match result {
+//!                     Ok(user) => Message::UserUpdated(user),
+//!                     Err(e) => Message::UpdateFailed(e.to_string()),
+//!                 })
+//!                 .into()
 //!             }
 //!             Message::UserUpdated(_) => {
 //!                 self.query_client.invalidate("user-123");

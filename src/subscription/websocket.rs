@@ -9,11 +9,9 @@
 //! WebSocket uses the **stream-based bidirectional** pattern. The subscription
 //! manages a long-lived connection and provides an `mpsc::UnboundedSender` for
 //! immediate send operations. This design reflects the real-time, streaming
-//! nature of WebSocket communication.
-//!
-//! For more details on why this pattern is used instead of `Command`-based
-//! sending, see the "Design Philosophy" section in the [`subscription`](crate::subscription)
-//! module documentation.
+//! nature of WebSocket communication: sending is a control operation on a
+//! connection that already exists, not a new side effect for a
+//! [`Command`](crate::Command) to start.
 //!
 //! # Disconnection and reconnection
 //!
