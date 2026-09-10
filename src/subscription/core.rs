@@ -213,8 +213,8 @@ pub trait SubscriptionSource: Send {
 
     /// Get the owned structural key for this subscription.
     ///
-    /// The framework combines this value with the concrete source type when it
-    /// constructs the opaque subscription identity.
+    /// The framework carries this value into the opaque [`SubscriptionId`],
+    /// which documents what the identity compares.
     ///
     /// This method must return equal keys for the same logical source identity
     /// across calls, including when fresh source values are constructed by
@@ -230,8 +230,9 @@ pub trait SubscriptionSource: Send {
 ///
 /// Two subscriptions with the same ID are considered identical.
 ///
-/// IDs compare their concrete source type and original structural key. Hashing
-/// is used only for indexing and never makes unequal keys equal.
+/// IDs compare three things: the concrete source type, the original structural
+/// key, and the scope path [`Subscription::scoped`] applies (RFC 0005 INV-1).
+/// Hashing is used only for indexing and never makes unequal keys equal.
 pub struct SubscriptionId {
     pub(super) source_type_id: TypeId,
     source_type_name: &'static str,

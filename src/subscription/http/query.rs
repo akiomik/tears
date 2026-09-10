@@ -160,13 +160,13 @@ impl QueryClient {
     #[must_use]
     pub fn with_config(config: QueryConfig) -> Self {
         Self {
-            // `client_id` is an identity component — subscription identity is
-            // `(client_id, TypeId, QueryKey)` (RFC 0001) — so reusing an id
-            // would collide distinct clients' identities. The allocator fails
-            // before it can reuse a value: on exhaustion the failed
-            // `fetch_update` stores nothing, leaving the counter saturated at
-            // `u64::MAX`, so this and every later allocation panics instead of
-            // wrapping into reuse.
+            // `client_id` is an identity component: it is the first element
+            // of `Query<V>::Key`, which the subscription id compares, so
+            // reusing an id would collide distinct clients' identities
+            // (RFC 0001 INV-5). The allocator fails before it can reuse a
+            // value: on exhaustion the failed `fetch_update` stores nothing,
+            // leaving the counter saturated at `u64::MAX`, so this and every
+            // later allocation panics instead of wrapping into reuse.
             client_id: NEXT_QUERY_CLIENT_ID
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .expect(
@@ -349,11 +349,12 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 /// # Changing the request
 ///
 /// Replacing the fetcher while keeping the same key is **not supported**. The
-/// runtime keys the running subscription by its identity (`QueryClient`, key,
-/// and value type), so constructing a new `Query::new(key, new_fetcher, client)`
-/// with an unchanged key keeps the existing stream and the old fetcher; the new
-/// fetcher never takes effect. **To change the request, change the key** (for
-/// example by including the varying parameter in it).
+/// runtime keys the running subscription by its
+/// [`SubscriptionId`](crate::SubscriptionId), which the fetcher is no part of,
+/// so constructing a new `Query::new(key, new_fetcher, client)` with an
+/// unchanged key keeps the existing stream and the old fetcher; the new fetcher
+/// never takes effect. **To change the request, change the key** (for example
+/// by including the varying parameter in it).
 ///
 /// # Example
 ///

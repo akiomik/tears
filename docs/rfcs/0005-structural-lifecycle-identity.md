@@ -33,8 +33,8 @@ a correctness failure, not merely an unlikely `HashMap` performance collision.
 This RFC replaces the pre-hashed surrogate with a framework-owned erased
 structural key. Each `SubscriptionSource` returns an associated `Key`, and
 `Subscription::new` combines the concrete source type with that original key.
-A subscription identity compares its source type, logical-key type, and
-logical-key value. Hashing remains an indexing operation; equality is never
+A subscription's local identity compares its source type, logical-key type,
+and logical-key value. Hashing remains an indexing operation; equality is never
 reduced to a hash digest.
 
 Structural local identity is also the foundation for safe feature composition.
@@ -335,7 +335,7 @@ impl<Msg: 'static> Subscription<Msg> {
 }
 
 impl std::fmt::Debug for SubscriptionId { /* diagnostic only */ }
-impl PartialEq for SubscriptionId { /* source type + erased structural key */ }
+impl PartialEq for SubscriptionId { /* local identity, §2.2 */ }
 impl Eq for SubscriptionId {}
 impl std::hash::Hash for SubscriptionId { /* same structural components */ }
 impl std::panic::UnwindSafe for SubscriptionId { /* preserved compatibility */ }
