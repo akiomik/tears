@@ -23,18 +23,39 @@
 //! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's drain, as the kernel applies it |
 //! | [`dismissing_the_slot_tears_down_its_occupant_s_runs`] | INV-RC3's dismissal shape, likewise |
 //! | [`a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`] | INV-RC3's no-diff adversary and INV-RC4's batch remove-and-reinsert |
+//! | [`a_replacement_s_successor_declares_again_at_the_predecessor_s_exit`] | §5.1's barrier and §5.2's dirt, over a boundary's replacement |
+//! | [`a_replaced_slot_occupant_s_successor_declares_again_at_the_predecessor_s_exit`] | the same, for the slot's replacing shape |
+//! | [`a_replacement_that_stops_no_subscription_declares_in_the_replacing_pass`] | the same barrier's condition, from its other side |
 //! | [`a_key_addressed_message_after_a_reinsert_reaches_the_new_instance`] | INV-ST8's positive half, §2.5's third routing clause |
 //! | [`a_message_for_a_closed_row_starts_nothing`] | §2.5's routing boundary, INV-ST8's negative half |
 //!
-//! # The one row a mutation was run against
+//! # The rows a mutation was run against
 //!
-//! The no-diff adversary is the only row here whose subject an unrelated
-//! mechanism could satisfy, so it is the one that was checked by mutation
-//! rather than by reading. Replacing the drain with a state-diff-equivalent
-//! one — returning only the keys absent from the collection when the drain
-//! runs — leaves every other row in this file passing and fails that row on
-//! its unkeyed-run assertion. The row's own comment records why the
-//! assertion is on the unkeyed run and not the keyed one.
+//! Four rows here have a subject an unrelated mechanism could satisfy, so
+//! each was checked by mutation rather than by reading. Every mutation
+//! below was run; what is recorded is which rows in **this file** failed,
+//! not which were expected to. Rows elsewhere may fail too — dropping the
+//! barrier reaches one in [`admission`](super::admission), for instance —
+//! and the column does not enumerate them.
+//!
+//! | mutation | rows in this file it fails |
+//! | --- | --- |
+//! | the drain returns only keys absent from the collection at drain time | the no-diff adversary, on its unkeyed run; the keyed replacement, where it asserts the replacing pass admits nothing |
+//! | `any_stopping_sub` dropped from the reconcile barrier | both replacement rows, where they assert the replacing pass admits nothing |
+//! | `Keyed::insert` records the removal without installing the value | the keyed replacement, on the source only its successor declares; the condition row, where it asserts the admission |
+//! | `Slot::present` records the dismissal but keeps the occupant | the slot replacement, likewise |
+//! | `is_stopping_sub` widened to any stopping run | the barrier's condition row, where it asserts the admission |
+//!
+//! The no-diff adversary's own comment records why its assertion is on the
+//! unkeyed run and not the keyed one. The two "records the removal but does
+//! not install" mutations are what the shared-plus-own source pair exists
+//! for on the replacement rows: one identity declared by both instances
+//! cannot tell a successor declaring from a predecessor left in place
+//! re-declaring at its own exit. The condition row needs no such pair — its
+//! successor is the only declarer there — which is why the same mutation
+//! reaches it. What that row does need is a predecessor holding a command
+//! run: holding nothing leaves the barrier nothing to read either, and the
+//! row would pass without its subject being what made it.
 //!
 //! [`ReducerExt::into_program`]: crate::reducer::combinator::ReducerExt::into_program
 
@@ -84,8 +105,8 @@ struct PaneState {
     /// Marked every time *this instance's* state is reduced — how a row
     /// tells the predecessor's state from the successor's.
     seen: Beacon,
-    /// The source this instance declares, when it declares one.
-    declares: Option<ProbeSource>,
+    /// The sources this instance declares, if any.
+    declares: Vec<ProbeSource>,
 }
 
 impl PaneState {
@@ -100,7 +121,7 @@ impl PaneState {
             keyed,
             anon,
             seen: Beacon::default(),
-            declares: None,
+            declares: Vec::new(),
         }
     }
 
@@ -113,8 +134,15 @@ impl PaneState {
     }
 
     fn declaring(reclaimed: Beacon, source: ProbeSource) -> Self {
+        Self::declaring_all(reclaimed, vec![source])
+    }
+
+    /// An instance declaring one or more sources. The two-source case is
+    /// what it exists for: a row that needs one identity shared with
+    /// another instance and one only this instance declares.
+    fn declaring_all(reclaimed: Beacon, sources: Vec<ProbeSource>) -> Self {
         Self {
-            declares: Some(source),
+            declares: sources,
             ..Self::new(reclaimed)
         }
     }
@@ -160,6 +188,13 @@ enum Act {
     /// placed under that same key — so one command carries the journal's
     /// teardown *and* the successor's spawn (RFC 0013 R4).
     Recreate(u8),
+    /// Replace `key`'s occupant through [`Keyed::insert`] alone, returning
+    /// no command — so nothing but the replacement's own teardown drives
+    /// what follows.
+    Replace(u8),
+    /// The slot's shape of [`Act::Replace`]: [`Slot::present`] over an
+    /// occupant, returning no command.
+    Represent,
     /// Empty the slot.
     Dismiss,
 }
@@ -170,8 +205,9 @@ struct RootState {
     panes: Keyed<u8, PaneState>,
     modal: Slot<PaneState>,
     acts: HashMap<u8, Act>,
-    /// The instance each [`Act::Recreate`] installs, in order. The test
-    /// builds them so it can watch each instance's runs separately.
+    /// The instance each act that installs one takes, in order — an act
+    /// that only removes takes none. The test builds them so it can watch
+    /// each instance's runs separately.
     successors: VecDeque<PaneState>,
 }
 
@@ -208,6 +244,22 @@ impl Reducer for Root {
                     .cancellable(CommandId::new("work"))
                     .scoped(key)
                     .into()
+            }
+            Some(Act::Replace(key)) => {
+                let successor = state
+                    .successors
+                    .pop_front()
+                    .expect("the script supplies one successor per replacement");
+                state.panes.insert(key, successor);
+                Command::none()
+            }
+            Some(Act::Represent) => {
+                let successor = state
+                    .successors
+                    .pop_front()
+                    .expect("the script supplies one successor per replacement");
+                state.modal.present(successor);
+                Command::none()
             }
             Some(Act::Dismiss) => {
                 state.modal.dismiss();
@@ -251,7 +303,7 @@ struct Setup {
     modal: Option<PaneState>,
     /// The scripted acts, by step.
     acts: HashMap<u8, Act>,
-    /// One instance per [`Act::Recreate`], in order.
+    /// One instance per act that installs one, in order.
     successors: VecDeque<PaneState>,
     /// The messages the init effect emits, one per grant.
     trigger: Vec<Msg>,
@@ -530,7 +582,8 @@ fn dismissing_the_slot_tears_down_its_occupant_s_runs() {
 // teardown is the only thing that reaches it, and the journal is the only
 // thing that emits one here. Verified by mutation: with the drain filtered
 // to keys absent at drain time (a state-diff-equivalent journal), this row
-// fails on `old_anon` while every other row in this file still passes.
+// fails on `old_anon`. The module doc's table records which other row that
+// mutation reaches.
 #[test]
 fn a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh() {
     let (old_keyed, old_anon, new) = (Beacon::default(), Beacon::default(), Beacon::default());
@@ -571,6 +624,178 @@ fn a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_f
     assert!(
         !new.marked(),
         "and the successor is the run that survives the application point"
+    );
+}
+
+// When a replacement's successor starts running what it declares, read
+// through the kernel rather than inferred from the teardown contract.
+//
+// The replacing pass admits nothing: the teardown stop-requests the
+// outgoing row's subscription run, and the uniform barrier defers every
+// admission runtime-wide while a subscription run is still stopping
+// (RFC 0014 §5.1). What ends the gap is the predecessor's own exit — its
+// quiescence marks subscriptions dirty (§5.2) and `ProducerExit` is a wake
+// source — so no unrelated event is needed, and the row drives that pass by
+// that source to say so.
+//
+// The successor declares two sources and the predecessor one of them. The
+// shared identity is the case the gap is hardest to see in — the same
+// `SubscriptionId` leaves and returns, with one pass in between running
+// none of it — and it is on its own indistinguishable from a predecessor
+// left in place re-declaring at its own exit. The source only the successor
+// declares is what tells those apart.
+#[test]
+fn a_replacement_s_successor_declares_again_at_the_predecessor_s_exit() {
+    let shared = ProbeSource::silent("both");
+    let successor_only = ProbeSource::silent("successor");
+    let mut driver = driver(
+        Setup::new(vec![Msg::Act(1)])
+            .opening(vec![(
+                1,
+                PaneState::declaring(Beacon::default(), shared.clone()),
+            )])
+            .acting(1, Act::Replace(1))
+            .succeeding(PaneState::declaring_all(
+                Beacon::default(),
+                vec![shared.clone(), successor_only.clone()],
+            )),
+    );
+    let trigger = driver.boot().started[0].clone();
+    assert_eq!(
+        (shared.admissions(), successor_only.admissions()),
+        (1, 0),
+        "boot admitted the row's one declaration"
+    );
+
+    deliver(&mut driver, &trigger);
+    assert_eq!(
+        (shared.admissions(), successor_only.admissions()),
+        (1, 0),
+        "the replacing pass admits nothing behind its own teardown"
+    );
+
+    // `settle` turns the executor without running a pass, and admission
+    // happens only inside one, so there is nothing to assert between here
+    // and the step below that a mutation could reach.
+    driver.settle(TEST_TURNS, || shared.quiescences() > 0);
+
+    assert!(
+        driver.step_pass(WakeSource::Data).is_err(),
+        "no unrelated arrival is waiting to drive the pass"
+    );
+
+    let stepped = driver
+        .step_pass(WakeSource::ProducerExit)
+        .expect("the predecessor's exit is a wake source of its own");
+    assert_eq!(
+        successor_only.admissions(),
+        1,
+        "the successor is what declares, not a predecessor left in place"
+    );
+    assert_eq!(
+        shared.admissions(),
+        2,
+        "and the identity both instances declare left and returned"
+    );
+    assert_eq!(
+        stepped.started.len(),
+        2,
+        "both are fresh runs, started by that pass"
+    );
+}
+
+// The slot's replacing shape, which is what `ReducerExt::presented` states
+// shares `for_each`'s timing. Only that shape differs from the row above —
+// `Slot::present` over an occupant rather than `Keyed::insert` over a key —
+// so this row reads the two facts the shape has to reach and leaves the
+// wake-source negative probe to the row that established it.
+#[test]
+fn a_replaced_slot_occupant_s_successor_declares_again_at_the_predecessor_s_exit() {
+    let shared = ProbeSource::silent("both");
+    let successor_only = ProbeSource::silent("successor");
+    let mut driver = driver(
+        Setup::new(vec![Msg::Act(1)])
+            .presenting(PaneState::declaring(Beacon::default(), shared.clone()))
+            .acting(1, Act::Represent)
+            .succeeding(PaneState::declaring_all(
+                Beacon::default(),
+                vec![shared.clone(), successor_only.clone()],
+            )),
+    );
+    let trigger = driver.boot().started[0].clone();
+    assert_eq!(
+        (shared.admissions(), successor_only.admissions()),
+        (1, 0),
+        "boot admitted the occupant's one declaration"
+    );
+
+    deliver(&mut driver, &trigger);
+    assert_eq!(
+        (shared.admissions(), successor_only.admissions()),
+        (1, 0),
+        "the replacing pass admits nothing behind its own teardown"
+    );
+
+    driver.settle(TEST_TURNS, || shared.quiescences() > 0);
+    let stepped = driver
+        .step_pass(WakeSource::ProducerExit)
+        .expect("the predecessor's exit is a wake source of its own");
+    assert_eq!(
+        (shared.admissions(), successor_only.admissions()),
+        (2, 1),
+        "the successor is what declares, at the predecessor's exit"
+    );
+    assert_eq!(
+        stepped.started.len(),
+        2,
+        "both are fresh runs, started by that pass"
+    );
+}
+
+// The condition on the row above, from its other side. The defer is
+// `issued || any_stopping_sub`, so a replacement whose predecessor holds a
+// run the barrier does not read leaves it nothing to hold: the successor's
+// declarations are admitted in the pass that replaced it. What
+// `ReducerExt::for_each` states is conditioned on a *subscription* run being
+// stopped, and this is that condition read off the kernel rather than off
+// the sentence.
+//
+// So the predecessor is given a keyed command run to hold — `PaneMsg::Work`
+// before the replacement — and the teardown stops it. A predecessor holding
+// nothing at all would leave the barrier nothing to read either, and the row
+// would pass without the sub-only scope being what made it. That scope is
+// INV-RC12 (a)'s and is pinned in `lifecycle`; what this row adds is a
+// boundary's replacement reaching it.
+#[test]
+fn a_replacement_that_stops_no_subscription_declares_in_the_replacing_pass() {
+    let successor_only = ProbeSource::silent("successor");
+    let mut driver = driver(
+        Setup::new(vec![Msg::Row(1, PaneMsg::Work), Msg::Act(1)])
+            .opening(vec![(1, PaneState::new(Beacon::default()))])
+            .acting(1, Act::Replace(1))
+            .succeeding(PaneState::declaring(
+                Beacon::default(),
+                successor_only.clone(),
+            )),
+    );
+    let trigger = driver.boot().started[0].clone();
+    assert_eq!(
+        successor_only.admissions(),
+        0,
+        "the outgoing row declared nothing to begin with"
+    );
+
+    let started = deliver(&mut driver, &trigger);
+    assert!(
+        matches!(started.as_slice(), [RunKind::Keyed(_)]),
+        "the predecessor holds a command run for the teardown to stop: {started:?}"
+    );
+
+    deliver(&mut driver, &trigger);
+    assert_eq!(
+        successor_only.admissions(),
+        1,
+        "with no subscription run stopping, the replacing pass admits the successor's"
     );
 }
 

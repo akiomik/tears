@@ -98,10 +98,12 @@
 //! and its key's scope disagree and both still reach it; [`cleanup`] carries
 //! INV-RC8's behavioral clauses and INV-RC12 (a)'s cleanup neighbour;
 //! [`combinator`] carries INV-RC2, INV-RC3, and INV-RC4's rows as the kernel
-//! applies them, over a program that is a closed combinator stack rather
-//! than the scripted reducer; [`admission`] carries RFC 0012's admission
-//! suite — INV-SE1, INV-SE2, INV-SE3's immediate half, and INV-SE4's
-//! mandated supersession sequence — which is INV-RC12's first clause; and
+//! applies them, plus RFC 0014 §5.1's barrier and §5.2's dirt where a
+//! boundary's replacement reaches them, over a program that is a closed
+//! combinator stack rather than the scripted reducer; [`admission`] carries
+//! RFC 0012's admission suite — INV-SE1, INV-SE2, INV-SE3's immediate half,
+//! and INV-SE4's mandated supersession sequence — which is INV-RC12's first
+//! clause; and
 //! [`observability`] carries the batch event's kernel reading, INV-RC15's
 //! behavioural neighbour (RFC 0014 §9 row 9), and the removal condition's
 //! exit-observation half on the gauge surface (its dequeue-site mirror is
