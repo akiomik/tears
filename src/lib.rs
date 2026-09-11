@@ -27,8 +27,11 @@
 //! into a [`Program`](reducer::Program). [`ProgramRuntime`] runs any
 //! [`Program`](reducer::Program). [`Runtime`] and [`ProgramRuntime`] build
 //! the same kernel and drive the same pass loop, so the choice changes how a
-//! program is written and not how it is executed. `examples/dashboard.rs` and
-//! `examples/dashboard_composed.rs` are one application written both ways.
+//! program is written and not how it is executed; the [`reducer`] module docs
+//! say when the rewrite is worth it, against one application written both ways
+//! — [`examples/dashboard.rs`](https://docs.rs/crate/tears/latest/source/examples/dashboard.rs)
+//! and
+//! [`examples/dashboard_composed.rs`](https://docs.rs/crate/tears/latest/source/examples/dashboard_composed.rs).
 //!
 //! ## Core Components
 //!

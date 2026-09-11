@@ -232,9 +232,10 @@ run when a teardown selects the scope it was built at; one built at a scope
 nothing tears down never runs.
 
 An `Application` is run through an adapter over the same kernel, so this is a
-way to write a program rather than a second runtime. See
-[docs/composition.md](docs/composition.md) for when the rewrite is worth it, and
-[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) for
+way to write a program rather than a second runtime. The
+[`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/) module docs say
+when the rewrite is worth it, and
+[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) is
 `dashboard.rs` written the other way.
 
 ### Built-in Subscriptions
