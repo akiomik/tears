@@ -84,7 +84,13 @@ the root reducer, so the root keeps exactly the messages that are its own.
   `Keyed::insert` over an occupied key and `Slot::present` over an occupied slot
   — and the boundary turns each recorded removal into one teardown of that
   instance's scope. The removed instance's subscriptions stop, its in-flight
-  commands are cancelled, and the cleanup hooks it registered run.
+  commands are cancelled, and the cleanup hooks it registered run. Stopping a
+  subscription reaches past the instance that declared it: while any
+  subscription run is stopping the runtime starts none, so a replacement's
+  successor — and any other row's new declarations — wait for that run to
+  quiesce. The combinators state the timing
+  ([`for_each`](https://docs.rs/tears/latest/tears/reducer/trait.ReducerExt.html#method.for_each),
+  [`presented`](https://docs.rs/tears/latest/tears/reducer/trait.ReducerExt.html#method.presented)).
 - **It discards what it cannot route.** A message addressed to a key the
   collection no longer holds, or to a slot with no occupant, reaches no reducer
   and is dropped — with no diagnostic, and with no way for the sender to learn

@@ -29,8 +29,9 @@
 //!
 //! The two replacement shapes are removals because that is what replacement
 //! *means* here: the old instance is torn down and the new one starts fresh
-//! (RFC 0014 §2.5). Insertion into an absent key and presentation into an
-//! empty slot record nothing — there was no instance to remove.
+//! (RFC 0014 §2.5) — each on the timing its boundary's combinator states.
+//! Insertion into an absent key and presentation into an empty slot record
+//! nothing — there was no instance to remove.
 //!
 //! **Four shapes is the whole surface, and that is deliberate.** There is no
 //! `retain`, no `clear`, no `drain`, no `IndexMut`, and no `&mut` iterator:
@@ -113,9 +114,10 @@ impl<K: ScopeValue, V> Keyed<K, V> {
     /// Inserts `value` under `key`, returning the instance it replaced.
     ///
     /// Replacing an occupied key **records a removal**: the old instance is
-    /// torn down and the new one starts fresh (RFC 0014 §2.5). The position
-    /// in the iteration order is the old instance's, so a replacement does
-    /// not reorder the collection.
+    /// torn down and the new one starts fresh (RFC 0014 §2.5), on the timing
+    /// [`ReducerExt::for_each`](crate::reducer::ReducerExt::for_each)
+    /// states. The position in the iteration order is the old instance's, so
+    /// a replacement does not reorder the collection.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         if let Some(row) = self.rows.iter_mut().find(|(held, _)| *held == key) {
             self.removals.push(key);
@@ -249,7 +251,9 @@ impl<S> Slot<S> {
     ///
     /// Presenting over an occupied slot **records a removal**, for the reason
     /// [`Keyed::insert`] does: replacement is a teardown of the old instance
-    /// and a fresh start for the new one.
+    /// and a fresh start for the new one, on the timing
+    /// [`ReducerExt::presented`](crate::reducer::ReducerExt::presented)
+    /// states.
     pub const fn present(&mut self, value: S) -> Option<S> {
         let replaced = self.value.replace(value);
         if replaced.is_some() {
