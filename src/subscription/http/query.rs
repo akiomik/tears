@@ -761,6 +761,7 @@ mod tests {
 
     use tokio::time::{Duration, timeout};
 
+    use crate::Subscription;
     use crate::test_support::{assert_pending_until, gate_fetches};
 
     #[test]
@@ -1428,6 +1429,91 @@ mod tests {
             fetch_count.load(Ordering::SeqCst),
             1,
             "loser stream must not invoke the fetcher after the shared success"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_queries_hold_distinct_ids_and_share_one_cell() {
+        let client = Arc::new(QueryClient::new());
+        let winner_count = Arc::new(AtomicUsize::new(0));
+        let loser_count = Arc::new(AtomicUsize::new(0));
+        let (mut releases, gates) = gate_fetches(1);
+
+        let winner_count_clone = winner_count.clone();
+        let gates_clone = gates.clone();
+        let winner = Query::new(
+            "key",
+            move || {
+                let count = winner_count_clone.clone();
+                let gates = gates_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    gates.next().await.expect("fetch gate should be released");
+                    Ok::<i32, QueryError>(7)
+                })
+            },
+            client.clone(),
+        );
+
+        let loser_count_clone = loser_count.clone();
+        let loser = Query::new(
+            "key",
+            move || {
+                let count = loser_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<i32, QueryError>(99)
+                })
+            },
+            client,
+        );
+
+        let winner_subscription = Subscription::new(winner).scoped("pane-1");
+        let loser_subscription = Subscription::new(loser).scoped("pane-2");
+        assert_ne!(
+            winner_subscription.id, loser_subscription.id,
+            "two boundaries must hold distinct subscription ids"
+        );
+
+        let mut winner_stream = winner_subscription.into_stream();
+        let mut loser_stream = loser_subscription.into_stream();
+
+        let winner_loading = winner_stream.next().await;
+        assert!(matches!(winner_loading, Some(ref result) if result.is_loading()));
+
+        let winner_success_poll = winner_stream.next();
+        tokio::pin!(winner_success_poll);
+        assert_pending_until(
+            &mut winner_success_poll,
+            || winner_count.load(Ordering::SeqCst) >= 1,
+            "winning fetch completed before its gate was released",
+            "winning fetch should start",
+        )
+        .await;
+
+        let loser_loading = loser_stream.next().await;
+        assert!(matches!(loser_loading, Some(ref result) if result.is_loading()));
+
+        releases.release(0);
+
+        let winner_success = timeout(Duration::from_millis(100), winner_success_poll)
+            .await
+            .expect("winning stream should receive success");
+        assert!(
+            matches!(winner_success, Some(ref result) if result.is_success() && result.data() == Some(&7))
+        );
+
+        let loser_success = timeout(Duration::from_millis(100), loser_stream.next())
+            .await
+            .expect("losing stream should receive the shared success");
+        assert!(
+            matches!(loser_success, Some(ref result) if result.is_success() && result.data() == Some(&7)),
+            "a boundary observes data the winning fetcher produced, not its own"
+        );
+        assert_eq!(
+            loser_count.load(Ordering::SeqCst),
+            0,
+            "the losing query's own fetcher must not run for the shared success"
         );
     }
 
