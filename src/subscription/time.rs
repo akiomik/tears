@@ -28,8 +28,7 @@ pub enum TimerEvent {
 ///
 /// ## Timing semantics
 ///
-/// The semantics of record are RFC 0009 §4.2
-/// (`docs/rfcs/0009-clock-di.md`):
+/// The semantics of record are RFC 0009 §4.2:
 ///
 /// - **Anchor.** The timer's time anchor is fixed at its stream's first
 ///   poll — read from the clock of the runtime that polls it, so a stream
