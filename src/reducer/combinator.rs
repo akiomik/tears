@@ -149,6 +149,16 @@ pub trait ReducerExt: Reducer + Sized {
     ///
     /// `extract` names the row a message is addressed to; a message for a
     /// key the collection does not hold is discarded.
+    ///
+    /// Replacing a row — [`Keyed::insert`] over an occupied key — tears the
+    /// outgoing instance down before the successor runs anything it
+    /// declares. While any subscription run is still stopping the runtime
+    /// admits no subscription at all, so a row whose replacement stops one
+    /// declares again in a later pass rather than in the pass that replaced
+    /// it. That run's exit is itself a wake source, so what ends the gap is
+    /// its quiescence and not an unrelated arrival. Where both instances
+    /// declare the same subscription, its identity leaves and returns rather
+    /// than staying.
     fn for_each<C, K>(
         self,
         child: C,
@@ -176,6 +186,10 @@ pub trait ReducerExt: Reducer + Sized {
     ///
     /// A message the slot's occupant would have claimed is discarded while
     /// the slot is empty.
+    ///
+    /// Replacing the occupant — [`Slot::present`] over an occupied slot —
+    /// starts the successor's declarations on the timing
+    /// [`for_each`](ReducerExt::for_each) states for a replaced row.
     fn presented<C, Seg>(
         self,
         child: C,
