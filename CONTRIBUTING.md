@@ -71,6 +71,21 @@ An edit is not finished until the changed file's own documentation has been read
 again — the module doc, every doc comment under it, the comments in the body —
 and any disagreement with the code fixed on one side or the other, explicitly.
 
+An example that demonstrates feature-gated API belongs in the module the feature
+gates. A doctest there is compiled by `just test-doc`, whose feature set turns
+the gate on; the same block in a file outside the gate fails `cargo test --doc`
+whenever the feature is off, so it ends up `ignore`, and an `ignore` block is
+one no compiler ever reads. Documentation outside the gate refers to such an
+example rather than restating it — a code span, or the intra-doc link and
+`cfg_attr(not(feature = "…"), doc = "…")` pair `src/subscription.rs` uses for
+its built-in list, which keeps the sentence when the feature is off.
+
+That leaves `ignore` for a block this crate was never going to compile. A
+migration guide's *Before:* snippet names API a release removed, and a
+sketch in a file no `include_str!` pulls into rustdoc — `README.md` is one —
+never reaches a doctest run at all. Neither licenses `ignore` on a block this
+crate can compile.
+
 ## Before you push
 
 [just](https://github.com/casey/just) runs the local gate:
