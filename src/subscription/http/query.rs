@@ -157,9 +157,9 @@ impl QueryClient {
     /// # Panics
     ///
     /// Panics if the process-wide client-id space is exhausted (the allocator
-    /// counter has reached `u64::MAX`): `client_id` is a component of
-    /// subscription identity, so ids are never reused within a process
-    /// (RFC 0001).
+    /// counter has reached `u64::MAX`): `client_id` rides inside the key the
+    /// subscription id compares, so ids are never reused within a process
+    /// (RFC 0001 §5.8).
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(QueryConfig::default())
@@ -170,16 +170,16 @@ impl QueryClient {
     /// # Panics
     ///
     /// Panics if the process-wide client-id space is exhausted (the allocator
-    /// counter has reached `u64::MAX`): `client_id` is a component of
-    /// subscription identity, so ids are never reused within a process
-    /// (RFC 0001).
+    /// counter has reached `u64::MAX`): `client_id` rides inside the key the
+    /// subscription id compares, so ids are never reused within a process
+    /// (RFC 0001 §5.8).
     #[must_use]
     pub fn with_config(config: QueryConfig) -> Self {
         Self {
             // `client_id` is an identity component: it is the first element
             // of `Query<V>::Key`, which the subscription id compares, so
             // reusing an id would collide distinct clients' identities
-            // (RFC 0001 INV-5). The allocator fails before it can reuse a
+            // (RFC 0001 §5.8). The allocator fails before it can reuse a
             // value: on exhaustion the failed `fetch_update` stores nothing,
             // leaving the counter saturated at `u64::MAX`, so this and every
             // later allocation panics instead of wrapping into reuse.
@@ -187,7 +187,7 @@ impl QueryClient {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .expect(
                     "QueryClient id space exhausted; client ids are never \
-                     reused within a process (RFC 0001 subscription identity)",
+                     reused within a process (RFC 0001 §5.8)",
                 ),
             cells: Arc::new(DashMap::new()),
             config,
@@ -371,7 +371,7 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 ///
 /// # Query keys
 ///
-/// The query key identifies the retained cell and the running subscription.
+/// Within one client and value type, the query key identifies the retained cell.
 /// Include every request parameter used by the fetcher in the key. If the
 /// fetcher captures values such as a user ID, search term, page number, or base
 /// URL but the key does not change, the runtime keeps the existing subscription
@@ -383,17 +383,25 @@ type Fetcher<V> = Arc<dyn Fn() -> BoxFuture<'static, Result<V, QueryError>> + Se
 /// runtime keys the running subscription by its
 /// [`SubscriptionId`](crate::SubscriptionId), which the fetcher is no part of,
 /// so constructing a new `Query::new(key, new_fetcher, client)` with an
-/// unchanged key keeps the existing stream and the old fetcher; the new fetcher
-/// never takes effect. **To change the request, change the key** (for example
-/// by including the varying parameter in it).
+/// unchanged key keeps the existing stream and the old fetcher.
+///
+/// Two subscriptions can share one retained cell, because the cell is keyed by
+/// client, value type and key and takes no account of
+/// [`Subscription::scoped`](crate::Subscription::scoped). Queries differing only
+/// by boundary therefore share one fetch, and whichever starts it serves both —
+/// so fetchers reaching one cell must issue equivalent requests, or a query
+/// renders data its own fetcher never produced.
+///
+/// Either way: **to change the request, change the key** (for example by
+/// including the varying parameter in it).
 ///
 /// # Where the client lives
 ///
 /// Hold the [`QueryClient`] in the model and clone the `Arc` into each query.
-/// The client's id is part of the subscription's identity, alongside the query
-/// key above, so a client constructed inside
+/// The client's id rides in the key the subscription id compares, alongside the
+/// query key above, so a client constructed inside
 /// [`Application::subscriptions`](crate::Application::subscriptions) gives the
-/// query a new identity every pass — and a client just constructed retains
+/// query a new id every pass — and a client just constructed retains
 /// nothing, so each pass fetches again instead of serving what the one before
 /// it retained.
 ///
@@ -753,6 +761,7 @@ mod tests {
 
     use tokio::time::{Duration, timeout};
 
+    use crate::Subscription;
     use crate::test_support::{assert_pending_until, gate_fetches};
 
     #[test]
@@ -1355,7 +1364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_same_identity_streams_share_single_in_flight_fetch() {
+    async fn test_two_streams_of_one_query_share_the_in_flight_fetch() {
         let client = Arc::new(QueryClient::new());
         let fetch_count = Arc::new(AtomicUsize::new(0));
         let (mut releases, gates) = gate_fetches(1);
@@ -1397,7 +1406,7 @@ mod tests {
         assert_eq!(
             fetch_count.load(Ordering::SeqCst),
             1,
-            "same identity streams must share the cell in-flight fetch"
+            "streams reaching one cell must share its in-flight fetch"
         );
 
         releases.release(0);
@@ -1420,6 +1429,91 @@ mod tests {
             fetch_count.load(Ordering::SeqCst),
             1,
             "loser stream must not invoke the fetcher after the shared success"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_queries_hold_distinct_ids_and_share_one_cell() {
+        let client = Arc::new(QueryClient::new());
+        let winner_count = Arc::new(AtomicUsize::new(0));
+        let loser_count = Arc::new(AtomicUsize::new(0));
+        let (mut releases, gates) = gate_fetches(1);
+
+        let winner_count_clone = winner_count.clone();
+        let gates_clone = gates.clone();
+        let winner = Query::new(
+            "key",
+            move || {
+                let count = winner_count_clone.clone();
+                let gates = gates_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    gates.next().await.expect("fetch gate should be released");
+                    Ok::<i32, QueryError>(7)
+                })
+            },
+            client.clone(),
+        );
+
+        let loser_count_clone = loser_count.clone();
+        let loser = Query::new(
+            "key",
+            move || {
+                let count = loser_count_clone.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<i32, QueryError>(99)
+                })
+            },
+            client,
+        );
+
+        let winner_subscription = Subscription::new(winner).scoped("pane-1");
+        let loser_subscription = Subscription::new(loser).scoped("pane-2");
+        assert_ne!(
+            winner_subscription.id, loser_subscription.id,
+            "two boundaries must hold distinct subscription ids"
+        );
+
+        let mut winner_stream = winner_subscription.into_stream();
+        let mut loser_stream = loser_subscription.into_stream();
+
+        let winner_loading = winner_stream.next().await;
+        assert!(matches!(winner_loading, Some(ref result) if result.is_loading()));
+
+        let winner_success_poll = winner_stream.next();
+        tokio::pin!(winner_success_poll);
+        assert_pending_until(
+            &mut winner_success_poll,
+            || winner_count.load(Ordering::SeqCst) >= 1,
+            "winning fetch completed before its gate was released",
+            "winning fetch should start",
+        )
+        .await;
+
+        let loser_loading = loser_stream.next().await;
+        assert!(matches!(loser_loading, Some(ref result) if result.is_loading()));
+
+        releases.release(0);
+
+        let winner_success = timeout(Duration::from_millis(100), winner_success_poll)
+            .await
+            .expect("winning stream should receive success");
+        assert!(
+            matches!(winner_success, Some(ref result) if result.is_success() && result.data() == Some(&7))
+        );
+
+        let loser_success = timeout(Duration::from_millis(100), loser_stream.next())
+            .await
+            .expect("losing stream should receive the shared success");
+        assert!(
+            matches!(loser_success, Some(ref result) if result.is_success() && result.data() == Some(&7)),
+            "a boundary observes data the winning fetcher produced, not its own"
+        );
+        assert_eq!(
+            loser_count.load(Ordering::SeqCst),
+            0,
+            "the losing query's own fetcher must not run for the shared success"
         );
     }
 

@@ -196,8 +196,8 @@ Per (TypeId, key) there is a **state cell** owned by the `QueryClient`, holding:
 
 ### 5.4 Single-flight (cell contract)
 
-Single-flight does **not** depend on the runtime deduplicating to "one stream
-per identity." It is a **cell contract**, so it holds even when `Query::stream()`
+Single-flight does **not** depend on the runtime deduplicating subscriptions by
+identity. It is a **cell contract**, so it holds even when `Query::stream()`
 is constructed multiple times directly, across multiple `SubscriptionManager`s,
 or via a future alternate runtime.
 
@@ -212,12 +212,16 @@ two concurrent reconciles cannot both acquire the in-flight slot:
   at this generation) neither fetches nor waits; it observes the current
   (stale + Error) snapshot and waits for `invalidate`/generation progress (§5.6).
 
-Any two streams for the same identity share the same cell (via the cell map), so
-single-flight holds across them without runtime deduplication.
+Any two streams reaching the same cell — one `QueryClient`'s cell map resolves
+them by §5.8's cell map key, whatever their subscription ids — share its
+in-flight slot, so single-flight holds across them without runtime
+deduplication.
 
 **Fetcher arbitration** = "the fetcher of the first stream to acquire the
-in-flight slot." For the same identity the request is equivalent by the §5.8
-contract, so any stream's fetcher yields the same result.
+in-flight slot." A stream can therefore observe data its own fetcher never
+produced, so all fetchers reaching one cell must issue an equivalent request.
+That is the caller's obligation, not something the cell can check: two requests
+that differ take two keys.
 
 **On completion the in-flight slot is always released** (success, error, or
 discard) under the mutex (liveness; INV-8). Completion branches into one of:
@@ -327,14 +331,17 @@ needs_fetch := (no_data || generation_stale || (time_stale && reason == InitialO
   `QueryKeyPart::{Str, I64, U64, Bool}` (`#[non_exhaustive]`). `From<&str>`,
   `From<String>`, and small tuple/array conversions are provided. Structured
   keys compare structurally and do not collide.
-- **Subscription identity = (`client_id`, `TypeId::of::<V>()`, `QueryKey`).**
-  Identity must always include `TypeId` so that `Query<i32>("data")` and
-  `Query<String>("data")` are distinct (prevents the 0.8.2 type collision).
-- **Cell map key = (`TypeId`, `QueryKey`).** Client separation is achieved by the
-  `QueryClient` *owning* its cell map (per-client), so `client_id` is not part of
-  the cell map key (that would be redundant double-bookkeeping). Subscription
-  identity still includes `client_id` because the runtime shares one subscription
-  space and must distinguish the same (TypeId, QueryKey) across clients.
+- **Subscription identity is RFC 0005 INV-1's**, which owns what an id compares.
+  What a query contributes to it is its source type, `Query<V>`, and its logical
+  key, `(client_id, QueryKey)`. The value type enters through the source type, so
+  identity always includes a `TypeId` that separates `Query<i32>("data")` from
+  `Query<String>("data")` (prevents the 0.8.2 type collision).
+- **Cell map key = (`TypeId::of::<V>()`, `QueryKey`).** Client separation is
+  achieved by the `QueryClient` *owning* its cell map (per-client), so
+  `client_id` is not part of the cell map key (that would be redundant
+  double-bookkeeping). The query's logical key does carry `client_id`, because
+  the runtime shares one subscription space and must distinguish the same value
+  type and `QueryKey` across clients.
 
 ### 5.9 Type erasure
 
@@ -368,7 +375,7 @@ trait AnyCell: Any + Send + Sync + 'static {
 ### 5.10 GC and cell lifecycle
 
 The cell is the single retention store; there is no separate cache. GC targets
-the cell's *data* (and related metadata), not the cell identity while it is
+the cell's *data* (and related metadata), not its cell map entry while it is
 active.
 
 - **Active cells keep their data regardless of `cache_time`.** `cache_time` is
@@ -388,8 +395,8 @@ active.
 - **Cell creation and the first subscribe are atomic.** `get_or_subscribe_cell`
   performs "insert + first subscribe" under the map shard lock (`entry`), so a
   concurrent GC sweep cannot evict a freshly created cell before its first
-  subscriber registers (which would otherwise split one identity across two cells
-  and break single-flight).
+  subscriber registers (which would otherwise split one cell map key across two
+  cells and break single-flight).
 - **GC runs automatically after each fetch** (`gc_expired` is called on fetch
   completion) and can also be triggered manually via `QueryClient::gc()`. Because
   a fetch always drives a sweep, INV-7 ("inactive data is not retained forever")
@@ -413,10 +420,11 @@ cannot break the contract.
 - **INV-1.** A query subscribed before the `invalidate()` call time `T` (§5.5,
   synchronous bump) does not lose the invalidation issued at `T`.
 - **INV-2.** Single-flight is guaranteed by the cell's `in_flight_generation`
-  contract (§5.4): at most one in-flight fetch per identity. It does not depend on
-  runtime deduplication and holds even with multiple direct `Query::stream()`s.
-  Multiple `invalidate`s during a fetch coalesce into one refetch. Identity is
-  `(client_id, TypeId, QueryKey)`.
+  contract (§5.4): at most one in-flight fetch per cell. The in-flight slot is the
+  cell's, so the unit is §5.8's cell map key within the owning `QueryClient`, not
+  the subscription id. It does not depend on runtime deduplication and holds even
+  with multiple direct `Query::stream()`s. Multiple `invalidate`s during a fetch
+  coalesce into one refetch.
 - **INV-3.** A fetch result is applied only when its target generation equals
   `current_generation` (results from an outdated in-flight fetch are discarded).
 - **INV-4a.** With **data present**, subscribing after `invalidate` (or after
@@ -425,9 +433,13 @@ cannot break the contract.
 - **INV-4b.** With **no data**, subscribing after `invalidate` is observed as
   `is_stale = false` Pending/Fetching and fetches respecting the generation (not
   stale data).
-- **INV-5.** Different `client_id` / `TypeId` / `QueryKey` — differing in any one
-  — hold independent subscriptions and cache slots (includes preventing the 0.8.2
-  type collision).
+- **INV-5.** Queries differing in any one of `client_id`, value type, or
+  `QueryKey` hold independent subscriptions and cache slots. §5.8 has how each
+  axis reaches each unit: cells through a per-client map keyed on
+  `TypeId::of::<V>()` and `QueryKey`, subscriptions through what a query
+  contributes to an id — the source type `Query<V>` and the logical key
+  `(client_id, QueryKey)`. The value type reaching both is what prevents the
+  0.8.2 type collision.
 - **INV-6.** A cell with an active subscriber is not GC'd, and its `data` is not
   dropped by `cache_time` (cell, watch channel, and data are retained; data GC is
   limited to inactive cells).
@@ -494,10 +506,12 @@ Semantic breaks to call out in the migration guide:
   `is_error()` independently (§5.6).
 - **Retention semantics change:** `cache_time` is measured from when the last
   subscriber becomes inactive, not from the fetch timestamp (§5.10).
-- **Replacing a fetcher for the same identity is not supported.** The runtime keys
-  the running subscription by identity (`QueryClient`, key, value type), so a new
-  `Query::new(key, new_fetcher, client)` with an unchanged key keeps the existing
-  subscription and the old fetcher. To change the request, change the key.
+- **Replacing a fetcher for the same identity is not supported.** The runtime
+  keys the running subscription by its identity, which the fetcher is no part of,
+  so a new `Query::new(key, new_fetcher, client)` that changes only the fetcher
+  keeps the existing subscription and the old fetcher. To change the request,
+  change the key — which §5.4 requires of every fetcher reaching one cell, not
+  only of a declaration whose identity is unchanged.
 
 ## 9. Optimistic update
 
