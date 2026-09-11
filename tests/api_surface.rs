@@ -14,8 +14,8 @@ use public_api::tokens::Token;
 /// them rather than restated here.
 ///
 /// Not `--all-features`: that turns on `loom-core`, which *removes* code
-/// rather than adding it. The gate that would bite carries a `test`
-/// (`src/subscription.rs`), and rustdoc JSON builds the library without
+/// rather than adding it. The gate that would bite carries a `test` (`signal`,
+/// in `src/subscription.rs`), and rustdoc JSON builds the library without
 /// `cfg(test)`, so nothing is lost from the surface today — but that is a
 /// property of one gate's shape, not of the approach. A plain
 /// `#[cfg(not(feature = "loom-core"))]` compiles its item away whenever
