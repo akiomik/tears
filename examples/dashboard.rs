@@ -14,8 +14,8 @@
 //! more than one instance at a time or comes and goes: there the task list is a
 //! keyed collection with one child reducer per row and the details pane is an
 //! optionally-present child, and each boundary qualifies its child's identities
-//! and tears a removed child's runs down. `docs/composition.md` is the guide to
-//! choosing between the two.
+//! and tears a removed child's runs down. The `tears::reducer` module docs
+//! (`src/reducer.rs`) are the guide to choosing between the two.
 //!
 //! Run with: cargo run --example dashboard
 
