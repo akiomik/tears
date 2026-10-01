@@ -72,6 +72,8 @@ impl Application for App {
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 ```
 
@@ -157,6 +159,8 @@ impl Application for Counter {
             }),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::main]
