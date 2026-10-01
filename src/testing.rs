@@ -286,7 +286,7 @@ where
     redraw_requested: bool,
     /// The previous live-instance report — the kernel's own reconciliation,
     /// shared rather than re-derived (RFC 0008 INV-T3, RFC 0014 INV-RC3).
-    live: LiveInstances,
+    live_instances: LiveInstances,
     /// Where the store is between running and a quit the test has assented
     /// to. Three states rather than two booleans, because the middle one is
     /// real: a quit applies at its dispatch and is only *observed* later, and
@@ -345,11 +345,11 @@ where
             .build()
             .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
-        let mut live = LiveInstances::default();
-        live.seed(&AppProgram::<App>::new(), &app);
+        let mut live_instances = LiveInstances::default();
+        live_instances.seed(&AppProgram::<App>::new(), &app);
         let mut store = Self {
             app,
-            live,
+            live_instances,
             context,
             pending: Vec::new(),
             armed: Vec::new(),
@@ -614,7 +614,7 @@ where
     fn apply_update(&mut self, msg: App::Message) {
         let command = self.app.update(msg);
         let command = self
-            .live
+            .live_instances
             .reconcile(&AppProgram::<App>::new(), &self.app, command);
         self.enqueue_command(command.into_runtime_parts());
     }

@@ -194,7 +194,7 @@ impl<P: Program> Kernel<P> {
             let command = self.program.reduce(state, message);
             // Live-instance reconciliation, between `reduce` and the dispatch
             // and never as a later command (RFC 0014 INV-RC3).
-            let command = self.live.reconcile(&self.program, state, command);
+            let command = self.live_instances.reconcile(&self.program, state, command);
             updated += 1;
             self.dispatch(command);
         }

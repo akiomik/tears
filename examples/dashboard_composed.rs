@@ -30,13 +30,13 @@
 //!
 //! Removal is the other half. A row leaves through [`Keyed::remove`] or is
 //! replaced by [`Keyed::insert`]; the occupant leaves through [`Slot::dismiss`]
-//! or a replacing [`Slot::present`]. The boundary turns each of those into a
-//! teardown of that instance's scope, so its timer stops and its in-flight sync
-//! is cancelled without this file asking for either. The `on_teardown` hooks
-//! each child registers write the line the activity pane carries. A finalizer
-//! produces no message by design — which is why the log is a handle rather than
-//! a message, and why the pane shows that line the next time something draws
-//! rather than at the moment the hook runs.
+//! or a replacing [`Slot::present`]. However an instance leaves, the runtime
+//! tears down that instance's scope in the same update, so its timer stops and
+//! its in-flight sync is cancelled without this file asking for either. The
+//! `on_teardown` hooks each child registers write the line the activity pane
+//! carries. A finalizer produces no message by design — which is why the log
+//! is a handle rather than a message, and why the pane shows that line the
+//! next time something draws rather than at the moment the hook runs.
 //!
 //! Cross-child work stays the root's. Saving the details pane's notes back
 //! onto the task it was opened for touches two children, so it is a root
@@ -495,8 +495,7 @@ impl Reducer for Root {
                 // Esc is guarded on the focus rather than on `editing_notes`,
                 // so it is the way out of a `Details` focus with nothing behind
                 // it — which is also why the status has to say which of the two
-                // happened. Dismissing an empty slot removes no instance and
-                // records nothing.
+                // happened. Dismissing an empty slot removes no instance.
                 state.status = match (close_details(state), unsaved) {
                     (true, true) => "Closed the details pane, discarding notes nobody saved",
                     (true, false) => "Closed the details pane",
@@ -974,10 +973,9 @@ fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
 /// Dismisses the details pane, reporting whether there was an occupant to
 /// dismiss.
 ///
-/// Dismissal is a removal, so the slot's boundary tears the occupant's runs
-/// down — but only when there was one, which is why the caller is told: an
-/// empty slot records nothing, and the status must not claim a close that did
-/// not happen.
+/// Dismissal is a removal, so the occupant's runs are torn down — but only
+/// when there was one, which is why the caller is told: an empty slot removes
+/// nothing, and the status must not claim a close that did not happen.
 ///
 /// Restoring the focus is this function's other half, and it guards nothing:
 /// [`editing_notes`] already asks the slot, so a `Details` focus over an empty
@@ -1023,8 +1021,8 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
         return Command::none();
     };
     // Inserting over an occupied key is a replacement, and a replacement is a
-    // removal: the boundary tears the old instance's runs down before this
-    // command's spawns start the successor's.
+    // removal: the old instance's runs are torn down before this command's
+    // spawns start the successor's.
     let task_title = task.title.clone();
     state.tasks.insert(
         id,
@@ -1693,12 +1691,12 @@ mod tests {
                 "reloaded: #2 beta".to_owned(),
                 "stopped watching: #2 beta".to_owned(),
                 // The root's own line, written by the reduce that removed the
-                // row, before the teardown it originated ran.
+                // row, before that removal's teardown ran.
                 "deleted: #1 alpha".to_owned(),
                 "stopped watching: #1 alpha".to_owned(),
             ],
-            "one teardown per removal, in removal order, and none for the successor row that is \
-             still present"
+            "one teardown per removal, in the order the removals happened, and none for the \
+             successor row that is still present"
         );
     }
 
@@ -1759,8 +1757,8 @@ mod tests {
     /// The pane holds the replaced instance's title and notes, so leaving it
     /// open would let a later `SaveNotes` write them back over the reload.
     ///
-    /// Both teardowns are originated by the same reduce, so this asserts which
-    /// hooks fired and not the order they finished in.
+    /// Both teardowns follow the same reduce, so this asserts which hooks
+    /// fired and not the order they finished in.
     #[test]
     fn replacing_a_row_closes_a_pane_opened_on_it() {
         let activity = ActivityLog::default();
@@ -1874,7 +1872,7 @@ mod tests {
         let _closed = Root.reduce(&mut state, Message::CloseDetails);
         assert!(
             !state.details.is_present(),
-            "an occupant is dismissed, which is the removal the boundary tears down"
+            "an occupant is dismissed, which is the removal that gets torn down"
         );
         assert_eq!(
             state.status, "Closed the details pane",

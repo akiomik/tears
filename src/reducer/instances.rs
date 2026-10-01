@@ -133,8 +133,7 @@ impl LiveInstances {
     /// then keeps this report as the next comparison's baseline.
     ///
     /// The teardowns come in the order the previous report first named each
-    /// path, so one script yields one sequence; the sets below are consulted
-    /// for membership only, never iterated.
+    /// path, so one script yields one sequence.
     pub fn reconcile<R: Reducer>(
         &mut self,
         reducer: &R,

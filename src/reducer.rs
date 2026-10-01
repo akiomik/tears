@@ -131,7 +131,7 @@
 //! unless it places work under a key or segment itself, by calling a child's
 //! `reduce` and scoping the result, in which case it reports what it placed
 //! work under ([`Instances`]). Nothing detects a missing report: an instance
-//! that is never reported is never torn down.
+//! that is never reported originates no teardown of its own.
 //!
 //! ## What stays at the root
 //!
