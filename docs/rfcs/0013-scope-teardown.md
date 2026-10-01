@@ -143,11 +143,10 @@ ride RFC 0014 §9's register:
   (RFC 0014 §9, rows 1–3); the RFC 0003 discipline that survives on
   the kernel — the token rule (INV-8), one-item drain (INV-10), and
   §4.3's dispatch phase order — is cited here in that surviving form.
-- **RFC 0005's identity laws** (INV-14–INV-21). Selection compares
-  scope paths structurally; the path representation stays internal and
-  no scope introspection becomes public (RFC 0005 §2.3). Teardown
-  remains an explicit operation — dropping a scoped value still tears
-  nothing down (RFC 0005 INV-21).
+- **RFC 0005's identity laws** (INV-14–INV-21). Selection compares scope
+  paths structurally; the path representation stays internal and no
+  scope introspection becomes public (RFC 0005 §2.3). Dropping a scoped
+  value still tears nothing down (RFC 0005 INV-21).
 - **RFC 0012's boundary vocabulary and admission rules** (§3,
   INV-SE2–INV-SE5), which §4 consumes with one additive extension —
   the fourth stop cause — and **RFC 0011's phase order and
@@ -702,7 +701,7 @@ Transformations of an already-originated operation are not
 origination and stay free: `scoped`'s prefix qualification, the
 aggregation of batch children's entries, and the lowering from
 command metadata to the runtime parts all transform existing entries.
-The combinator rows above are its regression neighbors, not its
+RFC 0014 INV-RC3's rows are its regression neighbors, not its
 proof.
 
 ### 7.3 Adversarial models considered
@@ -881,7 +880,7 @@ must re-justify it if the preservation obligation (§3.4) cannot be met
 otherwise. The occupancy identity of RFC 0014 §2.5 is not this axis: it
 decides whether an occupancy is still in the state, a property neither
 per-run tokens nor the fresh-slot rule provide, and RFC 0014 §2.5 states
-what never reads it.
+that it decides which teardowns an update issues and nothing else.
 
 ### Policy-parameterized teardown
 

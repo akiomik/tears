@@ -367,9 +367,9 @@ zero immediately — `tests/observability.rs`.)
 completion (`run()`'s return for controlled; completion of the drop or
 unwind for abrupt):
 
-1. No further transition: `update`, `view`, `subscriptions`, and
-   `instances` are never invoked again for this runtime, and no producer
-   output — buffered or in flight — is ever delivered. Output
+1. No further transition or report: `update`, `view`, `subscriptions`,
+   and `instances` are never invoked again for this runtime, and no
+   producer output — buffered or in flight — is ever delivered. Output
    undelivered at termination is discarded, never delivered late (the
    discard RFC 0006 INV-L2 already carves out and RFC 0008 §5.3
    mirrors).
@@ -451,7 +451,7 @@ future supervision surface free to expose them additively.
 
 At most one owner drives a runtime instance at a time, and the state
 transitions — `update`, `view`, `subscriptions` — and `instances`
-execute serially and non-reentrantly: no transition begins before the
+execute serially and non-reentrantly: none of them begins before the
 previous one returns, and none is invoked from inside another (INV-LC9).
 
 This is pinned as a *property*, not as the absence of an API. It is
@@ -683,9 +683,9 @@ Enforcement classes follow the pre-review checklist's definitions.
 - **INV-LC9**: at most one owner drives a runtime instance at a time,
   and `update`/`view`/`subscriptions`/`instances` execute serially and
   non-reentrantly; a future driving surface is additive iff it preserves
-  this (§6). Structural: the property is delivered by construction
-  (the consuming `run(self)` as the sole driving entry point,
-  transitions invoked only from the driving task) and reviewed at those
+  this (§6). Structural: the property is delivered by construction (the
+  consuming `run(self)` as the sole driving entry point, transitions and
+  `instances` invoked only from the driving task) and reviewed at those
   invocation sites — a behavioral test cannot prove the absence of a
   reentrant path.
 

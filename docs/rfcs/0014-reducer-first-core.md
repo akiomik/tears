@@ -467,27 +467,28 @@ Contract:
   another does, tears nothing down and starts nothing. For each
   disappearing path that no other disappearing path is a proper prefix
   of, reconciliation merges one teardown of that path into the command
-  it dispatches for that update — after `reduce` returns and before the
-  dispatch, never as a later command — in an order that is reproducible
-  — one script yields one teardown sequence (INV-RC14); a disappearing
-  path under another is selected by that one's teardown (RFC 0013 §3.1).
-  That selection is by prefix, so it also reaches the runs of
-  occupancies still reported beneath a disappearing path: an occupancy
-  kept inside a replaced one continues as an occupancy, and its runs end
-  with the outer one's. The merge adds teardown entries and nothing
-  else: the entries `reduce` returned, a teardown it returned for the
-  same path included, and its directives cross unchanged, and §3.4's
-  phase order makes a same-update remove-and-reinsert (or replace) yield
-  the old occupancy's teardown *and* the new one's fresh spawns in one
-  dispatched command (RFC 0013 R4). Identities are what is compared, so
-  same-key reinsertion is not mistaken for continuity. The first report
-  is read from the state `init` returns, before its command is
-  dispatched, and tears nothing down. Teardowns this adds appear in the
-  dispatched command, not in the `Command` that `reduce` returns. The
-  previous report the kernel keeps is not per-scope state in RFC 0013
-  INV-ST7's sense: it decides which teardowns an update issues, and no
-  declaration, output, admission, spawn, or delivery decision carries or
-  reads it.
+  it dispatches for that update, after `reduce` returns and before the
+  dispatch, never as a later command. The order of those teardowns is
+  reproducible: one script yields one teardown sequence (INV-RC14). A
+  disappearing path under another is selected by that one's teardown
+  (RFC 0013 §3.1). That selection is by prefix, so it also reaches the
+  runs of occupancies still reported beneath a disappearing path: an
+  occupancy kept inside a replaced one continues as an occupancy, and
+  its runs end with the outer one's. The merge adds teardown entries and
+  nothing else: the entries `reduce` returned, a teardown it returned
+  for the same path included, and its directives cross unchanged, and
+  §3.4's phase order makes a same-update remove-and-reinsert (or
+  replace) yield the old occupancy's teardown *and* the new one's fresh
+  spawns in one dispatched command (RFC 0013 R4). Identities are what is
+  compared, so same-key reinsertion is not mistaken for continuity. The
+  first report is read from the state `init` returns, before its command
+  is dispatched, and tears nothing down. Teardowns this adds appear in
+  the dispatched command, not in the `Command` that `reduce` returns.
+  Occupancy identities and the previous report the kernel keeps decide
+  which teardowns an update issues and nothing else: no declaration,
+  output, admission, spawn, or delivery decision carries or reads them,
+  so the previous report is not per-scope state in RFC 0013 INV-ST7's
+  sense.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
   `Reducer` and on `Application`, and it is a pure function of state:
   for a given state it reports the same pairs in the same order, it
@@ -1288,12 +1289,13 @@ invariants of §12 are.
 - *Boundary-local removal tracking* — a journal recorded by the
   collection's removal methods and drained by its boundary after the
   parent's `reduce` passes every per-method test, and misses the two
-  removals it cannot see: a reassigned collection value, which takes
-  the journal with it, and a mutation by a reducer above an enclosing
-  boundary, whose `reduce` the boundary never runs. Excluded by
-  INV-RC3's single reconciliation point, which every update passes
-  whatever route its message took, and by its reassignment and
-  ancestor rows.
+  removals it cannot see: a reassigned collection value, which takes the
+  journal with it, and a mutation by a reducer above an enclosing
+  boundary, whose `reduce` the boundary never runs. A snapshot the
+  boundary takes around its parent's `reduce` sees the reassignment and
+  still misses the second. Excluded by INV-RC3's single reconciliation
+  point, which every update passes whatever route its message took, and
+  by its reassignment and ancestor rows.
 - *State-held previous report* (rejected alternative, §2.5): keeping
   the last report inside the state it describes, beside the collection
   it records, lets a reassignment replace the record together with the
@@ -1392,11 +1394,11 @@ quantifies over the test topology, not the facade). For §2.5's
 reconciliation: no completeness check accompanies INV-RC3a, since no
 oracle independent of the report exists (§12); the uniqueness of
 occupancy identities gets no invariant of its own, since §2.5 states it,
-INV-RC3's same-key replacement and remove-reinsert rows are what a
-reused identity fails, and INV-RC3's structural review covers the sites
-that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
-— INV-RC3 quantifies over the pairs reported, INV-RC3a over which pairs
-must be. The order of reconciliation teardowns is pinned only as
+INV-RC3's row assigning a populated collection with the same keys is
+what a reused identity fails, and INV-RC3's structural review covers the
+sites that create one; kept separate is INV-RC3a, which INV-RC3 does not
+imply — INV-RC3 quantifies over the pairs reported, INV-RC3a over which
+pairs must be. The order of reconciliation teardowns is pinned only as
 reproducible — what INV-RC14 and RFC 0008 INV-T4 need — and not as a
 rule over paths or over its inputs.
 
@@ -1448,19 +1450,21 @@ reconciliation and wait for its implementation.
   occupancies, replacement of an occupancy whose state holds occupancies
   (one teardown, of the outer path), and a `remove` and an assignment
   made by a reducer above an enclosing `scope` boundary; the key-only
-  remove-reinsert adversary; one slot reported under two paths by two
-  `presented` boundaries, dismissed, yielding a teardown of each; rows
-  that tear nothing down — in-place replacement through `get_mut` of a
-  value that holds no occupancies, a take-and-restore within one update,
-  the restoring update of a collection taken in an earlier one, and an
-  unrelated message to the doubly reported slot; an update that returns
-  its own teardown of a path reconciliation also tears down, keeping
-  both entries; a removal in an update returning `without_redraw`, which
-  stays without a redraw; and a repeat row, in which one script run
-  twice yields one teardown sequence. Structural, in two parts: review
-  of the kernel's and the store's dispatch sites, confirming that each
-  command a `reduce` returns reaches dispatch or intake only through the
-  reconciliation step; and review of the sites that create an identity —
+  remove-reinsert adversary; an occupancy present in `init`'s state and
+  removed by the first update, on the kernel and on the store; one slot
+  reported under two paths by two `presented` boundaries, dismissed,
+  yielding a teardown of each; rows that tear nothing down — in-place
+  replacement through `get_mut` of a value that holds no occupancies, a
+  take-and-restore within one update, the restoring update of a
+  collection taken in an earlier one, and an unrelated message to the
+  doubly reported slot; an update that returns its own teardown of a
+  path reconciliation also tears down, keeping both entries; a removal
+  in an update returning `without_redraw`, which stays without a redraw;
+  and a repeat row, in which one script run twice yields one teardown
+  sequence. Structural, in two parts: review of the kernel's and the
+  store's dispatch sites, confirming that each command a `reduce`
+  returns reaches dispatch or intake only through the reconciliation
+  step; and review of the sites that create an identity —
   `Keyed::insert`, `Keyed::from_iter`, `Slot::present` — confirming each
   draws one no earlier occupancy held, never derived from the collection
   value or the key.

@@ -156,8 +156,8 @@ verification pass, with executor independence still open at RFC 0014
 §13.3; and **pass-unit driving as the evidence surface**, one driver step
 executing one whole production pass, with stage-granular probes
 admissible as component-level instruments but outside that surface. The
-one boundary no pass-unit step reaches is the park boundary, where RFC
-0014 §7.2 names a separate instrument, `ParkProbe`, whose observations
+one boundary no pass-unit step reaches is the park boundary, where
+RFC 0014 §7.2 names a separate instrument, `ParkProbe`, whose observations
 are evidence for that RFC's park-and-wake invariant alone — never for the
 driver's topology or determinism claims, and not for anything this
 store's layers claim. §4.2's citation rule generalizes to both: an order
@@ -324,7 +324,8 @@ generic) are implementation latitude.
   scripted `send` supersede or cancel an earlier step's not-yet-received
   keyed output — the store's own linearization, no longer backed by a
   runtime schedule (§6). Its only poll is the keyed-intake
-  reconciliation of §5.1, and only when the command `update` returns is
+  reconciliation of §5.1 — not the live-instance reconciliation above,
+  which polls nothing — and only when the command `update` returns is
   keyed under `CancelPolicy::KeepInFlight`; it never delivers output,
   which happens only in `receive*` calls.
 - **`advance`** (stage 2) is the store's only time control. It fails on
