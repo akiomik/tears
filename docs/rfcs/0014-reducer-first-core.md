@@ -12,13 +12,17 @@
   production arbitration policy, and the remaining §12 behavioral rows
   — is closed, and its checks are the regression suite. The §9
   supersessions and amendments landed on their owner documents at
-  acceptance, in §13.1's order, ahead of that mainlining.
+  acceptance, in §13.1's order, ahead of that mainlining. One part is
+  accepted and not implemented: the live-instance reconciliation of
+  §2.5 and INV-RC3/INV-RC3a, which replaces the removal journals the
+  crate still drains (issue #422 records the defect it closes), together
+  with the edits it makes to RFC 0005, RFC 0008, RFC 0011, and RFC 0013.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8)
 - Scope: the reducer-first core protocol (`Reducer`/`Program`) and the
   `Application` facade adapter, with the facade-preservation decision
   (§2.4); composition combinators with automatic scope application and
-  removal journals (§2.5); the kernel delivery contract — one
+  live-instance reconciliation (§2.5); the kernel delivery contract — one
   origin-tagged data lane, revocation filtering, the control-lane and
   synchronous quit routes (§3); multi-keyed `batch` lowering and the
   modifier interaction rules (§3.4); the kernel side of RFC 0013's
@@ -59,7 +63,14 @@
   than here: the `Command::teardown` these combinators invoke is
   RFC 0013's, and the stage-3 `TestDriver` is RFC 0008's, entered by
   that RFC's amendment (§13.2, §9 row 11). Landed with the
-  implementation, after §13.1's gate.
+  implementation, after §13.1's gate. The live-instance reconciliation
+  carries its own entry when it lands: `Changed` (breaking) —
+  `Reducer` and `Application` gain the provided `instances` method a
+  hand-written composition must forward, a removal is torn down in the
+  dispatched command rather than in `reduce`'s return value, and
+  `Slot::present` stops being `const` (§2.5); `Fixed` — reassigning a
+  collection, and mutating one from above its boundary, no longer leaks
+  the removed instances' runs.
 
 ## Summary
 
@@ -82,9 +93,10 @@ Eight decisions:
    preserved as a facade — same trait, same `run` signature, same
    result classification — executed through the adapter (§2.4).
 2. **Composition with automatic scoping** (§2.5). `for_each`,
-   `presented`, and `scope` apply scopes structurally; removal journals
-   in `Keyed`/`Slot` turn state removal into teardown automatically.
-   User code writes no manual scoping.
+   `presented`, and `scope` apply scopes structurally; after every
+   update the kernel reconciles the instances `Keyed`/`Slot` hold, so
+   removing one from state tears its runs down automatically. User code
+   writes no manual scoping.
 3. **Unified delivery with revocation filtering** (§3). Producer
    output travels one origin-tagged lane; cancellation and teardown
    revoke at the delivery decision point, so a revoked run's
@@ -130,8 +142,8 @@ acceptance and its mainlining each passed.
 
 - The `Reducer`/`Program` protocol and the `Application` adapter, with
   the facade-preservation decision (§2).
-- The composition combinators, their journals, and automatic scope
-  application (§2.5).
+- The composition combinators, automatic scope application, and
+  live-instance reconciliation (§2.5).
 - The kernel delivery contract: unified lane, revocation, quit routes,
   multi-keyed lowering, modifier interaction (§3).
 - Scope teardown: selection, ordering, strictness, cleanup hooks,
@@ -187,6 +199,8 @@ pub trait Reducer {
     fn subscriptions(&self, _state: &Self::State) -> Vec<Subscription<Self::Message>> {
         Vec::new()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 pub trait Program: Reducer {
@@ -207,7 +221,8 @@ Contract, stated observably:
   `subscriptions` is a pure function of state exactly as RFC 0012
   INV-SE6 states for `Application::subscriptions` — the obligation
   transfers to the trait verbatim, and the runtime may evaluate it at
-  any re-evaluation frequency.
+  any re-evaluation frequency. `instances` reports the live instances
+  the state holds, under INV-RC3a's obligation (§2.5).
 - **Views are root-level by design.** `Reducer` deliberately has no
   `view`; only `Program` does. Composing child *views* is ordinary
   function calls inside the root `view` over the root state — pane and
@@ -234,6 +249,9 @@ impl<A: Application> Reducer for AppProgram<A> {
     fn subscriptions(&self, state: &A) -> Vec<Subscription<A::Message>> {
         state.subscriptions()
     }
+    fn instances(&self, state: &A, out: &mut Instances<'_>) {
+        state.instances(out)
+    }
 }
 
 impl<A: Application> Program for AppProgram<A> {
@@ -248,7 +266,11 @@ impl<A: Application> Program for AppProgram<A> {
 ```
 
 The adapter is a mapping and nothing else: the application value *is*
-the state, `update` *is* `reduce`. Every kernel concern and every
+the state, `update` *is* `reduce`. `Application` carries a provided
+`instances(&self, out: &mut Instances<'_>)` with an empty default, the
+same shape as its `subscriptions`, because an application can hold a
+`Keyed` or `Slot` and reduce a combinator stack over it inside
+`update`; the adapter forwards it. Every kernel concern and every
 phase step executes identical code for `Application` programs and
 composed programs (INV-RC1 enumerates the concern set); the facade has
 no dedicated channel, branch, or phase.
@@ -283,8 +305,8 @@ The question this RFC decides: does the existing public `Runtime<App>`
 surface survive, with an internal exit type converted at the facade?
 
 **Adopted for the entry point and result contract.**
-`Application` (unchanged), `Runtime<App: Application>` (the existing
-type), and
+`Application` (unchanged apart from §2.2's provided `instances`),
+`Runtime<App: Application>` (the existing type), and
 
 ```rust
 pub async fn run<B: Backend>(
@@ -318,8 +340,19 @@ supersession (§9 row 4), not a facade decision.
 ```rust
 pub trait ScopeValue: Eq + Hash + Clone + Send + Sync + 'static {}
 
-pub struct Keyed<K: ScopeValue, V> { /* map + removal journal */ }
-pub struct Slot<S> { /* Option<S> + dismissal journal */ }
+pub struct Keyed<K: ScopeValue, V> { /* rows, each one occupancy */ }
+pub struct Slot<S> { /* at most one occupancy */ }
+
+pub struct Instances<'a> { /* opaque, append-only */ }
+
+impl Instances<'_> {
+    pub fn scoped<Seg: ScopeValue>(&mut self, seg: Seg,
+        visit: impl FnOnce(&mut Instances<'_>));
+    pub fn keyed<K: ScopeValue, V>(&mut self, rows: &Keyed<K, V>,
+        visit: impl FnMut(&V, &mut Instances<'_>));
+    pub fn slot<Seg: ScopeValue, S>(&mut self, seg: Seg, slot: &Slot<S>,
+        visit: impl FnOnce(&S, &mut Instances<'_>));
+}
 
 pub trait ReducerExt: Reducer + Sized {
     fn scope<Seg, C>(self, child: C, seg: Seg,
@@ -407,18 +440,64 @@ Contract:
   the combinators — the laws' bodies are unchanged; the two clauses
   that must be amended to *cover* the new carriers (teardown prefixes
   under INV-18, `batch` under INV-20) are §9's rows 6 and 3.
-- **Removal journals (INV-RC3).** `Keyed::remove`, `Slot::dismiss`,
-  and occupied-slot replacement (`Keyed::insert` over an occupied key,
-  `Slot::present` over an occupied slot) record removals; after the
-  parent's `reduce` returns, the combinator drains the journal and
-  merges one `Command::teardown` per removed key into the returned
-  command. Replacement means: the old instance is torn down and the
-  new one starts fresh — a same-update remove-and-reinsert (or
-  replace) yields the old instance's teardown *and* the new instance's
-  fresh spawns in one returned command, which §3.4's lowering makes
-  work at batch granularity (RFC 0013 R4).
-  The journal records removals rather than diffing states, so
-  same-key reinsertion is not mistaken for continuity.
+- **Occupancies.** A `Keyed` row and an occupied `Slot` are
+  *occupancies*, and each has an identity no other occupancy shares.
+  One begins at `Keyed::insert` — into an absent or an occupied key —
+  at `Keyed::from_iter`, and at `Slot::present`; nothing else creates
+  one, and no public surface reads, copies, or assigns an identity.
+  Mutating a row or an occupant in place (`get_mut`) continues its
+  occupancy. Everything that takes an occupancy out of the state ends
+  it: `remove`, `dismiss`, replacement by `insert` or `present`,
+  assigning, swapping, or taking a collection value, and replacing a
+  state that encloses one. Moving a collection value carries its
+  occupancies' identities with it, but an occupancy is matched together
+  with the path it is reported under, so moving it elsewhere ends it
+  where it was. A fixed `scope` boundary is not an occupancy: replacing
+  the child state it projects continues its prefix, and the occupancies
+  inside that state are reconciled on their own.
+- **Live-instance reconciliation (INV-RC3).** `instances` reports the
+  occupancies a state holds as a set of (qualified path, identity)
+  pairs. After every `reduce` the kernel drives returns, it reads that
+  set from the resulting state and compares it with the set it read
+  before. For each path under which the earlier set holds a pair the new
+  one lacks, it merges one teardown of that path into the command it
+  dispatches for that update — after `reduce` returns and before the
+  dispatch, never as a later command — in the order the earlier set
+  reported those pairs. The combinators report a parent composition
+  before its children and a collection in its iteration order, each
+  occupancy before the occupancies inside it. The merge adds teardown
+  entries and nothing else, so the update's directives cross unchanged,
+  and §3.4's phase order makes a same-update remove-and-reinsert (or
+  replace) yield the old occupancy's teardown *and* the new one's fresh
+  spawns in one dispatched command (RFC 0013 R4). Identities are what is
+  compared, so same-key reinsertion is not mistaken for continuity. The
+  first set is the one the init state yields, read before the first
+  `reduce`; it tears nothing down. Teardowns this adds appear in the
+  dispatched command, not in the `Command` that `reduce` returns.
+- **The reporting obligation (INV-RC3a).** `instances` is a pure
+  function of state in INV-SE6's sense. A reducer that reduces a child
+  reports that child's occupancies through the projection pair and under
+  the segments it reduces that child with, for every child the state
+  holds — whether or not the last message reached that child, and
+  whether or not the child declares any subscription. The combinators
+  meet this themselves, as they meet INV-RC2: each reports its parent
+  composition, then its child's occupancies under its boundary (`scoped`
+  for `scope`, `keyed` for `for_each`, `slot` for `presented`). A
+  reducer that composes children by hand meets it by forwarding, and its
+  default reports nothing. The runtime does not detect an omission: an
+  occupancy never reported is never torn down, and one reported only
+  intermittently is torn down while still in the state.
+- **What reconciliation does not reach.** Three classes, as negative
+  space. Work an update's command carries for an occupancy the state no
+  longer holds when that update returns — one inserted and removed
+  within the update, or one whose work was produced before it was
+  removed — is spawned: the teardown applies in the cancel phase, before
+  that command's spawns (§3.4). A state change made outside a `reduce`
+  the kernel drives — interior mutability, state shared with a
+  background task — is not observed until a later reconciliation, if one
+  runs, on the terms `Application::subscriptions` already states for
+  such changes. And two occupancies reported under one path are torn
+  down together, because teardown selects by prefix (RFC 0013 §3.1).
 - **Message routing is typed.** `extract` either claims a message for
   the child or returns it unchanged to the parent; a message for a
   child key absent from the collection is routed to nothing and
@@ -718,18 +797,19 @@ from the contract side:
 
 1. **Public surface and owner** (question 1):
    `Command::teardown(seg)` is the manual primitive; the composition
-   machinery invokes the *same* constructor internally (no internal
-   twin — RFC 0013 R8's two layers over one surface). Anchoring
-   composes through `scoped` exactly as explicit cancel IDs do
-   (INV-ST2, preserved). Lowering, selection, and application are the
-   kernel's.
+   layer's teardowns are originated by reconciliation (§2.5), the one
+   other origin RFC 0013 R8 admits — the same kind of prefix, the
+   primitive's reach and no more, and the same lowering and
+   application. Anchoring composes through `scoped` exactly as explicit
+   cancel IDs do (INV-ST2, preserved). Lowering, selection, and
+   application are the kernel's.
 2. **Subscription participation** (question 2): immediate stop —
    teardown's application point issues stop requests to the selected
-   subscription runs and revokes them; the composition layer removes
-   the declarations in the same update, so the stop is never
-   self-defeating. The required RFC 0012 amendments are §5's. The
-   admission coupling stays the uniform barrier, accepted as
-   documented negative space (§5.1).
+   subscription runs and revokes them; the declarations are gone from
+   the declared set as of the same update, both being read from the
+   state it leaves (§2.5), so the stop is never self-defeating. The
+   required RFC 0012 amendments are §5's. The admission coupling stays
+   the uniform barrier, accepted as documented negative space (§5.1).
 3. **Scope tree and unkeyed tracking** (question 3): the runtime
    tracks task-by-scope first-class. Anonymous (unkeyed) effects
    spawned through a composition boundary carry scope membership —
@@ -954,14 +1034,18 @@ carried by this RFC's CHANGELOG.
 
 ### 7.1 The non-executing store (stages 1–2, preserved)
 
-RFC 0008's TestStore keeps its contract unchanged: pure `update`
+RFC 0008's TestStore keeps its contract: pure `update`
 transitions, immediately ready effects, stage-2 virtual time, and the
 non-execution boundary — the store never starts, polls, or restarts a
 subscription source, and never spawns a task. Its command intake
 consumes the same lowered parts the kernel consumes, now including
 teardown entries and multi-keyed batch children (the RFC 0008
-parity extension RFC 0013 §8 names). The store makes no
-same-topology claim; that claim belongs to the driver alone.
+parity extension RFC 0013 §8 names), and it applies §2.5's
+reconciliation where the kernel does — seeded from the state
+`Application::new` returns, and run after each `update` before that
+update's command is taken in — through the kernel's reconciliation
+rather than a re-derivation of it (RFC 0008 §3.2, INV-T3). The store
+makes no same-topology claim; that claim belongs to the driver alone.
 
 ### 7.2 The stage-3 driver
 
@@ -1080,7 +1164,7 @@ the driver drives the kernel itself.
   carriers without changing their bodies (§9).
 - **(c) TestStore reuse** — satisfied in the two-layer form of §7: the
   existing store tests adapter and composed programs through the same
-  intake, unchanged; the stage-3 driver is the additive layer RFC 0012
+  intake; the stage-3 driver is the additive layer RFC 0012
   §6.2 already reserves, not a second harness.
 - **(d) Phase-machine sharing** — satisfied: one phase machine drives
   both entry types (§6.1); the adapter introduces no lifecycle (§2.2).
@@ -1166,10 +1250,33 @@ invariants of §12 are.
   passes API-level tests; excluded by INV-RC1's inventory walk — its
   own concern list and every §6 phase step identical on both paths —
   and the shared-path behavioral checks.
-- *Diff-based removal detection* — same-update remove-and-reinsert of
-  one key produces no state diff, so the old instance's runs leak;
-  excluded by the journal contract (INV-RC3 records removals, not
-  diffs).
+- *Key-only removal detection* — same-update remove-and-reinsert of
+  one key leaves the key set unchanged, so the old instance's runs
+  leak; excluded by INV-RC3's comparison of identities, under which the
+  reinserted row is a different occupancy.
+- *Boundary-local removal tracking* — a journal recorded by the
+  collection's removal methods and drained by its boundary after the
+  parent's `reduce` passes every per-method test, and misses the two
+  removals it cannot see: a reassigned collection value, which takes
+  the journal with it, and a mutation by a reducer above an enclosing
+  boundary, whose `reduce` the boundary never runs. Excluded by
+  INV-RC3's single reconciliation point, which every update passes
+  whatever route its message took, and by its reassignment and
+  ancestor rows.
+- *Composition by description* (rejected alternative, §2.5): deriving
+  routing, reporting, and qualification from one framework-held
+  description of the composition would make an omitted report
+  unrepresentable instead of an obligation. Rejected for its cost — a
+  second composition model beside the leaf `Reducer` a user writes
+  freely — given that INV-RC3a can take the obligation form INV-SE6
+  already gives `subscriptions`. It would not reach INV-RC3's negative
+  space either: a command produced for an occupancy the update removes
+  is a command, not a report.
+- *Runtime-held child state* (rejected alternative, §2.5): holding
+  child instances in a registry beside `Reducer::State` would put
+  their removal under the runtime's control, and moves child state out
+  of the state the application owns (§2.1) without reaching that same
+  negative space.
 - *Fold-era batch* — a lowering that folds child spawn keys satisfies
   every single-command test; excluded by INV-RC4's batch
   remove-and-reinsert test (old instance torn down, new instance's
@@ -1246,7 +1353,13 @@ machine" invariant
 was dropped as implied by INV-RC1 (single execution path) plus
 INV-LC9; kept separate is INV-RC13's same-topology claim, which
 INV-RC1 does not imply (it quantifies over the test topology, not the
-facade).
+facade). For §2.5's reconciliation: no completeness check accompanies
+INV-RC3a, since no oracle independent of the report exists (§12); the
+uniqueness of occupancy identities gets no invariant of its own, since
+§2.5 states it and INV-RC3's remove-reinsert row is what a reused
+identity fails; kept separate is INV-RC3a, which INV-RC3 does not
+imply — INV-RC3 quantifies over the pairs reported, INV-RC3a over
+which pairs must be.
 
 ## 12. Invariants
 
@@ -1277,13 +1390,40 @@ Both tiers are met, and both are the regression suite now.
   segment; equal local IDs under sibling scopes never alias.
   Behavioral at the lowering seam: nested-combinator programs assert
   the qualified identities, including the sibling-isolation case.
-- **INV-RC3 — journal completeness.** Every removal shape —
-  `remove`, `dismiss`, occupied-key insert, occupied-slot present —
-  yields exactly one teardown for the removed instance in the same
-  update's returned command; same-update reinsertion still yields the
-  old instance's teardown and a fresh successor. Behavioral: the
-  journal drain is asserted per shape, including the no-diff
-  remove-reinsert adversary.
+- **INV-RC3 — live-instance reconciliation.** After every `reduce` the
+  kernel drives returns, the command dispatched for that update carries
+  exactly one teardown of each path under which the previously reported
+  set holds a (path, identity) pair the newly reported set lacks, in the
+  order the previous set reported them, and no reconciliation teardown
+  of any other path; the first reported set is the init state's (§2.5).
+  Same-update reinsertion still yields the old occupancy's teardown and
+  a fresh successor. Behavioral, at the driven-transition seam the
+  kernel and the store share — every row reads the dispatched command,
+  never `reduce`'s return value: one row per way an occupancy ends —
+  `remove`, `dismiss`, occupied-key `insert`, occupied-slot `present`,
+  assignment of a fresh collection, `mem::take`, `mem::swap` between two
+  slots reported under different segments, replacement of an occupancy
+  whose state holds occupancies, and a `remove` and an assignment made
+  by a reducer above an enclosing `scope` boundary; the key-only
+  remove-reinsert adversary; rows that tear nothing down — in-place
+  replacement through `get_mut`, a take-and-restore within one update,
+  and an unrelated message to a state two boundaries report the same
+  slot through; a removal in an update returning `without_redraw`, which
+  stays without a redraw; and the report-order row. Structural for the
+  "every update" quantifier: review of the kernel's and the store's
+  dispatch sites, confirming that each command a `reduce` returns
+  reaches dispatch or intake only through the reconciliation step.
+- **INV-RC3a — the reporting obligation.** `instances` is pure in
+  INV-SE6's sense, and a reducer reports the occupancies of every child
+  it reduces, through the projection pair and under the segments it
+  reduces it with, whatever route the last message took (§2.5). Its two
+  halves take different classes. The combinators' half is behavioral:
+  nested stacks report each occupancy under the path INV-RC2 qualifies
+  its child's carriers with, including an occupancy under a child the
+  last message did not reach. The half a hand-written composition owes
+  is an obligation with no runtime check — no oracle independent of the
+  report itself can find an occupancy it omits — and is stated as
+  negative space beside §2.5's consequences of an omission.
 - **INV-RC4 — multi-keyed lowering.** Batch children lower to
   independent entries; the combined cancel phase precedes every spawn
   of the same command; the §3.4 interaction rules hold. Behavioral:
@@ -1442,8 +1582,10 @@ Both tiers are met, and both are the regression suite now.
   than the park boundary, and is not a row of this invariant.
 
 Surface–invariant coverage: `Reducer`/`Program`/adapter (INV-RC1;
-purity via RFC 0012 INV-SE6's transfer, §2.1), combinators and
-journals (INV-RC2/INV-RC3), `Keyed`/`Slot` (INV-RC3), batch lowering
+purity via RFC 0012 INV-SE6's transfer, §2.1), combinators
+(INV-RC2/INV-RC3a), `Keyed`/`Slot` and their occupancies (INV-RC3),
+`instances` on `Reducer` and `Application` and the `Instances`
+collector (INV-RC3a), batch lowering
 (INV-RC4), lane topology (INV-RC15), delivery and revocation
 (INV-RC5/INV-RC6/INV-RC10), park and wake (INV-RC16),
 teardown and `on_teardown` (INV-RC7/INV-RC8, §4.2's successor table),
@@ -1557,6 +1699,18 @@ isolation window is bracketed at both ends. Ownership is unchanged
 and no numeric threshold is claimed here; §3.3's latency statements
 remain this RFC's contract, and RFC 0006 §5.3 is where the numbers
 that satisfy them live.
+
+### 13.6 Reconciliation cost
+
+INV-RC3 reads every occupancy a state holds after every update, where
+recording removals as they are made costs work in proportion to the
+removals an update makes. No bound on that cost is claimed: a
+non-functional guarantee is pinned as an observable threshold, and
+nothing here derives one. It is measured before the release that ships
+it — a large collection that does not change, deep nesting, one slot
+reported through two boundaries, a flood of small messages, and a mass
+removal. A cheaper reconciliation with INV-RC3's results is mechanism
+that measurement may call for.
 
 ## 14. References
 

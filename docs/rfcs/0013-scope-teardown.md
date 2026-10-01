@@ -4,14 +4,19 @@
   core), whose §4 states the kernel side of the same operation. The
   owner-document edits this contract requires landed with that RFC's
   acceptance (§8), and the implementation landed with that kernel,
-  after RFC 0014 §13.1's implementation-acceptance tier closed.
+  after RFC 0014 §13.1's implementation-acceptance tier closed. R8's
+  second origin — the composition layer's teardowns coming from
+  RFC 0014 §2.5's live-instance reconciliation rather than from journal
+  drains — is accepted with that reconciliation and not yet
+  implemented.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
   RFC 0014's breaking changes, recorded there.
 - Scope: prefix selection over scoped lifecycle identities across
   every run kind — keyed commands, anonymous effects, subscription
   runs — plus cleanup registrations; the public surface
-  (`Command::teardown`) shared by the manual and composition layers;
+  (`Command::teardown`) and the composition layer's one other origin
+  (R8);
   dispatch ordering; revocation strictness; totality and idempotence;
   scope reuse; subscription participation (immediate stop under
   RFC 0012's uniform barrier); cleanup-hook participation; what
@@ -40,11 +45,11 @@ resolutions stand on:
    subscription runs, plus the prefix's unfired cleanup
    registrations; matching a segment anywhere in a path is rejected
    (§10).
-2. **One surface for both layers** (§3.2) — `Command::teardown(seg)`
-   is the manual primitive, the composition combinators invoke the
-   same constructor when draining their removal journals, and
-   anchoring composes through `scoped` exactly as explicit cancel IDs
-   do.
+2. **One operation for both layers** (§3.2) — `Command::teardown(seg)`
+   is the manual primitive, the composition layer's teardowns come from
+   RFC 0014's live-instance reconciliation as the same operation over
+   the same kind of prefix, and anchoring composes through `scoped`
+   exactly as explicit cancel IDs do.
 3. **Teardown applies in the cancel phase** (§3.3) — before every
    spawn of the same command, batch children included (they lower to
    independent keyed entries, RFC 0014 §3.4), so removing and
@@ -59,7 +64,8 @@ resolutions stand on:
 6. **Subscriptions participate by immediate stop** (§4) — the
    application point issues stop requests to the selected
    subscription runs and revokes them; declaration removal is paired
-   structurally by the combinators; admission stays ordered by
+   with it structurally, both following from an occupancy leaving the
+   state (RFC 0014 §2.5); admission stays ordered by
    RFC 0012's uniform quiescence barrier.
 
 The lookup strategy — scanning entries versus a secondary index,
@@ -94,11 +100,12 @@ each resolved in the section named:
    teardown state — no, by construction (§3.6).
 
 The one known client is TCA-parity collection composition: RFC 0014
-§2.5's `for_each` combinator, whose removal journal merges one
-`Command::teardown` per removed key into the parent's returned
-command (RFC 0014 INV-RC3), automatically cancelling a removed child
-instance's in-flight effects. Full effect parity in the composition
-surface depends on this contract, which is why this RFC gates it.
+§2.5's `for_each` combinator, whose removed rows the kernel's
+live-instance reconciliation tears down in the command dispatched for
+the update that removed them (RFC 0014 INV-RC3), automatically
+cancelling a removed child instance's in-flight effects. Full effect
+parity in the composition surface depends on this contract, which is why
+this RFC gates it.
 
 ### 1.2 Delegation inherited
 
@@ -169,7 +176,7 @@ The teardown contract is reviewed against this list:
   old instance's teardown neither kills nor suppresses the new
   instance's spawns. This holds at batch granularity — the multi-keyed
   lowering (RFC 0014 §3.4) puts the old instance's teardown and the
-  new instance's fresh keyed spawns in one returned command — and the
+  new instance's fresh keyed spawns in one dispatched command — and the
   new instance's subscriptions are admitted at the next re-evaluation
   behind the old runs' quiescence: deferred by ordering, never lost
   (§4.3).
@@ -192,12 +199,18 @@ The teardown contract is reviewed against this list:
   parity extension, §8) — and §7.2 requires the store-layer tests.
   The subscription and cleanup halves are execution and belong to the
   stage-3 `TestDriver` (RFC 0014 §7.2), driven pass-unit.
-- **R8 — two layers, one surface.** The manual primitive and the
-  composition machinery invoke the same `Command::teardown`
-  constructor — no internal twin — so correctness of child teardown
-  does not rest on hand-written anchors, and the machinery adds no
-  reach the primitive lacks. The one-surface property is checked
-  structurally (§7.2's origination review).
+- **R8 — two layers, one operation.** A teardown has exactly two
+  origins: the public `Command::teardown` constructor, and RFC 0014
+  §2.5's live-instance reconciliation, which originates the
+  composition layer's. Reconciliation builds each from the path an
+  occupancy was reported under — a nonempty path of the boundary
+  segments and keys above it, root first, which is the prefix
+  `Command::teardown` over the innermost of them, `scoped` by the
+  rest, would carry — so it adds no reach the primitive lacks, an empty
+  prefix included (§3.1). Both produce the same teardown entry, lowered
+  and applied by the same kernel path. Correctness of child teardown
+  therefore does not rest on hand-written anchors, and no third origin
+  exists. Checked structurally (§7.2's origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
@@ -249,12 +262,12 @@ composition boundary therefore targets that boundary's subtree and
 nothing above or beside it, and an aggregating parent needs no
 knowledge of its own ancestors (R2).
 
-The composition combinators invoke the same constructor: a removal
-journal drain merges one `Command::teardown` per removed key into the
-parent's returned command, qualified by the boundary's segment like
-every other identity-bearing carrier (RFC 0014 §2.5, INV-RC2/INV-RC3).
-There is no internal twin (R8). Lowering, selection, and application
-are the kernel's.
+The composition layer's teardowns are originated by reconciliation
+(R8): for each path an update leaves without the occupancy reported
+under it, one teardown of that path is merged into the command
+dispatched for that update, a path qualified by the boundaries above
+it exactly as `scoped` would qualify it (RFC 0014 §2.5, INV-RC3).
+Lowering, selection, and application are the kernel's.
 
 ### 3.3 Dispatch ordering: the cancel phase
 
@@ -284,8 +297,8 @@ the same command (RFC 0014 §3.4, INV-RC4). `scoped` applied to the
 batch distributes over children, qualifying teardown prefixes along
 with spawn keys, cancel IDs, and cleanup registrations. This is what
 makes same-update remove-and-reinsert work at batch granularity (R4):
-the combinator's journal yields the old instance's teardown and the
-reinserted child's fresh keyed spawns in one returned command.
+reconciliation puts the old occupancy's teardown and the reinserted
+child's fresh keyed spawns in one dispatched command.
 Cleanup registrations from the same command apply in the spawn
 phase (§5).
 
@@ -411,9 +424,10 @@ un-consume input the run already read (§3.8).
 
 ### 4.2 Declaration pairing
 
-The combinators remove the torn-down child's subscription declarations
-in the same update whose journal drain issues the teardown (RFC 0014
-INV-RC3), so the stop is never self-defeating. The manual primitive
+The torn-down child's subscription declarations are gone from the
+declared set as of the update whose reconciliation issues the
+teardown — both are read from the state that update leaves (RFC 0014
+INV-RC3) — so the stop is never self-defeating. The manual primitive
 applied to a *still-declared* subscription stops the run, and the next
 re-evaluation restarts it — RFC 0005 INV-13's restart meaning,
 untouched — which makes that use self-defeating by design; the
@@ -573,6 +587,10 @@ full.
   state at the teardown application and spawn sites, because no finite
   set of fresh-start scripts proves it: an implementation that taints
   only the scopes a test never reuses passes every such script. The
+  kernel's record of the occupancies last reported (RFC 0014 INV-RC3)
+  is not per-scope state in this sense: it decides which teardowns an
+  update issues, and no admission, spawn, or delivery decision reads
+  it. The
   §7.3 *generation-tracking* adversary is excluded by that review,
   with the fresh-start rows as its regression neighbours.
 - **INV-ST8: the unreached.** Teardown affects nothing already
@@ -673,14 +691,15 @@ reinserted child's leaf stays deliverable; root-path anonymous pending
 output unaffected. A store that ignores teardown entries in the parts
 fails these.
 
-One structural check accompanies these tests, for R8's one-surface
-property, which no behavioral test can prove — an internal twin
-produces lowered entries identical to the public surface's. The
-review walks the teardown *origination* routes: the public
-`Command::teardown` constructor and the combinators' journal-drain
-sites, confirming that every teardown operation originates in a call
-to the public constructor — the journal drain included — and that no
-route below the public surface originates one from a raw prefix.
+One structural check accompanies these tests, for R8's two-origin
+property, which no behavioral test can prove — a third origin
+produces lowered entries identical to the other two. The review walks
+the teardown *origination* routes, confirming that every teardown
+operation originates either in a call to the public constructor or in
+reconciliation; that reconciliation builds its prefix only from a
+reported occupancy's path, never empty, never reordered, and never
+from a segment the report did not carry; and that no other route
+originates one from a raw prefix.
 Transformations of an already-originated operation are not
 origination and stay free: `scoped`'s prefix qualification, the
 aggregation of batch children's entries, and the lowering from
@@ -697,11 +716,12 @@ proof.
   INV-ST1's reordered/deeper/subset tests.
 - *Spawn-before-cancel implementation* — kills the same command's
   reinserted child; excluded by INV-ST3's same-command spawn test.
-- *Private-twin constructor* — composition machinery that originates
-  its teardown operations from raw prefixes through an internal
-  constructor produces the same lowered entries and passes every
-  behavioral test while violating R8; excluded by §7.2's structural
-  origination review.
+- *Third-origin constructor* — machinery that originates teardown
+  operations from raw prefixes outside the two R8 names, or a
+  reconciliation that builds a prefix its report did not carry,
+  produces the same lowered entries and passes every behavioral test
+  while violating R8; excluded by §7.2's structural origination
+  review.
 - *Filter-at-update and tombstone-expiry implementations* — deliver a
   revoked run's output into the batch and drop it there, or forget a
   revoked run after its task exits and deliver late-queued output;
@@ -793,11 +813,12 @@ The four questions RFC 0014 §4 answers for this contract, numbered as
 there, resolve in the body as follows:
 
 1. **Public surface and owner.** `Command::teardown(seg)` is the
-   manual primitive; the composition machinery invokes the same
-   constructor — no internal twin (§3.2, R8).
+   manual primitive; the composition layer's teardowns are
+   reconciliation's, the one other origin (§3.2, R8).
 2. **Subscription participation and admission coupling.** Immediate
-   stop at the application point, paired with declaration removal by
-   the combinators; the uniform barrier stays, its availability
+   stop at the application point, paired with declaration removal
+   because both follow from the occupancy leaving the state; the
+   uniform barrier stays, its availability
    coupling accepted as documented negative space (§4).
 3. **Scope tree and unkeyed tracking (N30).** The runtime tracks
    task-by-scope first-class; anonymous effects spawned through a
@@ -860,7 +881,11 @@ output. It adds registry state and a second identity axis for a
 property the strict frame already provides through per-run tokens and
 the fresh-slot rule (§3.6). Rejected for the strict frame; a graceful
 window must re-justify it if the preservation obligation (§3.4)
-cannot be met otherwise.
+cannot be met otherwise. The occupancy identity of RFC 0014 §2.5 is
+not this axis: it decides whether an occupancy is still in the state,
+a property neither per-run tokens nor the fresh-slot rule provide, and
+no declaration, output, admission, or delivery decision carries or
+reads it.
 
 ### Policy-parameterized teardown
 
@@ -872,9 +897,13 @@ delegation's window (§3.4). Rejected.
 
 Tearing down when a scoped value is dropped or a scoped command is
 omitted contradicts RFC 0005 INV-21 and makes teardown unobservable in
-the declaration. Rejected; teardown stays explicit — the combinators'
-removal journals are explicit state operations (`remove`, `dismiss`,
-occupied-slot replacement), not drop observation (RFC 0014 §2.5).
+the declaration. Rejected; teardown stays explicit. The composition
+layer's teardown follows an occupancy leaving the state, not a value
+being dropped: a collection taken out and kept alive still ends the
+occupancies it held where they were reported (RFC 0014 §2.5). It is
+observable as subscription stops are — from the state an update leaves
+and the command dispatched for it — rather than from the `Command` the
+update returns.
 
 ### Root cancel-all
 

@@ -1,7 +1,9 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
 - Status: Implemented — stages 1–2 with the store, stage 3 (§9) with
-  the reducer-first kernel, at the paths §9.1 places it
+  the reducer-first kernel, at the paths §9.1 places it — apart from
+  the store's live-instance reconciliation (§3.2, INV-T3), accepted with
+  RFC 0014 §2.5's and not yet implemented
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
@@ -126,8 +128,8 @@ context the store itself owns (§4.3).
   the composition core is RFC 0014's — a reducer-first kernel over which
   `Application` is a single-feature adapter. That RFC discharges the
   no-second-harness obligation on this store's terms: the adapter and
-  composed programs are tested through this store's own intake,
-  unchanged (its §7.1, §7.3). Designing that core is that RFC's work,
+  composed programs are tested through this store's own intake (its
+  §7.1, §7.3). Designing that core is that RFC's work,
   not this one's; what it adds here is §1.3's delegated layer.
 
 ### 1.3 Delegated: the stage-3 driving layer
@@ -301,15 +303,19 @@ generic) are implementation latitude.
 
 ### 3.2 Method semantics
 
-- **`new`** applies `Application::new` and enqueues the init command
-  exactly as a `send` enqueues an update's command. The init command's
+- **`new`** applies `Application::new`, reads the live-instance set
+  the resulting application reports (RFC 0014 §2.5) as the first one,
+  and enqueues the init command exactly as a `send` enqueues an
+  update's command. The init command's
   deliverable output is subject to the same `receive*`/`finish`/drop
   accounting as any step's output (§6); `send` does not require it to
   be received first.
-- **`send`** is one synchronous `update` call plus bookkeeping. It
-  spawns no task, awaits nothing, and returns only after the
-  command's metadata (directives, cancellation) has been applied to the
-  store. It runs no deliverable-output exhaustiveness precondition and
+- **`send`** is one synchronous `update` call plus bookkeeping. The
+  command it takes in is the one the kernel would dispatch for that
+  update: `update`'s, with RFC 0014 INV-RC3's reconciliation teardowns
+  merged in. It spawns no task, awaits nothing, and returns only after
+  the command's metadata (directives, cancellation) has been applied to
+  the store. It runs no deliverable-output exhaustiveness precondition and
   polls no pending leaf for output; pending deliverable output is left
   in place for a later `receive*` (or caught by `finish`/drop, §6),
   which lets a scripted `send` supersede or cancel an earlier step's
@@ -945,9 +951,13 @@ Enforcement classes follow the pre-review checklist's definitions
   prerequisite refactor, a `RuntimeCommandParts` that carries the
   effect's leaves unfolded in declaration order, folded or driven only
   at each consumer's own site — never a parallel re-derivation of
-  directives, cancellation, or effects. Structural, in two parts:
-  review of the store's single command-intake site (it accepts the
-  parts type and touches no `Command` or `Effect` internals), and
+  directives, cancellation, or effects — and the command it consumes
+  for an update has passed through the kernel's own live-instance
+  reconciliation (RFC 0014 INV-RC3), never a re-derivation of it.
+  Structural, in two parts: review of the store's single
+  command-intake site (it accepts the parts type, touches no `Command`
+  or `Effect` internals, and is reached from `update` only through that
+  reconciliation), and
   review of the runtime's spawn site for the prerequisite's
   behavior-preservation half (the relocated fold, `fold_leaves`, merges
   the leaves exactly as the pre-refactor `into_stream()` did). This is

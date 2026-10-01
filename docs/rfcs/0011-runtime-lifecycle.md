@@ -1,6 +1,8 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Implemented
+- Status: Implemented, apart from the `instances` call sites §4.3 and
+  INV-LC6 list, which are accepted with RFC 0014 §2.5's live-instance
+  reconciliation and not yet implemented
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
@@ -125,8 +127,9 @@ next is §2.3's negative space, so no alternation or ratio between them
 is guaranteed:
 
 - **Input batch.** Inputs are processed one at a time: each message runs
-  `update`, and the returned command is dispatched before the next input
-  is pulled (RFC 0003 INV-10; window and cap per RFC 0003 §4.4 and
+  `update`, and the command it returns — with RFC 0014 §2.5's
+  reconciliation teardowns merged in — is dispatched before the next
+  input is pulled (RFC 0003 INV-10; window and cap per RFC 0003 §4.4 and
   RFC 0006 INV-L12). The batch records its outcome as pending work:
   redraw pending per RFC 0002's OR-fold over the batch, subscription
   dirtiness per RFC 0003 §4.4's at-least-one-`update` rule.
@@ -323,13 +326,14 @@ tidying, not a contract deliverable, and carries no CHANGELOG entry.
 
 Causes: the `run` future is dropped (external cancellation — a caller's
 `select!`/timeout); a panic unwinds through `run` from application code
-invoked on the driving task — `update`, `view`, `subscriptions`
-(called during bootstrap *and* on every dirty frame), or a declared
-subscription's lazy source constructor, which runs inside the same
-reconcile (all four sites are on the driving task, so all unwind
-through `run`); the runtime value is dropped without ever being run —
-once `run` is called the value is owned by the future, so a mid-run
-drop *is* the run-future drop above.
+invoked on the driving task — `update`, `view`, `subscriptions` (called
+during bootstrap *and* on every dirty frame), a declared subscription's
+lazy source constructor, which runs inside the same reconcile, or
+`instances` (called once before the first `update` and after every one,
+RFC 0014 §2.5) — all five sites are on the driving task, so all unwind
+through `run`; the runtime value is dropped without ever being run —
+once `run` is called the value is owned by the future, so a mid-run drop
+*is* the run-future drop above.
 
 Contract (INV-LC6): the terminating drop or unwind itself performs the
 ownership teardown and the cancellation requests — the §4.4 immediate
@@ -410,8 +414,8 @@ behavior, and that diagnostic requirement stays RFC 0003's (§5.1).
 
 The complement is deliberate: a panic in the application's own code on
 the driving task — `update`, `view`, `subscriptions`, a subscription's
-source constructor — is the application's own bug and stays fail-fast
-(§4.3); containment never extends to it.
+source constructor, `instances` — is the application's own bug and stays
+fail-fast (§4.3); containment never extends to it.
 
 ### 5.1 Negative space: diagnostics and exit causes
 
@@ -588,10 +592,11 @@ Enforcement classes follow the pre-review checklist's definitions.
     the integration layer.
 - **INV-LC6**: each abrupt cause — drop of the `run` future, a panic
   unwinding through `run` from application code on the driving task
-  (`update`, `view`, `subscriptions` at either call site, or a
-  subscription's lazy source constructor), drop of a never-run runtime
-  value — performs the ownership teardown and cancellation requests
-  synchronously during the drop or unwind, reaching the §4.4 immediate
+  (`update`, `view`, `subscriptions` or `instances` at either call
+  site, or a subscription's lazy source constructor), drop of a
+  never-run runtime value — performs the ownership teardown and
+  cancellation requests synchronously during the drop or unwind,
+  reaching the §4.4 immediate
   postcondition with no further call (task futures are dismantled
   afterward by the executor — the quiescent stage); a panic propagates
   to the caller (§4.3). Structural for the synchrony half: review of
@@ -620,6 +625,11 @@ Enforcement classes follow the pre-review checklist's definitions.
     its first call, before the loop);
   - a panic in `subscriptions` at the steady call site (raised only on
     a re-evaluation after a processed message);
+  - a panic in `instances` at the bootstrap call site (raised on its
+    first call, before any message is processed);
+  - a panic in `instances` at the steady call site (raised only on
+    the call after a processed message, before that message's command
+    is dispatched);
   - a panic in a subscription's lazy source constructor (raised at the
     reconcile that starts it);
   - a never-run runtime value dropped — with §3.4 landed there is
