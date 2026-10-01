@@ -64,6 +64,7 @@
   `TestDriver` is RFC 0008's, entered by that RFC's amendment (§13.2, §9
   row 11). Landed with the implementation, after §13.1's gate. The
   live-instance reconciliation carries its own entry when it lands:
+  `Added` — `Instances`, the collector `instances` reports through;
   `Changed` (breaking) — `Reducer` and `Application` gain a required
   `instances` method, empty for an implementor that reduces no other
   reducer and forwarding for one that does, a removal is torn down in
@@ -399,24 +400,23 @@ implicit — and each returned combinator implements
 `Reducer<State = Self::State, Message = Self::Message>`, so stacks
 nest.
 
-**Each projection is supplied as a read/write pair**, because the two
-`Reducer` methods borrow the parent differently: `reduce` takes
-`&mut Self::State` and needs the mutable projection, while
-`subscriptions` takes `&Self::State` and needs the shared one. A
-combinator holding only the mutable accessor could not aggregate its
-child's declarations from the borrow `subscriptions` gives it — it
-would have to fabricate an aliasing mutable borrow, or drop the child's
-subscriptions — and the aggregation INV-RC2 requires would be
-unimplementable as written. The pair closes that: `subscriptions`
-projects with `state`/`rows`/`slot` and walks a collection shared,
-`reduce` projects with `state_mut`/`rows_mut`/`slot_mut`. Both are
-projections of state the caller already holds, so the purity RFC 0012
-INV-SE6 transfers to `Reducer::subscriptions` (§2.1) is untouched:
-aggregating reads the declared set out of state and reaches nothing
-outside it. Two function items per boundary is the whole cost; no lens
-trait is introduced, and none is needed to state this — a projection
-here is a pair of ordinary `fn` items, not an abstraction the core has
-to own.
+**Each projection is supplied as a read/write pair**, because the
+`Reducer` methods borrow the parent differently: `reduce` takes `&mut
+Self::State` and needs the mutable projection, while `subscriptions` and
+`instances` take `&Self::State` and need the shared one. A combinator
+holding only the mutable accessor could not aggregate its child's
+declarations from the borrow `subscriptions` gives it — it would have to
+fabricate an aliasing mutable borrow, or drop the child's subscriptions
+— and the aggregation INV-RC2 requires would be unimplementable as
+written. The pair closes that: `subscriptions` and `instances` project
+with `state`/`rows`/`slot` and walk a collection shared, `reduce`
+projects with `state_mut`/`rows_mut`/`slot_mut`. Both are projections of
+state the caller already holds, so the purity RFC 0012 INV-SE6 transfers
+to `Reducer::subscriptions` (§2.1) is untouched: aggregating reads the
+declared set out of state and reaches nothing outside it. Two function
+items per boundary is the whole cost; no lens trait is introduced, and
+none is needed to state this — a projection here is a pair of ordinary
+`fn` items, not an abstraction the core has to own.
 
 `into_program` is the closing surface: a combinator stack plus a root
 `init` and a root `view` is a `Program` the runtime (§2.3) or the
@@ -447,12 +447,15 @@ Contract:
   begins at `Keyed::insert` — into an absent or an occupied key — at
   `Keyed::from_iter`, and at `Slot::present`; nothing else creates one,
   and no public surface reads, copies, or assigns an identity, so a
-  collection built anew holds new identities even under keys an
-  earlier one held. Mutating a row or an occupant in place (`get_mut`)
-  keeps its identity, and so does moving the collection value that
-  holds it. A fixed `scope` boundary is not an occupancy: replacing the
-  child state it projects continues its prefix, and the occupancies
-  inside that state are reconciled on their own.
+  collection built anew holds new identities even under keys an earlier
+  one held. A surface that copies a collection — `Clone`,
+  deserialization — would be a fourth way to create occupancies or a way
+  to share an identity, and comes with an amendment of this section.
+  Mutating a row or an occupant in place (`get_mut`) keeps its identity,
+  and so does moving the collection value that holds it. A fixed `scope`
+  boundary is not an occupancy: replacing the child state it projects
+  continues its prefix, and the occupancies inside that state are
+  reconciled on their own.
 - **Live-instance reconciliation (INV-RC3).** `instances` reports the
   occupancies a state holds as a set of (qualified path, identity)
   pairs. After every `reduce` the kernel drives returns, it reads that
@@ -495,14 +498,16 @@ Contract:
   executes no side effects and reads no external mutable state; it is
   called for the first report and after every update the kernel or the
   store drives, and nowhere else. An implementor whose `reduce` or
-  `update` calls no other reducer's `reduce` reports nothing, even when
+  `update` calls no other reducer's `reduce` owes no report, even when
   its state holds a `Keyed` or `Slot` — the combinator that reduces that
-  collection reports it. One that does reports that child's occupancies
-  through the projection pair and under the segments it reduces that
-  child with, for every child the state holds — whether or not the last
-  message reached that child, and whether or not the child declares any
-  subscription. The combinators meet this themselves, as they meet
-  INV-RC2: each reports its parent composition and its child's
+  collection reports it. One that reduces the rows of a `Keyed` or the
+  occupant of a `Slot` itself reports those occupancies through `keyed`
+  or `slot`, and one that calls a child's `reduce` reports that child's
+  occupancies through the projection pair and under the segments it
+  reduces that child with, for every child the state holds — whether or
+  not the last message reached that child, and whether or not the child
+  declares any subscription. The combinators meet this themselves, as
+  they meet INV-RC2: each reports its parent composition and its child's
   occupancies under its boundary (`scoped` for `scope`, `keyed` for
   `for_each`, `slot` for `presented`). Requiring the method makes every
   implementor face the obligation; it does not check the report. The
@@ -1466,14 +1471,17 @@ reconciliation and wait for its implementation.
   a baseline row — a removal, a reinsertion at the same key in a later
   update, and an unrelated message after that, the last tearing nothing
   down; and a repeat row, in which one script whose update removes
-  several occupancies at once, run twice, yields one teardown sequence.
-  Structural, in two parts: review of the kernel's and the store's
-  dispatch sites, confirming that each command a `reduce` returns
-  reaches dispatch or intake only through the reconciliation step; and
-  review of the sites that create an identity — `Keyed::insert`,
-  `Keyed::from_iter`, `Slot::present` — confirming each draws one no
-  earlier occupancy held, never derived from the collection value or the
-  key.
+  sibling occupancies — two or more teardowns that no prefix subsumes —
+  run twice, yields one teardown sequence. Structural, in two parts:
+  review of the kernel's and the store's dispatch sites, confirming that
+  each command a `reduce` returns reaches dispatch or intake only
+  through the reconciliation step; and review of the sites that create
+  an identity — `Keyed::insert`, `Keyed::from_iter`, `Slot::present` —
+  confirming each draws one no earlier occupancy held, never derived
+  from the collection value or the key. The repeat row is a regression
+  check for the order, whose structural half is review of the
+  reconciliation step, confirming that the teardown order takes nothing
+  from a randomized iteration.
 - **INV-RC3a — the reporting obligation.** `instances` is required on
   `Reducer` and `Application` and pure — the same state reports the same
   pairs in the same order, with no side effects and no reads of external

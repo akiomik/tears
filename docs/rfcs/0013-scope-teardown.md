@@ -896,10 +896,7 @@ the declaration. Rejected: dropping a scoped value or omitting a scoped
 command tears nothing down. The composition layer's teardown is not drop
 observation either — it follows a reported occupancy disappearing from
 the state's report: a collection taken out and kept alive past the
-update disappears from where it was reported (RFC 0014 §2.5). It is
-observable as subscription stops are — from the state an update leaves
-and the command dispatched for it — rather than from the `Command` the
-update returns.
+update disappears from where it was reported (RFC 0014 §2.5).
 
 ### Root cancel-all
 

@@ -159,8 +159,10 @@ Rendering and subscription re-evaluation are frame-phase activities:
 neither runs inside an input batch, and one frame pass performs at most
 one render and at most one re-evaluation (INV-LC1). This is what makes
 render cost proportional to frames rather than messages (RFC 0002's
-premise) and keeps subscription reconciliation from running per
-message.
+premise) and keeps subscription reconciliation from running per message.
+Live-instance reconciliation is the exception that runs per message,
+because a removal's teardown belongs to the command of the update that
+removed it (RFC 0014 §2.5, RFC 0013 R4).
 
 ### 2.2 Render before subscription start
 
