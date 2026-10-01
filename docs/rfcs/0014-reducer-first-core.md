@@ -125,12 +125,12 @@ Eight decisions:
    pass-bounded, and time-driven redraw is an application `Timer`
    subscription.
 8. **Two-layer testing** (§7). The existing store keeps its
-   non-execution contract (RFC 0008 stages 1–2, unchanged); a stage-3
-   `TestDriver` drives the production kernel itself — same
-   construction, same task bookkeeping, same lanes, same termination —
-   with the driving differential confined to two seams (pass-initiation
-   arbitration, send-intent grants), one recorded pre-pass executor
-   turn, and application-side inputs.
+   non-execution contract (RFC 0008 stages 1–2); a stage-3 `TestDriver`
+   drives the production kernel itself — same construction, same task
+   bookkeeping, same lanes, same termination — with the driving
+   differential confined to two seams (pass-initiation arbitration,
+   send-intent grants), one recorded pre-pass executor turn, and
+   application-side inputs.
 
 Mechanism — the kernel's registries, counters, and seam types — is
 informative (§10). The kernel is the crate's runtime core; this RFC
@@ -222,8 +222,9 @@ Contract, stated observably:
   is a pure function of state exactly as RFC 0012 INV-SE6 states for
   `Application::subscriptions` — the obligation transfers to the trait
   verbatim, and the runtime may evaluate it at any re-evaluation
-  frequency. `instances` reports the live instances the state holds; it
-  is required, and INV-RC3a (§2.5) states what it owes.
+  frequency. `instances` reports the occupancies of the children a
+  reducer composes; it is required, and INV-RC3a (§2.5) states what it
+  owes.
 - **Views are root-level by design.** `Reducer` deliberately has no
   `view`; only `Program` does. Composing child *views* is ordinary
   function calls inside the root `view` over the root state — pane and
@@ -466,12 +467,12 @@ Contract:
   disappearing path that no other disappearing path is a proper prefix
   of, reconciliation merges one teardown of that path into the command
   it dispatches for that update — after `reduce` returns and before the
-  dispatch, never as a later command — in an order that depends on the
-  earlier report alone; a disappearing path under another is selected by
-  that one's teardown (RFC 0013 §3.1). That selection is by prefix, so
-  it also reaches the runs of occupancies still reported beneath a
-  disappearing path: an occupancy kept inside a replaced one continues
-  as an occupancy, and its runs end with the outer one's. The merge adds
+  dispatch, never as a later command — in an order the two reports
+  determine; a disappearing path under another is selected by that one's
+  teardown (RFC 0013 §3.1). That selection is by prefix, so it also
+  reaches the runs of occupancies still reported beneath a disappearing
+  path: an occupancy kept inside a replaced one continues as an
+  occupancy, and its runs end with the outer one's. The merge adds
   teardown entries and nothing else: the entries `reduce` returned, a
   teardown it returned for the same path included, and its directives
   cross unchanged, and §3.4's phase order makes a same-update
@@ -481,27 +482,30 @@ Contract:
   mistaken for continuity. The first report is read from the state
   `init` returns, before its command is dispatched, and tears nothing
   down. Teardowns this adds appear in the dispatched command, not in the
-  `Command` that `reduce` returns.
+  `Command` that `reduce` returns. The previous report the kernel keeps
+  is not per-scope state in RFC 0013 INV-ST7's sense: it decides which
+  teardowns an update issues, and no declaration, output, admission,
+  spawn, or delivery decision carries or reads it.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
   `Reducer` and on `Application`, and it is a pure function of state:
   for a given state it reports the same pairs in the same order, it
-  executes no side effects and reads no external mutable state, and the
-  runtime may call it at any frequency. An implementor whose `reduce` or
-  `update` calls no other reducer's `reduce` reports nothing, even when
-  its state holds a `Keyed` or `Slot` — the combinator that reduces that
-  collection reports it. One that does reports that child's occupancies
-  through the projection pair and under the segments it reduces that
-  child with, for every child the state holds — whether or not the last
-  message reached that child, and whether or not the child declares any
-  subscription. The combinators meet this themselves, as they meet
-  INV-RC2: each reports its parent composition, then its child's
-  occupancies under its boundary (`scoped` for `scope`, `keyed` for
-  `for_each`, `slot` for `presented`). Requiring the method makes every
-  implementor face the obligation; it does not check the report. The
-  runtime does not detect an omission: an occupancy never reported
-  originates no teardown of its own, though another path's teardown can
-  still select its runs, and one reported only intermittently is torn
-  down while still in the state.
+  executes no side effects and reads no external mutable state; the
+  runtime calls it where RFC 0011 §4.3 lists. An implementor whose
+  `reduce` or `update` calls no other reducer's `reduce` reports
+  nothing, even when its state holds a `Keyed` or `Slot` — the
+  combinator that reduces that collection reports it. One that does
+  reports that child's occupancies through the projection pair and under
+  the segments it reduces that child with, for every child the state
+  holds — whether or not the last message reached that child, and
+  whether or not the child declares any subscription. The combinators
+  meet this themselves, as they meet INV-RC2: each reports its parent
+  composition and its child's occupancies under its boundary (`scoped`
+  for `scope`, `keyed` for `for_each`, `slot` for `presented`).
+  Requiring the method makes every implementor face the obligation; it
+  does not check the report. The runtime does not detect an omission: an
+  occupancy never reported originates no teardown of its own, though
+  another path's teardown can still select its runs, and one reported
+  only intermittently is torn down while still in the state.
 - **What reconciliation does not reach.** Three classes, as negative
   space. Work an update's command carries for an occupancy whose pair is
   not in the report that update leaves — one inserted and removed within
@@ -826,11 +830,11 @@ from the contract side:
    preserved). Lowering, selection, and application are the kernel's.
 2. **Subscription participation** (question 2): immediate stop —
    teardown's application point issues stop requests to the selected
-   subscription runs and revokes them; a removed occupancy's own
-   declarations leave the declared set in the same update, as
-   RFC 0013 §4.2 states, so the stop is not self-defeating for them. The
-   required RFC 0012 amendments are §5's. The admission coupling stays
-   the uniform barrier, accepted as documented negative space (§5.1).
+   subscription runs and revokes them; what only the removed occupancy
+   declared is no longer declared by the state that update leaves, so
+   the stop is not self-defeating for it (RFC 0013 §4.2). The required
+   RFC 0012 amendments are §5's. The admission coupling stays the
+   uniform barrier, accepted as documented negative space (§5.1).
 3. **Scope tree and unkeyed tracking** (question 3): the runtime
    tracks task-by-scope first-class. Anonymous (unkeyed) effects
    spawned through a composition boundary carry scope membership —
@@ -1019,17 +1023,16 @@ send-failure series states both layers).
 
 ### 6.2 Bootstrap: the synchronous init quit (an RFC 0011 amendment)
 
-RFC 0011 §3.2's intake order stands — `init` and the first
-live-instance report (§2.5), then init dispatch, then initial
-reconcile, then first render pending unconditionally — with one
-change following from §3.3: an init command whose `Command::quit()`
-part is present terminates **during the init dispatch**,
-deterministically, before the initial reconcile runs and before any
-subscription source starts. Under the previous contract that outcome
-was one legal result of bootstrap arbitration; it is now pinned, and
-the arbitration clause narrows to the init *effect's* output, initial
-subscription output, and the first render. This is the RFC 0011
-amendment §9 row 8 names.
+RFC 0011 §3.2's intake order stands — the first live-instance report
+(§2.5), then init dispatch, then initial reconcile, then first render
+pending unconditionally — with one change following from §3.3: an init
+command whose `Command::quit()` part is present terminates **during the
+init dispatch**, deterministically, before the initial reconcile runs
+and before any subscription source starts. Under the previous contract
+that outcome was one legal result of bootstrap arbitration; it is now
+pinned, and the arbitration clause narrows to the init *effect's*
+output, initial subscription output, and the first render. This is the
+RFC 0011 amendment §9 row 8 names.
 
 ### 6.3 Frame pacing removed
 
@@ -1220,7 +1223,7 @@ implemented. Each row names the owner document that edits in place.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake; RFC 0011's bootstrap order, dispatch step, and panic inventory, with `init` placed inside `run()`; RFC 0005's pointer to the mechanism |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake; RFC 0011's bootstrap order, dispatch step, panic inventory, and the call lists `instances` joins; RFC 0005's pointer to the mechanism |
 
 Count: thirteen rows — five supersessions (rows 1, 2, 3, 4 — the public
 constructor change belongs to row 4's cluster and the keyed-capacity
@@ -1390,7 +1393,7 @@ reused identity fails, and INV-RC3's structural review covers the sites
 that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
 — INV-RC3 quantifies over the pairs reported, INV-RC3a over which pairs
 must be. The order of reconciliation teardowns is pinned only as a
-function of the previous report — what INV-RC14's and RFC 0008 INV-T4's
+function of the two reports — what INV-RC14's and RFC 0008 INV-T4's
 reproducibility need — and not as a rule over paths.
 
 ## 12. Invariants
@@ -1428,26 +1431,26 @@ reconciliation and wait for its implementation.
   kernel drives returns, the command dispatched for that update carries,
   beyond the entries `reduce` returned, exactly one teardown of each
   disappearing path that no other disappearing path is a proper prefix
-  of, in an order that depends on the previous report alone, and no
-  other entry; the first report is the one `init`'s state yields (§2.5).
-  Same-update reinsertion still yields the old occupancy's teardown and
-  a fresh successor. Behavioral, at the driven-transition seam the
-  kernel and the store share — every row reads the dispatched command,
-  never `reduce`'s return value: one row per way a pair disappears —
-  `remove`, `dismiss`, occupied-key `insert`, occupied-slot `present`,
-  assignment of a populated collection holding the same keys,
-  `mem::take`, a swap of two occupied slots reported under different
-  segments, replacement of an occupancy whose state holds occupancies
-  (one teardown, of the outer path), and a `remove` and an assignment
-  made by a reducer above an enclosing `scope` boundary; the key-only
-  remove-reinsert adversary; one slot reported under two paths by two
-  `presented` boundaries, dismissed, yielding a teardown of each; rows
-  that tear nothing down — in-place replacement through `get_mut` of a
-  value that holds no occupancies, a take-and-restore within one update,
-  the restoring update of a collection taken in an earlier one, and an
-  unrelated message to the doubly reported slot; an update that returns
-  its own teardown of a path reconciliation also tears down, keeping
-  both entries; a removal in an update returning `without_redraw`, which
+  of, in an order the two reports determine, and no other entry; the
+  first report is the one `init`'s state yields (§2.5). Same-update
+  reinsertion still yields the old occupancy's teardown and a fresh
+  successor. Behavioral, at the driven-transition seam the kernel and
+  the store share — every row reads the dispatched command, never
+  `reduce`'s return value: one row per way a pair disappears — `remove`,
+  `dismiss`, occupied-key `insert`, occupied-slot `present`, assignment
+  of a populated collection holding the same keys, `mem::take`, a swap
+  of two occupied slots reported under different segments, replacement
+  of an occupancy whose state holds occupancies (one teardown, of the
+  outer path), and a `remove` and an assignment made by a reducer above
+  an enclosing `scope` boundary; the key-only remove-reinsert adversary;
+  one slot reported under two paths by two `presented` boundaries,
+  dismissed, yielding a teardown of each; rows that tear nothing down —
+  in-place replacement through `get_mut` of a value that holds no
+  occupancies, a take-and-restore within one update, the restoring
+  update of a collection taken in an earlier one, and an unrelated
+  message to the doubly reported slot; an update that returns its own
+  teardown of a path reconciliation also tears down, keeping both
+  entries; a removal in an update returning `without_redraw`, which
   stays without a redraw; and a repeat row, in which one script run
   twice yields one teardown sequence. Structural, in two parts: review
   of the kernel's and the store's dispatch sites, confirming that each
@@ -1689,14 +1692,13 @@ mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
 the remaining §12 behavioral rows.
 **Order**, as it ran: the spike tier preceded acceptance, acceptance
-preceded every §9 edit, and the second tier preceded mainlining — so
-the §9 supersessions stood on the owner documents before the kernel
-entered the crate, and every document those rows reach states the
-successor contract as the one in force. A failure in that tier would
-have stopped mainlining and reopened the design of whatever it failed;
-the same is true of a later regression, and whether one reaches the
-architecture selection is RFC 0010 §1.9's counterexample-grade
-question.
+preceded every §9 edit, and the second tier preceded mainlining — so the
+§9 supersessions stood on the owner documents before the kernel entered
+the crate, and every document rows 1–12 reach states the successor
+contract as the one in force. A failure in that tier would have stopped
+mainlining and reopened the design of whatever it failed; the same is
+true of a later regression, and whether one reaches the architecture
+selection is RFC 0010 §1.9's counterexample-grade question.
 
 ### 13.2 Driver API body
 

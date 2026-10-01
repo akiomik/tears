@@ -63,9 +63,9 @@ resolutions stand on:
    tokens and the fresh-slot rule carry the property.
 6. **Subscriptions participate by immediate stop** (§4) — the
    application point issues stop requests to the selected subscription
-   runs and revokes them; a removed occupancy's own declarations leave
-   the declared set in the same update (§4.2); admission stays ordered
-   by RFC 0012's uniform quiescence barrier.
+   runs and revokes them; what only the removed occupancy declared is no
+   longer declared by the state that update leaves (§4.2); admission
+   stays ordered by RFC 0012's uniform quiescence barrier.
 
 The lookup strategy — scanning entries versus a secondary index,
 RFC 0005 §4.5's second question — is mechanism, deliberately unpinned
@@ -423,18 +423,18 @@ un-consume input the run already read (§3.8).
 
 ### 4.2 Declaration pairing
 
-A teardown's subscription stops are not self-defeating for the
-declarations the state that update leaves no longer holds: the declared
-set and the live-instance report are both read from that state (RFC 0014
-INV-RC3), so what the removed occupancy alone declared is gone as of the
-update that tears it down. A run whose identity that state still
-declares, whoever declares it, is restarted by the next re-evaluation —
-for a successor under the same path, the leave-and-return of R4's
-replacement, behind the stopped run's quiescence. The manual primitive
-applied to a *still-declared* subscription stops the run, and the next
-re-evaluation restarts it — RFC 0005 INV-13's restart meaning, untouched
-— which makes that use self-defeating by design; the primitive is sound
-for subscriptions only when the caller also removes the declarations.
+A teardown's subscription stops are not self-defeating for what only the
+removed occupancy declared: the state the tearing-down update leaves no
+longer declares it, and a re-evaluation restarts a stopped run only for
+an identity the state it reads declares. A run whose identity is still
+declared when the next re-evaluation reads the state, whoever declares
+it, is restarted then — for a successor under the same path, the
+leave-and-return of R4's replacement, behind the stopped run's
+quiescence. The manual primitive applied to a *still-declared*
+subscription stops the run, and the next re-evaluation restarts it —
+RFC 0005 INV-13's restart meaning, untouched — which makes that use
+self-defeating by design; the primitive is sound for subscriptions only
+when the caller also removes the declarations.
 
 ### 4.3 Admission under the uniform barrier
 
@@ -577,23 +577,20 @@ full.
   spawn under the torn-down prefix observes a fresh slot; late task
   exits and late sends from torn-down runs are inert (§3.6); a later
   occupant observes no teardown residue beyond the ordinary lifecycle
-  rules. Its two halves take different classes, for the reason RFC 0006
-  INV-L9 splits the same way — cited for its method, not as a live
-  neighbour: that invariant is itself not preserved on this kernel
-  (RFC 0006 §5.2). The **observable** half — fresh-slot spawn, inert late
-  exit, inert late send — is **behavioral**: the fresh-start rows below,
-  scripted per case. The **absence** half — no scope-generation state
-  exists and none is introduced, so no residue can be observed at all —
-  is **structural**, an inventory review of the runtime's per-scope
+  rules. Its two halves take different classes, for the reason
+  RFC 0006 INV-L9 splits the same way — cited for its method, not as
+  a live neighbour: that invariant is itself not preserved on this
+  kernel (RFC 0006 §5.2). The **observable** half —
+  fresh-slot spawn, inert late exit, inert late send — is
+  **behavioral**: the fresh-start rows below, scripted per case. The
+  **absence** half — no scope-generation state exists and none is
+  introduced, so no residue can be observed at all — is
+  **structural**, an inventory review of the runtime's per-scope
   state at the teardown application and spawn sites, because no finite
   set of fresh-start scripts proves it: an implementation that taints
   only the scopes a test never reuses passes every such script. The
-  kernel's record of the occupancies last reported (RFC 0014 INV-RC3) is
-  not per-scope state in this sense: it decides which teardowns an
-  update issues, and no declaration, output, admission, spawn, or
-  delivery decision carries or reads it. The §7.3 *generation-tracking*
-  adversary is excluded by that review, with the fresh-start rows as its
-  regression neighbours.
+  §7.3 *generation-tracking* adversary is excluded by that review,
+  with the fresh-start rows as its regression neighbours.
 - **INV-ST8: the unreached.** Teardown affects nothing already
   delivered to `update`, no state mutation already applied, and no
   external side effect already performed; it cannot un-consume input a
@@ -817,9 +814,9 @@ there, resolve in the body as follows:
    manual primitive; the composition layer's teardowns are
    reconciliation's, the one other origin (§3.2, R8).
 2. **Subscription participation and admission coupling.** Immediate stop
-   at the application point, paired with the removal of the removed
-   occupancy's own declarations (§4.2); the uniform barrier stays, its
-   availability coupling accepted as documented negative space (§4).
+   at the application point, paired with what only the removed occupancy
+   declared no longer being declared (§4.2); the uniform barrier stays,
+   its availability coupling accepted as documented negative space (§4).
 3. **Scope tree and unkeyed tracking (N30).** The runtime tracks
    task-by-scope first-class; anonymous effects spawned through a
    composition boundary are selectable, with no second identity model
@@ -883,8 +880,8 @@ fresh-slot rule (§3.6). Rejected for the strict frame; a graceful window
 must re-justify it if the preservation obligation (§3.4) cannot be met
 otherwise. The occupancy identity of RFC 0014 §2.5 is not this axis: it
 decides whether an occupancy is still in the state, a property neither
-per-run tokens nor the fresh-slot rule provide, and INV-ST7 states what
-it is not read by.
+per-run tokens nor the fresh-slot rule provide, and RFC 0014 §2.5 states
+what never reads it.
 
 ### Policy-parameterized teardown
 
