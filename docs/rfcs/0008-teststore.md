@@ -323,9 +323,9 @@ generic) are implementation latitude.
   scripted `send` supersede or cancel an earlier step's not-yet-received
   keyed output — the store's own linearization, no longer backed by a
   runtime schedule (§6). Its only poll is the keyed-intake
-  reconciliation of §5.1, and only when the returned command is keyed
-  under `CancelPolicy::KeepInFlight`; it never delivers output, which
-  happens only in `receive*` calls.
+  reconciliation of §5.1, and only when the command `update` returns is
+  keyed under `CancelPolicy::KeepInFlight`; it never delivers output,
+  which happens only in `receive*` calls.
 - **`advance`** (stage 2) is the store's only time control. It fails on
   the quit state like `send` (§5.3). Otherwise it anchors first, then
   moves time: its **anchoring scan** polls every pending leaf not
@@ -959,8 +959,8 @@ Enforcement classes follow the pre-review checklist's definitions
   Structural, in two parts: review of the store's single command-intake
   site (it accepts the parts type, touches no `Command` or `Effect`
   internals, and is reached from `update` only through that
-  reconciliation), and review of the runtime's spawn site for the
-  prerequisite's behavior-preservation half (the relocated fold,
+  live-instance reconciliation), and review of the runtime's spawn site
+  for the prerequisite's behavior-preservation half (the relocated fold,
   `fold_leaves`, merges the leaves exactly as the pre-refactor
   `into_stream()` did). This is what makes TestStore results evidence
   about real commands rather than about a test-only model.
@@ -968,9 +968,9 @@ Enforcement classes follow the pre-review checklist's definitions
   `send`, `advance`, and `receive*` are synchronous (no task spawn, no
   wall-clock waiting) and polling follows §4.1's fixed budget — so for
   an application whose `update` is deterministic (the store cannot
-  contract this for the application; `subscriptions` alone carries a
-  purity contract) and whose effects do not depend on spawned-task
-  progress (§4.3), two executions of one test program observe
+  contract this for the application; `subscriptions` and `instances`
+  alone carry a purity contract) and whose effects do not depend on
+  spawned-task progress (§4.3), two executions of one test program observe
   identical state transitions and delivery sequences. Behavioral: a
   repeated-run test over a deterministic application asserts equal
   delivery transcripts across runs of a multi-leaf,

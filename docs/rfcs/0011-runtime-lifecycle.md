@@ -3,7 +3,8 @@
 - Status: Implemented, apart from the parts that belong to RFC 0014
   §2.5's live-instance reconciliation — §2.1's reconciled dispatch,
   §3.2's first report, and the `instances` call sites §4.3, §5, and
-  INV-LC6 list — which are accepted with it and not yet implemented
+  INV-LC6 list — which are accepted with it and not yet implemented;
+  INV-LC6's `init` row states current behavior and has no test yet
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
@@ -632,7 +633,8 @@ Enforcement classes follow the pre-review checklist's definitions.
   - a panic in `init` (raised at the start of `run`, before the init
     command is dispatched);
   - a panic in `instances` at the bootstrap call site (raised on its
-    first call, on `init`'s state);
+    first call, on `init`'s state), asserting additionally that the init
+    command's effect never started;
   - a panic in `instances` at the steady call site (raised only on
     the call after a processed message, before that message's command
     is dispatched);

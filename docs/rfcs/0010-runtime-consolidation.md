@@ -317,7 +317,11 @@ the owner contracts jointly describe — evidence that they are
 satisfiable by one architecture — and every normative statement it
 summarizes lives in the RFC cited beside it. A conforming
 reimplementation is measured against those RFCs, never against this
-sketch.
+sketch. It is the architecture as consolidated at this RFC's acceptance:
+RFC 0014 has since replaced its delivery topology and its
+`select!`-driven loop (§3's verdicts record where), and `init` now runs
+inside `run()`, so the current phase contract is RFC 0011 §2–§3 with RFC
+0014 §3.5, not §2.1 below.
 
 ### 2.1 Phase machine
 

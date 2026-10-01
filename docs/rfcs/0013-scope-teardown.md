@@ -436,8 +436,7 @@ replacement, behind the stopped run's quiescence. The manual primitive
 applied to a *still-declared* subscription stops the run, and the next
 re-evaluation restarts it — RFC 0005 INV-13's restart meaning, untouched
 — which makes that use self-defeating by design; the primitive is sound
-for subscriptions only when the caller also removes the declarations,
-which removing an occupancy does.
+for subscriptions only when the caller also removes the declarations.
 
 ### 4.3 Admission under the uniform barrier
 
@@ -593,9 +592,10 @@ full.
   only the scopes a test never reuses passes every such script. The
   kernel's record of the occupancies last reported (RFC 0014 INV-RC3) is
   not per-scope state in this sense: it decides which teardowns an
-  update issues, and no admission, spawn, or delivery decision reads it.
-  The §7.3 *generation-tracking* adversary is excluded by that review,
-  with the fresh-start rows as its regression neighbours.
+  update issues, and no declaration, output, admission, spawn, or
+  delivery decision carries or reads it. The §7.3 *generation-tracking*
+  adversary is excluded by that review, with the fresh-start rows as its
+  regression neighbours.
 - **INV-ST8: the unreached.** Teardown affects nothing already
   delivered to `update`, no state mutation already applied, and no
   external side effect already performed; it cannot un-consume input a
@@ -879,15 +879,14 @@ unchanged. Rejected (RFC 0014 §4).
 ### Scope generations
 
 A generation counter per scope value could tag stale declarations and
-output. It adds registry state and a second identity axis for a
-property the strict frame already provides through per-run tokens and
-the fresh-slot rule (§3.6). Rejected for the strict frame; a graceful
-window must re-justify it if the preservation obligation (§3.4)
-cannot be met otherwise. The occupancy identity of RFC 0014 §2.5 is
-not this axis: it decides whether an occupancy is still in the state,
-a property neither per-run tokens nor the fresh-slot rule provide, and
-no declaration, output, admission, or delivery decision carries or
-reads it.
+output. It adds registry state and a second identity axis for a property
+the strict frame already provides through per-run tokens and the
+fresh-slot rule (§3.6). Rejected for the strict frame; a graceful window
+must re-justify it if the preservation obligation (§3.4) cannot be met
+otherwise. The occupancy identity of RFC 0014 §2.5 is not this axis: it
+decides whether an occupancy is still in the state, a property neither
+per-run tokens nor the fresh-slot rule provide, and INV-ST7 states what
+it is not read by.
 
 ### Policy-parameterized teardown
 

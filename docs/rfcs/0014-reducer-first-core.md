@@ -90,8 +90,9 @@ Eight decisions:
 
 1. **Core protocol and facade** (§2). `Reducer`/`Program` are the
    composable core; `Application` and its `Runtime` entry point are
-   preserved as a facade — same trait, same `run` signature, same
-   result classification — executed through the adapter (§2.4).
+   preserved as a facade — the same trait apart from a required
+   `instances` (§2.2), the same `run` signature, the same result
+   classification — executed through the adapter (§2.4).
 2. **Composition with automatic scoping** (§2.5). `for_each`,
    `presented`, and `scope` apply scopes structurally; after every
    update the kernel reconciles the instances `Keyed`/`Slot` hold, so
@@ -509,15 +510,17 @@ Contract:
   the update, or one whose work was produced before its removal — is not
   suppressed: a teardown of its path, if the path disappeared, applies
   in the cancel phase before that command's spawns (§3.4), and the work
-  is admitted under the ordinary dispatch rules; only a later teardown
-  that selects its path reaches it. A state change made outside a
-  `reduce` the kernel drives — interior mutability, state shared with a
-  background task — is not observed until a later reconciliation, if one
-  runs, on the terms `Application::subscriptions` already states for
-  such changes. And two occupancies reported under one path are torn
-  down together, because teardown selects by prefix (RFC 0013 §3.1) —
-  two sibling `for_each` boundaries over collections with one key type
-  report that way (issue #424).
+  is admitted under the ordinary dispatch rules. While its path is
+  absent from every report nothing tears it down: it runs until a
+  teardown selecting that path is issued, or until termination. A state
+  change made outside a `reduce` the kernel drives — interior
+  mutability, state shared with a background task — is not observed
+  until a later reconciliation, if one runs, on the terms
+  `Application::subscriptions` already states for such changes. And two
+  occupancies reported under one path are torn down together, because
+  teardown selects by prefix (RFC 0013 §3.1) — two sibling `for_each`
+  boundaries over collections with one key type report that way (issue
+  #424).
 - **Message routing is typed.** `extract` either claims a message for
   the child or returns it unchanged to the parent; a message for a
   child key absent from the collection is routed to nothing and
@@ -1218,7 +1221,7 @@ implemented. Each row names the owner document that edits in place.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals: RFC 0013 R8 admits it as the one other teardown origin, with its origination review, its §4.2 declaration pairing, and its §10 rejections of scope generations and drop-triggered teardown re-justified against occupancy identity; RFC 0008's store reads the first report at `new` and takes in the reconciled command (its §3.2, INV-T3); RFC 0011's bootstrap order, dispatch step, and panic inventory gain `init`'s report and the `instances` call sites, the inventory with `init` itself, which runs inside `run()` (its §2.1, §3.1, §3.2, §4.3, §5, INV-LC3, INV-LC6); RFC 0005 §4.5's pointer to the mechanism |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake; RFC 0011's bootstrap order, dispatch step, and panic inventory, with `init` placed inside `run()`; RFC 0005's pointer to the mechanism |
 
 Count: thirteen rows — five supersessions (rows 1, 2, 3, 4 — the public
 constructor change belongs to row 4's cluster and the keyed-capacity
@@ -1753,7 +1756,7 @@ that satisfy them live.
 
 ### 13.6 Reconciliation cost
 
-INV-RC3 reads every occupancy a state holds after every update, where
+INV-RC3 reads every occupancy a state reports after every update, where
 recording removals as they are made costs work in proportion to the
 removals an update makes. No bound on that cost is claimed: a
 non-functional guarantee is pinned as an observable threshold, and
