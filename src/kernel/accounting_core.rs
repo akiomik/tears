@@ -27,9 +27,7 @@
 //! every run.
 //!
 //! The algorithm here must stay line-for-line equivalent to
-//! `PendingCounter`; any divergence voids the verification. This module has
-//! the same shape and the same feature gate the query cell's own loom
-//! mirror uses.
+//! `PendingCounter`; any divergence voids the verification.
 
 use loom::sync::atomic::{AtomicU32, Ordering};
 

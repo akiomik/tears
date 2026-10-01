@@ -1,12 +1,12 @@
 //! Minimal synchronous mirror of the query cell's concurrency primitives, used
 //! for exhaustive `loom` interleaving checks.
 //!
-//! [`Cell`](super::cell::Cell) drives single-flight, generation
-//! compare-and-commit, in-flight release, and post-error retry suppression, but
-//! it is entangled with `tokio` watch channels and async fetchers, which `loom`
-//! cannot model. `CellCore` re-expresses just those synchronization primitives
-//! over plain atomics, isolated from any async plumbing, so `loom` can explore
-//! every thread interleaving of:
+//! `http::cell::Cell` drives single-flight, generation compare-and-commit,
+//! in-flight release, and post-error retry suppression, but it is entangled
+//! with `tokio` watch channels and async fetchers, which `loom` cannot model.
+//! `CellCore` re-expresses just those synchronization primitives over plain
+//! atomics, isolated from any async plumbing, so `loom` can explore every
+//! thread interleaving of:
 //!
 //! - single-flight: at most one fetcher acquires the in-flight slot per generation;
 //! - compare-and-commit: a result commits only at the generation it was fetched at,
@@ -18,7 +18,7 @@
 //!
 //! End-to-end behavior on the real `Cell` (watch wiring, timing, reconcile
 //! reasons) is covered separately by the `tokio` integration tests in
-//! [`super::query`].
+//! `http::query`.
 
 use loom::sync::atomic::{AtomicU64, Ordering};
 

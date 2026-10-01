@@ -131,12 +131,11 @@ jobs:
         run: just clippy
       # A second pass, because no single feature set sees the whole crate:
       # `loom-core` is the one feature that *removes* code, so the pass above
-      # cannot lint `subscription::http::cell_core` and
-      # `kernel::accounting_core` — 479 lines that `--all-features` used to
-      # reach. Verified by putting a violation there: silent above, caught
-      # here. Invoked via `just` so the local and CI invocations are
-      # identical, as the bench and doctest jobs are, and so a red Clippy is
-      # reproducible with `just clippy-loom`.
+      # cannot lint `subscription::cell_core` and `kernel::accounting_core`,
+      # which `--all-features` used to reach. Verified by putting a violation
+      # there: silent above, caught here. Invoked via `just` so the local and
+      # CI invocations are identical, as the bench and doctest jobs are, and so
+      # a red Clippy is reproducible with `just clippy-loom`.
       - name: Run clippy over the loom mirrors
         run: just clippy-loom
 

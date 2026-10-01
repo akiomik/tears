@@ -33,13 +33,13 @@
 # skipped start.
 #
 # `loom-core` is on in three recipes, and none of them is redundant.
-# `clippy-loom` lints the modules the mirrors live in, which the
-# `build_features` pass cannot see at all. `test-loom` and `test-mirrors` both
-# run the rows — loom's model checker is active either way, since loom's
-# runtime does not itself gate on `cfg(loom)` — and differ in what *else* is
-# compiled around them: `test-loom` sets `--cfg loom`, which reconfigures tokio
-# and drops the `cfg(not(loom))` items in `testing.rs`, while `test-mirrors`
-# leaves them in and is the one CI runs on three platforms.
+# `clippy-loom` lints the mirror modules, which the `build_features` pass
+# cannot see at all. `test-loom` and `test-mirrors` both run the rows — loom's
+# model checker is active either way, since loom's runtime does not itself gate
+# on `cfg(loom)` — and differ in what *else* is compiled around them:
+# `test-loom` sets `--cfg loom`, which reconfigures tokio and drops the
+# `cfg(not(loom))` items in `testing.rs`, while `test-mirrors` leaves them in
+# and is the one CI runs on three platforms.
 #
 # What no recipe covers is compiling the mirrors against the MSRV, and giving
 # that up is deliberate: `rust-version` is a promise about what a dependant
@@ -118,7 +118,7 @@ clippy:
 
 # No single feature set sees the whole crate, so linting takes two passes.
 # `loom-core` is the one feature that removes code, so the pass above cannot
-# reach `subscription::http::cell_core` or `kernel::accounting_core` — both
+# reach `subscription::cell_core` or `kernel::accounting_core` — both
 # `cfg(all(feature = "loom-core", test))`, and both linted by `--all-features`
 # before this list replaced it. `test-loom` runs their rows but under a plain
 # `cargo test` with no `-D warnings`, so without this a violation in either

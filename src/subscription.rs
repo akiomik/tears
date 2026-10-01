@@ -143,14 +143,13 @@
 //!
 //! See the [`mock`] module documentation for complete testing examples.
 
+// The loom mirror of `http::cell`. It sits outside `http` so that it compiles
+// without the `http` feature, and is gated on `test` because only tests call
+// it.
+#[cfg(all(feature = "loom-core", test))]
+mod cell_core;
 pub(crate) mod core;
-// This gate carries `test` the way `http.rs` puts it on the submodule
-// `loom-core` reaches in for: compile the module where something inside it is.
-// What that does to a doctest run is measured, not derived — `signal` below
-// reads the same sub-expression the other way (#298); the `loom-core` arm
-// still gives the module none of the `http` its own example needs (#401); and
-// no recipe runs that doctest configuration (#400).
-#[cfg(any(feature = "http", all(feature = "loom-core", test)))]
+#[cfg(feature = "http")]
 pub mod http;
 pub mod mock;
 #[cfg(not(all(feature = "loom-core", test)))]

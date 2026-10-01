@@ -11,7 +11,7 @@
 //!
 //! # Feature Flag
 //!
-//! The types in this module need the `http` feature:
+//! This module is only available when the `http` feature is enabled:
 //!
 //! ```toml
 //! [dependencies]
@@ -94,34 +94,17 @@
 //! }
 //! ```
 
-#[cfg(feature = "http")]
 mod cell;
-// `loom-core` is a test-only feature (its `CellCore` mirror is exercised solely
-// by the `#[cfg(test)]` loom model checks), so gate the module on `test` too:
-// a non-test `--all-features` build would otherwise compile it with no callers.
-#[cfg(all(feature = "loom-core", test))]
-mod cell_core;
-#[cfg(feature = "http")]
 mod config;
-#[cfg(feature = "http")]
 mod key;
-#[cfg(feature = "http")]
 mod mutation;
-#[cfg(feature = "http")]
 mod query;
-#[cfg(feature = "http")]
 mod reconcile;
-#[cfg(feature = "http")]
 mod result;
 
 // Re-export main types
-#[cfg(feature = "http")]
 pub use config::QueryConfig;
-#[cfg(feature = "http")]
 pub use key::{QueryKey, QueryKeyPart};
-#[cfg(feature = "http")]
 pub use mutation::{Mutation, MutationResult, MutationState};
-#[cfg(feature = "http")]
 pub use query::{Query, QueryClient, QueryError};
-#[cfg(feature = "http")]
 pub use result::{FetchStatus, QueryResult, QueryStatus};
