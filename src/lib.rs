@@ -83,6 +83,7 @@
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![]
 //!     }
+//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
 //! }
 //! ```
 //!

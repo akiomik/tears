@@ -91,6 +91,7 @@
 //!             }
 //!         }
 //!     }
+//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
 //! }
 //! ```
 

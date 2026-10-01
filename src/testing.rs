@@ -250,6 +250,7 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 ///         vec![]
 ///     }
+/// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
 /// }
 ///
 /// let mut store = TestStore::<Counter>::new(0);

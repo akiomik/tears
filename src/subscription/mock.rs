@@ -51,6 +51,7 @@
 //!         // Use the mock in subscriptions
 //!         vec![Subscription::new(self.mock.clone())]
 //!     }
+//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
 //! }
 //!
 //! # #[tokio::main(flavor = "current_thread")]

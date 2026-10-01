@@ -77,6 +77,7 @@ use super::SubscriptionSource;
 ///         }
 ///     }
 /// }
+/// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
 /// # }
 /// ```
 ///
