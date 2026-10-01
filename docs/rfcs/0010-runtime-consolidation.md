@@ -317,67 +317,17 @@ the owner contracts jointly describe — evidence that they are
 satisfiable by one architecture — and every normative statement it
 summarizes lives in the RFC cited beside it. A conforming
 reimplementation is measured against those RFCs, never against this
-sketch. It is the architecture as consolidated at this RFC's acceptance:
-RFC 0014 has since replaced its delivery topology and its
-`select!`-driven loop (§3's verdicts record where), and `init` now runs
-inside `run()`, so the current phase contract is RFC 0011 §2–§3 with RFC
-0014 §3.5, not §2.1 below.
+sketch. It is the architecture as consolidated at this RFC's
+acceptance; RFC 0014 has since replaced parts of it, and §3's verdicts
+record where.
 
 ### 2.1 Phase machine
 
-```text
-[construct]   Runtime::new / with_config
-  App::new(flags) runs (user code, outside the lifecycle contract)
-  -> (app, init command); construction is inert: no runtime-owned
-  task, no effect poll, no source start        (RFC 0011 §3, INV-LC3)
-      |
-      v  run()
-[bootstrap]                                     (RFC 0011 §3, INV-LC4)
-  1. init command dispatched (before subscriptions)
-  2. initial subscription reconcile
-  3. first render made pending — eligible, not promised
-  arbitration among init output, first subscription output, and the
-  first render: unpinned
-      |
-      v
-[steady loop]  select! over three branches (unbiased — premise of
-               RFC 0006 INV-L4)
-  A. input batch: first input -> update -> dispatch, one item at a
-     time (RFC 0003 INV-10), within the 100 microsecond window
-     (RFC 0003 §4.4) and the optional count cap (RFC 0006 INV-L12);
-     redraw directives OR-fold into pending work (RFC 0002); a batch
-     that ran update marks subscriptions dirty (RFC 0003 §4.4)
-  B. frame pass (current state; RFC 0011 INV-LC1/INV-LC2): render if
-     redraw pending, then — after a successful render; a render error
-     terminates instead (RFC 0011 §2.2, §4.1) — subscription re-evaluation
-     if dirty; both steps observe the same state; no individual state
-     is promised a render
-  C. dedicated unkeyed-quit branch (never-bounded channel —
-     RFC 0006 R4/INV-L4)
-  input delivery: one shared FIFO (subscription output, unkeyed
-  command output, terminal events) plus per-run keyed private FIFOs;
-  every pull point is shared-first (RFC 0003 INV-14)
-  subscription dirtiness has two sources: a batch that ran update,
-  and the quiescence of a task stopped by a steady-state
-  re-evaluation — reaching an idle driver as a wake-capable input
-  (RFC 0011 §2.1, RFC 0012 §4); termination-driven quiescence marks
-  nothing
-      |
-      v
-[termination]                                          (RFC 0011 §4)
-  controlled: unkeyed quit / keyed quit / render error -> loop exit
-    with reason; shutdown routing vs. value drop is mechanism
-    (RFC 0011 §4.2's no-divergence analysis)
-  abrupt: run-future drop / panic in update, view, subscriptions, or
-    a lazy source constructor / never-run drop -> Drop-chain
-    teardown; synchronous half = ownership teardown + cancellation
-    requests only
-  postconditions, both routes (INV-LC5–INV-LC7):
-    immediate  = no further transitions or delivery; cancellation
-                 requested for every runtime-owned task
-    quiescent  = after the executor processes the cancellations:
-                 all tasks terminated, producer gauges read zero
-```
+The phase machine this sketch drew — construction, bootstrap, the
+steady loop, termination — is superseded: RFC 0014 replaced its
+`select!`-driven loop with fixed pass stages, and `init` now runs inside
+`run()`. The current phase contract is RFC 0011 §2–§4 with RFC 0014
+§3.5; the sketch as drawn at this RFC's acceptance is in Git.
 
 ### 2.2 Owner table
 

@@ -278,9 +278,11 @@ holds the flags and starts nothing (`Runtime::new`/`with_config`,
 bootstrap that consumes those flags and ahead of the initial
 subscription reconcile (`Kernel::boot`, `src/kernel.rs`) — preserving
 the init-before-subscriptions relative order §3.2 pins. Public
-signatures are unchanged; the observable change is confined to code that
-constructs a runtime without running it (or observes effect side effects
-before `run()`), and it carries this RFC's `Changed` entry.
+signatures are unchanged; this deliverable's observable change is
+confined to code that constructs a runtime without running it (or
+observes effect side effects before `run()`), and it carries this RFC's
+`Changed` entry. That `Application::new` itself runs inside `run()`
+(§3.1) is a separate change, the reducer-first kernel's (RFC 0014).
 
 ## 4. Termination
 
@@ -569,11 +571,12 @@ Enforcement classes follow the pre-review checklist's definitions.
   pinned: the init effect's first poll, initial subscription output, and
   the first render arbitrate freely, and the first render's execution is
   not promised (§3.2). Structural for the ordering half — review of
-  `run()`'s bootstrap sequence — because production exposes no stable
-  observable phase between dispatch and first poll for a behavioral test
-  to anchor on (§3.3). Behavioral for the eligibility half, at the
-  runtime layer: a freshly constructed runtime's first frame pass
-  renders with no message processed.
+  `run()`'s bootstrap sequence, including that the first live-instance
+  report is read before the init command is dispatched — because
+  production exposes no stable observable phase between dispatch and
+  first poll for a behavioral test to anchor on (§3.3). Behavioral for
+  the eligibility half, at the runtime layer: a freshly constructed
+  runtime's first frame pass renders with no message processed.
 - **INV-LC5**: each controlled cause — a quit returned from a
   transition, a producer-originated quit, render error — exits the
   loop, and the §4.4 immediate postcondition holds when `run()`

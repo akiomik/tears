@@ -250,9 +250,10 @@ where
     /// The application state, for plain assertions.
     pub fn state(&self) -> &App;
 
-    /// Applies `msg` through `update` and enqueues the returned
-    /// command's effects. Does not deliver or poll pending output;
-    /// undelivered output stays caught by `receive*`/`finish`/drop (§6).
+    /// Applies `msg` through `update` and enqueues the effects of the
+    /// command the kernel would dispatch for it (§3.2). Does not deliver
+    /// or poll pending output; undelivered output stays caught by
+    /// `receive*`/`finish`/drop (§6).
     /// Fails the test on the quit state (§5.3); a keyed-intake
     /// reconciliation poll can additionally surface a leaf's own poll
     /// failure (§4.3).
@@ -353,9 +354,10 @@ generic) are implementation latitude.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
   `update` — so the store advances exactly as the runtime would on that
-  delivery, including enqueuing the resulting command. If the next
-  deliverable output is a quit request, both fail with a diagnostic
-  saying so (quit is asserted only via `receive_quit`). If nothing is
+  delivery, including enqueuing the command `send` would take in for
+  that update (§3.2's `send` bullet). If the next deliverable output is
+  a quit request, both fail with a diagnostic saying so (quit is
+  asserted only via `receive_quit`). If nothing is
   deliverable, both fail with a diagnostic that distinguishes "no
   pending effects" from "effects pending but not ready" (§4.3).
 - **`receive_quit`** observes a quit by either route. A quit an

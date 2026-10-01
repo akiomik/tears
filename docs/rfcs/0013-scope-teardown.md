@@ -262,13 +262,11 @@ composition boundary therefore targets that boundary's subtree and
 nothing above or beside it, and an aggregating parent needs no
 knowledge of its own ancestors (R2).
 
-The composition layer's teardowns are originated by reconciliation
-(R8): for each path from which an update's state drops a reported
-occupancy, and that lies under no other such path, one teardown of
-that path is merged into the command dispatched for that update, a
-path qualified by the boundaries above it exactly as `scoped` would
-qualify it (RFC 0014 §2.5, INV-RC3).
-Lowering, selection, and application are the kernel's.
+The composition layer's teardowns are originated by reconciliation (R8):
+the teardowns RFC 0014 INV-RC3 names are merged into the command
+dispatched for the update, each over a path qualified by the boundaries
+above it exactly as `scoped` would qualify it (RFC 0014 §2.5). Lowering,
+selection, and application are the kernel's.
 
 ### 3.3 Dispatch ordering: the cancel phase
 
