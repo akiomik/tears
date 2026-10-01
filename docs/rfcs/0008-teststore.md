@@ -312,18 +312,19 @@ generic) are implementation latitude.
   be received first.
 - **`send`** is one synchronous `update` call plus bookkeeping. The
   command it takes in is the one the kernel would dispatch for that
-  update: `update`'s, with RFC 0014 INV-RC3's reconciliation teardowns
-  merged in. It spawns no task, awaits nothing, and returns only after
-  the command's metadata (directives, cancellation) has been applied to
-  the store. It runs no deliverable-output exhaustiveness precondition and
-  polls no pending leaf for output; pending deliverable output is left
-  in place for a later `receive*` (or caught by `finish`/drop, §6),
-  which lets a scripted `send` supersede or cancel an earlier step's
-  not-yet-received keyed output — the store's own linearization, no
-  longer backed by a runtime schedule (§6). Its only poll is the keyed-intake reconciliation of §5.1,
-  and only when the returned command is keyed under
-  `CancelPolicy::KeepInFlight`; it never delivers output, which happens
-  only in `receive*` calls.
+  update: `update`'s, with RFC 0014 INV-RC3's live-instance
+  reconciliation teardowns merged in. It spawns no task, awaits nothing,
+  and returns only after the command's metadata (directives,
+  cancellation) has been applied to the store. It runs no
+  deliverable-output exhaustiveness precondition and polls no pending
+  leaf for output; pending deliverable output is left in place for a
+  later `receive*` (or caught by `finish`/drop, §6), which lets a
+  scripted `send` supersede or cancel an earlier step's not-yet-received
+  keyed output — the store's own linearization, no longer backed by a
+  runtime schedule (§6). Its only poll is the keyed-intake
+  reconciliation of §5.1, and only when the returned command is keyed
+  under `CancelPolicy::KeepInFlight`; it never delivers output, which
+  happens only in `receive*` calls.
 - **`advance`** (stage 2) is the store's only time control. It fails on
   the quit state like `send` (§5.3). Otherwise it anchors first, then
   moves time: its **anchoring scan** polls every pending leaf not
@@ -951,19 +952,17 @@ Enforcement classes follow the pre-review checklist's definitions
   prerequisite refactor, a `RuntimeCommandParts` that carries the
   effect's leaves unfolded in declaration order, folded or driven only
   at each consumer's own site — never a parallel re-derivation of
-  directives, cancellation, or effects — and the command it consumes
-  for an update has passed through the kernel's own live-instance
+  directives, cancellation, or effects — and the command it consumes for
+  an update has passed through the kernel's own live-instance
   reconciliation (RFC 0014 INV-RC3), never a re-derivation of it.
-  Structural, in two parts: review of the store's single
-  command-intake site (it accepts the parts type, touches no `Command`
-  or `Effect` internals, and is reached from `update` only through that
-  reconciliation), and
-  review of the runtime's spawn site for the prerequisite's
-  behavior-preservation half (the relocated fold, `fold_leaves`, merges
-  the leaves exactly as the pre-refactor `into_stream()` did). This is
-  what makes TestStore
-  results evidence about real commands rather than about a test-only
-  model.
+  Structural, in two parts: review of the store's single command-intake
+  site (it accepts the parts type, touches no `Command` or `Effect`
+  internals, and is reached from `update` only through that
+  reconciliation), and review of the runtime's spawn site for the
+  prerequisite's behavior-preservation half (the relocated fold,
+  `fold_leaves`, merges the leaves exactly as the pre-refactor
+  `into_stream()` did). This is what makes TestStore results evidence
+  about real commands rather than about a test-only model.
 - **INV-T4**: the store introduces no nondeterminism of its own —
   `send`, `advance`, and `receive*` are synchronous (no task spawn, no
   wall-clock waiting) and polling follows §4.1's fixed budget — so for

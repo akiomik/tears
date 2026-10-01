@@ -1,8 +1,9 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Implemented, apart from the `instances` call sites §4.3 and
-  INV-LC6 list, which are accepted with RFC 0014 §2.5's live-instance
-  reconciliation and not yet implemented
+- Status: Implemented, apart from the parts that belong to RFC 0014
+  §2.5's live-instance reconciliation — §2.1's reconciled dispatch,
+  §3.2's first report, and the `instances` call sites §4.3 and INV-LC6
+  list — which are accepted with it and not yet implemented
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
@@ -43,9 +44,9 @@ down. This RFC is the owner of that contract. Five decisions:
    no subscription source starts. Inside `run()`, the init command is
    dispatched before the initial subscription reconcile, and the first
    render starts out pending — eligible, not promised. `Application::new`
-   is user code and runs at construction; this RFC claims nothing about
-   its side effects, and a panic inside it happens before a runtime
-   exists and is outside this contract.
+   is user code and runs at the start of `run()`; this RFC claims
+   nothing about its side effects, and a panic inside it unwinds through
+   `run` like any other driving-task panic.
 3. **Termination** (§4, INV-LC5–INV-LC7). Termination has two routes —
    controlled (a quit returned from a transition, a producer-originated
    quit, render error: the loop exits with a reason and the shutdown
@@ -128,11 +129,11 @@ is guaranteed:
 
 - **Input batch.** Inputs are processed one at a time: each message runs
   `update`, and the command it returns — with RFC 0014 §2.5's
-  reconciliation teardowns merged in — is dispatched before the next
-  input is pulled (RFC 0003 INV-10; window and cap per RFC 0003 §4.4 and
-  RFC 0006 INV-L12). The batch records its outcome as pending work:
-  redraw pending per RFC 0002's OR-fold over the batch, subscription
-  dirtiness per RFC 0003 §4.4's at-least-one-`update` rule.
+  live-instance reconciliation teardowns merged in — is dispatched
+  before the next input is pulled (RFC 0003 INV-10; window and cap per
+  RFC 0003 §4.4 and RFC 0006 INV-L12). The batch records its outcome as
+  pending work: redraw pending per RFC 0002's OR-fold over the batch,
+  subscription dirtiness per RFC 0003 §4.4's at-least-one-`update` rule.
 - **Frame pass.** Pending work is consumed at frame granularity and in a
   fixed order: the render step first (executed when a redraw is
   pending), then subscription re-evaluation (executed when subscriptions
@@ -157,7 +158,8 @@ Rendering and subscription re-evaluation are frame-phase activities:
 neither runs inside an input batch, and one frame pass performs at most
 one render and at most one re-evaluation (INV-LC1). This is what makes
 render cost proportional to frames rather than messages (RFC 0002's
-premise) and keeps reconciliation from running per message.
+premise) and keeps subscription reconciliation from running per
+message.
 
 ### 2.2 Render before subscription start
 
@@ -217,23 +219,25 @@ subscription sources.
 
 Two boundaries are explicit:
 
-- `Application::new(flags)` runs during construction and is user code:
-  it may perform side effects of its own, so this RFC claims "the
-  *runtime* starts nothing", never "construction is side-effect-free".
-- A panic inside `Application::new` unwinds out of the constructor
-  before a `Runtime` value exists. There is nothing to clean up and no
-  lifecycle to speak of; it is outside this contract entirely.
+- `Application::new(flags)` — `Program::init` through the facade —
+  runs at the start of `run()`, not during construction, and is user
+  code: it may perform side effects of its own, so this RFC claims "the
+  *runtime* starts nothing", never "running `init` is side-effect-free".
+- A panic inside it unwinds through `run` and is an abrupt cause like
+  any other on the driving task (§4.3).
 
 ### 3.2 `run()` bootstrap order
 
 Inside `run()`, before the steady-state loop:
 
-1. **The init command is dispatched** — its cancel list is applied and
+1. **`init` runs** and the first live-instance report is read from the
+   state it returns (RFC 0014 §2.5) — before
+2. **the init command is dispatched** — its cancel list is applied and
    its keyed identity, if any, is admitted (RFC 0003 §4.3), and its
    effect becomes eligible to run — before
-2. **the initial subscription reconcile** starts any subscription
+3. **the initial subscription reconcile** starts any subscription
    source, and
-3. **the first render starts out pending**: eligible for the first
+4. **the first render starts out pending**: eligible for the first
    frame pass, unconditionally and independently of the init command's
    redraw directive, which the runtime never consults (the fact
    RFC 0008 §5.2 records).
@@ -326,11 +330,12 @@ tidying, not a contract deliverable, and carries no CHANGELOG entry.
 
 Causes: the `run` future is dropped (external cancellation — a caller's
 `select!`/timeout); a panic unwinds through `run` from application code
-invoked on the driving task — `update`, `view`, `subscriptions` (called
-during bootstrap *and* on every dirty frame), a declared subscription's
-lazy source constructor, which runs inside the same reconcile, or
-`instances` (called once before the first `update` and after every one,
-RFC 0014 §2.5) — all five sites are on the driving task, so all unwind
+invoked on the driving task — `init` (`Application::new`, once at the
+start of `run`), `update`, `view`, `subscriptions` (called during
+bootstrap *and* on every dirty frame), a declared subscription's lazy
+source constructor, which runs inside the same reconcile, or
+`instances` (called once on `init`'s state and after every `update`,
+RFC 0014 §2.5) — all six sites are on the driving task, so all unwind
 through `run`; the runtime value is dropped without ever being run —
 once `run` is called the value is owned by the future, so a mid-run drop
 *is* the run-future drop above.
@@ -413,9 +418,9 @@ keyed kind, RFC 0003 §5.5/§7.3 already record the catch-and-log
 behavior, and that diagnostic requirement stays RFC 0003's (§5.1).
 
 The complement is deliberate: a panic in the application's own code on
-the driving task — `update`, `view`, `subscriptions`, a subscription's
-source constructor, `instances` — is the application's own bug and stays
-fail-fast (§4.3); containment never extends to it.
+the driving task — `init`, `update`, `view`, `subscriptions`, a
+subscription's source constructor, `instances` — is the application's
+own bug and stays fail-fast (§4.3); containment never extends to it.
 
 ### 5.1 Negative space: diagnostics and exit causes
 
@@ -545,9 +550,9 @@ Enforcement classes follow the pre-review checklist's definitions.
   separation, observed from the lifecycle side).
 - **INV-LC3**: constructing a `Runtime` spawns no runtime-owned task,
   polls no command effect, and starts no subscription source; no claim
-  is made about `Application::new`'s own side effects, and an
-  `Application::new` panic is outside this contract (§3.1). Primary
-  check structural — review of the construction path
+  is made about `Application::new`'s own side effects, which happen
+  inside `run()`, and its panic is an abrupt cause (§3.1, INV-LC6).
+  Primary check structural — review of the construction path
   (`Runtime::new`/`with_config` and the value they build,
   `src/runtime.rs`) for the absence of spawn and dispatch sites —
   because a behavioral test cannot prove the absence of a task that
@@ -592,32 +597,30 @@ Enforcement classes follow the pre-review checklist's definitions.
     the integration layer.
 - **INV-LC6**: each abrupt cause — drop of the `run` future, a panic
   unwinding through `run` from application code on the driving task
-  (`update`, `view`, `subscriptions` or `instances` at either call
-  site, or a subscription's lazy source constructor), drop of a
+  (`init`, `update`, `view`, `subscriptions` or `instances` at either
+  call site, or a subscription's lazy source constructor), drop of a
   never-run runtime value — performs the ownership teardown and
   cancellation requests synchronously during the drop or unwind,
-  reaching the §4.4 immediate
-  postcondition with no further call (task futures are dismantled
-  afterward by the executor — the quiescent stage); a panic propagates
-  to the caller (§4.3). Structural for the synchrony half: review of
-  the `Drop` owners that carry the teardown — the kernel, whose drop
-  aborts what it still owns when it has not settled, and the run registry
-  it holds (`src/kernel.rs`, `src/kernel/registry.rs`) — confirming
-  every runtime-owned task is
+  reaching the §4.4 immediate postcondition with no further call (task
+  futures are dismantled afterward by the executor — the quiescent
+  stage); a panic propagates to the caller (§4.3). Structural for the
+  synchrony half: review of the `Drop` owners that carry the teardown —
+  the kernel, whose drop aborts what it still owns when it has not
+  settled, and the run registry it holds (`src/kernel.rs`,
+  `src/kernel/registry.rs`) — confirming every runtime-owned task is
   reachable from a structure the runtime value's drop or the unwind
   reaches, with no teardown step deferred to a later call or task.
   Behavioral at the integration layer, one row per quantified cause and
   call site; each row asserts that from the moment the drop or unwind
   completes — checked immediately, and re-checked across the INV-LC7
-  settle loop's yields, not only after settling — no further
-  transition, delivery, or source poll is observed (a settle-only check
-  would pass an implementation that defers its cancellation requests by
-  a scheduler pass, whose still-live producers keep polling sources
-  during that window), plus the propagation assertion for the panic
-  rows (the test harness catches the unwind). The rows run on a
-  single-threaded test executor, so no producer poll is in flight
-  across the drop itself and the no-further-poll assertion is
-  deterministic:
+  settle loop's yields, not only after settling — no further transition,
+  delivery, or source poll is observed (a settle-only check would pass
+  an implementation that defers its cancellation requests by a scheduler
+  pass, whose still-live producers keep polling sources during that
+  window), plus the propagation assertion for the panic rows (the test
+  harness catches the unwind). The rows run on a single-threaded test
+  executor, so no producer poll is in flight across the drop itself and
+  the no-further-poll assertion is deterministic:
   - the `run` future dropped mid-run (a caller `select!`/timeout);
   - a panic in `update`;
   - a panic in `view`;
@@ -625,8 +628,10 @@ Enforcement classes follow the pre-review checklist's definitions.
     its first call, before the loop);
   - a panic in `subscriptions` at the steady call site (raised only on
     a re-evaluation after a processed message);
+  - a panic in `init` (raised at the start of `run`, before the init
+    command is dispatched);
   - a panic in `instances` at the bootstrap call site (raised on its
-    first call, before any message is processed);
+    first call, on `init`'s state);
   - a panic in `instances` at the steady call site (raised only on
     the call after a processed message, before that message's command
     is dispatched);

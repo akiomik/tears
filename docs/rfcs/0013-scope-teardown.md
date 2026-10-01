@@ -62,11 +62,10 @@ resolutions stand on:
    nothing stale** (§3.6) — no scope-generation state exists; per-run
    tokens and the fresh-slot rule carry the property.
 6. **Subscriptions participate by immediate stop** (§4) — the
-   application point issues stop requests to the selected
-   subscription runs and revokes them; declaration removal is paired
-   with it structurally, both following from an occupancy leaving the
-   state (RFC 0014 §2.5); admission stays ordered by
-   RFC 0012's uniform quiescence barrier.
+   application point issues stop requests to the selected subscription
+   runs and revokes them; a removed occupancy's own declarations leave
+   the declared set in the same update (§4.2); admission stays ordered
+   by RFC 0012's uniform quiescence barrier.
 
 The lookup strategy — scanning entries versus a secondary index,
 RFC 0005 §4.5's second question — is mechanism, deliberately unpinned
@@ -263,10 +262,11 @@ nothing above or beside it, and an aggregating parent needs no
 knowledge of its own ancestors (R2).
 
 The composition layer's teardowns are originated by reconciliation
-(R8): for each path an update leaves without the occupancy reported
-under it, one teardown of that path is merged into the command
-dispatched for that update, a path qualified by the boundaries above
-it exactly as `scoped` would qualify it (RFC 0014 §2.5, INV-RC3).
+(R8): for each path from which an update's state drops a reported
+occupancy, and that lies under no other such path, one teardown of
+that path is merged into the command dispatched for that update, a
+path qualified by the boundaries above it exactly as `scoped` would
+qualify it (RFC 0014 §2.5, INV-RC3).
 Lowering, selection, and application are the kernel's.
 
 ### 3.3 Dispatch ordering: the cancel phase
@@ -424,10 +424,18 @@ un-consume input the run already read (§3.8).
 
 ### 4.2 Declaration pairing
 
-The torn-down child's subscription declarations are gone from the
-declared set as of the update whose reconciliation issues the
-teardown — both are read from the state that update leaves (RFC 0014
-INV-RC3) — so the stop is never self-defeating. The manual primitive
+A removed occupancy's own declarations — those no occupancy the state
+still holds declares under the same identity — leave the declared set
+as of the update whose live-instance reconciliation issues its
+teardown, both being read from the state that update leaves (RFC 0014
+INV-RC3), so the stop is not self-defeating for them. Two other kinds
+of declaration a teardown stops stay declared. A successor under the
+same path that declares the same identity is R4's replacement: that
+subscription leaves and returns, admitted at the next re-evaluation
+behind the stopped run's quiescence. A declaration from another
+occupancy reported under the same path (RFC 0014 §2.5's negative
+space) is stopped by the prefix and restarted by the next
+re-evaluation. The manual primitive
 applied to a *still-declared* subscription stops the run, and the next
 re-evaluation restarts it — RFC 0005 INV-13's restart meaning,
 untouched — which makes that use self-defeating by design; the
@@ -575,23 +583,21 @@ full.
   spawn under the torn-down prefix observes a fresh slot; late task
   exits and late sends from torn-down runs are inert (§3.6); a later
   occupant observes no teardown residue beyond the ordinary lifecycle
-  rules. Its two halves take different classes, for the reason
-  RFC 0006 INV-L9 splits the same way — cited for its method, not as
-  a live neighbour: that invariant is itself not preserved on this
-  kernel (RFC 0006 §5.2). The **observable** half —
-  fresh-slot spawn, inert late exit, inert late send — is
-  **behavioral**: the fresh-start rows below, scripted per case. The
-  **absence** half — no scope-generation state exists and none is
-  introduced, so no residue can be observed at all — is
-  **structural**, an inventory review of the runtime's per-scope
+  rules. Its two halves take different classes, for the reason RFC 0006
+  INV-L9 splits the same way — cited for its method, not as a live
+  neighbour: that invariant is itself not preserved on this kernel
+  (RFC 0006 §5.2). The **observable** half — fresh-slot spawn, inert late
+  exit, inert late send — is **behavioral**: the fresh-start rows below,
+  scripted per case. The **absence** half — no scope-generation state
+  exists and none is introduced, so no residue can be observed at all —
+  is **structural**, an inventory review of the runtime's per-scope
   state at the teardown application and spawn sites, because no finite
   set of fresh-start scripts proves it: an implementation that taints
   only the scopes a test never reuses passes every such script. The
-  kernel's record of the occupancies last reported (RFC 0014 INV-RC3)
-  is not per-scope state in this sense: it decides which teardowns an
-  update issues, and no admission, spawn, or delivery decision reads
-  it. The
-  §7.3 *generation-tracking* adversary is excluded by that review,
+  kernel's record of the occupancies last reported (RFC 0014 INV-RC3) is
+  not per-scope state in this sense: it decides which teardowns an
+  update issues, and no admission, spawn, or delivery decision reads it.
+  The §7.3 *generation-tracking* adversary is excluded by that review,
   with the fresh-start rows as its regression neighbours.
 - **INV-ST8: the unreached.** Teardown affects nothing already
   delivered to `update`, no state mutation already applied, and no
@@ -815,11 +821,10 @@ there, resolve in the body as follows:
 1. **Public surface and owner.** `Command::teardown(seg)` is the
    manual primitive; the composition layer's teardowns are
    reconciliation's, the one other origin (§3.2, R8).
-2. **Subscription participation and admission coupling.** Immediate
-   stop at the application point, paired with declaration removal
-   because both follow from the occupancy leaving the state; the
-   uniform barrier stays, its availability
-   coupling accepted as documented negative space (§4).
+2. **Subscription participation and admission coupling.** Immediate stop
+   at the application point, paired with the removal of the removed
+   occupancy's own declarations (§4.2); the uniform barrier stays, its
+   availability coupling accepted as documented negative space (§4).
 3. **Scope tree and unkeyed tracking (N30).** The runtime tracks
    task-by-scope first-class; anonymous effects spawned through a
    composition boundary are selectable, with no second identity model
@@ -898,12 +903,12 @@ delegation's window (§3.4). Rejected.
 Tearing down when a scoped value is dropped or a scoped command is
 omitted contradicts RFC 0005 INV-21 and makes teardown unobservable in
 the declaration. Rejected; teardown stays explicit. The composition
-layer's teardown follows an occupancy leaving the state, not a value
-being dropped: a collection taken out and kept alive still ends the
-occupancies it held where they were reported (RFC 0014 §2.5). It is
-observable as subscription stops are — from the state an update leaves
-and the command dispatched for it — rather than from the `Command` the
-update returns.
+layer's teardown follows a reported occupancy disappearing from the
+state's report, not a value being dropped: a collection taken out and
+kept alive past the update disappears from where it was reported
+(RFC 0014 §2.5). It is observable as subscription stops are — from the state
+an update leaves and the command dispatched for it — rather than from
+the `Command` the update returns.
 
 ### Root cancel-all
 
