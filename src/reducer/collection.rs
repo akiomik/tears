@@ -56,8 +56,12 @@ impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 pub struct InstanceId(u64);
 
 impl InstanceId {
+    /// The placeholder an empty slot holds. Never drawn: the counter starts
+    /// above it.
+    const NONE: Self = Self(0);
+
     fn draw() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static NEXT: AtomicU64 = AtomicU64::new(1);
         let drawn = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
@@ -190,14 +194,22 @@ impl<K: ScopeValue, V> FromIterator<(K, V)> for Keyed<K, V> {
 /// The one-instance counterpart of [`Keyed`]: what a modal, a detail pane,
 /// or any other optionally-present child lives in.
 pub struct Slot<S> {
-    occupant: Option<(S, InstanceId)>,
+    value: Option<S>,
+    /// The occupant's identity. Meaningful only while `value` is `Some`; a
+    /// field beside the value rather than inside the option, so emptying
+    /// the slot moves the occupant out without a destructor to run and
+    /// `dismiss` stays a `const fn`.
+    id: InstanceId,
 }
 
 impl<S> Slot<S> {
     /// An empty slot.
     #[must_use]
     pub const fn empty() -> Self {
-        Self { occupant: None }
+        Self {
+            value: None,
+            id: InstanceId::NONE,
+        }
     }
 
     /// Puts `value` in the slot, returning the instance it replaced.
@@ -208,35 +220,34 @@ impl<S> Slot<S> {
     /// [`ReducerExt::presented`](crate::reducer::ReducerExt::presented)
     /// states. Drawing the identity is why this is not a `const fn`.
     pub fn present(&mut self, value: S) -> Option<S> {
-        self.occupant
-            .replace((value, InstanceId::draw()))
-            .map(|(replaced, _)| replaced)
+        self.id = InstanceId::draw();
+        self.value.replace(value)
     }
 
     /// Empties the slot.
-    pub fn dismiss(&mut self) -> Option<S> {
-        self.occupant.take().map(|(dismissed, _)| dismissed)
+    pub const fn dismiss(&mut self) -> Option<S> {
+        self.value.take()
     }
 
     /// The instance, if the slot holds one.
-    pub fn get(&self) -> Option<&S> {
-        self.occupant.as_ref().map(|(value, _)| value)
+    pub const fn get(&self) -> Option<&S> {
+        self.value.as_ref()
     }
 
     /// The instance, mutably. The occupancy continues.
-    pub fn get_mut(&mut self) -> Option<&mut S> {
-        self.occupant.as_mut().map(|(value, _)| value)
+    pub const fn get_mut(&mut self) -> Option<&mut S> {
+        self.value.as_mut()
     }
 
     /// Whether the slot holds an instance.
     #[must_use]
     pub const fn is_present(&self) -> bool {
-        self.occupant.is_some()
+        self.value.is_some()
     }
 
     /// The occupant with its identity, for the report.
     pub(crate) fn occupancy(&self) -> Option<(&S, InstanceId)> {
-        self.occupant.as_ref().map(|(value, id)| (value, *id))
+        self.value.as_ref().map(|value| (value, self.id))
     }
 }
 
@@ -304,6 +315,19 @@ mod tests {
         assert_eq!(slot.get(), Some(&7));
         assert_eq!(ids(&rows), row_before);
         assert_eq!(slot_id(&slot), slot_before);
+    }
+
+    #[test]
+    fn an_absent_row_and_an_empty_slot_are_not_reachable_mutably() {
+        let mut rows: Keyed<&str, u8> = Keyed::new();
+        let mut slot: Slot<u8> = Slot::empty();
+        rows.insert("a", 1);
+
+        assert!(rows.get_mut(&"missing").is_none());
+        assert!(slot.get_mut().is_none());
+        slot.present(1);
+        slot.dismiss();
+        assert!(slot.get_mut().is_none(), "a dismissed slot is empty again");
     }
 
     #[test]

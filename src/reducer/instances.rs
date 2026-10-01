@@ -61,13 +61,7 @@ impl Instances<'_> {
         mut visit: impl FnMut(&V, &mut Instances<'_>),
     ) {
         for (key, value, id) in rows.occupancies() {
-            let path = self.prefix.child(StructuralKey::new(key.clone()));
-            self.report.push((path.clone(), id));
-            let mut child = Instances {
-                prefix: path,
-                report: &mut *self.report,
-            };
-            visit(value, &mut child);
+            self.occupy(StructuralKey::new(key.clone()), id, |out| visit(value, out));
         }
     }
 
@@ -80,14 +74,24 @@ impl Instances<'_> {
         visit: impl FnOnce(&S, &mut Instances<'_>),
     ) {
         if let Some((value, id)) = slot.occupancy() {
-            let path = self.prefix.child(StructuralKey::new(seg));
-            self.report.push((path.clone(), id));
-            let mut child = Instances {
-                prefix: path,
-                report: &mut *self.report,
-            };
-            visit(value, &mut child);
+            self.occupy(StructuralKey::new(seg), id, |out| visit(value, out));
         }
+    }
+
+    /// Reports one occupancy under `segment`, then what `visit` reports
+    /// beneath it.
+    fn occupy(
+        &mut self,
+        segment: StructuralKey,
+        id: InstanceId,
+        visit: impl FnOnce(&mut Instances<'_>),
+    ) {
+        let path = self.prefix.child(segment);
+        self.report.push((path.clone(), id));
+        visit(&mut Instances {
+            prefix: path,
+            report: &mut *self.report,
+        });
     }
 }
 
@@ -138,21 +142,31 @@ impl LiveInstances {
         command: Command<R::Message>,
     ) -> Command<R::Message> {
         let report = report(reducer, state);
-        let current: HashSet<&(ScopePath, InstanceId)> = report.iter().collect();
-        let mut seen: HashSet<&ScopePath> = HashSet::new();
-        let mut disappeared: Vec<&ScopePath> = Vec::new();
-        for pair in &self.previous {
-            if !current.contains(pair) && seen.insert(&pair.0) {
-                disappeared.push(&pair.0);
-            }
-        }
-        let outermost: Vec<ScopePath> = disappeared
-            .iter()
-            .filter(|path| !path.proper_prefixes().any(|prefix| seen.contains(&prefix)))
-            .map(|path| (*path).clone())
-            .collect();
-        let command = command.with_reconciled_teardowns(outermost);
+        let outermost = disappeared_outermost(&self.previous, &report);
         self.previous = report;
-        command
+        command.with_reconciled_teardowns(outermost)
     }
+}
+
+/// Each path under which `previous` holds a pair `current` lacks, once, in
+/// the order `previous` first names it, without the paths another of them is
+/// a proper prefix of. The sets are consulted for membership only, never
+/// iterated, so the order is the report's.
+fn disappeared_outermost(previous: &Report, current: &Report) -> Vec<ScopePath> {
+    let present: HashSet<&(ScopePath, InstanceId)> = current.iter().collect();
+    let mut gone: HashSet<&[StructuralKey]> = HashSet::new();
+    let mut disappeared: Vec<&ScopePath> = Vec::new();
+    for pair in previous {
+        if !present.contains(pair) && gone.insert(pair.0.segments()) {
+            disappeared.push(&pair.0);
+        }
+    }
+    disappeared
+        .into_iter()
+        .filter(|path| {
+            let segments = path.segments();
+            !(1..segments.len()).any(|len| gone.contains(&segments[..len]))
+        })
+        .cloned()
+        .collect()
 }

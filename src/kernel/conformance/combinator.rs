@@ -543,8 +543,8 @@ fn an_anonymous_child_effect_is_reached_by_its_boundary_s_teardown() {
 
 // INV-RC3's reconciliation as the kernel applies it: the row the parent's
 // own `update` removed leaves the report, its teardown is merged into that
-// same update's command, and the runs under the row are reclaimed by it. Nothing in the
-// reducer wrote `.teardown(...)` — the boundary did.
+// same update's command, and the runs under the row are reclaimed by it.
+// Nothing in the reducer wrote `.teardown(...)` — reconciliation did.
 #[test]
 fn closing_a_row_tears_down_the_runs_under_it() {
     let reclaimed = Beacon::default();
