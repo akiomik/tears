@@ -570,13 +570,15 @@ Enforcement classes follow the pre-review checklist's definitions.
   beyond intake is not pinned: the init effect's first poll, initial
   subscription output, and the first render arbitrate freely, and the
   first render's execution is not promised (§3.2). Structural for the
-  ordering half — review of `run()`'s bootstrap sequence, including that
-  the first live-instance report is read before the init command is
-  dispatched — because production exposes no stable observable phase
-  between dispatch and first poll for a behavioral test to anchor on
-  (§3.3). Behavioral for the eligibility half, at the runtime layer: a
-  freshly constructed runtime's first frame pass renders with no message
-  processed.
+  ordering half — review of `run()`'s bootstrap sequence — because
+  production exposes no stable observable phase between dispatch and
+  first poll for a behavioral test to anchor on (§3.3). Behavioral for
+  the eligibility half, at the runtime layer: a freshly constructed
+  runtime's first frame pass renders with no message processed.
+  Behavioral for the first-report order, at the integration layer: a
+  panic in `instances` on the initial state leaves the init command
+  undispatched — no spawn and no producer-gauge event, through INV-LC3's
+  recorder.
 - **INV-LC5**: each controlled cause — a quit returned from a
   transition, a producer-originated quit, render error — exits the
   loop, and the §4.4 immediate postcondition holds when `run()`

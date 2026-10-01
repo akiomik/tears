@@ -97,8 +97,8 @@ Eight decisions:
 2. **Composition with automatic scoping** (§2.5). `for_each`,
    `presented`, and `scope` apply scopes structurally; after every
    update the kernel reconciles the instances `Keyed`/`Slot` hold, so
-   removing one from state tears its runs down automatically. User code
-   writes no manual scoping.
+   removing one from state tears its runs down automatically. Code that
+   composes through the combinators writes no manual scoping.
 3. **Unified delivery with revocation filtering** (§3). Producer
    output travels one origin-tagged lane; cancellation and teardown
    revoke at the delivery decision point, so a revoked run's
@@ -1009,12 +1009,15 @@ construction inertness (INV-LC3, both entry types); the steady-state
 phase order — input batches with one-item drain, frame passes with at
 most one render then at most one re-evaluation, both observing the
 pass's current state, arbitration negative space (INV-LC1, INV-LC2,
-RFC 0011 §2.3); the two-stage termination postconditions with the
-bounded settle discipline (INV-LC5–INV-LC7); the panic split —
-producer panics contained for all producer kinds, cleanup runs now
-included; driving-task application panics fail-fast (INV-LC8, §4.3);
-driver exclusivity (INV-LC9 — the consuming `run(self)` on both entry
-types, transitions serial and non-reentrant).
+RFC 0011 §2.3); the two-stage termination postconditions with the bounded
+settle discipline (INV-LC5–INV-LC7); the panic split — producer panics
+contained for all producer kinds, cleanup runs now included;
+driving-task application panics fail-fast (INV-LC8, §4.3); driver
+exclusivity (INV-LC9 — the consuming `run(self)` on both entry types,
+transitions serial and non-reentrant). §2.5's reconciliation extends
+some of them: `instances` joins the calls the postconditions, the panic
+inventory, and serial execution name (INV-LC5, INV-LC6, INV-LC9), and
+the first live-instance report joins the bootstrap order (INV-LC4).
 
 One clarification on the shutdown path: RFC 0006's
 closure-observation guarantee is shutdown-scoped, and in the full
@@ -1186,8 +1189,8 @@ the driver drives the kernel itself.
 ## 8. Composition requirements (RFC 0010 §5.2, the C-15 register)
 
 - **(a) Automatic scope application** — satisfied by §2.5 (INV-RC2):
-  scoping is structural in the combinators; no user anchor exists to
-  forget or double-apply.
+  scoping is structural in the combinators; within them no user anchor
+  exists to forget or double-apply.
 - **(b) Identity-law preservation** — satisfied: RFC 0005
   INV-14–INV-21 hold through the adapter and combinators (§2.5); the
   two coverage amendments (INV-18, INV-20) extend the laws to new
@@ -1460,14 +1463,17 @@ reconciliation and wait for its implementation.
   doubly reported slot; an update that returns its own teardown of a
   path reconciliation also tears down, keeping both entries; a removal
   in an update returning `without_redraw`, which stays without a redraw;
-  and a repeat row, in which one script run twice yields one teardown
-  sequence. Structural, in two parts: review of the kernel's and the
-  store's dispatch sites, confirming that each command a `reduce`
-  returns reaches dispatch or intake only through the reconciliation
-  step; and review of the sites that create an identity —
-  `Keyed::insert`, `Keyed::from_iter`, `Slot::present` — confirming each
-  draws one no earlier occupancy held, never derived from the collection
-  value or the key.
+  a baseline row — a removal, a reinsertion at the same key in a later
+  update, and an unrelated message after that, the last tearing nothing
+  down; and a repeat row, in which one script whose update removes
+  several occupancies at once, run twice, yields one teardown sequence.
+  Structural, in two parts: review of the kernel's and the store's
+  dispatch sites, confirming that each command a `reduce` returns
+  reaches dispatch or intake only through the reconciliation step; and
+  review of the sites that create an identity — `Keyed::insert`,
+  `Keyed::from_iter`, `Slot::present` — confirming each draws one no
+  earlier occupancy held, never derived from the collection value or the
+  key.
 - **INV-RC3a — the reporting obligation.** `instances` is required on
   `Reducer` and `Application` and pure — the same state reports the same
   pairs in the same order, with no side effects and no reads of external
@@ -1773,9 +1779,8 @@ nothing here derives one. It is measured before the release that ships
 it — a large collection that does not change, deep nesting, one slot
 reported through two boundaries, a flood of small messages, and a mass
 removal. A cheaper reconciliation with INV-RC3's results is mechanism
-that measurement may call for. What the cost is held to is the latency
-contract already pinned — RFC 0006 §5.3's acceptance rows, re-run for
-that release — and nothing here adds a threshold beside it.
+that measurement may call for. No threshold is set: the measurement is
+recorded, and what it shows decides whether that mechanism is needed.
 
 ## 14. References
 

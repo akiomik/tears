@@ -67,7 +67,8 @@ Three decisions, ordered by urgency:
 
 The harness itself: `tears::testing::TestStore<App>` wraps an
 `Application`, applies messages synchronously through `update`, consumes
-the returned `Command` through the same decomposition boundary the
+the returned `Command` — with RFC 0014's live-instance reconciliation
+teardowns merged in — through the same decomposition boundary the
 runtime uses (§4.1 records the named prerequisite refactor that makes
 that boundary carry per-leaf streams), and lets the test assert state,
 delivered messages, quit,
@@ -934,8 +935,9 @@ Enforcement classes follow the pre-review checklist's definitions
 
 - **INV-T1**: `Application`'s definition is unchanged by this RFC —
   `type Message: Send + 'static` and no new bound on any associated
-  item. Structural: review of `src/application.rs` against the pre-RFC
-  definition. Behavioral: a compile test, added with the
+  item. Structural: review of `src/application.rs` for a bound added to
+  an associated item (RFC 0014 §2.2's required `instances` is a method,
+  not a bound). Behavioral: a compile test, added with the
   implementation, instantiates `Application` with a message type that
   implements nothing beyond `Send + 'static`. Two `src/application.rs`
   doctests already do this incidentally — `new`'s `enum Message { Init
@@ -1273,10 +1275,11 @@ its API. Stated over this surface:
   run (§9.4) and never holds one — the opaque name §9.4 mints is a
   name, not a handle to the run — so it cannot keep a run alive past
   the kernel's own bookkeeping.
-- **Reimplemented reconciliation** has no constructor: no method
-  applies a cancel, a teardown, or a keyed admission decision. Those
-  reach the kernel only as the lowered parts of a command the
-  application returned, exactly as in production.
+- **Reimplemented reconciliation** has no constructor: no method applies
+  a cancel, a teardown, or a keyed admission decision. Those reach the
+  kernel only as the lowered parts of a command the application
+  returned, or as RFC 0014 §2.5's live-instance reconciliation
+  teardowns, exactly as in production.
 - **A mirrored quit route** has no constructor: no method terminates
   the driven program. Quit reaches the kernel only through the two
   production routes (RFC 0014 §3.3).
@@ -1699,11 +1702,12 @@ the first driving differential past the wake sources RFC 0014 §7.2
 confines it to.
 
 **Bootstrap is where a pending frame does exist, and `boot` carries
-it.** RFC 0011 §3.2's intake order — init dispatch, then the initial
-subscription reconcile, then the first render pending
-unconditionally — leaves the kernel with work outstanding, so
-INV-RC16's park condition ("nothing to make progress on") is not met
-and the kernel does not park. `boot` therefore runs that intake *and*
+it.** RFC 0011 §3.2's intake order — the first live-instance report,
+then init dispatch, then the initial subscription reconcile, then the
+first render pending unconditionally — leaves the kernel with work
+outstanding, so INV-RC16's park condition ("nothing to make progress
+on") is not met and the kernel does not park. `boot` therefore runs that
+intake *and*
 the continuation pass that consumes the pending render. Absent a
 termination it returns with that render consumed and no lane item
 outstanding — no grant has released a send (§9.6) — so the kernel

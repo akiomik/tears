@@ -207,9 +207,9 @@ The teardown contract is reviewed against this list:
   `scoped` by the ones above it, would carry — so it adds no reach the
   primitive lacks, an empty prefix included (§3.1). Both produce the
   same teardown entry, lowered and applied by the same kernel path.
-  Correctness of child teardown therefore does not rest on hand-written
-  anchors, and no third origin exists. Checked structurally (§7.2's
-  origination review).
+  Correctness of child teardown under the combinators therefore does not
+  rest on hand-written anchors, and no third origin exists. Checked
+  structurally (§7.2's origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
