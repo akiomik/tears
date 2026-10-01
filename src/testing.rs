@@ -1026,7 +1026,7 @@ mod tests {
     use futures::stream;
     use ratatui::Frame;
 
-    use crate::reducer::Instances;
+    use crate::reducer::{ForEach, Instances, Keyed, Reducer, ReducerExt};
     // Tokio's I/O resources are compiled out under `--cfg loom` (tokio gates
     // them), so the I/O-dependent leaf helper and its tests are too.
     #[cfg(all(not(loom), unix))]
@@ -2278,6 +2278,193 @@ mod tests {
     #[should_panic(expected = "effect leaf(s) not driven to completion")]
     fn finish_fails_on_an_unadvanced_timeout_leaf() {
         let store = store_with(timeout_command(60), |_| Command::none());
+        store.finish();
+    }
+
+    // --- Live-instance reconciliation (RFC 0008 §3.2, INV-T3; RFC 0014
+    // INV-RC3): an application holding a `Keyed`, reducing a `for_each`
+    // stack inside `update` and forwarding the stack's report.
+
+    #[derive(Debug, PartialEq)]
+    enum BoardMsg {
+        Open(u8),
+        Close(u8),
+        Row(u8, RowMsg),
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum RowMsg {
+        Work,
+        Done,
+    }
+
+    struct Row {
+        cleaned: Arc<AtomicBool>,
+    }
+
+    /// A row's `Work` leaves keyed output pending under the row and
+    /// registers a cleanup there.
+    struct RowReducer;
+
+    impl Reducer for RowReducer {
+        type State = Row;
+        type Message = RowMsg;
+
+        fn reduce(&self, row: &mut Row, msg: RowMsg) -> Command<RowMsg> {
+            match msg {
+                RowMsg::Work => {
+                    let cleaned = Arc::clone(&row.cleaned);
+                    Command::batch([
+                        Command::message(RowMsg::Done)
+                            .cancellable(CommandId::new("work"))
+                            .into(),
+                        Command::on_teardown(async move {
+                            cleaned.store(true, Ordering::SeqCst);
+                        }),
+                    ])
+                }
+                RowMsg::Done => Command::none(),
+            }
+        }
+
+        fn instances(&self, _row: &Row, _out: &mut Instances<'_>) {}
+    }
+
+    struct BoardReducer;
+
+    impl Reducer for BoardReducer {
+        type State = Board;
+        type Message = BoardMsg;
+
+        fn reduce(&self, board: &mut Board, msg: BoardMsg) -> Command<BoardMsg> {
+            match msg {
+                BoardMsg::Open(key) => {
+                    let row = Row {
+                        cleaned: Arc::clone(&board.cleaned),
+                    };
+                    board.rows.insert(key, row);
+                }
+                BoardMsg::Close(key) => {
+                    board.rows.remove(&key);
+                }
+                BoardMsg::Row(..) => {}
+            }
+            Command::none()
+        }
+
+        fn instances(&self, _board: &Board, _out: &mut Instances<'_>) {}
+    }
+
+    fn board_stack() -> ForEach<BoardReducer, RowReducer, u8> {
+        BoardReducer.for_each(
+            RowReducer,
+            |board: &Board| &board.rows,
+            |board: &mut Board| &mut board.rows,
+            |msg| match msg {
+                BoardMsg::Row(key, row) => Ok((key, row)),
+                other => Err(other),
+            },
+            BoardMsg::Row,
+        )
+    }
+
+    /// Row 1 is open from `new`, whose command leaves keyed output pending
+    /// under it. `reports` is whether `instances` forwards the stack's
+    /// report.
+    struct Board {
+        rows: Keyed<u8, Row>,
+        cleaned: Arc<AtomicBool>,
+        reports: bool,
+    }
+
+    impl Application for Board {
+        type Message = BoardMsg;
+        type Flags = (bool, Arc<AtomicBool>);
+
+        fn new((reports, cleaned): Self::Flags) -> (Self, Command<BoardMsg>) {
+            let first = Row {
+                cleaned: Arc::clone(&cleaned),
+            };
+            let mut rows = Keyed::new();
+            rows.insert(1, first);
+            let board = Self {
+                rows,
+                cleaned,
+                reports,
+            };
+            let pending = Command::message(BoardMsg::Row(1, RowMsg::Done))
+                .cancellable(CommandId::new("work"))
+                .scoped(1_u8);
+            (board, pending.into())
+        }
+
+        fn update(&mut self, msg: BoardMsg) -> Command<BoardMsg> {
+            board_stack().reduce(self, msg)
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<BoardMsg>> {
+            Vec::new()
+        }
+
+        fn instances(&self, out: &mut Instances<'_>) {
+            if self.reports {
+                board_stack().instances(self, out);
+            }
+        }
+    }
+
+    fn assert_nothing_deliverable(store: &mut TestStore<Board>, what: &str) {
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            store.receive(BoardMsg::Row(1, RowMsg::Done));
+        }));
+        assert!(
+            failure_message(failure).contains("no pending effects"),
+            "{what}"
+        );
+    }
+
+    // The first report is read from the state `new` returns, so removing the
+    // row open there tears down the output pending under it.
+    #[test]
+    fn removing_a_row_held_from_new_tears_down_its_pending_output() {
+        let mut store = TestStore::<Board>::new((true, Arc::default()));
+        store.send(BoardMsg::Close(1));
+        assert_nothing_deliverable(&mut store, "the closed row's output was torn down");
+        store.finish();
+    }
+
+    // A row inserted by a later step is reconciled the same way: removing it
+    // discards its pending output and runs its cleanup.
+    #[cfg(not(loom))]
+    #[test]
+    fn removing_a_row_inserted_later_tears_down_its_output_and_runs_its_cleanup() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let mut store = TestStore::<Board>::new((true, Arc::clone(&cleaned)));
+        store.receive(BoardMsg::Row(1, RowMsg::Done));
+
+        store.send(BoardMsg::Open(2));
+        store.send(BoardMsg::Row(2, RowMsg::Work));
+        assert!(!cleaned.load(Ordering::SeqCst), "arming starts nothing");
+
+        store.send(BoardMsg::Close(2));
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "the removal ran the cleanup"
+        );
+        assert_nothing_deliverable(&mut store, "the closed row's output was torn down");
+        store.finish();
+    }
+
+    // The negative control: the same application reporting nothing leaves
+    // the removed row's output deliverable — the report is what tears it
+    // down.
+    #[test]
+    fn an_unreported_row_s_removal_leaves_its_output_deliverable() {
+        let mut store = TestStore::<Board>::new((false, Arc::default()));
+        store.send(BoardMsg::Close(1));
+        store.receive(BoardMsg::Row(1, RowMsg::Done));
         store.finish();
     }
 }

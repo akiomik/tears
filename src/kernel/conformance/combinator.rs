@@ -20,7 +20,8 @@
 //! | [`sibling_boundaries_keep_equal_local_ids_apart`] | INV-RC2 at the lowering seam, both halves |
 //! | [`a_row_s_subscriptions_are_qualified_and_retracted_with_it`] | INV-RC2's declaration half, INV-RC6 through a boundary |
 //! | [`an_anonymous_child_effect_is_reached_by_its_boundary_s_teardown`] | INV-RC7 through a combinator |
-//! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's drain, as the kernel applies it |
+//! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's reconciliation, as the kernel applies it |
+//! | [`closing_a_row_opened_at_init_in_the_first_update_fires_its_cleanup`] | INV-RC3's first report, read from `init`'s state |
 //! | [`dismissing_the_slot_tears_down_its_occupant_s_runs`] | INV-RC3's dismissal shape, likewise |
 //! | [`a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`] | INV-RC3's no-diff adversary and INV-RC4's batch remove-and-reinsert |
 //! | [`a_replacement_s_successor_declares_again_at_the_predecessor_s_exit`] | §5.1's barrier and §5.2's dirt, over a boundary's replacement |
@@ -40,15 +41,15 @@
 //!
 //! | mutation | rows in this file it fails |
 //! | --- | --- |
-//! | the drain returns only keys absent from the collection at drain time | the no-diff adversary, on its unkeyed run; the keyed replacement, where it asserts the replacing pass admits nothing |
+//! | reconciliation compares paths, not identities | the no-diff adversary, on its unkeyed run; both replacement rows, where they assert the replacing pass admits nothing |
 //! | `any_stopping_sub` dropped from the reconcile barrier | both replacement rows, where they assert the replacing pass admits nothing |
-//! | `Keyed::insert` records the removal without installing the value | the keyed replacement, on the source only its successor declares; the condition row, where it asserts the admission |
-//! | `Slot::present` records the dismissal but keeps the occupant | the slot replacement, likewise |
+//! | `Keyed::insert` draws a new identity without installing the value | the keyed replacement, on the source only its successor declares; the condition row, where it asserts the admission |
+//! | `Slot::present` draws a new identity but keeps the occupant | the slot replacement, likewise |
 //! | `is_stopping_sub` widened to any stopping run | the barrier's condition row, where it asserts the admission |
 //!
 //! The no-diff adversary's own comment records why its assertion is on the
-//! unkeyed run and not the keyed one. The two "records the removal but does
-//! not install" mutations are what the shared-plus-own source pair exists
+//! unkeyed run and not the keyed one. The two "new identity but does not
+//! install" mutations are what the shared-plus-own source pair exists
 //! for on the replacement rows: one identity declared by both instances
 //! cannot tell a successor declaring from a predecessor left in place
 //! re-declaring at its own exit. The condition row needs no such pair — its
@@ -60,6 +61,7 @@
 //! [`ReducerExt::into_program`]: crate::reducer::combinator::ReducerExt::into_program
 
 use std::collections::{HashMap, VecDeque};
+use std::iter;
 
 use futures::StreamExt;
 use futures::stream;
@@ -75,7 +77,7 @@ use crate::subscription::Subscription;
 use crate::testing::driver::{RunKind, RunName, TestDriver};
 
 use super::support::{
-    Beacon, ProbeSource, TEST_TURNS, accept, cap, config, holding_effect, terminal,
+    Beacon, ProbeSource, TEST_TURNS, accept, cap, config, holding_effect, spend_turns, terminal,
 };
 
 /// What a pane is asked to do.
@@ -95,7 +97,7 @@ enum PaneMsg {
 /// The two run beacons are separate on purpose. A keyed run can be reclaimed
 /// by two different things — a prefix teardown, or a same-identity
 /// supersession — while an **unkeyed** run has no identity to supersede, so
-/// only a teardown reaches it. A row that wants to witness the journal's
+/// only a teardown reaches it. A row that wants to witness reconciliation's
 /// teardown and nothing else asserts on `anon`.
 struct PaneState {
     /// Marked when the run `PaneMsg::Work` starts is reclaimed.
@@ -187,7 +189,7 @@ enum Act {
     /// Remove the pane under `key`.
     Close(u8),
     /// Remove and re-insert `key` in one update, returning a keyed run
-    /// placed under that same key — so one command carries the journal's
+    /// placed under that same key — so one command carries reconciliation's
     /// teardown *and* the successor's spawn (RFC 0013 R4).
     Recreate(u8),
     /// Replace `key`'s occupant through [`Keyed::insert`] alone, returning
@@ -240,7 +242,7 @@ impl Reducer for Root {
                 state.panes.remove(&key);
                 state.panes.insert(key, successor);
                 // Placed under the same segment the boundary uses, so the
-                // journal's teardown and this spawn address one prefix.
+                // reconciliation's teardown and this spawn address one prefix.
                 holding_effect(reclaimed)
                     .map(|_| Msg::Act(0))
                     .cancellable(CommandId::new("work"))
@@ -309,6 +311,9 @@ struct Setup {
     acts: HashMap<u8, Act>,
     /// One instance per act that installs one, in order.
     successors: VecDeque<PaneState>,
+    /// Cleanups the init command registers, each under a row's key, marking
+    /// its beacon when it runs.
+    cleanups: Vec<(u8, Beacon)>,
     /// The messages the init effect emits, one per grant.
     trigger: Vec<Msg>,
 }
@@ -320,6 +325,7 @@ impl Setup {
             modal: None,
             acts: HashMap::new(),
             successors: VecDeque::new(),
+            cleanups: Vec::new(),
             trigger,
         }
     }
@@ -343,6 +349,11 @@ impl Setup {
         self.successors.push_back(successor);
         self
     }
+
+    fn registering(mut self, key: u8, ran: Beacon) -> Self {
+        self.cleanups.push((key, ran));
+        self
+    }
 }
 
 /// The init effect: emits each scripted trigger and then parks forever, so
@@ -354,13 +365,9 @@ fn init(setup: Setup) -> (RootState, Command<Msg>) {
         modal,
         acts,
         successors,
+        cleanups,
         trigger,
     } = setup;
-    // Built rather than mutated: `from_iter` records no removal at all, and
-    // a first presentation into an empty slot records none either, so
-    // bootstrap leaves the journals clean. Reaching for `insert` here would
-    // owe a teardown to the first message that arrives — the rule the
-    // collection module states for mutating outside a `reduce`.
     let mut state = RootState {
         panes: panes.into_iter().collect(),
         modal: Slot::empty(),
@@ -370,9 +377,18 @@ fn init(setup: Setup) -> (RootState, Command<Msg>) {
     if let Some(occupant) = modal {
         state.modal.present(occupant);
     }
+    let registrations = cleanups.into_iter().map(|(key, ran)| {
+        Command::on_teardown(async move {
+            ran.mark();
+        })
+        .scoped(key)
+    });
     (
         state,
-        Command::stream(stream::iter(trigger).chain(stream::pending())).into(),
+        Command::batch(
+            iter::once(Command::stream(stream::iter(trigger).chain(stream::pending())).into())
+                .chain(registrations),
+        ),
     )
 }
 
@@ -525,9 +541,9 @@ fn an_anonymous_child_effect_is_reached_by_its_boundary_s_teardown() {
     driver.settle(TEST_TURNS, || reclaimed.marked());
 }
 
-// INV-RC3's drain as the kernel applies it: the removal the parent's own
-// `update` recorded becomes a teardown in that same update's command, and
-// the runs under the removed row are reclaimed by it. Nothing in the
+// INV-RC3's reconciliation as the kernel applies it: the row the parent's
+// own `update` removed leaves the report, its teardown is merged into that
+// same update's command, and the runs under the row are reclaimed by it. Nothing in the
 // reducer wrote `.teardown(...)` — the boundary did.
 #[test]
 fn closing_a_row_tears_down_the_runs_under_it() {
@@ -547,9 +563,31 @@ fn closing_a_row_tears_down_the_runs_under_it() {
     driver.settle(TEST_TURNS, || reclaimed.marked());
 }
 
-// The dismissal shape of the same drain, through the slot boundary: the
-// teardown the journal yields is of the boundary's own segment, and it
-// reaches the occupant's runs.
+// INV-RC3's first report, read from the state `init` returns: a row opened
+// there and closed by the very first update is torn down by that update.
+// Nothing runs under the row, so the witness is the cleanup the init command
+// registered under its key.
+#[test]
+fn closing_a_row_opened_at_init_in_the_first_update_fires_its_cleanup() {
+    let ran = Beacon::default();
+    let mut driver = driver(
+        Setup::new(vec![Msg::Act(1)])
+            .opening(vec![(1, PaneState::new(Beacon::default()))])
+            .registering(1, ran.clone())
+            .acting(1, Act::Close(1)),
+    );
+    let trigger = driver.boot().started[0].clone();
+
+    spend_turns(&mut driver, TEST_TURNS);
+    assert!(!ran.marked(), "arming the cleanup starts nothing");
+
+    deliver(&mut driver, &trigger);
+    driver.settle(TEST_TURNS, || ran.marked());
+}
+
+// The dismissal shape of the same reconciliation, through the slot
+// boundary: the teardown is of the boundary's own segment, and it reaches
+// the occupant's runs.
 #[test]
 fn dismissing_the_slot_tears_down_its_occupant_s_runs() {
     let reclaimed = Beacon::default();
@@ -568,25 +606,25 @@ fn dismissing_the_slot_tears_down_its_occupant_s_runs() {
     driver.settle(TEST_TURNS, || reclaimed.marked());
 }
 
-// RFC 0014 §11's *diff-based removal detection* and *fold-era batch*
+// RFC 0014 §11's *key-only removal detection* and *fold-era batch*
 // adversaries in one row. The update removes key 1 and re-inserts it, so
-// the collection is byte-for-byte what it was and a diff would report
-// nothing; and the command it returns carries both the journal's teardown
-// **and** the successor's keyed spawn, under one prefix and one identity.
-// The cancel phase precedes every spawn of the same command, so the old
-// instance's runs are reclaimed and the successor starts fresh rather than
-// being replaced or suppressed by what it succeeded.
+// the key set is what it was and a key diff would report nothing; and the
+// command it dispatches carries both reconciliation's teardown **and** the
+// successor's keyed spawn, under one prefix and one identity. The cancel
+// phase precedes every spawn of the same command, so the old instance's
+// runs are reclaimed and the successor starts fresh rather than being
+// replaced or suppressed by what it succeeded.
 //
 // **The load-bearing assertion is the *anonymous* run's reclamation.** The
 // old instance holds one keyed run and one unkeyed one. The successor's
 // spawn carries the same qualified identity as the old keyed run, so a
-// kernel with no journal at all would still reclaim *that* one by
-// `CancelInFlight` supersession — asserting on it would let a diff-based
-// journal pass. The unkeyed run has no identity to supersede: a prefix
-// teardown is the only thing that reaches it, and the journal is the only
-// thing that emits one here. Verified by mutation: with the drain filtered
-// to keys absent at drain time (a state-diff-equivalent journal), this row
-// fails on `old_anon`. The module doc's table records which other row that
+// kernel with no reconciliation at all would still reclaim *that* one by
+// `CancelInFlight` supersession — asserting on it would let a key-only
+// comparison pass. The unkeyed run has no identity to supersede: a prefix
+// teardown is the only thing that reaches it, and reconciliation is the
+// only thing that emits one here. Verified by mutation: with
+// reconciliation comparing paths rather than identities, this row fails on
+// `old_anon`. The module doc's table records which other rows that
 // mutation reaches.
 #[test]
 fn a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh() {
