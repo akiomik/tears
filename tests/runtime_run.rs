@@ -79,6 +79,8 @@ impl Application for CounterApp {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 // Helper: App with subscriptions
@@ -109,6 +111,8 @@ impl Application for SubApp {
         use tears::subscription::time::Timer;
         vec![Subscription::new(Timer::new(NonZeroU64::new(10).expect("non-zero"))).map(|_| ())]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::test]
@@ -169,6 +173,8 @@ async fn test_runtime_run_logs_command_task_panic() -> Result<()> {
                     .map(|_| Message::Quit),
             ]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     // The default panic hook synchronously symbolicates a backtrace under
@@ -233,6 +239,8 @@ async fn test_runtime_run_end_to_end_with_commands() -> Result<()> {
         fn subscriptions(&self) -> Vec<Subscription<String>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     let mut terminal = common::test_terminal()?;
@@ -314,6 +322,8 @@ async fn test_runtime_run_delivers_timeout_and_retry_messages_to_update() -> Res
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     let observed = Arc::new(AtomicUsize::new(0));

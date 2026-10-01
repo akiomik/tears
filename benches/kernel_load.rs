@@ -1929,6 +1929,8 @@ impl Application for LoadApp {
             })
             .collect()
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 /// Busy-waits for `duration`, simulating CPU-bound work on the driving task.

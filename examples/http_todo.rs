@@ -225,6 +225,8 @@ impl Application for App {
             .map(Message::TodosQuery),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 impl App {

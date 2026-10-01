@@ -80,6 +80,8 @@ impl Application for PanicDemo {
             }),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::main]

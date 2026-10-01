@@ -718,7 +718,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use tokio::task::yield_now;
 
-    use crate::reducer::Reducer;
+    use crate::reducer::{Instances, Reducer};
     use crate::subscription::Subscription;
     use crate::subscription::mock::MockSource;
     use crate::test_support::TraceRecorder;
@@ -812,6 +812,8 @@ mod tests {
                 .map(|source| Subscription::new(source.clone()))
                 .collect()
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     impl Program for Probe {

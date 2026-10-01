@@ -199,6 +199,8 @@ impl Application for EchoChat {
             Subscription::new(WebSocket::new("wss://echo.websocket.org")).map(Msg::WebSocket),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 impl EchoChat {

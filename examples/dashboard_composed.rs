@@ -524,6 +524,8 @@ impl Reducer for Root {
             }),
         ]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// A fixed sibling with no runs of its own: `scope` buys code organisation
@@ -547,6 +549,8 @@ impl Reducer for Navigation {
         }
         Command::none()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The other fixed sibling.
@@ -566,6 +570,8 @@ impl Reducer for Activity {
         }
         Command::none()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// One row of the keyed collection.
@@ -634,6 +640,8 @@ impl Reducer for Task {
     fn subscriptions(&self, _state: &TaskState) -> Vec<Subscription<TaskMessage>> {
         vec![tick(|TimerEvent::Tick| TaskMessage::Tick)]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The optionally-present child.
@@ -691,6 +699,8 @@ impl Reducer for Details {
     fn subscriptions(&self, _state: &DetailsState) -> Vec<Subscription<DetailsMessage>> {
         vec![tick(|TimerEvent::Tick| DetailsMessage::Tick)]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The composition: one root and four boundaries over it.

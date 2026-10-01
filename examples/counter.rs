@@ -94,6 +94,8 @@ impl Application for Counter {
             }),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::main]

@@ -68,9 +68,9 @@ use ratatui::backend::TestBackend;
 
 use crate::command::{Command, CommandId};
 use crate::kernel::arbiter::WakeSource;
-use crate::reducer::Reducer;
 use crate::reducer::collection::{Keyed, Slot};
 use crate::reducer::combinator::{ForEach, IntoProgram, Presented, ReducerExt};
+use crate::reducer::{Instances, Reducer};
 use crate::subscription::Subscription;
 use crate::testing::driver::{RunKind, RunName, TestDriver};
 
@@ -177,6 +177,8 @@ impl Reducer for Pane {
             .map(|source| Subscription::new(source.clone()).map(|_| PaneMsg::Work))
             .collect()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// What one scripted step tells the root to do.
@@ -268,6 +270,8 @@ impl Reducer for Root {
             None => Command::none(),
         }
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The root message type.

@@ -55,7 +55,7 @@ use crate::command::{Action, Command};
 use crate::kernel::Kernel;
 use crate::kernel::arbiter::WakeSource;
 use crate::kernel::lane::GateMode;
-use crate::reducer::{Exit, Program, Reducer};
+use crate::reducer::{Exit, Instances, Program, Reducer};
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::LoadObserver;
 use crate::subscription::mock::MockSource;
@@ -1215,6 +1215,8 @@ impl Reducer for Scripted {
             )
             .collect()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 impl Program for Scripted {

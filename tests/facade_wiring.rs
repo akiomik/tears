@@ -166,6 +166,8 @@ impl Application for FacadeApp {
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         self.0.declared()
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 // --- the hand-written program's side --------------------------------------
@@ -183,6 +185,8 @@ impl Reducer for HandWritten {
     fn subscriptions(&self, state: &State) -> Vec<Subscription<Message>> {
         state.declared()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 impl Program for HandWritten {

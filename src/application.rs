@@ -207,11 +207,11 @@ pub trait Application: Sized {
     /// holds, so the runtime can tear down the ones an update removes
     /// (RFC 0014 INV-RC3a).
     ///
-    /// An application whose `update` calls no reducer's `reduce` reports
-    /// nothing — write an empty body. One that reduces a combinator stack
-    /// over part of its own state inside `update` forwards that stack's
-    /// report, through the same projection and under the same segments it
-    /// reduces it with; [`Reducer::instances`](crate::reducer::Reducer::instances)
+    /// An application that places no work under a segment — the usual
+    /// case — reports nothing: write an empty body. One that reduces a
+    /// combinator stack over part of its own state inside `update`, or
+    /// scopes work under a row's key itself, reports what it places work
+    /// under; [`Reducer::instances`](crate::reducer::Reducer::instances)
     /// states the obligation in full. Pure in the state, order included.
     ///
     /// ```
@@ -287,6 +287,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]
@@ -371,6 +373,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[tokio::test]
@@ -412,6 +416,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<BareMessage>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]

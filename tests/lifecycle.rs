@@ -272,6 +272,8 @@ impl Application for QuitApp {
             .fetch_add(1, Ordering::SeqCst);
         vec![timer_subscription(|| QuitMessage::Tick)]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 async fn assert_quit_terminates() -> Result<()> {
@@ -579,6 +581,8 @@ impl Application for AbruptApp {
             panic_in_constructor: self.flags.site == PanicSite::SourceConstructor,
         })]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 /// Drives one INV-LC6 panic row: the unwind must propagate to `run()`'s caller,
@@ -773,6 +777,8 @@ impl Application for InertApp {
             started: Arc::clone(&self.probe.source_started),
         })]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 /// How many run-queue drains [`drain_executor`] performs.
@@ -966,6 +972,8 @@ impl Application for ContainmentApp {
             vec![surviving]
         }
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 async fn assert_producer_panic_is_contained(kind: PanickingProducer) -> Result<()> {

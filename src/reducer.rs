@@ -240,14 +240,15 @@ pub trait Reducer {
     /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
     ///
     /// Pure in the state, order included: equal states report equal
-    /// sequences. A reducer that calls no other reducer's `reduce` reports
-    /// nothing — write an empty body — even when its state holds a [`Keyed`]
-    /// or [`Slot`], since the combinator that reduces that collection reports
-    /// it. One that calls a child's `reduce` forwards the child's report
-    /// through the same projection and under the same segments it reduces
-    /// the child with, for every child the state holds; one that reduces the
-    /// rows of a `Keyed` or the occupant of a `Slot` itself reports them
-    /// through [`Instances::keyed`] or [`Instances::slot`]. The combinators do
+    /// sequences. What a reducer owes follows from where it places work. One
+    /// that qualifies commands — a child's or its own — with a segment, a
+    /// row's key, or a slot's segment reports each row or occupant it places
+    /// work under through [`Instances::keyed`] or [`Instances::slot`], and
+    /// forwards, under each segment, the report of the child it reduces
+    /// there, through the same projection — for every such row, occupant,
+    /// and child the state holds. One that places no work under a segment
+    /// reports nothing — write an empty body — even when its state holds a
+    /// [`Keyed`] or [`Slot`] that a combinator reduces. The combinators do
     /// all of this for you. Nothing detects an omission: an occupancy that is
     /// never reported is never torn down on its own account.
     fn instances(&self, state: &Self::State, out: &mut Instances<'_>);

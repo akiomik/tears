@@ -1025,6 +1025,8 @@ mod tests {
     use futures::channel::oneshot;
     use futures::stream;
     use ratatui::Frame;
+
+    use crate::reducer::Instances;
     // Tokio's I/O resources are compiled out under `--cfg loom` (tokio gates
     // them), so the I/O-dependent leaf helper and its tests are too.
     #[cfg(all(not(loom), unix))]
@@ -1077,6 +1079,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Msg>> {
             Vec::new()
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     fn store_with<Msg: Send + Debug + 'static>(
@@ -1960,6 +1964,8 @@ mod tests {
                 vec![Subscription::new(self.first.clone())]
             }
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]
@@ -2013,6 +2019,8 @@ mod tests {
                 Subscription::new(self.first.clone()),
             ]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     // INV-T11: duplicates collapse to their first occurrence, at its

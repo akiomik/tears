@@ -25,12 +25,13 @@ pub(crate) type Report = Vec<(ScopePath, InstanceId)>;
 /// segment and report the rows of a [`Keyed`] or the occupant of a [`Slot`],
 /// and nothing else — it cannot read, remove, or invent a report entry.
 ///
-/// A reducer that calls no other reducer's `reduce` reports nothing. One
-/// that reduces a child forwards that child's report through the projection
-/// and under the segments it reduces the child with, and one that reduces
-/// the rows of a [`Keyed`] or the occupant of a [`Slot`] by hand reports
-/// them through [`keyed`](Self::keyed) or [`slot`](Self::slot) (RFC 0014
-/// INV-RC3a). The combinators do both for you.
+/// A reducer reports where it places work: each row or occupant it
+/// qualifies commands under, through [`keyed`](Self::keyed) or
+/// [`slot`](Self::slot), with the report of the child it reduces there
+/// beneath it, and under [`scoped`](Self::scoped) the report of a child it
+/// reduces under a fixed segment (RFC 0014 INV-RC3a). One that places no
+/// work under a segment reports nothing. The combinators do all of this for
+/// you.
 pub struct Instances<'a> {
     prefix: ScopePath,
     report: &'a mut Report,

@@ -313,7 +313,9 @@ where
     /// report beneath it.
     fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
         self.parent.instances(state, out);
-        out.keyed((self.rows)(state), |row, out| self.child.instances(row, out));
+        out.keyed((self.rows)(state), |row, out| {
+            self.child.instances(row, out)
+        });
     }
 }
 
@@ -495,6 +497,8 @@ mod tests {
                 Vec::new()
             }
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,6 +588,8 @@ mod tests {
         fn subscriptions(&self, _state: &RootState) -> Vec<Subscription<Message>> {
             vec![Subscription::new(MockSource::<Message>::new())]
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     fn left_extract(message: Message) -> Result<ChildMessage, Message> {
@@ -688,6 +694,8 @@ mod tests {
             );
             Command::none()
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     fn outer_extract(message: OuterMessage) -> Result<Message, OuterMessage> {
