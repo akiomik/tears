@@ -41,12 +41,13 @@ down. This RFC is the owner of that contract. Five decisions:
    against a state that same pass has just rendered.
 2. **Bootstrap** (§3, INV-LC3/INV-LC4). Constructing a `Runtime` is
    inert: no runtime-owned task is spawned, no command effect is polled,
-   no subscription source starts. Inside `run()`, the init command is
-   dispatched before the initial subscription reconcile, and the first
-   render starts out pending — eligible, not promised. `Application::new`
-   is user code and runs at construction; this RFC claims nothing about
-   its side effects, and a panic inside it happens before a runtime
-   exists and is outside this contract.
+   no subscription source starts. Inside `run()`, the first
+   live-instance report is read before the init command is dispatched,
+   and the init command is dispatched before the initial subscription
+   reconcile, and the first render starts out pending — eligible, not
+   promised. `Application::new` is user code and runs at construction;
+   this RFC claims nothing about its side effects, and a panic inside it
+   happens before a runtime exists and is outside this contract.
 3. **Termination** (§4, INV-LC5–INV-LC7). Termination has two routes —
    controlled (a quit returned from a transition, a producer-originated
    quit, render error: the loop exits with a reason and the shutdown
@@ -561,19 +562,21 @@ Enforcement classes follow the pre-review checklist's definitions.
   runtime with an init effect and a subscription source that record
   execution, under a `tracing` recorder; drop it without running; assert
   neither ran and no producer-gauge event fired during construction.
-- **INV-LC4**: inside `run()`, the init command is dispatched before the
-  initial subscription reconcile starts any source, and the first render
-  starts out pending — unconditionally, independent of the init
-  command's redraw directive. Execution order beyond intake is not
-  pinned: the init effect's first poll, initial subscription output, and
-  the first render arbitrate freely, and the first render's execution is
-  not promised (§3.2). Structural for the ordering half — review of
-  `run()`'s bootstrap sequence, including that the first live-instance
-  report is read before the init command is dispatched — because
-  production exposes no stable observable phase between dispatch and
-  first poll for a behavioral test to anchor on (§3.3). Behavioral for
-  the eligibility half, at the runtime layer: a freshly constructed
-  runtime's first frame pass renders with no message processed.
+- **INV-LC4**: inside `run()`, the first live-instance report is read
+  before the init command is dispatched, and the init command is
+  dispatched before the initial subscription reconcile starts any
+  source, and the first render starts out pending — unconditionally,
+  independent of the init command's redraw directive. Execution order
+  beyond intake is not pinned: the init effect's first poll, initial
+  subscription output, and the first render arbitrate freely, and the
+  first render's execution is not promised (§3.2). Structural for the
+  ordering half — review of `run()`'s bootstrap sequence, including that
+  the first live-instance report is read before the init command is
+  dispatched — because production exposes no stable observable phase
+  between dispatch and first poll for a behavioral test to anchor on
+  (§3.3). Behavioral for the eligibility half, at the runtime layer: a
+  freshly constructed runtime's first frame pass renders with no message
+  processed.
 - **INV-LC5**: each controlled cause — a quit returned from a
   transition, a producer-originated quit, render error — exits the
   loop, and the §4.4 immediate postcondition holds when `run()`
@@ -630,7 +633,7 @@ Enforcement classes follow the pre-review checklist's definitions.
     its first call, before the loop);
   - a panic in `subscriptions` at the steady call site (raised only on
     a re-evaluation after a processed message);
-    - a panic in `instances` at the bootstrap call site (raised on its
+      - a panic in `instances` at the bootstrap call site (raised on its
     first call, on the initial state);
   - a panic in `instances` at the steady call site (raised only on the
     call after a processed message, before that message's command is

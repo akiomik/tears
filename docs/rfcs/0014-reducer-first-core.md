@@ -68,7 +68,8 @@
   `instances` method, empty for an implementor that reduces no other
   reducer and forwarding for one that does, a removal is torn down in
   the dispatched command rather than in `reduce`'s return value, and
-  `Slot::present` stops being `const` (§2.5); `Fixed` — reassigning a
+  `Slot::present` stops being `const`, since presenting begins an
+  occupancy and draws its identity (§2.5); `Fixed` — reassigning a
   collection, and mutating one from above its boundary, no longer leaks
   the removed instances' runs.
 
@@ -467,45 +468,48 @@ Contract:
   disappearing path that no other disappearing path is a proper prefix
   of, reconciliation merges one teardown of that path into the command
   it dispatches for that update — after `reduce` returns and before the
-  dispatch, never as a later command — in an order the two reports
-  determine; a disappearing path under another is selected by that one's
-  teardown (RFC 0013 §3.1). That selection is by prefix, so it also
-  reaches the runs of occupancies still reported beneath a disappearing
-  path: an occupancy kept inside a replaced one continues as an
-  occupancy, and its runs end with the outer one's. The merge adds
-  teardown entries and nothing else: the entries `reduce` returned, a
-  teardown it returned for the same path included, and its directives
-  cross unchanged, and §3.4's phase order makes a same-update
-  remove-and-reinsert (or replace) yield the old occupancy's teardown
-  *and* the new one's fresh spawns in one dispatched command (RFC 0013
-  R4). Identities are what is compared, so same-key reinsertion is not
-  mistaken for continuity. The first report is read from the state
-  `init` returns, before its command is dispatched, and tears nothing
-  down. Teardowns this adds appear in the dispatched command, not in the
-  `Command` that `reduce` returns. The previous report the kernel keeps
-  is not per-scope state in RFC 0013 INV-ST7's sense: it decides which
-  teardowns an update issues, and no declaration, output, admission,
-  spawn, or delivery decision carries or reads it.
+  dispatch, never as a later command — in an order that is reproducible
+  — one script yields one teardown sequence (INV-RC14); a disappearing
+  path under another is selected by that one's teardown (RFC 0013 §3.1).
+  That selection is by prefix, so it also reaches the runs of
+  occupancies still reported beneath a disappearing path: an occupancy
+  kept inside a replaced one continues as an occupancy, and its runs end
+  with the outer one's. The merge adds teardown entries and nothing
+  else: the entries `reduce` returned, a teardown it returned for the
+  same path included, and its directives cross unchanged, and §3.4's
+  phase order makes a same-update remove-and-reinsert (or replace) yield
+  the old occupancy's teardown *and* the new one's fresh spawns in one
+  dispatched command (RFC 0013 R4). Identities are what is compared, so
+  same-key reinsertion is not mistaken for continuity. The first report
+  is read from the state `init` returns, before its command is
+  dispatched, and tears nothing down. Teardowns this adds appear in the
+  dispatched command, not in the `Command` that `reduce` returns. The
+  previous report the kernel keeps is not per-scope state in RFC 0013
+  INV-ST7's sense: it decides which teardowns an update issues, and no
+  declaration, output, admission, spawn, or delivery decision carries or
+  reads it.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
   `Reducer` and on `Application`, and it is a pure function of state:
   for a given state it reports the same pairs in the same order, it
-  executes no side effects and reads no external mutable state; the
-  runtime calls it where RFC 0011 §4.3 lists. An implementor whose
-  `reduce` or `update` calls no other reducer's `reduce` reports
-  nothing, even when its state holds a `Keyed` or `Slot` — the
-  combinator that reduces that collection reports it. One that does
-  reports that child's occupancies through the projection pair and under
-  the segments it reduces that child with, for every child the state
-  holds — whether or not the last message reached that child, and
-  whether or not the child declares any subscription. The combinators
-  meet this themselves, as they meet INV-RC2: each reports its parent
-  composition and its child's occupancies under its boundary (`scoped`
-  for `scope`, `keyed` for `for_each`, `slot` for `presented`).
-  Requiring the method makes every implementor face the obligation; it
-  does not check the report. The runtime does not detect an omission: an
-  occupancy never reported originates no teardown of its own, though
-  another path's teardown can still select its runs, and one reported
-  only intermittently is torn down while still in the state.
+  executes no side effects and reads no external mutable state; it is
+  called for the first report and after every update the kernel or the
+  store drives, and nowhere else. An implementor whose `reduce` or
+  `update` calls no other reducer's `reduce` reports nothing, even when
+  its state holds a `Keyed` or `Slot` — the combinator that reduces that
+  collection reports it. One that does reports that child's occupancies
+  through the projection pair and under the segments it reduces that
+  child with, for every child the state holds — whether or not the last
+  message reached that child, and whether or not the child declares any
+  subscription. The combinators meet this themselves, as they meet
+  INV-RC2: each reports its parent composition and its child's
+  occupancies under its boundary (`scoped` for `scope`, `keyed` for
+  `for_each`, `slot` for `presented`). Requiring the method makes every
+  implementor face the obligation; it does not check the report. The
+  runtime does not detect an omission: an occupancy never reported
+  originates no teardown of its own, though another path's teardown can
+  still select its runs, and one reported only intermittently is torn
+  down while still in the state. §11 records the designs rejected in
+  favor of this one.
 - **What reconciliation does not reach.** Three classes, as negative
   space. Work an update's command carries for an occupancy whose pair is
   not in the report that update leaves — one inserted and removed within
@@ -1392,9 +1396,9 @@ INV-RC3's same-key replacement and remove-reinsert rows are what a
 reused identity fails, and INV-RC3's structural review covers the sites
 that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
 — INV-RC3 quantifies over the pairs reported, INV-RC3a over which pairs
-must be. The order of reconciliation teardowns is pinned only as a
-function of the two reports — what INV-RC14's and RFC 0008 INV-T4's
-reproducibility need — and not as a rule over paths.
+must be. The order of reconciliation teardowns is pinned only as
+reproducible — what INV-RC14 and RFC 0008 INV-T4 need — and not as a
+rule over paths or over its inputs.
 
 ## 12. Invariants
 
@@ -1431,26 +1435,27 @@ reconciliation and wait for its implementation.
   kernel drives returns, the command dispatched for that update carries,
   beyond the entries `reduce` returned, exactly one teardown of each
   disappearing path that no other disappearing path is a proper prefix
-  of, in an order the two reports determine, and no other entry; the
-  first report is the one `init`'s state yields (§2.5). Same-update
-  reinsertion still yields the old occupancy's teardown and a fresh
-  successor. Behavioral, at the driven-transition seam the kernel and
-  the store share — every row reads the dispatched command, never
-  `reduce`'s return value: one row per way a pair disappears — `remove`,
-  `dismiss`, occupied-key `insert`, occupied-slot `present`, assignment
-  of a populated collection holding the same keys, `mem::take`, a swap
-  of two occupied slots reported under different segments, replacement
-  of an occupancy whose state holds occupancies (one teardown, of the
-  outer path), and a `remove` and an assignment made by a reducer above
-  an enclosing `scope` boundary; the key-only remove-reinsert adversary;
-  one slot reported under two paths by two `presented` boundaries,
-  dismissed, yielding a teardown of each; rows that tear nothing down —
-  in-place replacement through `get_mut` of a value that holds no
-  occupancies, a take-and-restore within one update, the restoring
-  update of a collection taken in an earlier one, and an unrelated
-  message to the doubly reported slot; an update that returns its own
-  teardown of a path reconciliation also tears down, keeping both
-  entries; a removal in an update returning `without_redraw`, which
+  of, in a reproducible order, and no other entry; the first report is
+  the one `init`'s state yields (§2.5). Same-update reinsertion still
+  yields the old occupancy's teardown and a fresh successor. Behavioral,
+  at the driven-transition seam the kernel and the store share — every
+  row reads the dispatched command, never `reduce`'s return value: one
+  row per way a pair disappears — `remove`, `dismiss`, occupied-key
+  `insert`, occupied-slot `present`, assignment of a populated
+  collection holding the same keys, `mem::take`, a swap of two occupied
+  slots reported under different segments, a `Keyed` moved to another
+  path, a fixed `scope` boundary's child state replaced while it holds
+  occupancies, replacement of an occupancy whose state holds occupancies
+  (one teardown, of the outer path), and a `remove` and an assignment
+  made by a reducer above an enclosing `scope` boundary; the key-only
+  remove-reinsert adversary; one slot reported under two paths by two
+  `presented` boundaries, dismissed, yielding a teardown of each; rows
+  that tear nothing down — in-place replacement through `get_mut` of a
+  value that holds no occupancies, a take-and-restore within one update,
+  the restoring update of a collection taken in an earlier one, and an
+  unrelated message to the doubly reported slot; an update that returns
+  its own teardown of a path reconciliation also tears down, keeping
+  both entries; a removal in an update returning `without_redraw`, which
   stays without a redraw; and a repeat row, in which one script run
   twice yields one teardown sequence. Structural, in two parts: review
   of the kernel's and the store's dispatch sites, confirming that each
