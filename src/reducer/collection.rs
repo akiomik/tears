@@ -57,7 +57,7 @@ impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 /// The counter panics rather than wrap: a reused identity would make a
 /// replacement look like continuity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct InstanceId(u64);
+pub struct InstanceId(u64);
 
 impl InstanceId {
     fn draw() -> Self {

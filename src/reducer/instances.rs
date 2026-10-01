@@ -17,7 +17,7 @@ use super::collection::{InstanceId, Keyed, ScopeValue, Slot};
 
 /// One report: every occupancy a state holds, with the path it is reported
 /// under, in the order the reducers reported them.
-pub(crate) type Report = Vec<(ScopePath, InstanceId)>;
+pub type Report = Vec<(ScopePath, InstanceId)>;
 
 /// What a reducer reports its occupancies through.
 ///
@@ -89,7 +89,7 @@ impl Instances<'_> {
 }
 
 /// Reads the report `reducer` makes of `state`.
-pub(crate) fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
+pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
     let mut report = Report::new();
     reducer.instances(
         state,
@@ -104,13 +104,13 @@ pub(crate) fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 /// The previous report, and the comparison against it — the one
 /// reconciliation the kernel and the store share (INV-RC3, RFC 0008 INV-T3).
 #[derive(Default)]
-pub(crate) struct LiveInstances {
+pub struct LiveInstances {
     previous: Report,
 }
 
 impl LiveInstances {
     /// Takes the first report, which tears nothing down.
-    pub(crate) fn seed(&mut self, report: Report) {
+    pub fn seed(&mut self, report: Report) {
         self.previous = report;
     }
 
@@ -122,7 +122,7 @@ impl LiveInstances {
     /// The teardowns come in the order the previous report first named each
     /// path, so one script yields one sequence; the set below is consulted
     /// for membership only, never iterated.
-    pub(crate) fn reconcile<Msg: Send + 'static>(
+    pub fn reconcile<Msg: Send + 'static>(
         &mut self,
         report: Report,
         command: Command<Msg>,

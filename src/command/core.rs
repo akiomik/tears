@@ -323,12 +323,10 @@ impl<Msg: Send + 'static> Command<Msg> {
     ///
     /// The one caller is live-instance reconciliation, which has to put a
     /// removal's teardown on the command an update returned.
-    /// [`Command::batch`] would be wrong there twice over: it folds the
-    /// redraw directive across its children, so an update that returned
-    /// [`Command::without_redraw`] would silently regain its redraw, and it
-    /// warns about a child spawn key for a command reconciliation is only
-    /// passing through. The merge adds teardown entries and nothing else
-    /// (RFC 0014 §2.5).
+    /// [`Command::batch`] would be wrong there: it folds the redraw directive
+    /// across its children, so an update that returned
+    /// [`Command::without_redraw`] would silently regain its redraw. The
+    /// merge adds teardown entries and nothing else (RFC 0014 §2.5).
     pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
         debug_assert!(
             other.is_none()
