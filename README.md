@@ -216,27 +216,27 @@ Tears follows **The Elm Architecture (TEA)** pattern:
 
 ### Composing Reducers
 
-A `Reducer` owns one state transition and the subscriptions that state declares.
-`scope`, `for_each` and `presented` compose one under a parent — a sibling
-feature, one child per row of a `Keyed` collection, or an optionally-present
-child in a `Slot` — and `into_program` closes the stack into a runnable
-`Program` for `ProgramRuntime`. Every boundary qualifies the identities its
-child produces with its own segment, so rows declaring the same subscription or
-keying the same command do not collide. The two whose child can leave —
-`for_each` over a `Keyed` collection and `presented` over a `Slot` —
-additionally tear a departed child's runs down, so no removal leaks a run;
-`scope` composes one child in place, and that child is always there.
-`Command::teardown` is the manual primitive behind the teardowns `for_each`
-and `presented` perform, and `Command::on_teardown` registers a finalizer to
-run when a teardown selects the scope it was built at; one built at a scope
-nothing tears down never runs.
+A program can also be written as a stack of reducers instead of one
+`Application`. Each feature is a `Reducer` over its own state and messages,
+and a boundary places it under its parent: `scope` for a sibling feature,
+`for_each` for one child per row of a `Keyed` collection, `presented` for an
+optionally-present child in a `Slot`. `into_program` closes the stack into a
+`Program` for `ProgramRuntime`.
 
-An `Application` is run through an adapter over the same kernel, so this is a
-way to write a program rather than a second runtime. See the
-[`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/#composing-reducers)
-module docs for when the rewrite is worth it, and
-[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) for
-`dashboard.rs` written the other way.
+Composition pays off where a feature exists more than once at a time or comes
+and goes. Every row can declare the same timer and give its commands the same
+command id, and the timer and the commands still run as that row's own. When
+the parent removes a row or dismisses a pane, the boundary tears that child
+down, cancelling the child's commands still in flight and running the cleanup
+the child registered with `Command::on_teardown`; the parent tracks none of
+it. `Runtime` runs an `Application` through an adapter on the same kernel as
+`ProgramRuntime`, so composing changes how a program is written, not how it
+is executed.
+
+The [`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/#composing-reducers)
+module docs say when composing is worth it and how it works.
+[`examples/dashboard_composed.rs`](examples/dashboard_composed.rs) is
+`dashboard.rs` written this way.
 
 ### Built-in Subscriptions
 
