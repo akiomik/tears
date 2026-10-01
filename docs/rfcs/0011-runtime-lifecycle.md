@@ -2,8 +2,8 @@
 
 - Status: Implemented, apart from the parts that belong to RFC 0014
   §2.5's live-instance reconciliation — §2.1's reconciled dispatch,
-  §3.2's first report, and the `instances` call sites §4.3 and INV-LC6
-  list — which are accepted with it and not yet implemented
+  §3.2's first report, and the `instances` call sites §4.3, §5, and
+  INV-LC6 list — which are accepted with it and not yet implemented
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
@@ -256,15 +256,16 @@ though no message has been processed.
 ### 3.3 What TestStore maps
 
 `TestStore::new` maps the logical intake and accounting of this
-bootstrap — it applies `Application::new` and enqueues the init command
-with its metadata, cancel list, and keyed admission, exactly as RFC 0008
-§3.2 states. It does not map the temporal side: runtime task start,
-subscription start, and first render have no counterpart in the store,
-and production offers no stable observable phase between a dispatch and
-its effect's first poll for the store to map (the spawned task may be
-polled immediately on another executor thread). A test must not read
-store construction as evidence of production bootstrap *timing*; the
-intake half is exactly what it is evidence of.
+bootstrap — it applies `Application::new`, reads the first live-instance
+report, and enqueues the init command with its metadata, cancel list,
+and keyed admission, exactly as RFC 0008 §3.2 states. It does not map
+the temporal side: runtime task start, subscription start, and first
+render have no counterpart in the store, and production offers no stable
+observable phase between a dispatch and its effect's first poll for the
+store to map (the spawned task may be polled immediately on another
+executor thread). A test must not read store construction as evidence of
+production bootstrap *timing*; the intake half is exactly what it is
+evidence of.
 
 ### 3.4 Deliverable: construction-dispatch removal
 
@@ -740,7 +741,8 @@ RFC 0014 §12's.
   per pass, before re-evaluation, on the pass's current state.
 - **§3.2's intake order gains a bootstrap short-circuit, pinning
   INV-LC4's arbitration clause one case narrower.** The order itself
-  stands — init dispatch, then the initial reconcile, then the first
+  stands — `init` and the first live-instance report, then init
+  dispatch, then the initial subscription reconcile, then the first
   render pending unconditionally — but an init command whose
   `Command::quit()` part is present terminates deterministically
   *during* the init dispatch, before the initial reconcile runs and

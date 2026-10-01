@@ -200,16 +200,17 @@ The teardown contract is reviewed against this list:
   stage-3 `TestDriver` (RFC 0014 §7.2), driven pass-unit.
 - **R8 — two layers, one operation.** A teardown has exactly two
   origins: the public `Command::teardown` constructor, and RFC 0014
-  §2.5's live-instance reconciliation, which originates the
-  composition layer's. Reconciliation builds each from the path an
-  occupancy was reported under — a nonempty path of the boundary
-  segments and keys above it, root first, which is the prefix
-  `Command::teardown` over the innermost of them, `scoped` by the
-  rest, would carry — so it adds no reach the primitive lacks, an empty
-  prefix included (§3.1). Both produce the same teardown entry, lowered
-  and applied by the same kernel path. Correctness of child teardown
-  therefore does not rest on hand-written anchors, and no third origin
-  exists. Checked structurally (§7.2's origination review).
+  §2.5's live-instance reconciliation, which originates the composition
+  layer's. Reconciliation builds each from the path an occupancy was
+  reported under — the boundary segments and keys from the root down to
+  the occupancy's own key or segment, nonempty because it ends in that
+  one, which is the prefix `Command::teardown` over that last segment,
+  `scoped` by the ones above it, would carry — so it adds no reach the
+  primitive lacks, an empty prefix included (§3.1). Both produce the
+  same teardown entry, lowered and applied by the same kernel path.
+  Correctness of child teardown therefore does not rest on hand-written
+  anchors, and no third origin exists. Checked structurally (§7.2's
+  origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
@@ -424,23 +425,19 @@ un-consume input the run already read (§3.8).
 
 ### 4.2 Declaration pairing
 
-A removed occupancy's own declarations — those no occupancy the state
-still holds declares under the same identity — leave the declared set
-as of the update whose live-instance reconciliation issues its
-teardown, both being read from the state that update leaves (RFC 0014
-INV-RC3), so the stop is not self-defeating for them. Two other kinds
-of declaration a teardown stops stay declared. A successor under the
-same path that declares the same identity is R4's replacement: that
-subscription leaves and returns, admitted at the next re-evaluation
-behind the stopped run's quiescence. A declaration from another
-occupancy reported under the same path (RFC 0014 §2.5's negative
-space) is stopped by the prefix and restarted by the next
-re-evaluation. The manual primitive
+A teardown's subscription stops are not self-defeating for the
+declarations the state that update leaves no longer holds: the declared
+set and the live-instance report are both read from that state (RFC 0014
+INV-RC3), so what the removed occupancy alone declared is gone as of the
+update that tears it down. A run whose identity that state still
+declares, whoever declares it, is restarted by the next re-evaluation —
+for a successor under the same path, the leave-and-return of R4's
+replacement, behind the stopped run's quiescence. The manual primitive
 applied to a *still-declared* subscription stops the run, and the next
-re-evaluation restarts it — RFC 0005 INV-13's restart meaning,
-untouched — which makes that use self-defeating by design; the
-primitive is sound for subscriptions only when the caller also removes
-the declarations, which the composition layer does structurally.
+re-evaluation restarts it — RFC 0005 INV-13's restart meaning, untouched
+— which makes that use self-defeating by design; the primitive is sound
+for subscriptions only when the caller also removes the declarations,
+which removing an occupancy does.
 
 ### 4.3 Admission under the uniform barrier
 
@@ -902,13 +899,14 @@ delegation's window (§3.4). Rejected.
 
 Tearing down when a scoped value is dropped or a scoped command is
 omitted contradicts RFC 0005 INV-21 and makes teardown unobservable in
-the declaration. Rejected; teardown stays explicit. The composition
-layer's teardown follows a reported occupancy disappearing from the
-state's report, not a value being dropped: a collection taken out and
-kept alive past the update disappears from where it was reported
-(RFC 0014 §2.5). It is observable as subscription stops are — from the state
-an update leaves and the command dispatched for it — rather than from
-the `Command` the update returns.
+the declaration. Rejected: dropping a scoped value or omitting a scoped
+command tears nothing down. The composition layer's teardown is not drop
+observation either — it follows a reported occupancy disappearing from
+the state's report: a collection taken out and kept alive past the
+update disappears from where it was reported (RFC 0014 §2.5). It is
+observable as subscription stops are — from the state an update leaves
+and the command dispatched for it — rather than from the `Command` the
+update returns.
 
 ### Root cancel-all
 

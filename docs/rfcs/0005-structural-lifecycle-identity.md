@@ -1,7 +1,9 @@
 # RFC 0005: Structural Lifecycle Identity and Composition Scopes
 
 - Status: Implemented (Phase A shipped in 0.10.0; Phase B shipped additively
-  after 0.10.0)
+  after 0.10.0). §4.5's pointer to RFC 0014 §2.5's live-instance
+  reconciliation describes a mechanism accepted there and not yet
+  implemented
 - Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive)
 - Scope: collision-safe subscription identity and hierarchical identity
   namespacing for composed command and subscription lifecycles
@@ -712,7 +714,7 @@ RFC 0013 — and it decides the six questions this section deferred:
 - running and finished-but-buffered output is revoked — nothing under the
   prefix is delivered after the application point (RFC 0013 §3.4);
 - subscriptions participate by immediate stop at that point, paired with
-  declaration removal by the composition layer (RFC 0013 §4); and
+  declaration removal as RFC 0013 §4.2 states; and
 - a later child reusing the same scope observes nothing stale (RFC 0013 §3.6).
 
 The structural path defined here is what that operation anchors on: a teardown

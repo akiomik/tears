@@ -64,12 +64,13 @@
   `TestDriver` is RFC 0008's, entered by that RFC's amendment (§13.2, §9
   row 11). Landed with the implementation, after §13.1's gate. The
   live-instance reconciliation carries its own entry when it lands:
-  `Changed` (breaking) — `Reducer` and `Application` gain the provided
-  `instances` method a hand-written composition must forward, a removal
-  is torn down in the dispatched command rather than in `reduce`'s
-  return value, and `Slot::present` stops being `const` (§2.5); `Fixed`
-  — reassigning a collection, and mutating one from above its boundary,
-  no longer leaks the removed instances' runs.
+  `Changed` (breaking) — `Reducer` and `Application` gain a required
+  `instances` method, empty for an implementor that reduces no other
+  reducer and forwarding for one that does, a removal is torn down in
+  the dispatched command rather than in `reduce`'s return value, and
+  `Slot::present` stops being `const` (§2.5); `Fixed` — reassigning a
+  collection, and mutating one from above its boundary, no longer leaks
+  the removed instances' runs.
 
 ## Summary
 
@@ -199,7 +200,7 @@ pub trait Reducer {
         Vec::new()
     }
 
-    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    fn instances(&self, state: &Self::State, out: &mut Instances<'_>);
 }
 
 pub trait Program: Reducer {
@@ -216,12 +217,12 @@ Contract, stated observably:
   never mutates it, and all application state lives in
   `Reducer::State`. A reducer may hold child reducers as fields; that
   is composition structure, not state.
-- `reduce` is the only state-transition entry point, and
-  `subscriptions` is a pure function of state exactly as RFC 0012
-  INV-SE6 states for `Application::subscriptions` — the obligation
-  transfers to the trait verbatim, and the runtime may evaluate it at
-  any re-evaluation frequency. `instances` reports the live instances
-  the state holds, under INV-RC3a's obligation (§2.5).
+- `reduce` is the only state-transition entry point, and `subscriptions`
+  is a pure function of state exactly as RFC 0012 INV-SE6 states for
+  `Application::subscriptions` — the obligation transfers to the trait
+  verbatim, and the runtime may evaluate it at any re-evaluation
+  frequency. `instances` reports the live instances the state holds; it
+  is required, and INV-RC3a (§2.5) states what it owes.
 - **Views are root-level by design.** `Reducer` deliberately has no
   `view`; only `Program` does. Composing child *views* is ordinary
   function calls inside the root `view` over the root state — pane and
@@ -265,14 +266,13 @@ impl<A: Application> Program for AppProgram<A> {
 ```
 
 The adapter is a mapping and nothing else: the application value *is*
-the state, `update` *is* `reduce`. `Application` carries a provided
-`instances(&self, out: &mut Instances<'_>)` with an empty default, the
-same shape as its `subscriptions`, because an application can hold a
-`Keyed` or `Slot` and reduce a combinator stack over it inside
-`update`; the adapter forwards it. Every kernel concern and every
-phase step executes identical code for `Application` programs and
-composed programs (INV-RC1 enumerates the concern set); the facade has
-no dedicated channel, branch, or phase.
+the state, `update` *is* `reduce`. `Application` carries a required
+`instances(&self, out: &mut Instances<'_>)`, because an application can
+hold a `Keyed` or `Slot` and reduce a combinator stack over it inside
+`update`; the adapter forwards it, and §2.5 states what it owes. Every
+kernel concern and every phase step executes identical code for
+`Application` programs and composed programs (INV-RC1 enumerates the
+concern set); the facade has no dedicated channel, branch, or phase.
 
 ### 2.3 Advanced entry point
 
@@ -304,7 +304,7 @@ The question this RFC decides: does the existing public `Runtime<App>`
 surface survive, with an internal exit type converted at the facade?
 
 **Adopted for the entry point and result contract.**
-`Application` (unchanged apart from §2.2's provided `instances`),
+`Application` (unchanged apart from §2.2's required `instances`),
 `Runtime<App: Application>` (the existing type), and
 
 ```rust
@@ -455,67 +455,69 @@ Contract:
   pairs. After every `reduce` the kernel drives returns, it reads that
   set from the resulting state and compares it with the set it read
   before; only consecutive reports are compared. A path *disappears*
-  when the earlier report holds a pair under it that the later one
-  lacks, whatever took the pair out — `remove`, `dismiss`, replacement
-  by `insert` or `present`, assigning, swapping, or taking a collection
-  value, moving it to another path, or replacing a state that encloses
-  it — and a pair that reappears in a later report, as a collection
-  taken in one update and restored in another does, tears nothing down
-  and starts nothing. For each disappearing path that no other
-  disappearing path is a proper prefix of, reconciliation merges one
-  teardown of that path into the command it dispatches for that
-  update — after `reduce` returns and before the dispatch, never as a
-  later command — in the order of each path's first pair in the earlier
-  report; a disappearing path under another is selected by that one's
-  teardown (RFC 0013 §3.1). The combinators report a parent composition
-  before its children and a collection in its iteration order, each
-  occupancy before the occupancies inside it. The merge adds teardown
-  entries and nothing else: the entries `reduce` returned, a teardown
-  it returned for the same path included, and its directives cross
-  unchanged, and §3.4's phase order makes a same-update
-  remove-and-reinsert (or replace) yield the old occupancy's teardown
-  *and* the new one's fresh spawns in one dispatched command
-  (RFC 0013 R4). Identities are what is compared, so same-key
-  reinsertion is not mistaken for continuity. The first report is read
-  from the state `init` returns, before its command is dispatched, and
-  tears nothing down. Teardowns this adds appear in the dispatched
-  command, not in the `Command` that `reduce` returns.
-- **The reporting obligation (INV-RC3a).** `instances` is a pure
-  function of state: for a given state it reports the same set, it
-  executes no side effects and reads no external mutable state, and the
-  runtime may call it at any frequency. A reducer that reduces a child
-  reports that child's occupancies through the projection pair and
-  under the segments it reduces that child with, for every child the
-  state holds — whether or not the last message reached that child, and
-  whether or not the child declares any subscription. The combinators
-  meet this themselves, as they meet INV-RC2: each reports its parent
-  composition, then its child's occupancies under its boundary
-  (`scoped` for `scope`, `keyed` for `for_each`, `slot` for
-  `presented`). A reducer that composes children by hand meets it by
-  forwarding, and its default reports nothing. The runtime does not
-  detect an omission: an occupancy never reported originates no
-  teardown of its own — another path's teardown can still select its
-  runs — and one reported only intermittently is torn down while still
-  in the state.
+  when the earlier report holds a pair at that path — one whose own path
+  it is — that the later one lacks, whatever took the pair out —
+  `remove`, `dismiss`, replacement by `insert` or `present`, assigning,
+  swapping, or taking a collection value, moving it to another path, or
+  replacing a state that encloses it — and a pair that reappears in a
+  later report, as a collection taken in one update and restored in
+  another does, tears nothing down and starts nothing. For each
+  disappearing path that no other disappearing path is a proper prefix
+  of, reconciliation merges one teardown of that path into the command
+  it dispatches for that update — after `reduce` returns and before the
+  dispatch, never as a later command — in the order of each path's first
+  pair in the earlier report; a disappearing path under another is
+  selected by that one's teardown (RFC 0013 §3.1). That selection is by
+  prefix, so it also reaches the runs of occupancies still reported
+  beneath a disappearing path: an occupancy kept inside a replaced one
+  continues as an occupancy, and its runs end with the outer one's. The
+  combinators report a parent composition before its children and a
+  collection in its iteration order, each occupancy before the
+  occupancies inside it. The merge adds teardown entries and nothing
+  else: the entries `reduce` returned, a teardown it returned for the
+  same path included, and its directives cross unchanged, and §3.4's
+  phase order makes a same-update remove-and-reinsert (or replace) yield
+  the old occupancy's teardown *and* the new one's fresh spawns in one
+  dispatched command (RFC 0013 R4). Identities are what is compared, so
+  same-key reinsertion is not mistaken for continuity. The first report
+  is read from the state `init` returns, before its command is
+  dispatched, and tears nothing down. Teardowns this adds appear in the
+  dispatched command, not in the `Command` that `reduce` returns.
+- **The reporting obligation (INV-RC3a).** `instances` is required on
+  `Reducer` and on `Application`, and it is a pure function of state:
+  for a given state it reports the same set, it executes no side effects
+  and reads no external mutable state, and the runtime may call it at
+  any frequency. An implementor whose `reduce` or `update` calls no
+  other reducer's `reduce` reports nothing, even when its state holds a
+  `Keyed` or `Slot` — the combinator that reduces that collection
+  reports it. One that does reports that child's occupancies through
+  the projection pair and under the segments it reduces that child
+  with, for every child the state holds — whether or not the last
+  message reached that child, and whether or not the child declares any
+  subscription. The combinators meet this themselves, as they meet
+  INV-RC2: each reports its parent composition, then its child's
+  occupancies under its boundary (`scoped` for `scope`, `keyed` for
+  `for_each`, `slot` for `presented`). Requiring the method makes every
+  implementor face the obligation; it does not check the report. The
+  runtime does not detect an omission: an occupancy never reported
+  originates no teardown of its own, though another path's teardown can
+  still select its runs, and one reported only intermittently is torn
+  down while still in the state.
 - **What reconciliation does not reach.** Three classes, as negative
   space. Work an update's command carries for an occupancy whose pair is
-  not in the report that update leaves — one inserted and removed
-  within the update, or one whose work was produced before it was
-  removed — is not suppressed: a teardown of its path, if the path
-  disappeared, applies in the cancel phase before that command's spawns
-  (§3.4); the work is admitted under the ordinary dispatch rules; and
-  no later report tears it down on its account, since none holds a pair
-  it lacks. The combinators produce no such command — one message takes
-  one branch at each boundary, and a boundary's parent branch returns
-  no work under its own occupancies — so it arises from a hand-written
-  composition or a hand-applied `scoped` only. A state change made
-  outside a `reduce` the kernel drives — interior mutability, state
-  shared with a background task — is not observed until a later
-  reconciliation, if one runs, on the terms `Application::subscriptions`
-  already states for such changes. And two occupancies reported under
-  one path are torn down together, because teardown selects by prefix
-  (RFC 0013 §3.1) — two sibling `for_each` boundaries over collections
-  with one key type report that way (issue #424).
+  not in the report that update leaves — one inserted and removed within
+  the update, or one whose work was produced before its removal — is not
+  suppressed: a teardown of its path, if the path disappeared, applies
+  in the cancel phase before that command's spawns (§3.4), and the work
+  is admitted under the ordinary dispatch rules; only a later teardown
+  that selects its path reaches it. A state change made outside a
+  `reduce` the kernel drives — interior mutability, state shared with a
+  background task — is not observed until a later reconciliation, if one
+  runs, on the terms `Application::subscriptions` already states for
+  such changes. And two occupancies reported under one path are torn
+  down together, because teardown selects by prefix (RFC 0013 §3.1) —
+  two sibling `for_each` boundaries over collections with one key type
+  report that way (issue #424).
 - **Message routing is typed.** `extract` either claims a message for
   the child or returns it unchanged to the parent; a message for a
   child key absent from the collection is routed to nothing and
@@ -1283,6 +1285,14 @@ invariants of §12 are.
   INV-RC3's single reconciliation point, which every update passes
   whatever route its message took, and by its reassignment and
   ancestor rows.
+- *State-held previous report* (rejected alternative, §2.5): keeping
+  the last report inside the state it describes, as the Swift Composable
+  Architecture's presentation and stack reducers do (`PresentationState`
+  and `StackState` in its 1.x releases), lets a reassignment replace
+  the record together with the value, and lets the record drift from
+  the runs it describes — the drift that library's
+  [issue 3820](https://github.com/pointfreeco/swift-composable-architecture/issues/3820)
+  tracks. Excluded by INV-RC3's previous report, which the kernel holds.
 - *Composition by description* (rejected alternative, §2.5): deriving
   routing, reporting, and qualification from one framework-held
   description of the composition would make an omitted report
@@ -1436,31 +1446,33 @@ reconciliation and wait for its implementation.
   doubly reported slot; an update that returns its own teardown of a
   path reconciliation also tears down, keeping both entries; a removal
   in an update returning `without_redraw`, which stays without a redraw;
-  and an order row removing several occupancies in an order other than
-  their report order. Structural, in two parts: review of the kernel's
+  an order row removing several occupancies in an order other than their
+  report order; and an interleaved row — a report of (A, i1), (B, i2),
+  (A, i3) followed by one of (A, i1) — whose contribution is A's
+  teardown, then B's. Structural, in two parts: review of the kernel's
   and the store's dispatch sites, confirming that each command a
   `reduce` returns reaches dispatch or intake only through the
   reconciliation step; and review of the sites that create an identity —
   `Keyed::insert`, `Keyed::from_iter`, `Slot::present` — confirming each
   draws one no earlier occupancy held, never derived from the collection
   value or the key.
-- **INV-RC3a — the reporting obligation.** `instances` is pure — the
-  same state reports the same set, with no side effects and no reads of
-  external mutable state — and a reducer reports the occupancies of
-  every child it reduces, through the projection pair and under the
-  segments it reduces it with, whatever route the last message took
-  (§2.5). Its two halves take different classes. The combinators' half
-  is behavioral: nested stacks report each occupancy under the path
-  INV-RC2 qualifies its child's carriers with, including an occupancy
-  under a child the last message did not reach. The half a hand-written
-  composition owes is structural on the crate side, as INV-SE6 is: the
-  obligation is carried by the rustdoc of `Reducer::instances` and
-  `Application::instances` citing this RFC, and a review of the crate's
-  own composition sites — `Scoped`, `ForEach`, `Presented`,
-  `IntoProgram`, `AppProgram` — confirms each forwards. No check reaches
-  an application's own composition, since no oracle independent of the
-  report can find an occupancy it omits; §2.5 states what an omission
-  costs.
+- **INV-RC3a — the reporting obligation.** `instances` is required on
+  `Reducer` and `Application` and pure — the same state reports the same
+  set, with no side effects and no reads of external mutable state — and
+  a reducer reports the occupancies of every child it reduces, through
+  the projection pair and under the segments it reduces it with,
+  whatever route the last message took (§2.5). Its two halves take
+  different classes. The combinators' half is behavioral: nested stacks
+  report each occupancy under the path INV-RC2 qualifies its child's
+  carriers with, including an occupancy under a child the last message
+  did not reach. The half a hand-written composition owes is structural
+  on the crate side, as INV-SE6 is: the obligation is carried by the
+  rustdoc of `Reducer::instances` and `Application::instances` citing
+  this RFC, and a review of the crate's own composition sites —
+  `Scoped`, `ForEach`, `Presented`, `IntoProgram`, `AppProgram` —
+  confirms each forwards. No check reaches an application's own
+  composition, since no oracle independent of the report can find an
+  occupancy it omits; §2.5 states what an omission costs.
 - **INV-RC4 — multi-keyed lowering.** Batch children lower to
   independent entries; the combined cancel phase precedes every spawn
   of the same command; the §3.4 interaction rules hold. Behavioral:

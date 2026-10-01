@@ -239,7 +239,8 @@ impl<App: Application> TestStore<App>
 where
     App::Message: Debug,
 {
-    /// Runs `Application::new(flags)` and enqueues the init command.
+    /// Runs `Application::new(flags)`, reads the first live-instance
+    /// report, and enqueues the init command.
     ///
     /// Panics if called while a Tokio runtime is already entered — for
     /// example, from inside `#[tokio::test]` (§4.3, INV-T10).
