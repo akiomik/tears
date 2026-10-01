@@ -1695,7 +1695,7 @@ mod tests {
                 "deleted: #1 alpha".to_owned(),
                 "stopped watching: #1 alpha".to_owned(),
             ],
-            "one teardown per removal, in the order the removals happened, and none for the \
+            "one teardown per removal, each after the update that made it, and none for the \
              successor row that is still present"
         );
     }

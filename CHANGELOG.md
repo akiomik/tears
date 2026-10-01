@@ -25,9 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   child it reduces there, or the removed ones are not torn down; the
   combinators already do. In particular, an `Application` whose `update`
   reduces a combinator stack over its own state forwards that stack's
-  report, `fn instances(&self, out: &mut Instances<'_>) { stack().instances(self, out) }`
-  — an empty body there compiles and silently stops tearing down its rows.
-  One that places no work under a key or segment writes an empty body.
+  report — an empty body there compiles and silently stops tearing down its
+  rows. One that places no work under a key or segment writes an empty body.
 
   Before:
 
@@ -36,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       // ...
       fn subscriptions(&self) -> Vec<Subscription<Message>> {
           vec![]
+      }
+  }
+
+  impl Application for MyComposedApp {
+      // ...
+      fn update(&mut self, msg: Message) -> Command<Message> {
+          stack().reduce(self, msg)
       }
   }
   ```
@@ -50,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       }
 
       fn instances(&self, _out: &mut Instances<'_>) {}
+  }
+
+  impl Application for MyComposedApp {
+      // ...
+      fn update(&mut self, msg: Message) -> Command<Message> {
+          stack().reduce(self, msg)
+      }
+
+      fn instances(&self, out: &mut Instances<'_>) {
+          stack().instances(self, out);
+      }
   }
   ```
 
