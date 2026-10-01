@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tears::reducer::Instances` (also in the prelude), the collector a reducer
+  reports the instances it composes through
+
+### Changed
+
+- **Breaking:** `Reducer` and `Application` gain a required `instances`
+  method, through which the runtime learns which `Keyed` rows and `Slot`
+  occupants a state holds, so that it can tear down the ones an update
+  removes
+
+  An implementor that places no work under a key or segment of its own — any
+  `Application` that does not run a combinator stack inside `update`, and any
+  leaf `Reducer` — writes an empty body. One that calls a child's `reduce` and
+  scopes the result itself must report what it placed work under, or its
+  removed children are not torn down; the combinators already do.
+
+  Before:
+
+  ```rust
+  impl Application for MyApp {
+      // ...
+      fn subscriptions(&self) -> Vec<Subscription<Message>> {
+          vec![]
+      }
+  }
+  ```
+
+  After:
+
+  ```rust
+  impl Application for MyApp {
+      // ...
+      fn subscriptions(&self) -> Vec<Subscription<Message>> {
+          vec![]
+      }
+
+      fn instances(&self, _out: &mut Instances<'_>) {}
+  }
+  ```
+
+- **Breaking:** a removed instance's teardown is no longer part of the
+  `Command` a combinator stack's `reduce` returns. The runtime adds it to the
+  command it dispatches for that update, so a test that read teardowns off
+  `reduce`'s return value sees none; drive the program instead
+- **Breaking:** `Slot::present` is no longer a `const fn`, since presenting
+  begins an instance and draws its identity
+
+### Fixed
+
+- Replacing a `Keyed` or `Slot` value wholesale (`state.rows = Keyed::default()`,
+  `mem::take`, `mem::swap`) now tears down the instances it held, and so does
+  a reducer above an enclosing `scope` boundary removing or replacing one.
+  Before, such removals were lost or deferred, and their in-flight commands
+  and cleanup hooks were left behind (#422)
+
 ## [0.11.1] - 2026-09-11
 
 ### Fixed

@@ -72,8 +72,9 @@
 //!   occupant is fixed to the task it was opened for, because a `Slot` holds an
 //!   instance rather than a view of whatever is selected.
 //! - **The tasks arrive as messages** rather than being built into the initial
-//!   state. `init` could build them — `Keyed::from_iter` records no removal, so
-//!   growing a collection there is fine — and this file routes them through
+//!   state. `init` could build them — the first report is read from `init`'s
+//!   state and tears nothing down, so growing a collection there is fine — and
+//!   this file routes them through
 //!   `AddTask` so the seed and the `n` key take one path. What `init`'s command
 //!   cannot do is start work *under a child's scope*, so the row's own setup is
 //!   a message either way. That the rows start with the same notes and none
@@ -1001,9 +1002,7 @@ fn close_details_opened_on(state: &mut App, task: TaskId) {
 fn add_task(state: &mut App, title: String) -> Command<Message> {
     let id = TaskId(state.next_id);
     state.next_id += 1;
-    // Insertion into an absent key records no removal: nothing was running
-    // under it to tear down. The key is fresh, so this is that case and never
-    // the replacing one.
+    // The key is fresh, so this begins an instance and replaces none.
     state.activity.push(format!("added: #{} {}", id.0, title));
     state.tasks.insert(
         id,
@@ -1055,9 +1054,8 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     // Read before the removal, because it is a position in the collection and
     // the removal is what changes it.
     let position = state.tasks.keys().position(|key| *key == id);
-    // `remove` records the removal; the row boundary drains it in this same
-    // reduce and merges the row's teardown into the command returned here.
-    // Nothing below asks for that.
+    // The row leaves the state here; the runtime tears it down in the command
+    // it dispatches for this update. Nothing below asks for that.
     let Some(task) = state.tasks.remove(&id) else {
         state.status = "That task is gone";
         return Command::none();
@@ -1065,8 +1063,8 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     state
         .activity
         .push(format!("deleted: #{} {}", id.0, task.title));
-    // A details pane open on the row that just left goes with it, and the
-    // slot's own boundary originates that teardown.
+    // A details pane open on the row that just left goes with it, and is
+    // torn down in the same update.
     close_details_opened_on(state, id);
     if state.selected == Some(id) {
         // The row that moved up into the position, or the new last row when
@@ -1593,8 +1591,8 @@ mod tests {
         );
     }
 
-    /// The four removal shapes a boundary tears down, and the one thing that is
-    /// not a removal.
+    /// The ways an instance leaves the state, each torn down, and the one thing
+    /// that is not a removal.
     ///
     /// The comparison below is exact, and holds however long the run takes:
     /// the rows' keyed requests sleep in real time, but `deliver` grants a
@@ -1604,7 +1602,7 @@ mod tests {
     ///
     /// Nothing in this file calls `Command::teardown`: each `stopped watching`
     /// and `closed details` line below is a hook a child registered, fired by
-    /// the teardown its boundary originated when the instance left.
+    /// the teardown reconciliation issued when the instance left.
     #[test]
     fn every_removal_tears_its_instance_down() {
         let activity = ActivityLog::default();

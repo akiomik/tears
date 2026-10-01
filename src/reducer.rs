@@ -101,11 +101,13 @@
 //!   segment. Two rows declaring the same timer are two subscriptions; two rows
 //!   keyed on the same command id occupy two slots. Application code writes no
 //!   `.scoped(...)`, and cannot omit or double-apply one.
-//! - **It tears removed instances down.** `Keyed` and `Slot` record a removal
-//!   when one happens — [`Keyed::remove`], [`Slot::dismiss`], and the two
-//!   replacing shapes, [`Keyed::insert`] over an occupied key and
-//!   [`Slot::present`] over an occupied slot — and the boundary turns each
-//!   recorded removal into one teardown of that instance's scope. The removed
+//! - **It tears removed instances down.** Every row of a `Keyed` and the
+//!   occupant of a `Slot` is an instance with an identity of its own. After
+//!   every update the runtime compares the instances the state reports with
+//!   the ones it reported before, and tears down each one that is gone,
+//!   however it went: [`Keyed::remove`], [`Slot::dismiss`], an insert or a
+//!   present that replaces an occupant, assigning or swapping the whole
+//!   collection, or a reducer above the boundary changing it. The removed
 //!   instance's subscriptions stop, its in-flight commands are cancelled, and
 //!   the cleanup hooks it registered run. Stopping a subscription reaches past
 //!   the instance that declared it: while any subscription run is stopping the
@@ -122,10 +124,14 @@
 //!   the row's work simply not done. Where that matters, keep the decision and
 //!   the work in one reduce rather than splitting them across a message.
 //!
-//! Building initial state records nothing: [`Keyed::from_iter`] and an insert
-//! into an absent key remove no instance, so growing a collection during `init`
-//! is fine. The four shapes that *do* record belong inside a `reduce`, where
-//! the boundary drains them in the same update.
+//! The runtime learns what instances a state holds from
+//! [`instances`](Reducer::instances), which every reducer and
+//! [`Application`](crate::Application) implements. The combinators report
+//! their own; a reducer you write by hand reports nothing — an empty body —
+//! unless it places work under a key or segment itself, by calling a child's
+//! `reduce` and scoping the result, in which case it reports what it placed
+//! work under ([`Instances`]). Nothing detects a missing report: an instance
+//! that is never reported is never torn down.
 //!
 //! ## What stays at the root
 //!

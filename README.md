@@ -226,12 +226,12 @@ optionally-present child in a `Slot`. `into_program` closes the stack into a
 Composition pays off where a feature exists more than once at a time or comes
 and goes. Every row can declare the same timer and give its commands the same
 command id, and the timer and the commands still run as that row's own. When
-the parent removes a row or dismisses a pane, the boundary tears that child
-down, cancelling the child's commands still in flight and running the cleanup
-the child registered with `Command::on_teardown`; the parent tracks none of
-it. `Runtime` runs an `Application` through an adapter on the same kernel as
-`ProgramRuntime`, so composing changes how a program is written, not how it
-is executed.
+the parent removes a row or dismisses a pane — or replaces the collection, or
+a reducer further up does — the runtime tears that child down, cancelling the
+child's commands still in flight and running the cleanup the child registered
+with `Command::on_teardown`; the parent tracks none of it. `Runtime` runs an
+`Application` through an adapter on the same kernel as `ProgramRuntime`, so
+composing changes how a program is written, not how it is executed.
 
 The [`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/#composing-reducers)
 module docs say when composing is worth it and how it works.
@@ -347,9 +347,9 @@ thread that is already driving tasks. So a `#[tokio::test]` that builds a
 driver in its own body and never drives it still fails, at the drop.
 
 Driving the real kernel is what puts two things within reach. A declared
-subscription source runs; and in a composed program, the teardown a boundary
-originates when a child leaves runs too, where `TestStore` has no boundary to
-originate one. So reach for `TestStore` when the assertion is about an
+subscription source runs; and in a composed program, the teardown that
+follows a child's removal stops runs that really started, where `TestStore`
+starts none. So reach for `TestStore` when the assertion is about an
 `Application`'s `update` transitions and command effects, and for `TestDriver`
 when it is about a source running at all, or — in a composed program — a
 child's arrival and removal across passes. Not about *when* a time-gated
