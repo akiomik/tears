@@ -633,7 +633,7 @@ Enforcement classes follow the pre-review checklist's definitions.
     its first call, before the loop);
   - a panic in `subscriptions` at the steady call site (raised only on
     a re-evaluation after a processed message);
-      - a panic in `instances` at the bootstrap call site (raised on its
+  - a panic in `instances` at the bootstrap call site (raised on its
     first call, on the initial state);
   - a panic in `instances` at the steady call site (raised only on the
     call after a processed message, before that message's command is
