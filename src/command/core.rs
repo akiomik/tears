@@ -292,23 +292,42 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
+    /// Teardowns of the paths live-instance reconciliation found
+    /// disappeared — the one origin of a teardown besides
+    /// [`Command::teardown`] (RFC 0013 R8).
+    ///
+    /// Each path is one a report built as it descended through the
+    /// boundaries, ending in an occupancy's own key or segment, so it is the
+    /// prefix `Command::teardown` over that segment, `scoped` by the ones
+    /// above it, would carry — never empty.
+    pub(crate) fn reconciled_teardowns(paths: Vec<ScopePath>) -> Self {
+        debug_assert!(
+            paths.iter().all(|path| !path.is_empty()),
+            "a reconciliation teardown names an occupancy's path, which is never empty"
+        );
+        Self {
+            teardowns: paths,
+            ..Self::none()
+        }
+    }
+
     /// Takes `other`'s teardown prefixes onto this command and **nothing
     /// else** — not its effect, not its directives, not its cancellation
     /// metadata, not its cleanup registrations.
     ///
     /// This is aggregation of an already-originated teardown, which RFC 0013
     /// §7.2's origination review names as a free transformation: the entry
-    /// still comes from a [`Command::teardown`] call, and there is no route
-    /// here from a raw prefix. A `debug_assert` holds `other` to that shape
-    /// so this cannot quietly become a general-purpose merge.
+    /// still comes from one of R8's two origins, and there is no route here
+    /// from a raw prefix. A `debug_assert` holds `other` to that shape so
+    /// this cannot quietly become a general-purpose merge.
     ///
-    /// The one caller is a combinator's journal drain, which has to put a
-    /// removal's teardown on a command the application returned.
+    /// The one caller is live-instance reconciliation, which has to put a
+    /// removal's teardown on the command an update returned.
     /// [`Command::batch`] would be wrong there twice over: it folds the
     /// redraw directive across its children, so an update that returned
     /// [`Command::without_redraw`] would silently regain its redraw, and it
-    /// warns about a child spawn key for a command the boundary is only
-    /// passing through. A boundary adds identity carriers and nothing else
+    /// warns about a child spawn key for a command reconciliation is only
+    /// passing through. The merge adds teardown entries and nothing else
     /// (RFC 0014 §2.5).
     pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
         debug_assert!(

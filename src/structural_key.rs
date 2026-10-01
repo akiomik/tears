@@ -128,6 +128,23 @@ impl ScopePath {
         Self(segments)
     }
 
+    /// Returns a new path with `segment` appended after this path's
+    /// existing segments — one boundary further from the root.
+    ///
+    /// The live-instance report descends from the root and extends the path
+    /// at each boundary it enters; the result is the path `prefixed` would
+    /// build from the innermost segment outward.
+    pub(crate) fn child(&self, segment: StructuralKey) -> Self {
+        let mut segments = Vec::with_capacity(self.0.len() + 1);
+        segments.extend(self.0.iter().cloned());
+        segments.push(segment);
+        Self(segments)
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Whether this path lies under `prefix`, comparing leading segments
     /// from the root.
     ///

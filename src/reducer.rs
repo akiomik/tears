@@ -191,13 +191,14 @@
 //! [dashboard]: https://docs.rs/crate/tears/latest/source/examples/dashboard.rs
 //! [dashboard_composed]: https://docs.rs/crate/tears/latest/source/examples/dashboard_composed.rs
 
-// The three submodules are file organization, not a hierarchy a user needs
+// The four submodules are file organization, not a hierarchy a user needs
 // to navigate: everything public in them is re-exported here, so each item
 // has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
 // Path" and "Module Visibility").
 pub(crate) mod adapter;
 pub(crate) mod collection;
 pub(crate) mod combinator;
+pub(crate) mod instances;
 // `Exit` is `ProgramRuntime::run`'s success type, so it shares its owner's
 // home at the crate root rather than sitting on this module's path — the
 // companion rule in `docs/api-guidelines.md`. Its module is `pub(crate)` so
@@ -209,6 +210,7 @@ pub use adapter::AppProgram;
 pub use collection::{Keyed, ScopeValue, Slot};
 pub use combinator::{ForEach, IntoProgram, Presented, ReducerExt, Scoped};
 pub(crate) use exit::Exit;
+pub use instances::Instances;
 
 use ratatui::Frame;
 
@@ -233,6 +235,22 @@ pub trait Reducer {
     fn subscriptions(&self, _state: &Self::State) -> Vec<Subscription<Self::Message>> {
         Vec::new()
     }
+
+    /// Reports the occupancies of the children this reducer composes, so the
+    /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
+    ///
+    /// Pure in the state, order included: equal states report equal
+    /// sequences. A reducer that calls no other reducer's `reduce` reports
+    /// nothing — write an empty body — even when its state holds a [`Keyed`]
+    /// or [`Slot`], since the combinator that reduces that collection reports
+    /// it. One that calls a child's `reduce` forwards the child's report
+    /// through the same projection and under the same segments it reduces
+    /// the child with, for every child the state holds; one that reduces the
+    /// rows of a `Keyed` or the occupant of a `Slot` itself reports them
+    /// through [`Instances::keyed`] or [`Instances::slot`]. The combinators do
+    /// all of this for you. Nothing detects an omission: an occupancy that is
+    /// never reported is never torn down on its own account.
+    fn instances(&self, state: &Self::State, out: &mut Instances<'_>);
 }
 
 /// A reducer that can be run: it can produce its initial state and render.

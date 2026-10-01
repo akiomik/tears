@@ -21,7 +21,7 @@ use crate::application::Application;
 use crate::command::Command;
 use crate::subscription::Subscription;
 
-use super::{Program, Reducer};
+use super::{Instances, Program, Reducer};
 
 /// Runs an [`Application`] as a [`Program`].
 pub struct AppProgram<A>(PhantomData<fn() -> A>);
@@ -50,6 +50,10 @@ impl<A: Application> Reducer for AppProgram<A> {
 
     fn subscriptions(&self, state: &A) -> Vec<Subscription<A::Message>> {
         state.subscriptions()
+    }
+
+    fn instances(&self, state: &A, out: &mut Instances<'_>) {
+        state.instances(out);
     }
 }
 

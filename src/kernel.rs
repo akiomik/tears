@@ -73,6 +73,7 @@ use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
 use crate::command::{CleanupRegistration, Command, CommandId, SpawnEntry};
 use crate::reducer::Program;
+use crate::reducer::instances::{self, LiveInstances};
 use crate::runtime::channel::channel_observed;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::{Channel, LoadObserver};
@@ -198,6 +199,9 @@ pub struct Kernel<P: Program> {
     dirty: bool,
     phase: KernelPhase,
     batch_cap: NonZeroUsize,
+    /// The previous live-instance report (RFC 0014 INV-RC3): read from the
+    /// initial state at boot, replaced after every update.
+    live: LiveInstances,
     /// The one send gate, kernel-wide. Every run's ingress holds a clone of
     /// this same object, which is what makes the driver's "at most one
     /// outstanding grant" rule driver-wide rather than per origin
@@ -260,6 +264,7 @@ impl<P: Program> Kernel<P> {
             dirty: false,
             phase: KernelPhase::Boot,
             batch_cap: batch_max.unwrap_or(DEFAULT_BATCH_MAX_MESSAGES),
+            live: LiveInstances::default(),
             gate: Arc::new(SendGate::new(gate_mode)),
             next_token: 1,
             started: Vec::new(),
@@ -300,6 +305,9 @@ impl<P: Program> Kernel<P> {
         assert!(self.phase == KernelPhase::Boot, "boot runs once");
         let flags = self.flags.take().expect("boot consumes the flags once");
         let (state, init) = self.program.init(flags);
+        // The first live-instance report is read before the init dispatch
+        // (RFC 0011 §3.2); it tears nothing down.
+        self.live.seed(instances::report(&self.program, &state));
         self.state = Some(state);
 
         self.dispatch(init);

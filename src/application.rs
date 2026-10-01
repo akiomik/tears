@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 
-use crate::{command::Command, subscription::Subscription};
+use crate::{command::Command, reducer::Instances, subscription::Subscription};
 
 /// The main trait for defining TUI applications following The Elm Architecture.
 ///
@@ -202,6 +202,34 @@ pub trait Application: Sized {
     /// # }
     /// ```
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>>;
+
+    /// Reports the occupancies of the composed children this application
+    /// holds, so the runtime can tear down the ones an update removes
+    /// (RFC 0014 INV-RC3a).
+    ///
+    /// An application whose `update` calls no reducer's `reduce` reports
+    /// nothing — write an empty body. One that reduces a combinator stack
+    /// over part of its own state inside `update` forwards that stack's
+    /// report, through the same projection and under the same segments it
+    /// reduces it with; [`Reducer::instances`](crate::reducer::Reducer::instances)
+    /// states the obligation in full. Pure in the state, order included.
+    ///
+    /// ```
+    /// # use ratatui::Frame;
+    /// # use tears::prelude::*;
+    /// # use tears::reducer::Instances;
+    /// # struct App;
+    /// # impl Application for App {
+    /// #     type Message = ();
+    /// #     type Flags = ();
+    /// #     fn new((): ()) -> (Self, Command<()>) { (App, Command::none()) }
+    /// #     fn update(&mut self, (): ()) -> Command<()> { Command::none() }
+    /// #     fn view(&self, _: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<()>> { vec![] }
+    /// fn instances(&self, _out: &mut Instances<'_>) {}
+    /// # }
+    /// ```
+    fn instances(&self, out: &mut Instances<'_>);
 }
 
 #[cfg(test)]

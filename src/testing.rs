@@ -122,6 +122,8 @@ use tokio::time;
 use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
+use crate::reducer::AppProgram;
+use crate::reducer::instances::{self, LiveInstances};
 use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
 
@@ -281,6 +283,9 @@ where
     /// the set shrinks as the test makes progress — a count could only grow.
     running_cleanups: Vec<RunningCleanup>,
     redraw_requested: bool,
+    /// The previous live-instance report — the kernel's own reconciliation,
+    /// shared rather than re-derived (RFC 0008 INV-T3, RFC 0014 INV-RC3).
+    live: LiveInstances,
     /// Where the store is between running and a quit the test has assented
     /// to. Three states rather than two booleans, because the middle one is
     /// real: a quit applies at its dispatch and is only *observed* later, and
@@ -339,8 +344,11 @@ where
             .build()
             .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
+        let mut live = LiveInstances::default();
+        live.seed(instances::report(&AppProgram::<App>::new(), &app));
         let mut store = Self {
             app,
+            live,
             context,
             pending: Vec::new(),
             armed: Vec::new(),
@@ -604,6 +612,8 @@ where
     /// `send` and the `receive*` deliveries.
     fn apply_update(&mut self, msg: App::Message) {
         let command = self.app.update(msg);
+        let report = instances::report(&AppProgram::<App>::new(), &self.app);
+        let command = self.live.reconcile(report, command);
         self.enqueue_command(command.into_runtime_parts());
     }
 

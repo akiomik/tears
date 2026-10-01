@@ -15,80 +15,31 @@
 //!   boundary's segment. That is one [`Command::scoped`] call and one
 //!   [`Subscription::scoped`] call per boundary; user code writes no
 //!   `.scoped(...)` and can neither omit nor double-apply one (INV-RC2).
-//! - **Drains its removal journal** after the reduce it ran, merging one
-//!   [`Command::teardown`] per recorded removal into the returned command
-//!   (INV-RC3). Only [`ForEach`] and [`Presented`] have a journal to drain;
-//!   [`Scoped`] has none, because it composes a single child in place and
-//!   there is no collection at its boundary for an instance to leave.
-//!
-//! # A boundary drains only when its own `reduce` runs
-//!
-//! In a stack, a message an *outer* boundary claims is routed to that
-//! boundary's child, and the boundaries below it — its parent chain — do not
-//! run at all. Their journals are therefore not drained by that message.
-//!
-//! For an entry a boundary recorded **itself**, this is invisible: only a
-//! boundary's parent branch can record (a child is handed a projection and
-//! cannot reach the collection), and that branch is the one that drains, in
-//! the same call. It is observable only for an entry recorded outside a
-//! `reduce`, which the [`collection`](super::collection) module's note tells
-//! an application not to do. Such an entry stays owed until the next message
-//! that reaches its boundary, and is paid in full then — nothing is lost,
-//! but the teardown is deferred.
-//!
-//! `an_outer_claim_leaves_an_inner_boundary_s_pending_removal_undrained` is
-//! the row, and it is the wall a future INV-RC3 extension would meet: making
-//! the timing unconditional means draining every boundary in the stack per
-//! message, which is a different contract from the one §2.5 states.
+//! - **Reports its occupancies** through
+//!   [`instances`](Reducer::instances): the parent composition's, then the
+//!   child's under the boundary — a [`Scoped`] child under its segment,
+//!   each [`ForEach`] row under its key, a [`Presented`] occupant under the
+//!   boundary's segment (INV-RC3a). A boundary originates no teardown of
+//!   its own. After every update, live-instance reconciliation compares
+//!   the report with the previous one and tears down every path that
+//!   disappeared (INV-RC3), whichever reducer changed the state and
+//!   whichever route the message took.
 //! - **Routes typed messages**: `extract` either claims a message for the
 //!   child or hands it back to the parent, and a message addressed to a key
 //!   or slot with no instance is routed to nothing and discarded.
 //!
-//! A boundary adds **identity carriers and nothing else**. It does not
-//! touch the returned command's runtime directives — a `without_redraw`
-//! update stays a `without_redraw` update through a boundary that removed a
-//! row — and it adds no effect, no cancel id, and no registration of its
-//! own. [`merge`] is where that is enforced, and its doc says why the fold
-//! is not a [`Command::batch`].
-//!
 //! # Read/write projection pairs
 //!
-//! Each boundary takes its projection as a pair, because the two `Reducer`
+//! Each boundary takes its projection as a pair, because the `Reducer`
 //! methods borrow the parent differently: `reduce` needs the mutable
-//! projection and `subscriptions` the shared one. A combinator holding only
-//! the mutable accessor could not aggregate its child's declarations from
-//! the `&Self::State` `subscriptions` gives it — it would have to fabricate
-//! an aliasing mutable borrow or drop the child's subscriptions, and
-//! INV-RC2's aggregation would be unimplementable. Both are projections of
-//! state the caller already holds, so RFC 0012 INV-SE6's purity is
-//! untouched. Two `fn` items per boundary is the whole cost; no lens trait
-//! is introduced and none is needed.
-//!
-//! # One teardown surface (RFC 0013 R8)
-//!
-//! Every teardown this module produces is a call to the public
-//! [`Command::teardown`] constructor, in exactly one place — [`merge`],
-//! which the **two** journal drains share ([`ForEach`] and [`Presented`];
-//! [`Scoped`] has no journal). There is no internal twin that builds a
-//! teardown entry from a raw prefix, and no other route below the public
-//! surface originates one. What the boundaries do to an
-//! *already-originated* teardown — `scoped`'s prefix qualification,
-//! [`Command::merging_teardowns`]'s aggregation, the lowering to runtime
-//! parts — is transformation and stays free.
-//!
-//! # The mutation run against the merge rows
-//!
-//! "A boundary adds nothing but identity carriers" is a claim about what is
-//! *absent* from the returned command, so the rows that hold it were checked
-//! by mutation rather than by reading. Restoring the fold to a
-//! [`Command::batch`] — the shape this module used before — leaves 53 rows
-//! passing and fails exactly two:
-//! `a_removing_boundary_preserves_the_update_s_redraw_directive` (the
-//! batch's directive fold hands a `without_redraw` update a redraw back) and
-//! `a_removing_boundary_reports_no_discarded_child_key` (the batch warns
-//! about a spawn key the boundary merely passed through). Nothing else
-//! moves, which is the record that those two rows are what stands between
-//! this contract and its regression.
+//! projection, while `subscriptions` and `instances` need the shared one. A
+//! combinator holding only the mutable accessor could not aggregate its
+//! child's declarations or report from the `&Self::State` those methods are
+//! given — it would have to fabricate an aliasing mutable borrow or drop the
+//! child's, and INV-RC2's aggregation would be unimplementable. Both are
+//! projections of state the caller already holds, so RFC 0012 INV-SE6's
+//! purity is untouched. Two `fn` items per boundary is the whole cost; no
+//! lens trait is introduced and none is needed.
 //!
 //! [`Subscription::scoped`]: crate::subscription::Subscription::scoped
 
@@ -103,15 +54,13 @@
     reason = "RFC 0014 §2.5 fixes these signatures verbatim; an alias would hide the contract"
 )]
 
-use std::iter;
-
 use ratatui::Frame;
 
 use crate::command::Command;
 use crate::subscription::Subscription;
 
 use super::collection::{Keyed, ScopeValue, Slot};
-use super::{Program, Reducer};
+use super::{Instances, Program, Reducer};
 
 /// The composition combinators, on every [`Reducer`].
 pub trait ReducerExt: Reducer + Sized {
@@ -234,50 +183,6 @@ pub trait ReducerExt: Reducer + Sized {
 
 impl<R: Reducer + Sized> ReducerExt for R {}
 
-/// Merges one teardown per recorded removal into the command a boundary's
-/// reduce produced.
-///
-/// **The one origination site in this module** (RFC 0013 R8): every teardown
-/// a combinator produces is built here, by a call to the public
-/// [`Command::teardown`] constructor, from a segment value the application
-/// itself supplied as a key or as the boundary's `seg`. No raw prefix path
-/// is constructed anywhere in this module, and no other function here builds
-/// a teardown. What happens to an originated teardown afterwards —
-/// [`Command::merging_teardowns`] folding its entry onto the returned
-/// command — is aggregation, which §7.2's review leaves free.
-///
-/// **The fold is not a [`Command::batch`]**, and that is a contract point
-/// rather than a shortcut. A boundary adds identity carriers to what its
-/// child or its parent returned and nothing else (RFC 0014 §2.5); batching
-/// would add two things more. It folds the redraw directive across
-/// children, so an update that returned [`Command::without_redraw`] would
-/// silently regain its redraw the moment a row was removed in it. And it
-/// warns about a child spawn key — a diagnostic addressed to an application
-/// that keyed a batch, fired here for a command the boundary is only
-/// passing through. Both are observable differences a boundary is not
-/// entitled to make.
-///
-/// The phase order does not depend on the fold: the lowering applies every
-/// cancel-phase entry of a command before every spawn of it, however the
-/// entries got onto it (RFC 0014 §3.4).
-///
-/// One entry, one teardown — so a remove-and-reinsert-and-remove within a
-/// single update yields two, which is what "one teardown for the removed
-/// instance" means when two instances were removed. Repetition is harmless
-/// by INV-ST5's idempotence, and the alternative — collapsing them — would
-/// make the merge depend on a comparison of prefixes the boundary has no
-/// reason to perform.
-fn merge<Msg, Seg>(command: Command<Msg>, removed: impl IntoIterator<Item = Seg>) -> Command<Msg>
-where
-    Msg: Send + 'static,
-    Seg: ScopeValue,
-{
-    removed
-        .into_iter()
-        .map(Command::teardown)
-        .fold(command, Command::merging_teardowns)
-}
-
 /// One child under a fixed segment ([`ReducerExt::scope`]).
 pub struct Scoped<P: Reducer, C: Reducer, Seg> {
     parent: P,
@@ -303,14 +208,6 @@ where
     /// A message the child does not claim goes to the parent, whose command
     /// is *not* qualified: it is the parent's own command at the parent's
     /// own level, and this boundary is not one it crossed.
-    ///
-    /// **No journal drain here, and none is missing.** A journal records
-    /// that an *instance* left a collection, and this boundary has no
-    /// collection: it composes one child in place, whose state is a
-    /// projection of the parent's that is always there. There is no removal
-    /// for it to observe and therefore no teardown for it to originate — the
-    /// two boundaries that do hold collections ([`ForEach`], [`Presented`])
-    /// are where INV-RC3 lives.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         match (self.extract)(message) {
             Ok(claimed) => {
@@ -336,6 +233,19 @@ where
         );
         declared
     }
+
+    /// The parent's report, then the child's under this boundary's segment.
+    ///
+    /// The boundary is not an occupancy of its own: it composes one child
+    /// in place, whose state is always there, so replacing that state
+    /// continues the prefix and only the occupancies inside it are
+    /// reconciled.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.scoped(self.seg.clone(), |out| {
+            self.child.instances((self.state)(state), out);
+        });
+    }
 }
 
 /// One child per row of a [`Keyed`] collection ([`ReducerExt::for_each`]).
@@ -357,25 +267,12 @@ where
     type State = P::State;
     type Message = P::Message;
 
-    /// Routes the message to its row, then drains the journal.
-    ///
-    /// **Only the parent branch can record**, and the drain still runs on
-    /// both. A row is handed the projected `&mut C::State` and nothing else,
-    /// so a child cannot reach the collection its state lives in; the
-    /// parent's `update` is the only place a row is removed *during* a
-    /// reduce, and that branch drains what it just recorded. What the drain
-    /// on the child branch is for is an entry recorded **before** this
-    /// reduce — by a mutation outside one, which [`Keyed`](super::Keyed)
-    /// discourages but nothing prevents.
-    /// Such an entry is owed its teardown whichever branch the next message
-    /// takes, and draining once per reduce is what pays it.
+    /// Routes the message to its row.
     ///
     /// A message addressed to a key the collection does not hold reaches no
-    /// reducer and is discarded (RFC 0014 §2.5's routing boundary). The
-    /// journal is drained on that path too, for the same reason —
-    /// `a_pending_removal_survives_a_discarded_message` is its row.
+    /// reducer and is discarded (RFC 0014 §2.5's routing boundary).
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
-        let command = match (self.extract)(message) {
+        match (self.extract)(message) {
             Ok((key, claimed)) => {
                 let embed = self.embed;
                 let addressed = key.clone();
@@ -389,8 +286,7 @@ where
                     })
             }
             Err(unclaimed) => self.parent.reduce(state, unclaimed),
-        };
-        merge(command, (self.rows_mut)(state).drain_removals())
+        }
     }
 
     /// The parent's declarations, then each row's under its own key.
@@ -411,6 +307,13 @@ where
             );
         }
         declared
+    }
+
+    /// The parent's report, then each row under its key with its child's
+    /// report beneath it.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.keyed((self.rows)(state), |row, out| self.child.instances(row, out));
     }
 }
 
@@ -434,24 +337,12 @@ where
     type State = P::State;
     type Message = P::Message;
 
-    /// Routes the message to the occupant, then drains the journal.
+    /// Routes the message to the occupant.
     ///
     /// A claimed message reaching an empty slot is discarded, for the reason
     /// a message for an absent key is.
-    ///
-    /// The drain runs on both branches, as [`ForEach`]'s does and for the
-    /// same reason: only the parent branch can record — an occupant is
-    /// handed the projected `&mut C::State` and cannot reach the slot it
-    /// sits in — while an entry recorded before this reduce is owed its
-    /// teardown on whichever branch the next message takes.
-    ///
-    /// What differs is the segment: a dismissed occupant has no key of its
-    /// own, so each recorded dismissal yields a teardown of this boundary's
-    /// own `seg` — which is exactly where the occupant's runs were placed.
-    /// The segment is cloned per recorded dismissal and not at all when
-    /// there are none, which is what the lazy repetition below is for.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
-        let command = match (self.extract)(message) {
+        match (self.extract)(message) {
             Ok(claimed) => {
                 let embed = self.embed;
                 (self.slot_mut)(state)
@@ -464,12 +355,7 @@ where
                     })
             }
             Err(unclaimed) => self.parent.reduce(state, unclaimed),
-        };
-        let dismissals = (self.slot_mut)(state).drain_dismissals();
-        merge(
-            command,
-            iter::repeat_with(|| self.seg.clone()).take(dismissals),
-        )
+        }
     }
 
     /// The parent's declarations, then the occupant's if there is one.
@@ -486,14 +372,23 @@ where
         }
         declared
     }
+
+    /// The parent's report, then the occupant, if there is one, under this
+    /// boundary's segment with its child's report beneath it.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.slot(self.seg.clone(), (self.slot)(state), |occupant, out| {
+            self.child.instances(occupant, out);
+        });
+    }
 }
 
 /// A closed combinator stack ([`ReducerExt::into_program`]).
 ///
-/// Its `Reducer` half is the stack's, delegated verbatim: the same `reduce`
-/// and the same `subscriptions` a composed stack has when it is not closed,
-/// so closing a stack adds no execution path of its own. What it adds is the
-/// two root-level functions a [`Program`] needs.
+/// Its `Reducer` half is the stack's, delegated verbatim: the same `reduce`,
+/// `subscriptions`, and `instances` a composed stack has when it is not
+/// closed, so closing a stack adds no execution path of its own. What it adds
+/// is the two root-level functions a [`Program`] needs.
 pub struct IntoProgram<R: Reducer, Flags> {
     reducer: R,
     init: fn(Flags) -> (R::State, Command<R::Message>),
@@ -510,6 +405,10 @@ impl<R: Reducer, Flags> Reducer for IntoProgram<R, Flags> {
 
     fn subscriptions(&self, state: &R::State) -> Vec<Subscription<R::Message>> {
         self.reducer.subscriptions(state)
+    }
+
+    fn instances(&self, state: &R::State, out: &mut Instances<'_>) {
+        self.reducer.instances(state, out);
     }
 }
 
