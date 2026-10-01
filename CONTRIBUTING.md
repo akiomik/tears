@@ -71,6 +71,12 @@ An edit is not finished until the changed file's own documentation has been read
 again — the module doc, every doc comment under it, the comments in the body —
 and any disagreement with the code fixed on one side or the other, explicitly.
 
+Text nothing checks goes false without anyone noticing. Unless something checks
+it, say a thing once — elsewhere, name where it is said without restating it —
+and leave out a number that can go out of date. Moved text keeps its wording,
+changing only what the move makes false; rewording adds claims nobody has
+checked. This governs what a change writes, not what the tree already holds.
+
 An example that demonstrates feature-gated API belongs in the module the feature
 gates. A doctest there is compiled by `just test-doc`, whose feature set turns
 the gate on; the same block in a file outside the gate fails `cargo test --doc`
