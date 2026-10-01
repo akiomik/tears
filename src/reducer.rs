@@ -136,7 +136,7 @@
 //! ## What stays at the root
 //!
 //! **`init`'s command does.** It is the root's command and crosses no boundary,
-//! so nothing it starts is scoped to a child. Work that belongs to a child —
+//! so no boundary scopes what it starts. Work that belongs to a child —
 //! the first fetch, a cleanup hook that must anchor at the child's scope —
 //! starts as a message routed *through* the boundary. In the worked example
 //! that is `TaskMessage::Watch`: the root inserts the row and returns
@@ -197,26 +197,27 @@
 //! [dashboard]: https://docs.rs/crate/tears/latest/source/examples/dashboard.rs
 //! [dashboard_composed]: https://docs.rs/crate/tears/latest/source/examples/dashboard_composed.rs
 
-// The four submodules are file organization, not a hierarchy a user needs
+// The three submodules are file organization, not a hierarchy a user needs
 // to navigate: everything public in them is re-exported here, so each item
 // has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
 // Path" and "Module Visibility").
 pub(crate) mod adapter;
 pub(crate) mod collection;
 pub(crate) mod combinator;
-pub(crate) mod instances;
-// `Exit` is `ProgramRuntime::run`'s success type, so it shares its owner's
-// home at the crate root rather than sitting on this module's path — the
-// companion rule in `docs/api-guidelines.md`. Its module is `pub(crate)` so
-// the root re-export is the only public way to it, which is the same
+// `Exit` is `ProgramRuntime::run`'s success type and `Instances` is
+// `Application::instances`'s parameter type, so each shares its owner's home
+// at the crate root rather than sitting on this module's path — the
+// companion rule in `docs/api-guidelines.md`. Their modules are `pub(crate)`
+// so the root re-export is the only public way to them, which is the same
 // private-inner-module pattern `command::core` uses for `Command`.
 pub(crate) mod exit;
+pub(crate) mod instances;
 
 pub use adapter::AppProgram;
 pub use collection::{Keyed, ScopeValue, Slot};
 pub use combinator::{ForEach, IntoProgram, Presented, ReducerExt, Scoped};
 pub(crate) use exit::Exit;
-pub use instances::Instances;
+pub(crate) use instances::Instances;
 
 use ratatui::Frame;
 

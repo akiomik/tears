@@ -949,7 +949,7 @@ mod tests {
     impl<R: Reducer> Driven<R> {
         fn new(reducer: R, state: R::State) -> Self {
             let mut live = LiveInstances::default();
-            live.seed(instances::report(&reducer, &state));
+            live.seed(&reducer, &state);
             Self {
                 reducer,
                 state,
@@ -960,9 +960,8 @@ mod tests {
         /// One update, lowered from the command reconciliation dispatches.
         fn send(&mut self, message: R::Message) -> KernelParts<R::Message> {
             let command = self.reducer.reduce(&mut self.state, message);
-            let report = instances::report(&self.reducer, &self.state);
             self.live
-                .reconcile(report, command)
+                .reconcile(&self.reducer, &self.state, command)
                 .into_runtime_parts()
                 .into_kernel_parts()
         }

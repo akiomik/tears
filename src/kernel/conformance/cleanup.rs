@@ -400,9 +400,9 @@ fn a_teardown_and_reregister_command_consumes_the_old_hook_and_arms_the_new_one(
             finalizer(first.clone()).scoped("pane"),
         ]))
         .replying([
-            // The shape a combinator produces: the boundary's teardown of
-            // its own segment, merged with the child's command already
-            // qualified by that segment.
+            // The shape a replacement dispatches: the old occupant's
+            // teardown, merged with the successor's command already
+            // qualified by the same segment.
             Command::batch([
                 Command::teardown("pane"),
                 finalizer(second.clone()).scoped("pane"),

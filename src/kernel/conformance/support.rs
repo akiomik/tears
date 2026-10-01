@@ -545,6 +545,10 @@ pub enum Call {
 pub struct Journal {
     calls: Arc<Mutex<Vec<Call>>>,
     renders: Arc<Mutex<Vec<Option<u8>>>>,
+    /// How many live-instance reports were read. Counted beside `calls`
+    /// rather than in it, so the call sequences other rows assert stay as
+    /// they are.
+    reports: Arc<Mutex<usize>>,
 }
 
 impl Journal {
@@ -562,6 +566,21 @@ impl Journal {
     /// What each render observed, in render order.
     pub fn rendered(&self) -> Vec<Option<u8>> {
         self.renders_mut().clone()
+    }
+
+    /// How many live-instance reports the kernel read.
+    pub fn reports(&self) -> usize {
+        *self
+            .reports
+            .lock()
+            .expect("the report count is not poisoned")
+    }
+
+    fn report(&self) {
+        *self
+            .reports
+            .lock()
+            .expect("the report count is not poisoned") += 1;
     }
 
     /// Every call, in order.
@@ -1216,7 +1235,9 @@ impl Reducer for Scripted {
             .collect()
     }
 
-    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {
+        self.journal.report();
+    }
 }
 
 impl Program for Scripted {

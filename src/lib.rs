@@ -158,6 +158,11 @@ pub use panic::install_panic_hook;
 // on companion types). Not in the prelude: the facade's `run` returns
 // `Result<(), _>`, so a minimal skeleton never names it.
 pub use reducer::exit::Exit;
+// `Application::instances`'s parameter type, so every application names it:
+// at the crate root as that trait's companion, and in the prelude because a
+// skeleton writes it out (docs/api-guidelines.md, "Root Promotion Criteria"
+// and "Prelude Membership").
+pub use reducer::instances::Instances;
 pub use runtime::{ProgramRuntime, Runtime};
 // `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app

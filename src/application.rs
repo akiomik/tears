@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 
-use crate::{command::Command, reducer::Instances, subscription::Subscription};
+use crate::{Instances, command::Command, subscription::Subscription};
 
 /// The main trait for defining TUI applications following The Elm Architecture.
 ///
@@ -222,7 +222,6 @@ pub trait Application: Sized {
     /// ```
     /// # use ratatui::Frame;
     /// # use tears::prelude::*;
-    /// # use tears::reducer::Instances;
     /// # struct App;
     /// # impl Application for App {
     /// #     type Message = ();

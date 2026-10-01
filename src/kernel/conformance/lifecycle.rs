@@ -460,9 +460,17 @@ fn a_producer_quit_reclaims_owned_work() {
         .step_pass(WakeSource::Control)
         .expect("the quit is on the control lane");
 
-    assert!(stepped.terminated.is_some(), "the quit applied");
+    assert!(
+        matches!(stepped.terminated, Some(Ok(Exit::Quit))),
+        "the quit applied, as a quit"
+    );
     assert!(journal.reduced().is_empty(), "the backlog went untouched");
     assert!(reclaimed.marked(), "and the owned work was reclaimed");
+    assert_eq!(
+        journal.reports(),
+        1,
+        "the first report and no other: no update ran, and nothing is called after termination"
+    );
 }
 
 // The render-failure cause: it routes through the same termination, and only

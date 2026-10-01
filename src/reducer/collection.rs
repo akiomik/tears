@@ -41,10 +41,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// The blanket implementation below is the whole of it: nothing opts in, and
 /// no type that satisfies the bound can be excluded.
-///
-/// RFC 0014 §2.5's block writes `PartialEq + Eq + …`, which `Eq: PartialEq`
-/// makes redundant; the bound is written here without it, and the RFC's
-/// wording is synced when §2.5's surface is made public at the switch.
 pub trait ScopeValue: Eq + Hash + Clone + Send + Sync + 'static {}
 
 impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}

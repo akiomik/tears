@@ -292,52 +292,25 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
-    /// Teardowns of the paths live-instance reconciliation found
+    /// Adds teardowns of the paths live-instance reconciliation found
     /// disappeared — the one origin of a teardown besides
-    /// [`Command::teardown`] (RFC 0013 R8).
+    /// [`Command::teardown`] (RFC 0013 R8) — and **nothing else**: the
+    /// command's effect, directives, cancellation metadata, and cleanup
+    /// registrations are left as they are.
     ///
     /// Each path is one a report built as it descended through the
     /// boundaries, ending in an occupancy's own key or segment, so it is the
     /// prefix `Command::teardown` over that segment, `scoped` by the ones
-    /// above it, would carry — never empty.
-    pub(crate) fn reconciled_teardowns(paths: Vec<ScopePath>) -> Self {
+    /// above it, would carry — never empty. [`Command::batch`] would be
+    /// wrong here: it folds the redraw directive across its children, so an
+    /// update that returned [`Command::without_redraw`] would silently regain
+    /// its redraw (RFC 0014 §2.5).
+    pub(crate) fn with_reconciled_teardowns(mut self, paths: Vec<ScopePath>) -> Self {
         debug_assert!(
             paths.iter().all(|path| !path.is_empty()),
             "a reconciliation teardown names an occupancy's path, which is never empty"
         );
-        Self {
-            teardowns: paths,
-            ..Self::none()
-        }
-    }
-
-    /// Takes `other`'s teardown prefixes onto this command and **nothing
-    /// else** — not its effect, not its directives, not its cancellation
-    /// metadata, not its cleanup registrations.
-    ///
-    /// This is aggregation of an already-originated teardown, which RFC 0013
-    /// §7.2's origination review names as a free transformation: the entry
-    /// still comes from one of R8's two origins, and there is no route here
-    /// from a raw prefix. A `debug_assert` holds `other` to that shape so
-    /// this cannot quietly become a general-purpose merge.
-    ///
-    /// The one caller is live-instance reconciliation, which has to put a
-    /// removal's teardown on the command an update returned.
-    /// [`Command::batch`] would be wrong there: it folds the redraw directive
-    /// across its children, so an update that returned
-    /// [`Command::without_redraw`] would silently regain its redraw. The
-    /// merge adds teardown entries and nothing else (RFC 0014 §2.5).
-    pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
-        debug_assert!(
-            other.is_none()
-                && other.directives == RuntimeDirectives::DEFAULT
-                && other.cleanups.is_empty()
-                && other.cancellation.cancels.is_empty(),
-            "merging_teardowns aggregates teardown entries only; an effect, a redraw directive, a \
-             cleanup registration, a spawn key, or an explicit cancel on `other` would be dropped \
-             silently"
-        );
-        self.teardowns.extend(other.teardowns);
+        self.teardowns.extend(paths);
         self
     }
 

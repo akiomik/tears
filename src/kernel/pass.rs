@@ -45,7 +45,6 @@ use super::producer;
 use super::registry::{Phase, RunKind};
 use super::{ExitReason, Kernel, KernelPhase};
 use crate::reducer::Program;
-use crate::reducer::instances;
 use crate::subscription::SubscriptionId;
 
 /// The input-batch count cap used when `batch_max_messages` is unset.
@@ -195,8 +194,7 @@ impl<P: Program> Kernel<P> {
             let command = self.program.reduce(state, message);
             // Live-instance reconciliation, between `reduce` and the dispatch
             // and never as a later command (RFC 0014 INV-RC3).
-            let report = instances::report(&self.program, state);
-            let command = self.live.reconcile(report, command);
+            let command = self.live.reconcile(&self.program, state, command);
             updated += 1;
             self.dispatch(command);
         }

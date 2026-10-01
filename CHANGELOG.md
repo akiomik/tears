@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `tears::reducer::Instances` (also in the prelude), the collector a reducer
+- `tears::Instances` (also in the prelude), the collector a reducer
   reports the instances it composes through
 
 ### Changed
@@ -19,11 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   occupants a state holds, so that it can tear down the ones an update
   removes
 
-  An implementor that places no work under a key or segment of its own — any
-  `Application` that does not run a combinator stack inside `update`, and any
-  leaf `Reducer` — writes an empty body. One that calls a child's `reduce` and
-  scopes the result itself must report what it placed work under, or its
-  removed children are not torn down; the combinators already do.
+  What an implementor owes follows from where it places work. One that
+  scopes commands — a child's or its own — under a row's key or a slot's
+  segment must report those rows and occupants, and forward the report of a
+  child it reduces there, or the removed ones are not torn down; the
+  combinators already do. One that places no work under a key or segment
+  writes an empty body.
 
   Before:
 

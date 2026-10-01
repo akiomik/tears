@@ -123,7 +123,7 @@ use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
 use crate::reducer::AppProgram;
-use crate::reducer::instances::{self, LiveInstances};
+use crate::reducer::instances::LiveInstances;
 use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
 
@@ -346,7 +346,7 @@ where
             .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
         let mut live = LiveInstances::default();
-        live.seed(instances::report(&AppProgram::<App>::new(), &app));
+        live.seed(&AppProgram::<App>::new(), &app);
         let mut store = Self {
             app,
             live,
@@ -613,8 +613,9 @@ where
     /// `send` and the `receive*` deliveries.
     fn apply_update(&mut self, msg: App::Message) {
         let command = self.app.update(msg);
-        let report = instances::report(&AppProgram::<App>::new(), &self.app);
-        let command = self.live.reconcile(report, command);
+        let command = self
+            .live
+            .reconcile(&AppProgram::<App>::new(), &self.app, command);
         self.enqueue_command(command.into_runtime_parts());
     }
 

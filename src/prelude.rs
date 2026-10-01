@@ -12,8 +12,8 @@
 //! - [`Runtime`] - The runtime for running applications
 //! - [`Instances`] - What [`Application::instances`] reports through
 
+pub use crate::Instances;
 pub use crate::application::Application;
 pub use crate::command::core::Command;
-pub use crate::reducer::Instances;
 pub use crate::runtime::Runtime;
 pub use crate::subscription::core::Subscription;

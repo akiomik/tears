@@ -73,7 +73,7 @@ use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
 use crate::command::{CleanupRegistration, Command, CommandId, SpawnEntry};
 use crate::reducer::Program;
-use crate::reducer::instances::{self, LiveInstances};
+use crate::reducer::instances::LiveInstances;
 use crate::runtime::channel::channel_observed;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::{Channel, LoadObserver};
@@ -307,7 +307,7 @@ impl<P: Program> Kernel<P> {
         let (state, init) = self.program.init(flags);
         // The first live-instance report is read before the init dispatch
         // (RFC 0011 §3.2); it tears nothing down.
-        self.live.seed(instances::report(&self.program, &state));
+        self.live.seed(&self.program, &state);
         self.state = Some(state);
 
         self.dispatch(init);

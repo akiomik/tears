@@ -71,17 +71,17 @@
 //!   add, a delete — so any of those throws an unsaved edit away; here the
 //!   occupant is fixed to the task it was opened for, because a `Slot` holds an
 //!   instance rather than a view of whatever is selected.
-//! - **The tasks arrive as messages** rather than being built into the initial
-//!   state. `init` could build them — the first report is read from `init`'s
-//!   state and tears nothing down, so growing a collection there is fine — and
-//!   this file routes them through
-//!   `AddTask` so the seed and the `n` key take one path. What `init`'s command
-//!   cannot do is start work *under a child's scope*, so the row's own setup is
-//!   a message either way. That the rows start with the same notes and none
-//!   marked done is `AddTask`'s doing rather than composition's: it carries a
-//!   title and nothing else. So is the row selected at startup — adding a task
-//!   selects it, so this binary opens on the last of the three where
-//!   `dashboard.rs` opens on the first.
+//! - **The tasks arrive as messages** rather than being built into the
+//!   initial state. `init` could build them — the first report is read from
+//!   `init`'s state and tears nothing down, so growing a collection there is
+//!   fine — and this file routes them through `AddTask` so the seed and the
+//!   `n` key take one path. What `init`'s command does not get is a
+//!   boundary's scoping, so the row's own setup is a message either way.
+//!   That the rows start with the same notes and none marked done is
+//!   `AddTask`'s doing rather than composition's: it carries a title and
+//!   nothing else. So is the row selected at startup — adding a task selects
+//!   it, so this binary opens on the last of the three where `dashboard.rs`
+//!   opens on the first.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`

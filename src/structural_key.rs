@@ -145,6 +145,11 @@ impl ScopePath {
         self.0.is_empty()
     }
 
+    /// The nonempty prefixes shorter than this path, outermost first.
+    pub(crate) fn proper_prefixes(&self) -> impl Iterator<Item = Self> + '_ {
+        (1..self.0.len()).map(|len| Self(self.0[..len].to_vec()))
+    }
+
     /// Whether this path lies under `prefix`, comparing leading segments
     /// from the root.
     ///

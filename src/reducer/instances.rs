@@ -23,7 +23,10 @@ pub type Report = Vec<(ScopePath, InstanceId)>;
 ///
 /// It is append-only and opaque: an implementation can descend under a
 /// segment and report the rows of a [`Keyed`] or the occupant of a [`Slot`],
-/// and nothing else — it cannot read, remove, or invent a report entry.
+/// and it cannot read or remove what was reported. What it reports must be
+/// the collections the state holds: a `Keyed` built inside `instances`
+/// carries identities no update has seen, so reporting one tears down every
+/// row it stands for on each update.
 ///
 /// A reducer reports where it places work: each row or occupant it
 /// qualifies commands under, through [`keyed`](Self::keyed) or
@@ -103,52 +106,53 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 
 /// The previous report, and the comparison against it — the one
 /// reconciliation the kernel and the store share (INV-RC3, RFC 0008 INV-T3).
+///
+/// Its two methods are the whole seam: every update a kernel or a store
+/// drives reaches its dispatch or intake through [`reconcile`](Self::reconcile),
+/// which reads the report itself, so no caller can compare against a stale
+/// report or forget to read one.
 #[derive(Default)]
 pub struct LiveInstances {
     previous: Report,
 }
 
 impl LiveInstances {
-    /// Takes the first report, which tears nothing down.
-    pub fn seed(&mut self, report: Report) {
-        self.previous = report;
+    /// Reads the first report, from the initial state; it tears nothing
+    /// down.
+    pub fn seed<R: Reducer>(&mut self, reducer: &R, state: &R::State) {
+        self.previous = report(reducer, state);
     }
 
-    /// Merges into `command` one teardown of each path whose pair the
-    /// previous report holds and `report` lacks, skipping a path another
-    /// such path is a proper prefix of, and keeps `report` as the next
-    /// comparison's baseline.
+    /// Reads the report of the state an update left and merges into
+    /// `command` one teardown of each path whose pair the previous report
+    /// holds and this one lacks, skipping a path under another such path,
+    /// then keeps this report as the next comparison's baseline.
     ///
     /// The teardowns come in the order the previous report first named each
-    /// path, so one script yields one sequence; the set below is consulted
+    /// path, so one script yields one sequence; the sets below are consulted
     /// for membership only, never iterated.
-    pub fn reconcile<Msg: Send + 'static>(
+    pub fn reconcile<R: Reducer>(
         &mut self,
-        report: Report,
-        command: Command<Msg>,
-    ) -> Command<Msg> {
+        reducer: &R,
+        state: &R::State,
+        command: Command<R::Message>,
+    ) -> Command<R::Message> {
+        let report = report(reducer, state);
         let current: HashSet<&(ScopePath, InstanceId)> = report.iter().collect();
+        let mut seen: HashSet<&ScopePath> = HashSet::new();
         let mut disappeared: Vec<&ScopePath> = Vec::new();
         for pair in &self.previous {
-            if !current.contains(pair) && !disappeared.contains(&&pair.0) {
+            if !current.contains(pair) && seen.insert(&pair.0) {
                 disappeared.push(&pair.0);
             }
         }
         let outermost: Vec<ScopePath> = disappeared
             .iter()
-            .filter(|path| {
-                !disappeared
-                    .iter()
-                    .any(|other| other != *path && path.starts_with(other))
-            })
+            .filter(|path| !path.proper_prefixes().any(|prefix| seen.contains(&prefix)))
             .map(|path| (*path).clone())
             .collect();
-        drop(current);
+        let command = command.with_reconciled_teardowns(outermost);
         self.previous = report;
-        if outermost.is_empty() {
-            command
-        } else {
-            command.merging_teardowns(Command::reconciled_teardowns(outermost))
-        }
+        command
     }
 }
