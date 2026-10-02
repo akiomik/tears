@@ -80,7 +80,7 @@ pub trait Application: Sized {
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
-    /// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn new(flags: Self::Flags) -> (Self, Command<Self::Message>);
@@ -109,7 +109,7 @@ pub trait Application: Sized {
     /// }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
-    /// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message>;
@@ -203,7 +203,7 @@ pub trait Application: Sized {
     ///         vec![]
     ///     }
     /// }
-    /// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>>;

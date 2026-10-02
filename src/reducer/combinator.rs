@@ -954,8 +954,7 @@ mod tests {
 
     impl<R: Reducer> Driven<R> {
         fn new(reducer: R, state: R::State) -> Self {
-            let mut live = LiveInstances::default();
-            live.seed(&reducer, &state);
+            let live = LiveInstances::new(&reducer, &state);
             Self {
                 reducer,
                 state,

@@ -208,7 +208,7 @@ impl<App: Application> Runtime<App> {
     /// #     fn update(&mut self, _msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, _frame: &mut Frame<'_>) {}
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
-    /// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// let runtime = Runtime::<MyApp>::new(());
     /// ```

@@ -141,6 +141,7 @@ impl ScopePath {
         Self(segments)
     }
 
+    /// Whether this is the root path, with no segment.
     pub(crate) const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

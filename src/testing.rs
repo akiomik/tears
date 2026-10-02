@@ -347,8 +347,7 @@ where
             .build()
             .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
-        let mut live_instances = LiveInstances::default();
-        live_instances.seed(&AppProgram::<App>::new(), &app);
+        let live_instances = LiveInstances::new(&AppProgram::<App>::new(), &app);
         let mut store = Self {
             app,
             live_instances,

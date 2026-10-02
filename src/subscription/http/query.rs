@@ -71,7 +71,7 @@
 //!             }
 //!         }
 //!     }
-//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+//! #     fn instances(&self, _out: &mut Instances<'_>) {}
 //! }
 //! ```
 
@@ -225,7 +225,7 @@ impl QueryClient {
     ///         }
     ///     }
     /// }
-    /// #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     pub fn invalidate<K>(&self, key: K)

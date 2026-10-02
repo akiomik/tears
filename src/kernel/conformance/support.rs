@@ -549,7 +549,7 @@ pub struct Journal {
     /// How many live-instance reports were read. Counted beside `calls`
     /// rather than in it, so the call sequences other rows assert stay as
     /// they are.
-    reports: Arc<Mutex<usize>>,
+    reports: Arc<AtomicUsize>,
 }
 
 impl Journal {
@@ -571,17 +571,11 @@ impl Journal {
 
     /// How many live-instance reports the kernel read.
     pub fn reports(&self) -> usize {
-        *self
-            .reports
-            .lock()
-            .expect("the report count is not poisoned")
+        self.reports.load(Ordering::SeqCst)
     }
 
     fn report(&self) {
-        *self
-            .reports
-            .lock()
-            .expect("the report count is not poisoned") += 1;
+        self.reports.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Every call, in order.

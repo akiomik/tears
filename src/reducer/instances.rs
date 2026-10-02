@@ -113,11 +113,12 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 /// The previous report, and the comparison against it — the one
 /// reconciliation the kernel and the store share (INV-RC3, RFC 0008 INV-T3).
 ///
-/// Its two methods are the whole seam: every update a kernel or a store
-/// drives runs through [`update`](Self::update), which calls `reduce` and
-/// then reads the report itself, so a caller that goes through it can
-/// neither reduce without reconciling nor compare against a stale report.
-#[derive(Default)]
+/// Its constructor and [`update`](Self::update) are the whole seam: it is
+/// built from the first report, and every update a kernel or a store drives
+/// runs through `update`, which calls `reduce` and then reads the report
+/// itself. So a caller that goes through it can neither begin without a
+/// first report, reduce without reconciling, nor compare against a stale
+/// report.
 pub struct LiveInstances {
     previous: Report,
 }
@@ -125,8 +126,10 @@ pub struct LiveInstances {
 impl LiveInstances {
     /// Reads the first report, from the initial state; it tears nothing
     /// down.
-    pub fn seed<R: Reducer>(&mut self, reducer: &R, state: &R::State) {
-        self.previous = report(reducer, state);
+    pub fn new<R: Reducer>(reducer: &R, state: &R::State) -> Self {
+        Self {
+            previous: report(reducer, state),
+        }
     }
 
     /// Runs one update: calls `reduce`, reads the report of the state it
