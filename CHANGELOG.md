@@ -71,6 +71,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   }
   ```
 
+- **Breaking:** an instance that leaves its path while the state still holds
+  it is torn down: its commands are cancelled and its cleanup hooks run, and
+  nothing restarts them, where it now is or if it comes back. That covers moving a `Keyed` or
+  `Slot` to another path, swapping two, a collection taken out in one update
+  and restored in a later one, and a projection that stops selecting the
+  state holding it, such as the active one of several tabs. Before, a move or
+  a swap left the commands and cleanup registrations under the path they
+  left, where their output went to whichever instance held that path, or
+  nowhere, and a switching projection tore nothing down (#422)
+
+  ```rust
+  // Before: each occupant's runs stayed under the path it left, which the
+  // other now holds.
+  // After: both are torn down. An occupant that should keep working where
+  // it now is sets its work up again, as a new one would.
+  mem::swap(&mut state.modal, &mut state.sheet);
+  ```
+
 - **Breaking:** `Slot::present` is no longer a `const fn`, since presenting
   begins an instance and draws its identity
 
@@ -102,12 +120,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above an enclosing `scope` boundary removing or replacing one. Before, such
   removals were lost or deferred, and their in-flight commands and cleanup
   hooks were left behind (#422)
-- Moving a `Keyed` or `Slot` to another path, or swapping two, now tears
-  down the instances at the paths they left: their commands are cancelled
-  and their cleanup hooks run, although the state still holds them. Before,
-  their commands and cleanup registrations stayed under the paths they left,
-  and the commands' output went to whichever instance held that path, or
-  nowhere if none did (#422)
 - An occupant that replaced another while the initial state was built (in
   `init` or `Application::new`) no longer has its work torn down at the
   first message that reaches its boundary. Before, the replacement's

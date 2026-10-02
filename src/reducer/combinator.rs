@@ -523,7 +523,7 @@ mod tests {
         // The rest are handled by the root.
         /// Removes one row.
         Close(&'static str),
-        /// Removes every row.
+        /// Removes every row, the last inserted first.
         CloseAll,
         /// Removes one row and returns a teardown of its path.
         CloseAndTeardown(&'static str),
@@ -609,7 +609,7 @@ mod tests {
                 }
                 Message::CloseAll => {
                     let keys: Vec<_> = state.rows.keys().copied().collect();
-                    for key in keys {
+                    for key in keys.into_iter().rev() {
                         state.rows.remove(&key);
                     }
                     Command::none()
@@ -1462,7 +1462,8 @@ mod tests {
     }
 
     // INV-RC14: one script, one teardown sequence — the previous report's
-    // order, not a hash set's.
+    // order, not a hash set's, and not the order the update removed them in,
+    // which is the reverse here.
     #[test]
     fn removing_sibling_rows_yields_one_teardown_sequence_per_script() {
         const KEYS: [&str; 8] = [
