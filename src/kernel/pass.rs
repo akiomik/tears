@@ -191,10 +191,9 @@ impl<P: Program> Kernel<P> {
                 continue;
             };
             let state = self.state.as_mut().expect("kernel booted");
-            let command = self.program.reduce(state, message);
-            // Live-instance reconciliation, between `reduce` and the dispatch
-            // and never as a later command (RFC 0014 INV-RC3).
-            let command = self.live_instances.reconcile(&self.program, state, command);
+            // `reduce`, then live-instance reconciliation, before the
+            // dispatch and never as a later command (RFC 0014 INV-RC3).
+            let command = self.live_instances.update(&self.program, state, message);
             updated += 1;
             self.dispatch(command);
         }

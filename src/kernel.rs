@@ -277,10 +277,10 @@ impl<P: Program> Kernel<P> {
     /// Bootstrap: the pinned intake order, then the continuation pass that
     /// consumes the render it left pending.
     ///
-    /// Intake is RFC 0011 §3.2's, unchanged — dispatch the init command,
-    /// then the initial subscription reconcile, then mark the first redraw
-    /// unconditionally and independently of the init command's own redraw
-    /// directive. That leaves work outstanding, so INV-RC16's park condition
+    /// Intake is RFC 0011 §3.2's, unchanged — read the first live-instance
+    /// report, dispatch the init command, then the initial subscription
+    /// reconcile, then mark the first redraw unconditionally and
+    /// independently of the init command's own redraw directive. That leaves work outstanding, so INV-RC16's park condition
     /// ("nothing to make progress on") is not met and the kernel does not
     /// park; the continuation pass is therefore run here rather than left
     /// for a caller to remember, which is what makes the production loop and

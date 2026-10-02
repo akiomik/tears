@@ -107,9 +107,9 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 /// reconciliation the kernel and the store share (INV-RC3, RFC 0008 INV-T3).
 ///
 /// Its two methods are the whole seam: every update a kernel or a store
-/// drives reaches its dispatch or intake through [`reconcile`](Self::reconcile),
-/// which reads the report itself, so no caller can compare against a stale
-/// report.
+/// drives runs through [`update`](Self::update), which calls `reduce` and
+/// then reads the report itself, so no caller can reduce without reconciling
+/// or compare against a stale report.
 #[derive(Default)]
 pub struct LiveInstances {
     previous: Report,
@@ -122,22 +122,24 @@ impl LiveInstances {
         self.previous = report(reducer, state);
     }
 
-    /// Reads the report of the state an update left and merges into
-    /// `command` one teardown of each path whose pair the previous report
-    /// holds and this one lacks, skipping a path under another such path,
-    /// then keeps this report as the next comparison's baseline.
+    /// Runs one update: calls `reduce`, reads the report of the state it
+    /// left, and merges into the command `reduce` returned one teardown of
+    /// each path whose pair the previous report holds and this one lacks,
+    /// skipping a path under another such path, then keeps this report as
+    /// the next comparison's baseline.
     ///
     /// The teardowns come in the previous report's order, so one script
     /// yields one sequence.
     ///
     /// It reads the whole report on every update, a cost RFC 0014 §13.6
     /// accepts until it is measured.
-    pub fn reconcile<R: Reducer>(
+    pub fn update<R: Reducer>(
         &mut self,
         reducer: &R,
-        state: &R::State,
-        command: Command<R::Message>,
+        state: &mut R::State,
+        message: R::Message,
     ) -> Command<R::Message> {
+        let command = reducer.reduce(state, message);
         let report = report(reducer, state);
         let outermost = disappeared_outermost(&self.previous, &report);
         self.previous = report;

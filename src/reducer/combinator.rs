@@ -965,9 +965,8 @@ mod tests {
 
         /// One update, lowered from the command reconciliation dispatches.
         fn send(&mut self, message: R::Message) -> KernelParts<R::Message> {
-            let command = self.reducer.reduce(&mut self.state, message);
             self.live
-                .reconcile(&self.reducer, &self.state, command)
+                .update(&self.reducer, &mut self.state, message)
                 .into_runtime_parts()
                 .into_kernel_parts()
         }

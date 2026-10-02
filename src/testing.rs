@@ -612,10 +612,9 @@ where
     /// One synchronous `update` plus command intake — the shared tail of
     /// `send` and the `receive*` deliveries.
     fn apply_update(&mut self, msg: App::Message) {
-        let command = self.app.update(msg);
         let command = self
             .live_instances
-            .reconcile(&AppProgram::<App>::new(), &self.app, command);
+            .update(&AppProgram::<App>::new(), &mut self.app, msg);
         self.enqueue_command(command.into_runtime_parts());
     }
 
