@@ -98,7 +98,7 @@ default:
 
 # `test` passes explicit target flags, which suppress the implicit doctest run,
 # so `test-doc` has to be listed separately here and in `pre-commit`; without it
-# nothing compiles the examples in rustdoc comments or in the
+# nothing compiles the examples in rustdoc comments or in a
 # `cfg(doctest)`-included migration guide.
 
 # Run all checks (fmt, clippy, test, doc tests)
@@ -229,10 +229,11 @@ test-integration:
 test-doc:
     cargo test --doc --features {{user_features}}
 
-# Guards the `include` entry that keeps `include_str!` resolvable once
-# published: `cargo publish`'s verification is a `cargo build`, which drops
-# the `cfg(doctest)` item before the macro runs, so a missing entry shows up
-# nowhere else. Packaging and extracting reproduces what a consumer gets.
+# Guards a migration guide's `include` entry, which keeps its `include_str!`
+# resolvable once published: `cargo publish`'s verification is a
+# `cargo build`, which drops the `cfg(doctest)` item before the macro runs,
+# so a missing entry shows up nowhere else. Packaging and extracting
+# reproduces what a consumer gets.
 #
 # `--allow-dirty` so this is usable before committing, which is when a bad
 # `include` is cheapest to catch; CI checks out clean, so it changes nothing

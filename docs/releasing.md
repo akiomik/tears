@@ -148,8 +148,8 @@ compiler reports none of it.
   `[package.metadata.docs.rs]` is where to look — since one that is not
   leaves the addition absent there rather than merely hard to find.
 - Everything under `Changed` and `Removed` may have invalidated an example.
-  The doctests cover rustdoc and the migration guides; the README's fenced
-  blocks are compiled by nothing and have to be read.
+  The doctests cover rustdoc and the migration guides still compiled; the
+  README's fenced blocks are compiled by nothing and have to be read.
 - Decide whether the release needs a migration guide.
   [`docs/migrations/README.md`](migrations/README.md) holds the criterion
   and the edits that adding one takes.

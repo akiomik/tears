@@ -23,9 +23,12 @@ which of these changes reaches me, and how do I tell?
 ## Conventions
 
 - A guide is included into the crate under `#[cfg(doctest)]`, so its "after"
-  snippets are compiled by `cargo test --doc` and cannot drift from the API.
-  It adds no public module, so it can be deleted once the release it covers is
-  far enough back.
+  snippets are compiled by `cargo test --doc` and cannot drift from the API
+  while its release is the current one. Once a later change breaks one of
+  them, the guide stops being compiled rather than being edited, since it
+  describes its own release's API: that change undoes the first two edits
+  below, and the file stays as written. It adds no public module, so it can
+  be deleted once the release it covers is far enough back.
 - **Adding a guide is four edits besides the file itself, and only one of
   them fails loudly.** Removing a guide undoes the first three; the fourth
   is repointed rather than removed.
