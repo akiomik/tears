@@ -217,7 +217,8 @@ pub trait Application: Sized {
     /// body. One whose `update` calls a combinator stack's `reduce` forwards
     /// that stack's report, `stack().instances(self, out)`;
     /// [`Reducer::instances`](crate::reducer::Reducer::instances) states the
-    /// obligation in full. Pure in the state, order included.
+    /// obligation in full. Pure in the state, order included: reporting runs
+    /// no side effect and reads no external mutable state.
     ///
     /// ```
     /// # use ratatui::Frame;

@@ -253,7 +253,8 @@ pub trait Reducer {
     /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
     ///
     /// Pure in the state, order included: a given state reports the same
-    /// sequence every time. What a reducer owes follows from the work its
+    /// sequence every time, and reporting runs no side effect and reads no
+    /// external mutable state. What a reducer owes follows from the work its
     /// `reduce` returns, placed by itself or by a reducer it calls:
     ///
     /// - each row or occupant it qualifies commands under, a child's or its

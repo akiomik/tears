@@ -73,17 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** an instance that leaves its path while the state still holds
   it is torn down: its commands are cancelled and its cleanup hooks run, and
-  nothing restarts them, where it now is or if it comes back. That covers moving a `Keyed` or
-  `Slot` to another path, swapping two, a collection taken out in one update
-  and restored in a later one, and a projection that stops selecting the
-  state holding it, such as the active one of several tabs. Before, a move or
-  a swap left the commands and cleanup registrations under the path they
-  left, where their output went to whichever instance held that path, or
-  nowhere, and a switching projection tore nothing down (#422)
+  nothing restarts them, where it now is or if it comes back. That covers
+  moving a `Keyed` or `Slot` to another path, swapping two, a collection
+  taken out in one update and restored in a later one, and a projection that
+  stops selecting the state holding it, such as the active one of several
+  tabs. Before, none of these tore anything down: commands and cleanup
+  registrations stayed under the path they left, where the commands' output
+  went to whichever instance held that path, or nowhere (#422)
 
   ```rust
-  // Before: each occupant's runs stayed under the path it left, which the
-  // other now holds.
+  // Before: each occupant's commands and cleanup registrations stayed under
+  // the path it left, which the other now holds.
   // After: both are torn down. An occupant that should keep working where
   // it now is sets its work up again, as a new one would.
   mem::swap(&mut state.modal, &mut state.sheet);
