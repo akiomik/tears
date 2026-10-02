@@ -1129,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn dismissing_the_slot_yields_the_boundary_s_teardown() {
+    fn dismissing_the_slot_yields_its_occupant_s_teardown() {
         let mut state = RootState::new();
         state.modal.present(ChildState::new(true));
         let mut driven = Driven::new(stack(), state);

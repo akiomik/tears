@@ -19,7 +19,7 @@
 //! | --- | --- |
 //! | [`sibling_boundaries_keep_equal_local_ids_apart`] | INV-RC2 at the lowering seam, both halves |
 //! | [`a_row_s_subscriptions_are_qualified_and_retracted_with_it`] | INV-RC2's declaration half, INV-RC6 through a boundary |
-//! | [`an_anonymous_child_effect_is_reached_by_its_boundary_s_teardown`] | INV-RC7 through a combinator |
+//! | [`an_anonymous_child_effect_is_reached_by_its_row_s_teardown`] | INV-RC7 through a combinator |
 //! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's reconciliation, as the kernel applies it |
 //! | [`closing_a_row_opened_at_init_in_the_first_update_fires_its_cleanup`] | INV-RC3's first report, read from `init`'s state |
 //! | [`dismissing_the_slot_tears_down_its_occupant_s_runs`] | INV-RC3's dismissal shape, likewise |
@@ -522,7 +522,7 @@ fn a_row_s_subscriptions_are_qualified_and_retracted_with_it() {
 // can address it is the scope its boundary placed it under. Closing the row
 // reaches it.
 #[test]
-fn an_anonymous_child_effect_is_reached_by_its_boundary_s_teardown() {
+fn an_anonymous_child_effect_is_reached_by_its_row_s_teardown() {
     let reclaimed = Beacon::default();
     let mut driver = driver(
         Setup::new(vec![Msg::Row(1, PaneMsg::Anon), Msg::Act(1)])

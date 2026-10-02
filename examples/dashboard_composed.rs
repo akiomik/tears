@@ -48,9 +48,10 @@
 //! - The **row children and the pane's occupant** have runs of their own — a
 //!   timer and a keyed request each — where `dashboard.rs` has neither, its one
 //!   subscription being the root's terminal source. That is not incidental:
-//!   qualification and teardown are about runs, so a child with none gives a
-//!   boundary nothing to do. `Navigation` and `Activity` are exactly that case
-//!   and are composed anyway, for the organisation rather than the separation.
+//!   a boundary's qualification and the runtime's teardown are about runs,
+//!   so a child with none gives them nothing to act on. `Navigation` and
+//!   `Activity` are exactly that case and are composed anyway, for the
+//!   organisation rather than the separation.
 //! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
 //!   from the task list, and Esc closes the pane, where `dashboard.rs` rereads
 //!   the selected task's notes into a panel that is always there.
