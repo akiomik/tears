@@ -90,13 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   }
   ```
 
+- When one update removes several instances, their teardowns are issued in
+  the order the state held them before the update rather than the order they
+  were removed in, so their cleanup hooks start in that order
+
 ### Fixed
 
-- Replacing a `Keyed` or `Slot` value wholesale (`state.rows = Keyed::default()`,
-  `mem::take`, `mem::swap`) now tears down the instances it held, and so does
-  a reducer above an enclosing `scope` boundary removing or replacing one.
-  Before, such removals were lost or deferred, and their in-flight commands
-  and cleanup hooks were left behind (#422)
+- Replacing a whole `Keyed` or `Slot` (`state.rows = Keyed::default()`,
+  `mem::take`) now tears down the instances it held, and so does a reducer
+  above an enclosing `scope` boundary removing or replacing one. Before, such
+  removals were lost or deferred, and their in-flight commands and cleanup
+  hooks were left behind (#422)
+- Moving a `Keyed` or `Slot` to another path, or swapping two, now tears
+  down the instances at the paths they left: their commands are cancelled
+  and their cleanup hooks run, although the state still holds them. Before,
+  their work stayed under the old path, and its output reached whichever
+  instance held that path next (#422)
 
 ## [0.11.1] - 2026-09-11
 

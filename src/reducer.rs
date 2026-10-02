@@ -117,7 +117,9 @@
 //!   [`presented`](ReducerExt::presented)). A teardown ends an instance's
 //!   work, not its state: one torn down while the state still holds it —
 //!   moved to another path, or kept inside an occupant that was replaced —
-//!   keeps whatever its state records, and nothing starts it again.
+//!   keeps whatever its state records. Nothing restarts its commands or
+//!   re-registers its cleanup hooks; the subscriptions it still declares are
+//!   admitted again like any other.
 //! - **It discards what it cannot route.** A message addressed to a key the
 //!   collection no longer holds, or to a slot with no occupant, reaches no
 //!   reducer and is dropped — with no diagnostic, and with no way for the
@@ -254,7 +256,8 @@ pub trait Reducer {
     /// returns, placed by itself or by a reducer it calls:
     ///
     /// - each row or occupant it qualifies commands under, a child's or its
-    ///   own, through [`Instances::keyed`] or [`Instances::slot`];
+    ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
+    ///   combinator built on it already reports it;
     /// - the report of each reducer it calls `reduce` on, through the
     ///   projection it calls it with: beneath the row or occupant it calls it
     ///   for, under [`Instances::scoped`] when it calls it under a fixed

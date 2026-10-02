@@ -23,7 +23,7 @@
 //! | [`closing_a_row_tears_down_the_runs_under_it`] | INV-RC3's reconciliation, as the kernel applies it |
 //! | [`closing_a_row_opened_at_init_in_the_first_update_fires_its_cleanup`] | INV-RC3's first report, read from `init`'s state |
 //! | [`dismissing_the_slot_tears_down_its_occupant_s_runs`] | INV-RC3's dismissal shape, likewise |
-//! | [`a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`] | INV-RC3's no-diff adversary and INV-RC4's batch remove-and-reinsert |
+//! | [`a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`] | INV-RC3's key-only adversary and INV-RC4's batch remove-and-reinsert |
 //! | [`a_replacement_s_successor_declares_again_at_the_predecessor_s_exit`] | §5.1's barrier and §5.2's dirt, over a boundary's replacement |
 //! | [`a_replaced_slot_occupant_s_successor_declares_again_at_the_predecessor_s_exit`] | the same, for the slot's replacing shape |
 //! | [`a_replacement_that_stops_no_subscription_declares_in_the_replacing_pass`] | the same barrier's condition, from its other side |
@@ -41,13 +41,13 @@
 //!
 //! | mutation | rows in this file it fails |
 //! | --- | --- |
-//! | reconciliation compares paths, not identities | the no-diff adversary, on its unkeyed run; both replacement rows, where they assert the replacing pass admits nothing |
+//! | reconciliation compares paths, not identities | the key-only adversary, on its unkeyed run; both replacement rows, where they assert the replacing pass admits nothing |
 //! | `any_stopping_sub` dropped from the reconcile barrier | both replacement rows, where they assert the replacing pass admits nothing |
 //! | `Keyed::insert` draws a new identity without installing the value | the keyed replacement, on the source only its successor declares; the condition row, where it asserts the admission |
 //! | `Slot::present` draws a new identity but keeps the occupant | the slot replacement, likewise |
 //! | `is_stopping_sub` widened to any stopping run | the barrier's condition row, where it asserts the admission |
 //!
-//! The no-diff adversary's own comment records why its assertion is on the
+//! The key-only adversary's own comment records why its assertion is on the
 //! unkeyed run and not the keyed one. The two "new identity but does not
 //! install" mutations are what the shared-plus-own source pair exists
 //! for on the replacement rows: one identity declared by both instances

@@ -127,7 +127,9 @@ impl<K: ScopeValue, V> Keyed<K, V> {
             .map(|row| &row.value)
     }
 
-    /// The instance under `key`, mutably. The occupancy continues.
+    /// The instance under `key`, mutably. The occupancy continues, even when
+    /// the value is replaced through it; [`insert`](Self::insert) starts a
+    /// new one.
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.rows
             .iter_mut()
@@ -234,7 +236,8 @@ impl<S> Slot<S> {
         self.value.as_ref()
     }
 
-    /// The instance, mutably. The occupancy continues.
+    /// The instance, mutably. The occupancy continues, even when the value is
+    /// replaced through it; [`present`](Self::present) starts a new one.
     pub const fn get_mut(&mut self) -> Option<&mut S> {
         self.value.as_mut()
     }
