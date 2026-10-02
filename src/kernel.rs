@@ -166,12 +166,20 @@ pub struct ExitReport {
     pub joined: usize,
 }
 
+/// What `boot` produces: the state and the live-instance report read from
+/// it (RFC 0014 INV-RC3), held together so that neither exists without the
+/// other.
+struct Booted<P: Program> {
+    state: P::State,
+    live_instances: LiveInstances,
+}
+
 /// The kernel: one driving task, two lanes, one join set, one authoritative
 /// registry.
 pub struct Kernel<P: Program> {
     program: P,
     flags: Option<P::Flags>,
-    state: Option<P::State>,
+    booted: Option<Booted<P>>,
     registry: ScopeRegistry,
     /// Armed, not-yet-fired cleanup finalizers (RFC 0014 §4.4).
     ///
@@ -199,10 +207,6 @@ pub struct Kernel<P: Program> {
     dirty: bool,
     phase: KernelPhase,
     batch_cap: NonZeroUsize,
-    /// The previous live-instance report (RFC 0014 INV-RC3): read from the
-    /// initial state at boot, replaced after every update. `None` until
-    /// boot, as `state` is.
-    live_instances: Option<LiveInstances>,
     /// The one send gate, kernel-wide. Every run's ingress holds a clone of
     /// this same object, which is what makes the driver's "at most one
     /// outstanding grant" rule driver-wide rather than per origin
@@ -248,7 +252,7 @@ impl<P: Program> Kernel<P> {
         Self {
             program,
             flags: Some(flags),
-            state: None,
+            booted: None,
             registry: ScopeRegistry::new(observer.clone()),
             cleanups: CleanupLedger::new(),
             join_set: JoinSet::new(),
@@ -265,7 +269,6 @@ impl<P: Program> Kernel<P> {
             dirty: false,
             phase: KernelPhase::Boot,
             batch_cap: batch_max.unwrap_or(DEFAULT_BATCH_MAX_MESSAGES),
-            live_instances: None,
             gate: Arc::new(SendGate::new(gate_mode)),
             next_token: 1,
             started: Vec::new(),
@@ -309,8 +312,11 @@ impl<P: Program> Kernel<P> {
         let (state, init) = self.program.init(flags);
         // The first live-instance report is read before the init dispatch
         // (RFC 0011 §3.2); it tears nothing down.
-        self.live_instances = Some(LiveInstances::new(&self.program, &state));
-        self.state = Some(state);
+        let live_instances = LiveInstances::new(&self.program, &state);
+        self.booted = Some(Booted {
+            state,
+            live_instances,
+        });
 
         self.dispatch(init);
         if !self.terminating() {
@@ -334,7 +340,7 @@ impl<P: Program> Kernel<P> {
 
     /// The booted state.
     pub const fn state(&self) -> &P::State {
-        self.state.as_ref().expect("kernel booted")
+        &self.booted.as_ref().expect("kernel booted").state
     }
 
     /// Whether termination has been applied.

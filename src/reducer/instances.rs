@@ -117,8 +117,8 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 /// built from the first report, and every update a kernel or a store drives
 /// runs through `update`, which calls `reduce` and then reads the report
 /// itself. So a caller that goes through it can neither begin without a
-/// first report, reduce without reconciling, nor compare against a stale
-/// report.
+/// first report, reduce without reconciling, nor compare against a report
+/// older than its last completed update.
 pub struct LiveInstances {
     previous: Report,
 }

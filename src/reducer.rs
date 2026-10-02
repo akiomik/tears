@@ -252,9 +252,9 @@ pub trait Reducer {
     /// Reports the occupancies of the children this reducer composes, so the
     /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
     ///
-    /// Pure in the state, order included: equal states report equal
-    /// sequences. What a reducer owes follows from the work its `reduce`
-    /// returns, placed by itself or by a reducer it calls:
+    /// Pure in the state, order included: a given state reports the same
+    /// sequence every time. What a reducer owes follows from the work its
+    /// `reduce` returns, placed by itself or by a reducer it calls:
     ///
     /// - each row or occupant it qualifies commands under, a child's or its
     ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
