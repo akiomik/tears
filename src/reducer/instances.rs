@@ -157,11 +157,25 @@ impl LiveInstances {
     }
 }
 
+/// The paths one update's reconciliation tears down.
+///
+/// Its field is private to this module, so the paths can come only from
+/// [`disappeared_outermost`], each a reported occupancy's own path: RFC 0013
+/// R8's second teardown origin, held to it by the type rather than by review.
+pub struct Disappeared(Vec<ScopePath>);
+
+impl Disappeared {
+    /// The paths, in the order reconciliation found them.
+    pub fn into_paths(self) -> Vec<ScopePath> {
+        self.0
+    }
+}
+
 /// Each path under which `previous` holds a pair `current` lacks, once, at
 /// the position of the first such pair, without the paths another of them is
 /// a proper prefix of. The sets are consulted for membership only, never
 /// iterated, so the order is the report's.
-fn disappeared_outermost(previous: &Report, current: &Report) -> Vec<ScopePath> {
+fn disappeared_outermost(previous: &Report, current: &Report) -> Disappeared {
     let present: HashSet<&(ScopePath, InstanceId)> = current.iter().collect();
     let mut gone: HashSet<&[StructuralKey]> = HashSet::new();
     let mut disappeared: Vec<&ScopePath> = Vec::new();
@@ -170,12 +184,14 @@ fn disappeared_outermost(previous: &Report, current: &Report) -> Vec<ScopePath> 
             disappeared.push(&pair.0);
         }
     }
-    disappeared
-        .into_iter()
-        .filter(|path| {
-            let segments = path.segments();
-            !(1..segments.len()).any(|len| gone.contains(&segments[..len]))
-        })
-        .cloned()
-        .collect()
+    Disappeared(
+        disappeared
+            .into_iter()
+            .filter(|path| {
+                let segments = path.segments();
+                !(1..segments.len()).any(|len| gone.contains(&segments[..len]))
+            })
+            .cloned()
+            .collect(),
+    )
 }

@@ -12,6 +12,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt, stream};
 
+use crate::reducer::instances::Disappeared;
 use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
@@ -298,14 +299,16 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// command's effect, directives, cancellation metadata, and cleanup
     /// registrations are left as they are.
     ///
-    /// Each path is one a report built as it descended through the
-    /// boundaries, ending in an occupancy's own key or segment, so it is the
-    /// prefix `Command::teardown` over that segment, `scoped` by the ones
-    /// above it, would carry — never empty. [`Command::batch`] would be
-    /// wrong here: it folds the redraw directive across its children, so an
-    /// update that returned [`Command::without_redraw`] would silently regain
-    /// its redraw (RFC 0014 §2.5).
-    pub(crate) fn with_reconciled_teardowns(mut self, paths: Vec<ScopePath>) -> Self {
+    /// Only reconciliation can build a `Disappeared`, so each path is one a
+    /// report built as it descended through the boundaries, ending in an
+    /// occupancy's own key or segment. It is therefore the prefix
+    /// `Command::teardown` over that segment, `scoped` by the ones above it,
+    /// would carry — never empty. [`Command::batch`] would be wrong here: it
+    /// folds the redraw directive across its children, so an update that
+    /// returned [`Command::without_redraw`] would silently regain its redraw
+    /// (RFC 0014 §2.5).
+    pub(crate) fn with_reconciled_teardowns(mut self, disappeared: Disappeared) -> Self {
+        let paths = disappeared.into_paths();
         debug_assert!(
             paths.iter().all(|path| !path.is_empty()),
             "a reconciliation teardown names an occupancy's path, which is never empty"
