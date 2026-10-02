@@ -308,12 +308,7 @@ impl<Msg: Send + 'static> Command<Msg> {
     /// returned [`Command::without_redraw`] would silently regain its redraw
     /// (RFC 0014 §2.5).
     pub(crate) fn with_reconciled_teardowns(mut self, disappeared: Disappeared) -> Self {
-        let paths = disappeared.into_paths();
-        debug_assert!(
-            paths.iter().all(|path| !path.segments().is_empty()),
-            "a reconciliation teardown names an occupancy's path, which is never empty"
-        );
-        self.teardowns.extend(paths);
+        self.teardowns.extend(disappeared.into_paths());
         self
     }
 

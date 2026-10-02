@@ -101,25 +101,27 @@
 //!   segment. Two rows declaring the same timer are two subscriptions; two rows
 //!   keyed on the same command id occupy two slots. Application code writes no
 //!   `.scoped(...)`, and cannot omit or double-apply one.
-//! - **It tears removed instances down.** Every row of a `Keyed` and the
-//!   occupant of a `Slot` is an instance with an identity of its own. After
-//!   every update the runtime compares the instances the state reports with
-//!   the ones it reported before, and tears down each one that is gone,
-//!   however it went — [`Keyed::remove`], [`Slot::dismiss`], an insert or a
-//!   present that replaces an occupant, assigning or swapping the whole
-//!   collection, a reducer above the boundary changing it. The removed
-//!   instance's subscriptions stop, its in-flight commands are cancelled, and
-//!   the cleanup hooks it registered run. Stopping a subscription reaches past
-//!   the instance that declared it: while any subscription run is stopping the
-//!   runtime starts none, so a replacement's successor — and any other row's
-//!   new declarations — wait for that run to quiesce. The combinators state the
+//! - **It reports its instances, so removed ones are torn down.** Every row of
+//!   a `Keyed` and the occupant of a `Slot` is an instance with an identity of
+//!   its own, and the boundary reports the ones its state holds — through
+//!   whatever holds the stack, which forwards the report (below). After every
+//!   update the runtime compares the instances the state reports with the ones
+//!   it reported before, and tears down each one that is gone, however it went
+//!   — [`Keyed::remove`], [`Slot::dismiss`], an insert or a present that
+//!   replaces an occupant, assigning or swapping the whole collection, a
+//!   reducer above the boundary changing it. The removed instance's
+//!   subscriptions stop, its in-flight commands are cancelled, and the cleanup
+//!   hooks it registered run. Stopping a subscription reaches past the instance
+//!   that declared it: while any subscription run is stopping the runtime
+//!   starts none, so a replacement's successor — and any other row's new
+//!   declarations — wait for that run to quiesce. The combinators state the
 //!   timing ([`for_each`](ReducerExt::for_each),
-//!   [`presented`](ReducerExt::presented)). A teardown ends an instance's
-//!   work, not its state: one torn down while the state still holds it —
-//!   moved to another path, or kept inside an occupant that was replaced —
-//!   keeps whatever its state records. Nothing restarts its commands or
-//!   re-registers its cleanup hooks; the subscriptions it still declares are
-//!   admitted again like any other.
+//!   [`presented`](ReducerExt::presented)). A teardown ends an instance's work,
+//!   not its state: one torn down while the state still holds it — moved to
+//!   another path, or kept inside an occupant that was replaced — keeps
+//!   whatever its state records. Nothing restarts its commands or re-registers
+//!   its cleanup hooks; the subscriptions it still declares are admitted again
+//!   like any other.
 //! - **It discards what it cannot route.** A message addressed to a key the
 //!   collection no longer holds, or to a slot with no occupant, reaches no
 //!   reducer and is dropped — with no diagnostic, and with no way for the

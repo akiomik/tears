@@ -352,14 +352,16 @@ driver in its own body and never drives it still fails, at the drop.
 
 Driving the real kernel is what puts two things within reach. A declared
 subscription source runs; and in a composed program, the teardown that
-follows a child's removal stops runs that really started, where `TestStore`
-starts none. So reach for `TestStore` when the assertion is about an
-`Application`'s `update` transitions and command effects, and for `TestDriver`
-when it is about a source running at all, or — in a composed program — a
-child's arrival and removal across passes. Not about *when* a time-gated
-source produces, though: that needs a paused runtime the driver cannot be
-given, and so a different test shape, the one *deterministic time without
-`TestStore`* describes in the module docs linked above.
+follows a child's removal stops runs that really started. `TestStore` starts
+none, though it applies the same teardown to the output it holds pending and
+runs the cleanup hooks registered there. So reach for `TestStore` when the
+assertion is about an `Application`'s `update` transitions and command
+effects, and for `TestDriver` when it is about a source running at all, or —
+in a composed program — a child's arrival and removal across passes. Not
+about *when* a time-gated source produces, though: that needs a paused
+runtime the driver cannot be given, and so a different test shape, the one
+*deterministic time without `TestStore`* describes in the module docs linked
+above.
 
 `examples/dashboard_composed.rs` carries worked `TestDriver` tests:
 
