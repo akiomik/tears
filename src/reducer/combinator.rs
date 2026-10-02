@@ -1112,7 +1112,9 @@ mod tests {
 
         let parts = lowered(&stack, &mut state, Message::Modal(ChildMessage::Carriers));
 
-        assert!(parts.spawns.is_empty());
+        assert!(parts.spawns.is_empty(), "no child ran");
+        assert!(parts.teardowns.is_empty());
+        assert!(parts.cleanups.is_empty());
     }
 
     // INV-RC3, read from the command reconciliation dispatches

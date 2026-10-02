@@ -4,12 +4,12 @@
 //! [`Keyed`] holds one child state per key and [`Slot`] holds at most one.
 //! Each row and each occupant is an *occupancy* with an identity of its own,
 //! drawn when the occupancy begins and shared with no other (RFC 0014 §2.5).
-//! The kernel and the store compare the identities a state reports after
-//! every update with the ones it reported before, and tear down the
-//! occupancies that disappeared (INV-RC3). Nothing here records a removal:
-//! whatever takes an occupancy out of the state — a removal method, an
-//! assignment, a swap, a reducer above the boundary — takes its identity out
-//! of the next report.
+//! The kernel and the store compare the (path, identity) pairs a state
+//! reports after every update with the ones it reported before, and tear
+//! down the paths whose pairs disappeared (INV-RC3). Nothing here records a
+//! removal: whatever takes an occupancy out of the state or moves it — a
+//! removal method, an assignment, a swap, a reducer above the boundary —
+//! changes the next report.
 //!
 //! # Why identities and not keys
 //!

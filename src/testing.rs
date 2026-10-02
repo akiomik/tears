@@ -2061,8 +2061,8 @@ mod tests {
     }
 
     // INV-T11: no duplicate-ignored warning fires from `subscription_ids` —
-    // that tracing event belongs to the runtime's reconciliation, which the
-    // store never runs.
+    // that tracing event belongs to the runtime's subscription reconciliation,
+    // which the store never runs.
     #[test]
     fn subscription_ids_emits_no_duplicate_ignored_warning() {
         let recorder = TraceRecorder::new()
@@ -2076,7 +2076,8 @@ mod tests {
         assert_eq!(
             recorder.event_count(),
             0,
-            "the duplicate-ignored warning is reconciliation's side effect, not the store's"
+            "the duplicate-ignored warning is subscription reconciliation's side effect, not \
+             the store's"
         );
         store.finish();
     }

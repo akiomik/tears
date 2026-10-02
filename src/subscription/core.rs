@@ -205,7 +205,7 @@ pub trait SubscriptionSource: Send {
     ///
     /// This key must be stable across equivalent evaluations of a source. A
     /// changing key expresses a new lifecycle, causing the old subscription to
-    /// stop and a new one to start during reconciliation.
+    /// stop and a new one to start during subscription reconciliation.
     type Key: Eq + Hash + Send + Sync + 'static;
 
     /// Create the stream of messages for this subscription.
@@ -222,7 +222,7 @@ pub trait SubscriptionSource: Send {
     /// evaluations. A per-instance source must generate its instance token
     /// once, store it, and return the stored token here. Generating a fresh key
     /// on each evaluation aborts and respawns the subscription during
-    /// reconciliation.
+    /// subscription reconciliation.
     fn key(&self) -> Self::Key;
 }
 

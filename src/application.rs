@@ -158,9 +158,9 @@ pub trait Application: Sized {
     ///   replacing a live task, or a scope teardown selecting the run
     ///   (RFC 0012 §4.2).
     ///
-    /// The second needs no message, so a reconcile that had to wait for a stopped
-    /// task to finish does not also wait for the next message to arrive. A source
-    /// that merely *finishes* marks nothing dirty on its own.
+    /// The second needs no message, so a subscription reconcile that had to wait
+    /// for a stopped task to finish does not also wait for the next message to
+    /// arrive. A source that merely *finishes* marks nothing dirty on its own.
     ///
     /// A new or restarted subscription is admitted only after every previously
     /// stopped task has quiesced (RFC 0012 §4); a re-evaluation with no outstanding
