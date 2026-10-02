@@ -1355,6 +1355,23 @@ mod tests {
     }
 
     // Rows that tear nothing down.
+
+    // A row and an occupant replaced while the starting state was built —
+    // in `init`, in an application — were never reported, so the first
+    // update tears neither down. Recording replacements as they are made
+    // would tear down the path the successor holds at the first update
+    // through the boundary; this row is what fails if that comes back.
+    #[test]
+    fn a_replacement_made_before_the_first_report_tears_nothing_down() {
+        let mut state = RootState::with_rows(&["row-a"]);
+        state.rows.insert("row-a", ChildState::new(true));
+        state.modal.present(ChildState::new(true));
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        assert!(driven.send(Message::Idle).teardowns.is_empty());
+    }
+
     #[test]
     fn an_update_that_removes_nothing_yields_no_teardown() {
         let mut state = RootState::with_rows(&["row-a"]);
