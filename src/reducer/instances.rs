@@ -4,8 +4,9 @@
 //! A reducer reports the occupancies its state holds through
 //! [`Reducer::instances`](super::Reducer::instances) as (qualified path,
 //! identity) pairs. After every update, the kernel and the store compare the
-//! report with the one before and merge one teardown per path that
-//! disappeared into the command they dispatch for that update.
+//! report with the one before and merge into the command they dispatch for
+//! that update one teardown per path that disappeared, except a path under
+//! another that disappeared too, which that one's teardown selects.
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -114,8 +115,8 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 ///
 /// Its two methods are the whole seam: every update a kernel or a store
 /// drives runs through [`update`](Self::update), which calls `reduce` and
-/// then reads the report itself, so no caller can reduce without reconciling
-/// or compare against a stale report.
+/// then reads the report itself, so a caller that goes through it can
+/// neither reduce without reconciling nor compare against a stale report.
 #[derive(Default)]
 pub struct LiveInstances {
     previous: Report,
