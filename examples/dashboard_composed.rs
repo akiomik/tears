@@ -1021,8 +1021,9 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
         return Command::none();
     };
     // Inserting over an occupied key is a replacement, and a replacement is a
-    // removal: the old instance's runs are torn down before this command's
-    // spawns start the successor's.
+    // removal: the old instance's runs are torn down in the command the
+    // runtime dispatches for this update, and the successor sets its own work
+    // up when the `Watch` returned below reaches it.
     let task_title = task.title.clone();
     state.tasks.insert(
         id,
