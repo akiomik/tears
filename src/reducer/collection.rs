@@ -51,8 +51,9 @@ impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 ///
 /// Drawn from one process-wide counter, so no two occupancies ever share one
 /// — not in one collection, not across collections, not across runtimes.
-/// The counter panics rather than wrap: a reused identity would make a
-/// replacement look like continuity.
+/// Drawing never wraps, since a reused identity would make a replacement
+/// look like continuity: once the counter is exhausted it stays there, and
+/// every later draw in the process panics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InstanceId(u64);
 
