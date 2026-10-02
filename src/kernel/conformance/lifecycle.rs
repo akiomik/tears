@@ -625,7 +625,9 @@ fn a_stopping_command_run_defers_no_subscription_admission() {
 // nowhere else, and one pass performs at most one of each however many
 // messages its batch delivered. The whole claim reads off one call
 // sequence: three `Reduce`s with nothing between them, then exactly one
-// `View` and one `Subscriptions`.
+// `View` and one `Subscriptions`. The live-instance report is the other
+// side of the same line: RFC 0014 INV-RC3 reads one after every update, so
+// the batch reads three, not one after it.
 #[test]
 fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
     let (mut driver, journal) = driver_with(
@@ -637,6 +639,7 @@ fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
         accept(&mut driver, sender.clone());
     }
     let before = journal.calls().len();
+    let reports_before = journal.reports();
 
     driver
         .step_pass(WakeSource::Data)
@@ -652,6 +655,11 @@ fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
             Call::Subscriptions,
         ],
         "no render and no re-evaluation inside the batch, and one of each after it"
+    );
+    assert_eq!(
+        journal.reports() - reports_before,
+        3,
+        "one live-instance report per update, inside the batch"
     );
 }
 
