@@ -4,11 +4,11 @@
 //!
 //! - **Application-side observation only.** The driver reports no state, no
 //!   frame, and no delivery transcript (RFC 0008 §9.11), so what a series
-//!   asserts about `update`, `view`, and `subscriptions` is recorded by the
-//!   program under test, in [`Journal`]. What a series asserts about a
-//!   producer's own progress — a run reaching its end, a subscription
-//!   source starting or stopping — is recorded by the effect or the source,
-//!   in a [`Beacon`]. Both are the "test's own application-side
+//!   asserts about `update`, `view`, `subscriptions` and `instances` is
+//!   recorded by the program under test, in [`Journal`]. What a series
+//!   asserts about a producer's own progress — a run reaching its end, a
+//!   subscription source starting or stopping — is recorded by the effect or
+//!   the source, in a [`Beacon`]. Both are the "test's own application-side
 //!   instrumentation" a `settle` predicate is meant to read (RFC 0008 §9.6).
 //! - **Bounded waiting, never timed.** Nothing here sleeps, arms a timer, or
 //!   reads a wall clock. A wait is bounded either by a counted number of
