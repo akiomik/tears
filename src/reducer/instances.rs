@@ -28,13 +28,8 @@ pub type Report = Vec<(ScopePath, InstanceId)>;
 /// carries identities no update has seen, so reporting one tears down every
 /// row it stands for on each update.
 ///
-/// A reducer reports where it places work: each row or occupant it
-/// qualifies commands under, through [`keyed`](Self::keyed) or
-/// [`slot`](Self::slot), with the report of the child it reduces there
-/// beneath it, and under [`scoped`](Self::scoped) the report of a child it
-/// reduces under a fixed segment (RFC 0014 INV-RC3a). One that places no
-/// work under a segment reports nothing. The combinators do all of this for
-/// you.
+/// What a reducer reports through it is stated on
+/// [`Reducer::instances`](super::Reducer::instances).
 pub struct Instances<'a> {
     prefix: ScopePath,
     report: &'a mut Report,
@@ -134,6 +129,9 @@ impl LiveInstances {
     ///
     /// The teardowns come in the order the previous report first named each
     /// path, so one script yields one sequence.
+    ///
+    /// It reads the whole report on every update, a cost RFC 0014 §13.6
+    /// accepts until it is measured.
     pub fn reconcile<R: Reducer>(
         &mut self,
         reducer: &R,

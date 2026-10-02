@@ -105,16 +105,19 @@
 //!   occupant of a `Slot` is an instance with an identity of its own. After
 //!   every update the runtime compares the instances the state reports with
 //!   the ones it reported before, and tears down each one that is gone,
-//!   however it went: [`Keyed::remove`], [`Slot::dismiss`], an insert or a
+//!   however it went — [`Keyed::remove`], [`Slot::dismiss`], an insert or a
 //!   present that replaces an occupant, assigning or swapping the whole
-//!   collection, or a reducer above the boundary changing it. The removed
+//!   collection, a reducer above the boundary changing it. The removed
 //!   instance's subscriptions stop, its in-flight commands are cancelled, and
 //!   the cleanup hooks it registered run. Stopping a subscription reaches past
 //!   the instance that declared it: while any subscription run is stopping the
 //!   runtime starts none, so a replacement's successor — and any other row's
 //!   new declarations — wait for that run to quiesce. The combinators state the
 //!   timing ([`for_each`](ReducerExt::for_each),
-//!   [`presented`](ReducerExt::presented)).
+//!   [`presented`](ReducerExt::presented)). A teardown ends an instance's
+//!   work, not its state: one torn down while the state still holds it —
+//!   moved to another path, or kept inside an occupant that was replaced —
+//!   keeps whatever its state records, and nothing starts it again.
 //! - **It discards what it cannot route.** A message addressed to a key the
 //!   collection no longer holds, or to a slot with no occupant, reaches no
 //!   reducer and is dropped — with no diagnostic, and with no way for the
@@ -126,12 +129,11 @@
 //!
 //! The runtime learns what instances a state holds from
 //! [`instances`](Reducer::instances), which every reducer and
-//! [`Application`](crate::Application) implements. The combinators report
-//! their own; a reducer you write by hand reports nothing — an empty body —
-//! unless it places work under a key or segment itself, by calling a child's
-//! `reduce` and scoping the result, in which case it reports what it placed
-//! work under ([`Instances`]). Nothing detects a missing report: an instance
-//! that is never reported originates no teardown of its own.
+//! [`Application`](crate::Application) implements, and which says what each
+//! one reports. The combinators report their own. A reducer you write by
+//! hand that calls another reducer's `reduce` — a whole combinator stack
+//! included — forwards that reducer's report; one that calls none and places
+//! no command under a row or occupant reports nothing.
 //!
 //! ## What stays at the root
 //!
@@ -149,7 +151,8 @@
 //! applied to yet produces a second — and a teardown fires *every* registration
 //! its scope holds, so a child that arms on each one reports two teardowns for
 //! one removal. A flag on the child's state is enough; the successor instance a
-//! replacement creates gets a fresh one.
+//! replacement creates gets a fresh one. An instance torn down while the state
+//! still holds it keeps its flag, and so is not set up again.
 //!
 //! The same rule explains
 //! [`Command::on_teardown`](crate::Command::on_teardown)'s placement. A
@@ -247,17 +250,24 @@ pub trait Reducer {
     /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
     ///
     /// Pure in the state, order included: equal states report equal
-    /// sequences. What a reducer owes follows from where it places work. One
-    /// that qualifies commands — a child's or its own — with a segment, a
-    /// row's key, or a slot's segment reports each row or occupant it places
-    /// work under through [`Instances::keyed`] or [`Instances::slot`], and
-    /// forwards, under each segment, the report of the child it reduces
-    /// there, through the same projection — for every such row, occupant,
-    /// and child the state holds. One that places no work under a segment
-    /// reports nothing — write an empty body — even when its state holds a
-    /// [`Keyed`] or [`Slot`] that a combinator reduces. The combinators do
-    /// all of this for you. Nothing detects an omission: an occupancy that is
-    /// never reported is never torn down on its own account.
+    /// sequences. What a reducer owes follows from the work its `reduce`
+    /// returns, placed by itself or by a reducer it calls:
+    ///
+    /// - each row or occupant it qualifies commands under, a child's or its
+    ///   own, through [`Instances::keyed`] or [`Instances::slot`];
+    /// - the report of each reducer it calls `reduce` on, through the
+    ///   projection it calls it with: beneath the row or occupant it calls it
+    ///   for, under [`Instances::scoped`] when it calls it under a fixed
+    ///   segment, and as it is when it calls it under none — as a reducer
+    ///   that hands its whole `reduce` to a combinator stack does.
+    ///
+    /// It reports all of them on every call, whichever of them the last
+    /// message reached. One that calls no other reducer and qualifies no
+    /// command under a row or occupant reports nothing — write an empty
+    /// body — even when its state holds a [`Keyed`] or [`Slot`] that a
+    /// combinator built on it reduces. The combinators do all of this for
+    /// you. Nothing detects an omission: an occupancy never reported
+    /// originates no teardown of its own.
     fn instances(&self, state: &Self::State, out: &mut Instances<'_>);
 }
 

@@ -19,14 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   occupants a state holds, so that it can tear down the ones an update
   removes
 
-  What an implementor owes follows from where it places work. One that
-  scopes commands — a child's or its own — under a row's key or a slot's
-  segment must report those rows and occupants, and forward the report of a
-  child it reduces there, or the removed ones are not torn down; the
-  combinators already do. In particular, an `Application` whose `update`
-  reduces a combinator stack over its own state forwards that stack's
-  report — an empty body there compiles and silently stops tearing down its
-  rows. One that places no work under a key or segment writes an empty body.
+  What an implementor owes follows from the work it returns: it reports each
+  row or occupant that work is scoped under, and forwards the report of each
+  reducer it calls `reduce` on; the combinators already do. A removed
+  instance's teardown no longer travels in the `Command` a combinator
+  stack's `reduce` returns — the runtime adds it from the report — so an
+  `Application` whose `update` calls a stack's `reduce` must forward that
+  stack's report: an empty body there compiles and silently stops tearing
+  down its rows. One that calls no reducer and places no command under a
+  row or occupant writes an empty body.
 
   Before:
 
@@ -70,12 +71,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   }
   ```
 
-- **Breaking:** a removed instance's teardown is no longer part of the
-  `Command` a combinator stack's `reduce` returns. The runtime adds it to the
-  command it dispatches for that update, so a test that read teardowns off
-  `reduce`'s return value sees none; drive the program instead
 - **Breaking:** `Slot::present` is no longer a `const fn`, since presenting
   begins an instance and draws its identity
+
+  Before:
+
+  ```rust
+  const fn open(details: &mut Slot<Details>, pane: Details) -> Option<Details> {
+      details.present(pane)
+  }
+  ```
+
+  After:
+
+  ```rust
+  fn open(details: &mut Slot<Details>, pane: Details) -> Option<Details> {
+      details.present(pane)
+  }
+  ```
 
 ### Fixed
 

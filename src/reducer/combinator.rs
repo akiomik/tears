@@ -63,17 +63,18 @@ use super::collection::{Keyed, ScopeValue, Slot};
 use super::{Instances, Program, Reducer};
 
 /// The composition combinators, on every [`Reducer`].
+///
+/// Each takes projections from the parent's state to the child's, and they
+/// are expected to select the same state every time. One that switches
+/// between states — the active one of several tabs, say — stops reporting
+/// the instances inside the state it left, and they are torn down although
+/// the parent still holds them.
 pub trait ReducerExt: Reducer + Sized {
     /// Composes one child under a fixed segment.
     ///
     /// `state`/`state_mut` project the child's state out of the parent's,
     /// `extract` claims the messages that belong to the child, and `embed`
     /// lifts the child's messages back into the parent's.
-    ///
-    /// The projections are expected to select the same child state every
-    /// time. One that switches between states — the active one of several
-    /// tabs, say — stops reporting the instances inside the state it left,
-    /// and they are torn down although the parent still holds them.
     fn scope<Seg, C>(
         self,
         child: C,
