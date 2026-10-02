@@ -229,7 +229,8 @@ use ratatui::Frame;
 use crate::command::Command;
 use crate::subscription::Subscription;
 
-/// A state transition and the subscriptions that state declares.
+/// A state transition, the subscriptions that state declares, and the
+/// instances it holds.
 pub trait Reducer {
     /// The state this reducer owns.
     type State;

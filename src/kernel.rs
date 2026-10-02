@@ -731,9 +731,11 @@ mod tests {
 
     /// One recorded call into the program, in the order the kernel made it.
     ///
-    /// The four calls are the whole application surface a pass touches, so
-    /// this journal is what pins the intake order and the stage order
-    /// without any probe inside the kernel.
+    /// The four calls pin the intake order and the stage order without any
+    /// probe inside the kernel. `instances`, the fifth, is left unrecorded:
+    /// its place in the intake order is pinned by
+    /// `a_panic_in_the_first_report_leaves_the_init_command_undispatched` in
+    /// `tests/lifecycle.rs`.
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Call {
         Init,
@@ -791,7 +793,8 @@ mod tests {
         sources: Vec<MockSource<u8>>,
     }
 
-    /// A program that records every call the kernel makes into it.
+    /// A program that records every call the kernel makes into it but
+    /// `instances`.
     struct Probe {
         journal: Journal,
     }
