@@ -8,6 +8,7 @@
 //! disappeared into the command they dispatch for that update.
 
 use std::collections::HashSet;
+use std::hash::Hash;
 
 use crate::command::Command;
 use crate::structural_key::{ScopePath, StructuralKey};
@@ -40,7 +41,10 @@ impl Instances<'_> {
     ///
     /// This is what a [`scope`](super::ReducerExt::scope) boundary does: it
     /// adds a segment and no occupancy of its own.
-    pub fn scoped<Seg: ScopeValue>(&mut self, seg: Seg, visit: impl FnOnce(&mut Instances<'_>)) {
+    pub fn scoped<Seg>(&mut self, seg: Seg, visit: impl FnOnce(&mut Instances<'_>))
+    where
+        Seg: Eq + Hash + Send + Sync + 'static,
+    {
         let mut child = Instances {
             prefix: self.prefix.child(StructuralKey::new(seg)),
             report: &mut *self.report,
@@ -62,12 +66,14 @@ impl Instances<'_> {
 
     /// Reports the occupant of `slot`, if there is one, under `seg`, and
     /// what `visit` reports for it beneath it.
-    pub fn slot<Seg: ScopeValue, S>(
+    pub fn slot<Seg, S>(
         &mut self,
         seg: Seg,
         slot: &Slot<S>,
         visit: impl FnOnce(&S, &mut Instances<'_>),
-    ) {
+    ) where
+        Seg: Eq + Hash + Send + Sync + 'static,
+    {
         if let Some((value, id)) = slot.occupancy() {
             self.occupy(StructuralKey::new(seg), id, |out| visit(value, out));
         }

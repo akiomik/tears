@@ -1316,6 +1316,45 @@ mod tests {
         );
     }
 
+    // Two occupancies reported under one path — two slots under one segment
+    // here, two sibling `for_each`s over one key type in an application
+    // (#424) — disappear together and yield one teardown of that path. The
+    // segment type is not `Clone`: `Instances` asks of a segment only what
+    // `Command::scoped` does.
+    #[test]
+    fn two_pairs_gone_from_one_path_yield_one_teardown_of_it() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct Pane;
+
+        struct Twins;
+
+        impl Reducer for Twins {
+            type State = (Slot<()>, Slot<()>);
+            type Message = ();
+
+            fn reduce(&self, state: &mut Self::State, (): ()) -> Command<()> {
+                state.0.dismiss();
+                state.1.dismiss();
+                Command::none()
+            }
+
+            fn instances(&self, state: &Self::State, out: &mut Instances<'_>) {
+                out.slot(Pane, &state.0, |(), _| {});
+                out.slot(Pane, &state.1, |(), _| {});
+            }
+        }
+
+        let mut state = (Slot::empty(), Slot::empty());
+        state.0.present(());
+        state.1.present(());
+        let mut driven = Driven::new(Twins, state);
+
+        assert_eq!(
+            driven.send(()).teardowns,
+            vec![ScopePath::empty().prefixed(Pane)]
+        );
+    }
+
     // Rows that tear nothing down.
     #[test]
     fn an_update_that_removes_nothing_yields_no_teardown() {

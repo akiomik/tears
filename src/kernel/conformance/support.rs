@@ -509,8 +509,9 @@ impl Latch {
 ///
 /// These four, with the report count [`Journal`] keeps beside them, are the
 /// whole application surface a pass touches, so this is what pins delivery,
-/// rendering, and re-evaluation without any probe inside the kernel — and it is the *only* render observation there is, the driver
-/// owning its terminal and reporting nothing about frames (RFC 0008 §9.11).
+/// rendering, and re-evaluation without any probe inside the kernel — and it
+/// is the *only* render observation there is, the driver owning its terminal
+/// and reporting nothing about frames (RFC 0008 §9.11).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
     /// `init` ran.

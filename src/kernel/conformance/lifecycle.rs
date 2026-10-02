@@ -24,7 +24,7 @@
 //! | INV-LC1 (rendering and re-evaluation only in the frame stage, at most one of each) | this file, `a_multi_message_batch_renders_once_and_re_evaluates_once_after_it` |
 //! | INV-LC2 (render before re-evaluation, both on the pass's current state) | this file, plus `kernel`'s own order and `without_redraw` rows |
 //! | INV-LC3 (construction is inert) | this file, `constructing_a_driver_starts_nothing_and_dropping_it_winds_nothing_down` |
-//! | INV-LC4 (bootstrap intake; first render eligible unconditionally) | `kernel`'s intake row, plus this file's `without_redraw` init row |
+//! | INV-LC4 (bootstrap intake; first render eligible unconditionally) | `kernel`'s intake row, plus this file's `without_redraw` init row; the first live-instance report's place is `tests/lifecycle.rs`'s `a_panic_in_the_first_report_leaves_the_init_command_undispatched` |
 //! | INV-LC5 (controlled causes, with the return classification) | `termination under owned work`, above |
 //! | INV-LC6 (abrupt causes, one row per cause and call site) | `both panic classes` and `termination under owned work`, above, plus this file's `view`, `subscriptions` (both call sites), lazy-constructor, and never-run rows; `instances` (both call sites) is `tests/lifecycle.rs`'s |
 //! | INV-LC7 (two-stage postcondition, bounded settle, gauges zero) | `kernel`'s settle row, at the gauge surface — a narrowing: one row reads the invariant's three clauses at their common observable, the post-settle gauge state, rather than one row per clause |

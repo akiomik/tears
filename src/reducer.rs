@@ -304,7 +304,11 @@ pub trait Reducer {
     ///     type State = Keyed<u8, u32>;
     ///     type Message = (u8, ());
     ///
-    ///     fn reduce(&self, rows: &mut Keyed<u8, u32>, (key, message): (u8, ())) -> Command<(u8, ())> {
+    ///     fn reduce(
+    ///         &self,
+    ///         rows: &mut Keyed<u8, u32>,
+    ///         (key, message): (u8, ()),
+    ///     ) -> Command<(u8, ())> {
     ///         rows.get_mut(&key).map_or_else(Command::none, |row| {
     ///             Counter.reduce(row, message).map(move |m| (key, m)).scoped(key)
     ///         })

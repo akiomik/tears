@@ -91,9 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
 - When one update removes several instances, the teardowns the runtime adds
-  for them come in the order the state held them before the update rather
-  than the order they were removed in, which can change the order their
-  cleanup hooks start in
+  for them come in the order `instances` reported them before the update
+  rather than the order they were removed in, which can change the order
+  their cleanup hooks start in
 
 ### Fixed
 
