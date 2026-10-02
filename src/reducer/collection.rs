@@ -98,8 +98,10 @@ impl<K: ScopeValue, V> Keyed<K, V> {
     /// Inserts `value` under `key`, returning the instance it replaced.
     ///
     /// Inserting always begins a new occupancy, over an occupied key too:
-    /// the old instance is torn down and the new one starts fresh (RFC 0014
-    /// §2.5), on the timing
+    /// where the collection is reported
+    /// ([`Reducer::instances`](crate::reducer::Reducer::instances)), the old
+    /// instance is torn down and the new one starts fresh (RFC 0014 §2.5), on
+    /// the timing
     /// [`ReducerExt::for_each`](crate::reducer::ReducerExt::for_each)
     /// states. The position in the iteration order is the old instance's, so
     /// a replacement does not reorder the collection.
@@ -217,8 +219,9 @@ impl<S> Slot<S> {
     /// Puts `value` in the slot, returning the instance it replaced.
     ///
     /// Presenting always begins a new occupancy, over an occupied slot too,
-    /// for the reason [`Keyed::insert`] does: replacement is a teardown of the
-    /// old instance and a fresh start for the new one, on the timing
+    /// for the reason [`Keyed::insert`] does: where the slot is reported,
+    /// replacement is a teardown of the old instance and a fresh start for
+    /// the new one, on the timing
     /// [`ReducerExt::presented`](crate::reducer::ReducerExt::presented)
     /// states. Drawing the identity is why this is not a `const fn`.
     pub fn present(&mut self, value: S) -> Option<S> {
