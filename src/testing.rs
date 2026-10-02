@@ -373,8 +373,8 @@ where
     }
 
     /// Applies `msg` through [`Application::update`] and enqueues the
-    /// returned command's effects, with a teardown of each instance the
-    /// update removed (RFC 0014 INV-RC3).
+    /// returned command's effects, with the teardowns reconciliation adds for
+    /// the instances that left the report (RFC 0014 INV-RC3).
     ///
     /// `send` is one synchronous `update` call plus bookkeeping: it spawns no
     /// task and delivers no pending output. Deliverable output left by

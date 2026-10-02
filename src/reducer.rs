@@ -9,7 +9,8 @@
 //! [`Reducer::subscriptions`] is a pure function of state exactly as
 //! RFC 0012 INV-SE6 states for `Application::subscriptions`: the runtime may
 //! evaluate it at any re-evaluation frequency, so it must not carry
-//! per-evaluation effects of its own.
+//! per-evaluation effects of its own. [`Reducer::instances`] is pure in the
+//! state on the same terms, and is read after every update.
 //!
 //! Views are root-level by design. [`Reducer`] deliberately has no `view`;
 //! only [`Program`] does. Composing child views is ordinary function calls
@@ -276,8 +277,9 @@ pub trait Reducer {
     /// you.
     ///
     /// Being required makes every implementor face this; nothing checks the
-    /// report, and an occupancy never reported originates no teardown of its
-    /// own.
+    /// report. An occupancy never reported originates no teardown of its
+    /// own, and one reported only on some calls is torn down on the others
+    /// while the state still holds it.
     ///
     /// A reducer that reduces a child per row, scoping each row's commands
     /// under its key, reports the rows and forwards the child's report
