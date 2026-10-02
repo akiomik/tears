@@ -2419,9 +2419,9 @@ mod tests {
         }
     }
 
-    fn assert_nothing_deliverable(store: &mut TestStore<Board>, what: &str) {
+    fn assert_nothing_deliverable(store: &mut TestStore<Board>, row: u8, what: &str) {
         let failure = catch_unwind(AssertUnwindSafe(|| {
-            store.receive(BoardMsg::Row(1, RowMsg::Done));
+            store.receive(BoardMsg::Row(row, RowMsg::Done));
         }));
         assert!(
             failure_message(failure).contains("no pending effects"),
@@ -2435,7 +2435,7 @@ mod tests {
     fn removing_a_row_held_from_new_tears_down_its_pending_output() {
         let mut store = TestStore::<Board>::new((true, Arc::default()));
         store.send(BoardMsg::Close(1));
-        assert_nothing_deliverable(&mut store, "the closed row's output was torn down");
+        assert_nothing_deliverable(&mut store, 1, "the closed row's output was torn down");
         store.finish();
     }
 
@@ -2457,7 +2457,7 @@ mod tests {
             cleaned.load(Ordering::SeqCst),
             "the removal ran the cleanup"
         );
-        assert_nothing_deliverable(&mut store, "the closed row's output was torn down");
+        assert_nothing_deliverable(&mut store, 2, "the closed row's output was torn down");
         store.finish();
     }
 
