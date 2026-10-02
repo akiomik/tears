@@ -108,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their commands and cleanup registrations stayed under the paths they left,
   and the commands' output went to whichever instance held that path, or
   nowhere if none did (#422)
+- An occupant that replaced another while the initial state was built (in
+  `init` or `Application::new`) no longer has its work torn down at the
+  first message that reaches its boundary. Before, the replacement's
+  deferred teardown stopped what the initial command and subscriptions had
+  started under that path, and ran the cleanup hooks registered there
 
 ## [0.11.1] - 2026-09-11
 
