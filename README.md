@@ -39,7 +39,7 @@ See the [Optional Features](#optional-features) section for information about en
 
 ### Minimal Example
 
-A tears application implements the `Application` trait, which has four required methods ([Composing Reducers](#composing-reducers) is the other way to write a program):
+A tears application implements the `Application` trait, which has five required methods ([Composing Reducers](#composing-reducers) is the other way to write a program):
 
 ```rust
 use tears::prelude::*;

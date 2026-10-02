@@ -54,7 +54,8 @@
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![]
 //!     }
-//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+//!
+//!     fn instances(&self, _out: &mut Instances<'_>) {}
 //! }
 //!
 //! #[tokio::main]

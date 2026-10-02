@@ -21,7 +21,8 @@
 //!
 //! There are two ways to write such a program, over one execution path.
 //! [`Application`] and its [`Runtime`] entry point are the facade: one type
-//! holds the state and supplies `new`, `update`, `view` and `subscriptions`.
+//! holds the state and supplies `new`, `update`, `view`, `subscriptions` and
+//! `instances`.
 //! Under them is the [`reducer`] core, where [`Reducer`](reducer::Reducer)
 //! is the state transition and a stack of composition combinators closes
 //! into a [`Program`](reducer::Program). [`ProgramRuntime`] runs any
@@ -41,8 +42,11 @@
 //!   [`SubscriptionSource`] implementation and identified by a
 //!   [`SubscriptionId`]
 //! - [`install_panic_hook`]: Restores the terminal if the application panics
-//! - [`reducer::Reducer`]: A state transition and the subscriptions that
-//!   state declares
+//! - [`reducer::Reducer`]: A state transition, the subscriptions that state
+//!   declares, and the instances it holds
+//! - [`Instances`]: What [`Application::instances`] and
+//!   [`reducer::Reducer::instances`] report the instances a state holds
+//!   through
 //! - [`reducer::Program`]: A reducer that can be run — it produces its
 //!   initial state and renders
 //! - [`ProgramRuntime`]: Runs any [`reducer::Program`]
@@ -83,7 +87,8 @@
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![]
 //!     }
-//! #     fn instances(&self, _out: &mut tears::prelude::Instances<'_>) {}
+//!
+//!     fn instances(&self, _out: &mut Instances<'_>) {}
 //! }
 //! ```
 //!
