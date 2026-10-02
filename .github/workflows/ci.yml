@@ -361,8 +361,8 @@ jobs:
       # identical, as the bench job above does.
       - name: Run doc tests
         run: just test-doc
-      # Guards the `include` entry that keeps `include_str!` resolvable once
-      # published; the recipe explains why nothing else catches it. Invoked
+      # Guards a migration guide's `include` entry, which keeps its
+      # `include_str!` resolvable once published; the recipe explains why nothing else catches it. Invoked
       # via `just` so the local and CI invocations are identical, and so the
       # feature list lives in one place rather than being restated here.
       - name: Run doc tests against the packaged crate

@@ -70,4 +70,4 @@ which of these changes reaches me, and how do I tell?
 
 | Guide | Covers |
 | --- | --- |
-| [0.10.x → 0.11.0](0.10-to-0.11.md) | Reducer-first core: frame rate removal, one-lane delivery, `EffectCommand`, quit ordering |
+| [0.10.x → 0.11.0](0.10-to-0.11.md) | Reducer-first core: frame rate removal, one-lane delivery, `EffectCommand`, quit ordering. No longer compiled: kept as written for 0.11's API |
