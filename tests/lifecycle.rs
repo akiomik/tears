@@ -952,7 +952,9 @@ async fn dropping_a_never_run_runtime_winds_down_nothing() {
 // state leaves the init command undispatched. The producer-gauge event, read
 // through INV-LC3's recorder setup, is what tells the order apart: an init
 // command dispatched and then aborted by the unwind never starts its effect
-// either, but it does raise the gauge.
+// either, but it does raise the gauge. INV-LC6's bootstrap `instances` row
+// above reaches the same panic for its own invariant, which asks for one row
+// per cause and call site; this row is INV-LC4's.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_panic_in_the_first_report_leaves_the_init_command_undispatched() -> Result<()> {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");

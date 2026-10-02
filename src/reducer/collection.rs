@@ -105,6 +105,11 @@ impl<K: ScopeValue, V> Keyed<K, V> {
     /// [`ReducerExt::for_each`](crate::reducer::ReducerExt::for_each)
     /// states. The position in the iteration order is the old instance's, so
     /// a replacement does not reorder the collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let id = InstanceId::draw();
         if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) {
@@ -184,6 +189,11 @@ impl<K: ScopeValue, V> FromIterator<(K, V)> for Keyed<K, V> {
     /// Builds a collection from `(key, value)` pairs, each row a new
     /// occupancy; a later pair for a key already collected replaces the
     /// earlier one, as [`insert`](Keyed::insert) would.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
         let mut collection = Self::new();
         for (key, value) in pairs {
@@ -224,6 +234,11 @@ impl<S> Slot<S> {
     /// the new one, on the timing
     /// [`ReducerExt::presented`](crate::reducer::ReducerExt::presented)
     /// states. Drawing the identity is why this is not a `const fn`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
     pub fn present(&mut self, value: S) -> Option<S> {
         self.id = InstanceId::draw();
         self.value.replace(value)
