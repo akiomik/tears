@@ -278,7 +278,7 @@ impl<P: Program> Kernel<P> {
     /// consumes the render it left pending.
     ///
     /// Intake is RFC 0011 §3.2's, unchanged — dispatch the init command,
-    /// then the initial reconcile, then mark the first redraw
+    /// then the initial subscription reconcile, then mark the first redraw
     /// unconditionally and independently of the init command's own redraw
     /// directive. That leaves work outstanding, so INV-RC16's park condition
     /// ("nothing to make progress on") is not met and the kernel does not
@@ -288,9 +288,10 @@ impl<P: Program> Kernel<P> {
     /// (RFC 0008 §9.5).
     ///
     /// A quit dispatched by `init` short-circuits synchronously: the
-    /// reconcile is skipped, no subscription source starts, no render
-    /// happens, the continuation pass never runs, and the kernel never
-    /// reaches steady state (RFC 0014 §6.2, amending RFC 0011's bootstrap).
+    /// subscription reconcile is skipped, no subscription source starts, no
+    /// render happens, the continuation pass never runs, and the kernel
+    /// never reaches steady state (RFC 0014 §6.2, amending RFC 0011's
+    /// bootstrap).
     ///
     /// # Errors
     ///

@@ -109,7 +109,7 @@ pub fn report<R: Reducer>(reducer: &R, state: &R::State) -> Report {
 /// Its two methods are the whole seam: every update a kernel or a store
 /// drives reaches its dispatch or intake through [`reconcile`](Self::reconcile),
 /// which reads the report itself, so no caller can compare against a stale
-/// report or forget to read one.
+/// report.
 #[derive(Default)]
 pub struct LiveInstances {
     previous: Report,
@@ -127,8 +127,8 @@ impl LiveInstances {
     /// holds and this one lacks, skipping a path under another such path,
     /// then keeps this report as the next comparison's baseline.
     ///
-    /// The teardowns come in the order the previous report first named each
-    /// path, so one script yields one sequence.
+    /// The teardowns come in the previous report's order, so one script
+    /// yields one sequence.
     ///
     /// It reads the whole report on every update, a cost RFC 0014 §13.6
     /// accepts until it is measured.
@@ -145,8 +145,8 @@ impl LiveInstances {
     }
 }
 
-/// Each path under which `previous` holds a pair `current` lacks, once, in
-/// the order `previous` first names it, without the paths another of them is
+/// Each path under which `previous` holds a pair `current` lacks, once, at
+/// the position of the first such pair, without the paths another of them is
 /// a proper prefix of. The sets are consulted for membership only, never
 /// iterated, so the order is the report's.
 fn disappeared_outermost(previous: &Report, current: &Report) -> Vec<ScopePath> {

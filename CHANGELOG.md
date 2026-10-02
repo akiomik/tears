@@ -90,9 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   }
   ```
 
-- When one update removes several instances, their teardowns are issued in
-  the order the state held them before the update rather than the order they
-  were removed in, so their cleanup hooks start in that order
+- When one update removes several instances, the teardowns the runtime adds
+  for them come in the order the state held them before the update rather
+  than the order they were removed in, which can change the order their
+  cleanup hooks start in
 
 ### Fixed
 
@@ -104,8 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a `Keyed` or `Slot` to another path, or swapping two, now tears
   down the instances at the paths they left: their commands are cancelled
   and their cleanup hooks run, although the state still holds them. Before,
-  their work stayed under the old path, and its output reached whichever
-  instance held that path next (#422)
+  their commands and cleanup registrations stayed under the paths they left,
+  and the commands' output went to whichever instance held that path, or
+  nowhere if none did (#422)
 
 ## [0.11.1] - 2026-09-11
 

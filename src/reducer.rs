@@ -269,8 +269,51 @@ pub trait Reducer {
     /// command under a row or occupant reports nothing — write an empty
     /// body — even when its state holds a [`Keyed`] or [`Slot`] that a
     /// combinator built on it reduces. The combinators do all of this for
-    /// you. Nothing detects an omission: an occupancy never reported
-    /// originates no teardown of its own.
+    /// you.
+    ///
+    /// Being required makes every implementor face this; nothing checks the
+    /// report, and an occupancy never reported originates no teardown of its
+    /// own.
+    ///
+    /// A reducer that reduces a child per row, scoping each row's commands
+    /// under its key, reports the rows and forwards the child's report
+    /// beneath each:
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    /// use tears::reducer::{Keyed, Reducer};
+    ///
+    /// struct Counter;
+    ///
+    /// impl Reducer for Counter {
+    ///     type State = u32;
+    ///     type Message = ();
+    ///
+    ///     fn reduce(&self, count: &mut u32, (): ()) -> Command<()> {
+    ///         *count += 1;
+    ///         Command::none()
+    ///     }
+    ///
+    ///     fn instances(&self, _count: &u32, _out: &mut Instances<'_>) {}
+    /// }
+    ///
+    /// struct Counters;
+    ///
+    /// impl Reducer for Counters {
+    ///     type State = Keyed<u8, u32>;
+    ///     type Message = (u8, ());
+    ///
+    ///     fn reduce(&self, rows: &mut Keyed<u8, u32>, (key, message): (u8, ())) -> Command<(u8, ())> {
+    ///         rows.get_mut(&key).map_or_else(Command::none, |row| {
+    ///             Counter.reduce(row, message).map(move |m| (key, m)).scoped(key)
+    ///         })
+    ///     }
+    ///
+    ///     fn instances(&self, rows: &Keyed<u8, u32>, out: &mut Instances<'_>) {
+    ///         out.keyed(rows, |row, out| Counter.instances(row, out));
+    ///     }
+    /// }
+    /// ```
     fn instances(&self, state: &Self::State, out: &mut Instances<'_>);
 }
 

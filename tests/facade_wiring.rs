@@ -140,6 +140,10 @@ impl State {
         self.journal.record("subscriptions");
         vec![Subscription::from(OneTick("tick"))]
     }
+
+    fn report(&self) {
+        self.journal.record("instances");
+    }
 }
 
 // --- the facade's side ----------------------------------------------------
@@ -167,7 +171,9 @@ impl Application for FacadeApp {
         self.0.declared()
     }
 
-    fn instances(&self, _out: &mut Instances<'_>) {}
+    fn instances(&self, _out: &mut Instances<'_>) {
+        self.0.report();
+    }
 }
 
 // --- the hand-written program's side --------------------------------------
@@ -186,7 +192,9 @@ impl Reducer for HandWritten {
         state.declared()
     }
 
-    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    fn instances(&self, state: &Self::State, _out: &mut Instances<'_>) {
+        state.report();
+    }
 }
 
 impl Program for HandWritten {
@@ -233,9 +241,9 @@ async fn the_facade_drives_every_stage_and_classifies_the_quit() -> Result<()> {
         "the declared subscription was admitted and its output delivered: {entries:?}"
     );
     assert_eq!(
-        entries.last().map(String::as_str),
-        Some("update:stop"),
-        "the quit applied at its own dispatch, with nothing after it: {entries:?}"
+        entries[entries.len().saturating_sub(2)..],
+        ["update:stop", "instances"],
+        "the quit applied at its own dispatch, with nothing after its update's report: {entries:?}"
     );
     assert!(
         entries.iter().any(|entry| entry.starts_with("view:")),
