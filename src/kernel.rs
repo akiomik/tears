@@ -740,9 +740,11 @@ mod tests {
     ///
     /// The four calls pin the intake order and the stage order without any
     /// probe inside the kernel. `instances`, the fifth, is left unrecorded:
-    /// its place in the intake order is pinned by
+    /// its place at boot is pinned by
     /// `a_panic_in_the_first_report_leaves_the_init_command_undispatched` in
-    /// `tests/lifecycle.rs`.
+    /// `tests/lifecycle.rs`, and its place between `reduce` and the dispatch
+    /// by `a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`
+    /// in `conformance/combinator.rs`.
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Call {
         Init,

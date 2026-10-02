@@ -10,7 +10,8 @@
 //! RFC 0012 INV-SE6 states for `Application::subscriptions`: the runtime may
 //! evaluate it at any re-evaluation frequency, so it must not carry
 //! per-evaluation effects of its own. [`Reducer::instances`] is pure in the
-//! state on the same terms, and is read after every update.
+//! state on the same terms, and is read from the initial state and after
+//! every update.
 //!
 //! Views are root-level by design. [`Reducer`] deliberately has no `view`;
 //! only [`Program`] does. Composing child views is ordinary function calls
@@ -262,7 +263,10 @@ pub trait Reducer {
     ///
     /// - each row or occupant it qualifies commands under, a child's or its
     ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
-    ///   combinator built on it already reports it;
+    ///   combinator built on it already reports it. A row's work belongs to
+    ///   it only when scoped under the row's key itself, the value `keyed`
+    ///   reports; work scoped under any other segment is not torn down with
+    ///   the row;
     /// - the report of each reducer it calls `reduce` on, through the
     ///   projection it calls it with: beneath the row or occupant it calls it
     ///   for, under [`Instances::scoped`] when it calls it under a fixed
@@ -278,8 +282,8 @@ pub trait Reducer {
     ///
     /// Being required makes every implementor face this; nothing checks the
     /// report. An occupancy never reported originates no teardown of its
-    /// own, and one reported only on some calls is torn down on the others
-    /// while the state still holds it.
+    /// own, and one reported only on some calls is torn down when a report
+    /// first leaves it out, while the state still holds it.
     ///
     /// A reducer that reduces a child per row, scoping each row's commands
     /// under its key, reports the rows and forwards the child's report

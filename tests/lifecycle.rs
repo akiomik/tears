@@ -780,8 +780,9 @@ async fn a_bootstrap_instances_panic_propagates_and_starts_nothing() -> Result<(
 }
 
 // INV-LC6: same for a panic in `instances` at the steady call site, raised
-// only on the call after a processed message, before that message's command
-// is dispatched.
+// only on the call after a processed message. That message's `update`
+// returns no command, so this row pins the propagation and the
+// postconditions, not where the report sits relative to the dispatch.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_steady_instances_panic_propagates_and_reaches_both_postconditions() -> Result<()> {
     assert_transition_panic_tears_down(PanicSite::InstancesSteady, Reached::InitEffectAndSource)
