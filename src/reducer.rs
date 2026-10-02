@@ -340,7 +340,7 @@ pub trait Program: Reducer {
     /// Produces the initial state and the command dispatched at bootstrap.
     ///
     /// A quit returned here short-circuits bootstrap synchronously — the
-    /// initial reconcile does not run (RFC 0014 §6.2).
+    /// initial subscription reconcile does not run (RFC 0014 §6.2).
     fn init(&self, flags: Self::Flags) -> (Self::State, Command<Self::Message>);
 
     /// Renders the current state.

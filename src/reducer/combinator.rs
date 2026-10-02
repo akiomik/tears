@@ -64,11 +64,13 @@ use super::{Instances, Program, Reducer};
 
 /// The composition combinators, on every [`Reducer`].
 ///
-/// Each takes projections from the parent's state to the child's, and they
-/// are expected to select the same state every time. One that switches
-/// between states — the active one of several tabs, say — stops reporting
-/// the instances inside the state it left, and they are torn down although
-/// the parent still holds them.
+/// Each takes a pair of projections from the parent's state to the child's,
+/// one to read and one to write. Both are expected to select the same
+/// state, and to select it every time. What the read half does not select
+/// is not reported, so it is not torn down when removed; and a pair that
+/// switches between states — the active one of several tabs, say — stops
+/// reporting the instances inside the state it left, which are torn down
+/// although the parent still holds them.
 pub trait ReducerExt: Reducer + Sized {
     /// Composes one child under a fixed segment.
     ///

@@ -577,9 +577,10 @@ where
     /// This is the same *desired set* the runtime's subscription
     /// reconciliation computes as its input — not a prediction of which ids
     /// it spawns or already has running. Pure observation: no source's
-    /// stream is started, no reconciliation machinery runs, and no
+    /// stream is started, no subscription reconciliation runs, and no
     /// duplicate-ignored warning is emitted (that event belongs to the
-    /// runtime's reconciliation, which this call never invokes).
+    /// runtime's subscription reconciliation, which this call never
+    /// invokes).
     #[must_use]
     pub fn subscription_ids(&self) -> Vec<SubscriptionId> {
         let mut ids: Vec<SubscriptionId> = Vec::new();

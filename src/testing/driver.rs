@@ -664,9 +664,9 @@ impl<P: Program, B: Backend> TestDriver<P, B> {
     /// is in the state production reaches by the same route, and the next
     /// step names one of the three sources that can wake it. An init command
     /// carrying `Command::quit()` terminates during the init dispatch,
-    /// before the initial reconcile and before any render (RFC 0014 §6.2),
-    /// so the report carries the termination and the continuation pass never
-    /// ran.
+    /// before the initial subscription reconcile and before any render
+    /// (RFC 0014 §6.2), so the report carries the termination and the
+    /// continuation pass never ran.
     ///
     /// # Panics
     ///

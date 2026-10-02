@@ -135,8 +135,8 @@ pub struct StartedRun {
 /// What bootstrap started, in spawn order.
 #[derive(Debug)]
 pub struct BootReport {
-    /// The producer runs the init dispatch, the initial reconcile, and the
-    /// continuation pass started.
+    /// The producer runs the init dispatch, the initial subscription
+    /// reconcile, and the continuation pass started.
     pub producers: Vec<StartedRun>,
 }
 
