@@ -206,7 +206,7 @@
 //! [dashboard]: https://docs.rs/crate/tears/latest/source/examples/dashboard.rs
 //! [dashboard_composed]: https://docs.rs/crate/tears/latest/source/examples/dashboard_composed.rs
 
-// The three submodules are file organization, not a hierarchy a user needs
+// These three submodules are file organization, not a hierarchy a user needs
 // to navigate: everything public in them is re-exported here, so each item
 // has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
 // Path" and "Module Visibility").
@@ -264,9 +264,10 @@ pub trait Reducer {
     /// - each row or occupant it qualifies commands under, a child's or its
     ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
     ///   combinator built on it already reports it. A row's work belongs to
-    ///   it only when scoped under the row's key itself, the value `keyed`
-    ///   reports; work scoped under any other segment is not torn down with
-    ///   the row;
+    ///   it only when its path runs through the row's key, the value `keyed`
+    ///   reports, at the row's place in the stack. Work scoped there under
+    ///   another segment instead is not torn down with the row; segments
+    ///   added beneath the key are;
     /// - the report of each reducer it calls `reduce` on, through the
     ///   projection it calls it with: beneath the row or occupant it calls it
     ///   for, under [`Instances::scoped`] when it calls it under a fixed

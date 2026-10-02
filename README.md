@@ -237,7 +237,8 @@ with `Command::on_teardown`; the parent tracks none of it. `Runtime` runs an
 `Application` through an adapter on the same kernel as `ProgramRuntime`, so
 composing changes how a program is written, not how it is executed. An
 `Application` whose `update` calls a stack's `reduce` forwards the stack's
-report from `instances`; with an empty body there, nothing is torn down.
+report from `instances`; with an empty body there, a removed row gets no
+teardown of its own.
 
 The [`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/#composing-reducers)
 module docs say when composing is worth it and how it works.
