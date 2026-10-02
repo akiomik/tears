@@ -1,11 +1,11 @@
 //! The composition combinators, driven through the kernel.
 //!
 //! The unit rows beside the combinators themselves
-//! ([`crate::reducer::combinator`]) read a boundary's *command*: which
-//! carriers it qualified, which teardowns it merged. These rows read what
-//! the kernel then **does** with them — runs reclaimed, identities kept
-//! apart, successors started fresh — through the production dispatch path,
-//! pass-unit driven.
+//! ([`crate::reducer::combinator`]) read *commands*: which carriers a
+//! boundary qualified, and which teardowns reconciliation merged. These
+//! rows read what the kernel then **does** with them — runs reclaimed,
+//! identities kept apart, successors started fresh — through the production
+//! dispatch path, pass-unit driven.
 //!
 //! The program under test is a closed combinator stack
 //! ([`ReducerExt::into_program`]), so every row here is also the evidence
