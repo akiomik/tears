@@ -262,9 +262,10 @@ pub trait Reducer {
     /// `reduce` returns, placed by itself or by a reducer it calls:
     ///
     /// - each row or occupant it qualifies commands under, a child's or its
-    ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
-    ///   combinator built on it (one it is the parent of) already reports it
-    ///   at the path that work runs under. A row's work belongs to it only
+    ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless the
+    ///   report it gives already places it at the path that work runs under,
+    ///   through a reducer whose report it forwards or a combinator built on
+    ///   it (one it is the parent of). A row's work belongs to it only
     ///   when its path runs through the row's key, the value `keyed` reports,
     ///   at the row's place in the stack. Work scoped there under another
     ///   segment instead is not torn down with the row; segments added
