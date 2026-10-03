@@ -447,8 +447,9 @@ Contract:
   shares. `Keyed::insert` — into an absent or an occupied key —
   `Keyed::from_iter`, and `Slot::present` each create one; nothing else
   does, and no public surface reads, copies, or assigns an identity.
-  Mutating a row or an occupant in place (`get_mut`) keeps its identity,
-  and so does moving the collection value that holds it.
+  Mutating a row or an occupant in place (`get_mut`), its whole value
+  included, keeps its identity, and so does moving the collection value
+  that holds it.
 - **Live-instance reconciliation (INV-RC3).** `instances` reports the
   occupancies a state holds as (path, identity) pairs. The kernel or
   the store reads the first report from the state `init` returns; after
@@ -488,10 +489,13 @@ Contract:
   later holds that key. A state change made outside a `reduce` the
   kernel or the store drives — interior mutability, state shared with a
   background task — is seen only by a later reconciliation, if one runs.
-  And occupancies reported at one path are torn down together, because
-  teardown selects by prefix (RFC 0013 §3.1); sibling boundaries whose
-  keys or segments coincide in type and value report that way (issue
-  #424).
+  A teardown ends work, not occupancies: an occupancy still reported —
+  moved to another path, or kept beneath a disappearing one — keeps its
+  identity, while its runs under the vacated path end with that path's
+  teardown. And occupancies reported at one path are torn down together,
+  because teardown selects by prefix (RFC 0013 §3.1); sibling boundaries
+  whose keys or segments coincide in type and value report that way
+  (issue #424).
 - **Message routing is typed.** `extract` either claims a message for
   the child or returns it unchanged to the parent; a message for a
   child key absent from the collection is routed to nothing and
@@ -1239,6 +1243,12 @@ invariants of §12 are.
   one key leaves the key set unchanged, so the old instance's runs
   leak; excluded by INV-RC3's comparison of identities, under which the
   reinserted row is a different occupancy.
+- *Defaulted `instances`* — an empty default lets a hand-written
+  composition that holds a `Keyed` or `Slot` keep compiling and silently
+  stop tearing down its rows, and a default on `Application` alone
+  leaves the same hole in an application that reduces a stack inside
+  `update`. Rejected: every implementor writes the method, with an empty
+  body where it places no work.
 - *Boundary-local removal tracking* — a journal that the collection's
   removal methods record and its boundary drains after the parent's
   `reduce` passes every per-method test, and misses a reassigned
@@ -1343,16 +1353,15 @@ machine" invariant
 was dropped as implied by INV-RC1 (single execution path) plus
 INV-LC9; kept separate is INV-RC13's same-topology claim, which
 INV-RC1 does not imply (it quantifies over the test topology, not the
-facade). For §2.5's reconciliation: what a particular removal tears down
-— a reassigned, moved, or nested collection, a pair that reappears —
-is not restated, since INV-RC3's comparison and RFC 0013 §3.1's prefix
-selection imply it; the uniqueness of occupancy identities gets no
-invariant of its own, since §2.5 states it and INV-RC3's structural
-review covers the sites that create one; kept separate is INV-RC3a,
-which INV-RC3 does not imply — INV-RC3 quantifies over the pairs
-reported, INV-RC3a over which pairs must be. The teardown order is
-pinned only as reproducible, which is what INV-RC14 and RFC 0008 INV-T4
-need.
+facade). For §2.5's reconciliation: what a particular removal tears
+down — a reassigned collection, a pair that reappears — is not restated,
+since INV-RC3's comparison and RFC 0013 §3.1's prefix selection imply
+it; the uniqueness of occupancy identities gets no invariant of its own,
+since §2.5 states it and INV-RC3's structural review covers the sites
+that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
+— INV-RC3 quantifies over the pairs reported, INV-RC3a over which pairs
+must be. The teardown order is pinned only as reproducible, which is
+what INV-RC14 and RFC 0008 INV-T4 need.
 
 ## 12. Invariants
 
@@ -1395,15 +1404,15 @@ regression suite.
   them an unrelated update after a removal, which a reconciler that
   never advances its previous report fails; rows confirming that what
   the update's own command carries — a teardown of the same path,
-  `without_redraw` — is kept; and a repeat row, in which one script that
-  removes sibling occupancies, run twice, yields one teardown sequence.
-  Structural: review of the kernel's and the store's dispatch sites,
-  confirming that each command a `reduce` returns reaches dispatch
-  or intake only through reconciliation; of the sites §2.5 names as
-  creating an identity, confirming each draws one no earlier occupancy
-  held; and of the reconciliation step, confirming its teardown order
-  takes nothing from a randomized iteration, for which the repeat row is
-  the regression check.
+  `without_redraw` — is kept; and a repeat row, in which one script
+  that removes eight sibling occupancies, run twice, yields one teardown
+  sequence. Structural: review of the kernel's and the store's dispatch
+  sites, confirming that each command a `reduce` returns reaches
+  dispatch or intake only through reconciliation; of the sites §2.5
+  names as creating an identity, confirming each draws one no earlier
+  occupancy held; and of the reconciliation step, confirming its
+  teardown order takes nothing from a randomized iteration, for which
+  the repeat row is the regression check.
 - **INV-RC3a — the reporting obligation.** §2.5's obligation on
   `instances`. Structural, as INV-SE6 is, because no oracle independent
   of the report can find an occupancy it omits: the rustdoc of
@@ -1625,14 +1634,13 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2–INV-RC4, INV-RC3 then
-checking the removal journals that §2.5's live-instance
-reconciliation replaced), the observability vocabulary
+full combinator surface (INV-RC2, INV-RC4, and the removal
+journals' completeness), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
 the remaining §12 behavioral rows.
-Neither tier includes the reconciliation, whose INV-RC3
-and INV-RC3a were implemented after mainlining. **Order**,
+Neither tier includes §2.5's live-instance reconciliation
+(INV-RC3, INV-RC3a), implemented after mainlining. **Order**,
 as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so
 §9's rows 1–12 stood on the owner documents before the kernel

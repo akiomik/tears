@@ -750,10 +750,11 @@ applies).
 ### 5.2 Redraw directive (RFC 0002)
 
 `redraw_requested()` reports the folded redraw directive of the command
-returned by the most recent step (a `send`, or the `update` call inside
-a `receive` / `receive_matching`). Before any step completes it reports
-the init command's directive. `receive_quit` applies no message and is
-not a step: after it, `redraw_requested` keeps reporting the previous
+the most recent step took in (§3.2; a `send`, or the `update`
+call inside a `receive` / `receive_matching`). Before any
+step completes it reports the init command's directive.
+`receive_quit` applies no message and is not a step:
+after it, `redraw_requested` keeps reporting the previous
 step's directive. This makes `without_redraw` decisions assertable per
 transition, which is the granularity RFC 0002 defines them at.
 

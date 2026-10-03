@@ -267,7 +267,7 @@ phase as explicit cancels, and that phase precedes every spawn of the
 same command (RFC 0003 §4.3's phase order, extended to batch children
 by RFC 0014 §3.4). The dispatch is one ordered sequence — cancels,
 then teardowns, then spawns, then cleanup registrations, then a
-synchronous quit — and nothing reconciles the target slot ahead of it:
+synchronous quit — and nothing settles the target slot ahead of it:
 what a spawn reads is the occupancy the cancel phase has already
 left. Application is commutative with
 the same command's explicit cancels — both are strict, idempotent
@@ -571,8 +571,10 @@ full.
   kernel (RFC 0006 §5.2). The **observable** half —
   fresh-slot spawn, inert late exit, inert late send — is
   **behavioral**: the fresh-start rows below, scripted per case. The
-  **absence** half — no scope-generation state exists and none is
-  introduced, so no residue can be observed at all — is
+  **absence** half — no scope-generation state exists
+  and none is introduced (RFC 0014 §2.5's previous report
+  decides only which teardowns an update issues, and is not
+  such state), so no residue can be observed at all — is
   **structural**, an inventory review of the runtime's per-scope
   state at the teardown application and spawn sites, because no finite
   set of fresh-start scripts proves it: an implementation that taints
