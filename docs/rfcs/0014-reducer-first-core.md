@@ -12,13 +12,10 @@
   production arbitration policy, and the remaining §12 behavioral rows
   — is closed, and its checks are the regression suite. The §9
   supersessions and amendments landed on their owner documents at
-  acceptance, in §13.1's order, ahead of that mainlining. One part is
-  accepted and not implemented: the live-instance reconciliation of
-  §2.5 and INV-RC3/INV-RC3a, which replaces the removal journals the
-  crate still drains (issue #422 records the defect it closes), together
-  with the edits it makes to RFC 0005, RFC 0008, RFC 0011, and RFC 0013.
+  acceptance, in §13.1's order, ahead of that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
-  (RFC 0010 §1.8)
+  (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
+  (breaking)
 - Scope: the reducer-first core protocol (`Reducer`/`Program`) and the
   `Application` facade adapter, with the facade-preservation decision
   (§2.4); composition combinators with automatic scope application and
@@ -63,16 +60,8 @@
   composition layer's teardowns share is RFC 0013's, and the stage-3
   `TestDriver` is RFC 0008's, entered by that RFC's amendment (§13.2, §9
   row 11). Landed with the implementation, after §13.1's gate. The
-  live-instance reconciliation carries its own entry when it lands:
-  `Added` — `Instances`, the collector `instances` reports through;
-  `Changed` (breaking) — `Reducer` and `Application` gain a required
-  `instances` method — empty for an implementor that places no work
-  under a segment, reporting and forwarding for one that does — a
-  removal is torn down in the dispatched command rather than in
-  `reduce`'s return value, and `Slot::present` stops being `const`,
-  since presenting begins an occupancy and draws its identity (§2.5);
-  `Fixed` — reassigning a collection, and mutating one from above its
-  boundary, no longer leaks the removed instances' runs.
+  live-instance reconciliation carries its own entries, in 0.12.0's
+  section.
 
 ## Summary
 
@@ -273,10 +262,14 @@ The adapter is a mapping and nothing else: the application value *is*
 the state, `update` *is* `reduce`. `Application` carries a required
 `instances(&self, out: &mut Instances<'_>)`, because an application can
 hold a `Keyed` or `Slot` and reduce a combinator stack over it inside
-`update`; the adapter forwards it, and §2.5 states what it owes. Every
-kernel concern and every phase step executes identical code for
-`Application` programs and composed programs (INV-RC1 enumerates the
-concern set); the facade has no dedicated channel, branch, or phase.
+`update`; the adapter forwards it, and §2.5 states what it owes.
+`Instances`' canonical public path is the crate root, a companion of
+`Application::instances` in the sense the API guidelines give the word,
+and it is in the prelude: every application writes it out in that
+method's signature. Every kernel concern and every phase step executes
+identical code for `Application` programs and composed programs (INV-RC1
+enumerates the concern set); the facade has no dedicated channel,
+branch, or phase.
 
 ### 2.3 Advanced entry point
 
@@ -349,12 +342,14 @@ pub struct Slot<S> { /* at most one occupancy */ }
 pub struct Instances<'a> { /* opaque, append-only */ }
 
 impl Instances<'_> {
-    pub fn scoped<Seg: ScopeValue>(&mut self, seg: Seg,
-        visit: impl FnOnce(&mut Instances<'_>));
+    pub fn scoped<Seg>(&mut self, seg: Seg,
+        visit: impl FnOnce(&mut Instances<'_>))
+    where Seg: Eq + Hash + Send + Sync + 'static;
     pub fn keyed<K: ScopeValue, V>(&mut self, rows: &Keyed<K, V>,
         visit: impl FnMut(&V, &mut Instances<'_>));
-    pub fn slot<Seg: ScopeValue, S>(&mut self, seg: Seg, slot: &Slot<S>,
-        visit: impl FnOnce(&S, &mut Instances<'_>));
+    pub fn slot<Seg, S>(&mut self, seg: Seg, slot: &Slot<S>,
+        visit: impl FnOnce(&S, &mut Instances<'_>))
+    where Seg: Eq + Hash + Send + Sync + 'static;
 }
 
 pub trait ReducerExt: Reducer + Sized {
@@ -498,24 +493,30 @@ Contract:
   executes no side effects and reads no external mutable state; it is
   called for the first report and after every update the kernel or the
   store drives, and nowhere else. What a reducer owes follows from where
-  it places work. One that qualifies commands — a child's or its own —
-  with a fixed segment, a row's key, or a slot's segment reports each
-  row or occupant it places work under through `keyed` or `slot`, and
-  forwards, under each segment, the report of the child it reduces
-  there, through the projection pair it reduces that child with — for
-  every such row, occupant, and child the state holds, whether or not
-  the last message reached it, and whether or not it declares any
-  subscription. One that places no work under a segment owes no report,
-  even when its state holds a `Keyed` or `Slot` that a combinator
-  reduces. The combinators meet this themselves, as they meet INV-RC2:
-  each reports its parent composition and its child's occupancies under
-  its boundary (`scoped` for `scope`, `keyed` for `for_each`, `slot` for
-  `presented`). Requiring the method makes every implementor face the
-  obligation; it does not check the report. The runtime does not detect
-  an omission: an occupancy never reported originates no teardown of its
-  own, though another path's teardown can still select its runs, and one
-  reported only intermittently is torn down while still in the state.
-  §11 records the designs rejected in favor of this one.
+  it places work, by itself or through a reducer it reduces. One that
+  qualifies commands — a child's or its own — with a row's key or a
+  slot's segment reports each row or occupant it places work under
+  through `keyed` or `slot`, unless a combinator built on it already
+  reports that row or occupant. It forwards the report of each reducer
+  it reduces, through the projection pair it reduces that reducer with:
+  beneath the row or occupant it reduces it for, under `scoped` when it
+  reduces it under a fixed segment, and as it is when it reduces it
+  under none, as a reducer that hands its whole `reduce` to a combinator
+  stack does. It owes this for every such row and occupant the state
+  holds and every reducer it reduces, whether or not the last message
+  reached it, and whether or not it declares any subscription. One that
+  reduces no other reducer and qualifies no command under a row or
+  occupant owes no report, even when its state holds a `Keyed` or `Slot`
+  that a combinator built on it reduces. The combinators meet this
+  themselves, as they meet INV-RC2: each reports its parent composition
+  and its child's occupancies under its boundary (`scoped` for `scope`,
+  `keyed` for `for_each`, `slot` for `presented`). Requiring the method
+  makes every implementor face the obligation; it does not check the
+  report. The runtime does not detect an omission: an occupancy never
+  reported originates no teardown of its own, though another path's
+  teardown can still select its runs, and one reported only
+  intermittently is torn down while still in the state. §11 records the
+  designs rejected in favor of this one.
 - **What reconciliation does not reach.** Three classes, as negative
   space. Work an update's command carries for an occupancy whose pair is
   not in the report that update leaves — one inserted and removed within
@@ -1218,9 +1219,9 @@ the driver drives the kernel itself.
 ## 9. Supersessions and amendments
 
 Rows 1–12 landed on their owner documents with this RFC's acceptance,
-ahead of the mainlining §13.1's second tier gated; row 13 accompanies
-§2.5's live-instance reconciliation, which the header records as not
-implemented. Each row names the owner document that edits in place.
+ahead of the mainlining §13.1's second tier gated; row 13 landed with
+§2.5's live-instance reconciliation. Each row names the owner document
+that edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
@@ -1418,9 +1419,7 @@ kernel claims and the twelve-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
 below, which gated implementation mainlining rather than acceptance.
-Both tiers are met, and both are the regression suite now — except
-INV-RC3's and INV-RC3a's rows, which accompany §2.5's live-instance
-reconciliation and wait for its implementation.
+Both tiers are met, and both are the regression suite now.
 
 - **INV-RC1 — single execution path.** For every kernel concern — state
   ownership, lane topology, input delivery, quit delivery, park and
@@ -1486,20 +1485,21 @@ reconciliation and wait for its implementation.
   `Reducer` and `Application` and pure — the same state reports the same
   pairs in the same order, with no side effects and no reads of external
   mutable state — and a reducer reports every row and occupant it places
-  work under and forwards the report of every child it reduces, through
-  the projection pair and under the segments it uses, whatever route the
-  last message took (§2.5). Its two halves take different classes. The
-  combinators' half is behavioral: nested stacks report each occupancy
-  under the path INV-RC2 qualifies its child's carriers with, including
-  an occupancy under a child the last message did not reach. The half a
-  hand-written composition owes is structural on the crate side, as
-  INV-SE6 is: the obligation is carried by the rustdoc of
-  `Reducer::instances` and `Application::instances` citing this RFC, and
-  a review of the crate's own composition sites — `Scoped`, `ForEach`,
-  `Presented`, `IntoProgram`, `AppProgram` — confirms each forwards. No
-  check reaches an application's own composition, since no oracle
-  independent of the report can find an occupancy it omits; §2.5 states
-  what an omission costs.
+  work under that no combinator built on it already reports, and
+  forwards the report of every reducer it reduces, through the
+  projection pair and under the segments it uses, or under none when it
+  adds none, whatever route the last message took (§2.5). Its two halves
+  take different classes. The combinators' half is behavioral: nested
+  stacks report each occupancy under the path INV-RC2 qualifies its
+  child's carriers with, including an occupancy under a child the last
+  message did not reach. The half a hand-written composition owes is
+  structural on the crate side, as INV-SE6 is: the obligation is carried
+  by the rustdoc of `Reducer::instances` and `Application::instances`
+  citing this RFC, and a review of the crate's own composition sites —
+  `Scoped`, `ForEach`, `Presented`, `IntoProgram`, `AppProgram` —
+  confirms each forwards. No check reaches an application's own
+  composition, since no oracle independent of the report can find an
+  occupancy it omits; §2.5 states what an omission costs.
 - **INV-RC4 — multi-keyed lowering.** Batch children lower to
   independent entries; the combined cancel phase precedes every spawn
   of the same command; the §3.4 interaction rules hold. Behavioral:
@@ -1708,9 +1708,7 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2–INV-RC4, apart from the INV-RC3 and
-INV-RC3a rows of §2.5's live-instance reconciliation, which are not
-implemented), the observability vocabulary
+full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
 the remaining §12 behavioral rows.
