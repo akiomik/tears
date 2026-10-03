@@ -63,7 +63,8 @@
   with the implementation, after §13.1's gate. §2.5's live-instance
   reconciliation carries its own entries: `Added` — `Instances`;
   `Changed` (breaking) — `Reducer` and `Application` gain a required
-  `instances`; `Fixed` — issue #422's lost and deferred removals.
+  `instances`, and `Slot::present` stops being `const`; `Fixed` —
+  issue #422's lost and deferred removals.
 
 ## Summary
 
@@ -128,8 +129,8 @@ Eight decisions:
 
 Mechanism — the kernel's registries, counters, and seam types — is
 informative (§10). The kernel is the crate's runtime core; this RFC
-states the contract it implements, and §13.1 records the two tiers its
-acceptance and its mainlining each passed.
+states the contract it implements, and §13.1 states the two tiers its
+acceptance and its mainlining each require.
 
 ## 1. Scope
 
@@ -447,8 +448,11 @@ Contract:
   `Keyed::from_iter`, and `Slot::present` each create one; nothing else
   does, and no public surface reads, copies, or assigns an identity.
   Mutating a row or an occupant in place (`get_mut`), its whole value
-  included, keeps its identity, and so does moving the collection value
-  that holds it.
+  included, keeps its identity, and so does moving the collection
+  value that holds it. A surface that copies a collection — `Clone`,
+  deserialization, a restored snapshot — would have to draw new
+  identities or share old ones, and comes with an amendment of this
+  section.
 - **Live-instance reconciliation (INV-RC3).** `instances` reports the
   occupancies a state holds as (path, identity) pairs. The kernel or
   the store reads the first report from the state `init` returns; after
@@ -470,7 +474,8 @@ Contract:
   admission, spawn, or delivery decision carries or reads them, so the
   previous report is not per-scope state in RFC 0013 INV-ST7's sense.
   Reconciliation follows the report, not a dropped value or an omitted
-  command, so RFC 0005 INV-21 holds.
+  command, so RFC 0005 INV-21 holds. §11 records the designs rejected
+  for it.
 - **Reporting (INV-RC3a).** `instances` is required on `Reducer` and
   on `Application`, and pure in the state: a given state reports the
   same pairs in the same order, and reporting runs no side effect and
@@ -1184,8 +1189,8 @@ the driver drives the kernel itself.
 
 ## 9. Supersessions and amendments
 
-These rows landed on their owner documents with this RFC's
-acceptance, ahead of the mainlining §13.1's second tier gated. Each row
+Each row lands on its owner document with its acceptance,
+ahead of the mainlining of what it describes (§13.1). Each row
 names the owner document that edits in place.
 
 | # | Owner | Kind | Object |
@@ -1276,10 +1281,10 @@ invariants of §12 are.
   unrepresentable instead of a stated cost. Rejected for its cost —
   a second composition model beside the leaf `Reducer` a user writes
   freely — given that INV-RC3a can take the form INV-SE6 already gives
-  `subscriptions`: a required, pure method whose omissions the runtime
-  does not detect. It would not reach INV-RC3's negative space either: a
-  command produced for an occupancy the update removes is a command, not
-  a report.
+  `subscriptions`: a pure method whose omissions the runtime does not
+  detect. It would not reach INV-RC3's negative space either: a command
+  produced for an occupancy the update removes is a command, not a
+  report.
 - *Runtime-held child state* (rejected alternative, §2.5): holding
   child instances in a registry beside `Reducer::State` would put
   their removal under the runtime's control, and moves child state out
@@ -1376,11 +1381,11 @@ need.
 
 Enforcement classes per the pre-review checklist. The behavioral
 checks divide into two tiers (§13.1): the **spike tier** — the four
-kernel claims and the twelve-series conformance suite, which gated this
-RFC's acceptance and ran on a prototype kernel — and the
+kernel claims and the twelve-series conformance suite, which gate
+this RFC's acceptance and run on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
-below, which gated implementation mainlining rather than acceptance.
-Both tiers are met, and both are the regression suite now.
+below, which gates an implementation's mainlining rather than
+acceptance. Both tiers are the regression suite.
 
 - **INV-RC1 — single execution path.** For every kernel concern —
   state ownership, lane topology, input delivery, quit delivery,
@@ -1427,7 +1432,8 @@ Both tiers are met, and both are the regression suite now.
   the repeat row is the regression check.
 - **INV-RC3a — reporting.** §2.5's reporting clause. Purity is
   structural, as INV-SE6 is: the rustdoc of `Reducer::instances`
-  and `Application::instances` carries it citing this RFC. What the
+  and `Application::instances` carries it citing this RFC, and
+  `ReducerExt`'s carries §2.5's projection-pair condition. What the
   collector and the combinators report is behavioral: a hand-written
   reducer reporting through `scoped`, `keyed`, and `slot` gets the pairs
   §2.5 states for each, and nested stacks report each occupancy at the
@@ -1618,7 +1624,7 @@ contract without it, as `Command::scoped` does.
 
 ## 13. Open questions
 
-### 13.1 The acceptance gate: both tiers met
+### 13.1 The acceptance gate
 
 *Spike tier* — the gate this RFC's acceptance passed, demonstrated on
 a prototype kernel, four claims plus the suite: the
@@ -1647,18 +1653,18 @@ alone, at the scope §7.2 states: `parked data-lane wake`;
 that invariant arms. The park boundary is unreachable by pass-unit
 driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
-both groups. *Implementation-acceptance tier* — what gated mainlining
-rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
+both groups. *Implementation-acceptance tier* — what gates
+mainlining rather than acceptance: cleanup hooks (INV-RC8), the
 full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
-the remaining §12 behavioral rows.
-**Order**, as it ran: the spike tier preceded acceptance, acceptance
-preceded every §9 edit, and the second tier preceded mainlining — so
-the §9 supersessions stood on the owner documents before the kernel
-entered the crate, and every document those rows reach states the
-successor contract as the one in force. A failure in that tier would
-have stopped mainlining and reopened the design of whatever it failed;
+the remaining §12 behavioral rows. **Order**: the spike tier
+precedes acceptance, acceptance precedes every §9 edit, and
+the second tier precedes mainlining — so §9's rows stand on
+the owner documents before the implementation they describe
+enters the crate, and every document those rows reach states the
+successor contract as the one in force. A failure in that tier
+stops mainlining and reopens the design of whatever it fails;
 the same is true of a later regression, and whether one reaches the
 architecture selection is RFC 0010 §1.9's counterexample-grade
 question.
