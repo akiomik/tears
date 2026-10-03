@@ -284,9 +284,9 @@ where
     /// puts the store into the quit state (§5.3).
     pub fn receive_quit(&mut self);
 
-    /// Whether the command returned by the most recent `send`/`receive`
-    /// step requested a redraw (RFC 0002). `receive_quit` is not a
-    /// step (§5.2).
+    /// Whether the command the most recent `send`/`receive` step took
+    /// in requested a redraw (RFC 0002). `receive_quit` is not a step
+    /// (§5.2).
     pub fn redraw_requested(&self) -> bool;
 
     /// The `SubscriptionId`s the application currently declares. Pure
@@ -750,10 +750,11 @@ applies).
 ### 5.2 Redraw directive (RFC 0002)
 
 `redraw_requested()` reports the folded redraw directive of the command
-returned by the most recent step (a `send`, or the `update` call inside
-a `receive` / `receive_matching`). Before any step completes it reports
-the init command's directive. `receive_quit` applies no message and is
-not a step: after it, `redraw_requested` keeps reporting the previous
+the most recent step took in (§3.2; a `send`, or the `update`
+call inside a `receive` / `receive_matching`). Before any
+step completes it reports the init command's directive.
+`receive_quit` applies no message and is not a step:
+after it, `redraw_requested` keeps reporting the previous
 step's directive. This makes `without_redraw` decisions assertable per
 transition, which is the granularity RFC 0002 defines them at.
 
