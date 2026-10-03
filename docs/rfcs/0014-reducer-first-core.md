@@ -62,8 +62,12 @@
   composition layer's teardowns share is RFC 0013's, and the stage-3
   `TestDriver` is RFC 0008's, entered by that RFC's amendment (§13.2, §9
   row 11). Landed with the implementation, after §13.1's gate. The
-  live-instance reconciliation carries its own entries, in the
-  changelog section of the release that ships it.
+  live-instance reconciliation carries its own entries, among them:
+  `Added` — `Instances`; `Changed` (breaking) — `Reducer` and
+  `Application` gain a required `instances`, a removed instance's
+  teardown leaves `reduce`'s return value, an instance the state still
+  holds is torn down when it leaves its path, and `Slot::present` stops
+  being `const`; `Fixed` — issue #422's lost and deferred removals.
 
 ## Summary
 
@@ -503,10 +507,10 @@ Contract:
   work runs under; composed without that combinator, it reports them
   itself. For each child state it reduces a reducer over, it forwards
   that reducer's report over that state, through the projection pair it
-  uses: beneath the row or occupant when the child state is one, under
-  `scoped` with the segment it scopes the child's work under otherwise,
-  and as it is when it scopes that work under no segment, as a reducer
-  that hands its whole `reduce` to a combinator stack does. It owes this
+  uses, under the path it scopes that child's work under: through
+  `keyed` or `slot` for a row or occupant, then `scoped` for each
+  further segment, and under none when it adds none, as a reducer that
+  hands its whole `reduce` to a combinator stack does. It owes this
   for every such row, occupant, and child state the state holds, whether
   or not the last message reached it, and whether or not it declares any
   subscription. One that reduces no other reducer and qualifies no
@@ -1422,8 +1426,10 @@ checks divide into two tiers (§13.1): the **spike tier** — the four
 kernel claims and the twelve-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
 **implementation-acceptance tier** — every remaining behavioral row
-below, which gated implementation mainlining rather than acceptance.
-Both tiers are met, and both are the regression suite now.
+below but INV-RC3's and INV-RC3a's, which gated implementation
+mainlining rather than acceptance. Both tiers are met, and both are the
+regression suite now; so are INV-RC3's and INV-RC3a's rows, met with
+§2.5's live-instance reconciliation after mainlining.
 
 - **INV-RC1 — single execution path.** For every kernel concern — state
   ownership, lane topology, input delivery, quit delivery, park and
@@ -1725,9 +1731,9 @@ production arbitration policy (§3.5's unbiased pass initiation, whose
 check is the structural review named there), and
 the remaining §12 behavioral rows.
 **Order**, as it ran: the spike tier preceded acceptance, acceptance
-preceded every §9 edit, and the second tier preceded mainlining — so the
-§9 supersessions stood on the owner documents before the kernel entered
-the crate, and every document rows 1–12 reach states the successor
+preceded every §9 edit, and the second tier preceded mainlining — so
+§9's rows 1–12 stood on the owner documents before the kernel entered
+the crate, and every document those rows reach states the successor
 contract as the one in force. A failure in that tier would have stopped
 mainlining and reopened the design of whatever it failed; the same is
 true of a later regression, and whether one reaches the architecture

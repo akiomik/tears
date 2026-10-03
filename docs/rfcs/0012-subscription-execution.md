@@ -328,12 +328,12 @@ quiescence.
 ### 4.4 Transparency to composition
 
 The barrier is a runtime-side rule over the desired set, invisible to
-whoever declares it. An aggregating adapter (RFC 0014's composition
-combinators) merely merges child declarations into one desired set;
-nothing in this contract requires — or offers — a declaring layer any
-way to observe or await quiescence. A composition design that turns out
-to need quiescence observation is a change to this contract, not a use
-of it.
+whoever declares it. An aggregating adapter (a future composition
+layer) merely merges child declarations into one desired set; nothing
+in this contract requires — or offers — a declaring layer any way to
+observe or await quiescence. A composition design that turns out to
+need quiescence observation is a change to this contract, not a use of
+it.
 
 ## 5. `subscriptions()` purity
 
