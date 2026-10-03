@@ -742,9 +742,9 @@ cross-cancellation may be silent.
 Making child-instance scoping correct by construction requires a composition
 layer that owns the boundary and applies the instance scope automatically.
 RFC 0014's combinators are that layer, which this RFC does not define. They
-qualify a child with its row key, slot segment, or fixed segment, so two
-sibling `for_each` boundaries over one key type still give their rows equal
-paths (issue #424). Phase B is therefore an explicit manual
+qualify a child with its row key, slot segment, or fixed segment, so sibling
+boundaries whose keys or segments coincide in type and value give their
+children equal paths (issue #424). Phase B is therefore an explicit manual
 primitive and the prerequisite for that stronger design, not the construction
 guarantee for applications that scope by hand.
 
@@ -775,8 +775,8 @@ Phase B is additive. Unscoped subscriptions and commands keep an empty scope
 path and retain Phase A / RFC 0003 behavior. No application is automatically
 scoped based on closure type, message mapper, vector position, or memory
 address. As specified in section 4.6, forgetting or reusing a manual scope
-remains valid code, and command aliasing can be silent wherever an application
-scopes by hand, or where two sibling `for_each` boundaries share a key type
+remains valid code, and command aliasing can be silent wherever two paths are
+built equal: by hand, or by sibling boundaries whose keys or segments coincide
 (issue #424).
 
 Deferring Phase B implementation does not require another breaking change. The
@@ -869,9 +869,9 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   lowering replaces — child keys were ignored while scoped explicit cancels
   folded; the invariant held there too, over the smaller set of IDs that
   boundary carried.
-- **INV-21: no implicit teardown.** Dropping a value returned by `scoped` or
-  omitting one scoped command does not issue prefix cancellation beyond the
-  lifecycle's existing ID-specific rules.
+- **INV-21: no implicit teardown on drop or omission.** Dropping a value
+  returned by `scoped` or omitting one scoped command does not issue prefix
+  cancellation beyond the lifecycle's existing ID-specific rules.
 
 ### 6.4 Required tests
 

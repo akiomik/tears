@@ -10,11 +10,11 @@
   **implementation-acceptance tier** that gated mainlining — cleanup
   hooks, the full combinator surface, the observability vocabulary, the
   production arbitration policy, and the remaining §12 behavioral rows
-  — is closed, and its checks are the regression suite. Rows 1–12 of
-  §9's supersessions and amendments landed on their owner documents at
-  acceptance, in §13.1's order, ahead of that mainlining. §2.5's
-  live-instance reconciliation and its INV-RC3/INV-RC3a rows were
-  implemented after that mainlining.
+  but INV-RC3's and INV-RC3a's — is closed, and its checks are the
+  regression suite. Rows 1–12 of §9's supersessions and amendments
+  landed on their owner documents at acceptance, in §13.1's order, ahead
+  of that mainlining. §2.5's live-instance reconciliation and its
+  INV-RC3/INV-RC3a rows were implemented after that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)
@@ -460,11 +460,12 @@ Contract:
   reconciled on their own.
 - **Live-instance reconciliation (INV-RC3).** `instances` reports the
   occupancies a state holds as a set of (qualified path, identity)
-  pairs. After every `reduce` the kernel drives returns, it reads that
-  set from the resulting state and compares it with the set it read
-  before; only consecutive reports are compared. A path *disappears*
-  when the earlier report holds a pair at that path — one whose own path
-  it is — that the later one lacks, whatever took the pair out —
+  pairs. After every `reduce` the kernel or the store drives returns, it
+  reads that set from the resulting state and compares it with the set
+  it read before; only consecutive reports are compared. A path
+  *disappears* when the earlier report holds a pair at that path — one
+  whose own path it is — that the later one lacks, whatever took the
+  pair out —
   `remove`, `dismiss`, replacement by `insert` or `present`, assigning,
   swapping, or taking a collection value, moving it to another path, or
   replacing a state that encloses it — and a pair that reappears in a
@@ -489,11 +490,11 @@ Contract:
   first report is read from the state `init` returns, before its command
   is dispatched, and tears nothing down. Teardowns this adds appear in
   the dispatched command, not in the `Command` that `reduce` returns.
-  Occupancy identities and the previous report the kernel keeps decide
-  which teardowns an update issues and nothing else: no declaration,
-  output, admission, spawn, or delivery decision carries or reads them,
-  so the previous report is not per-scope state in RFC 0013 INV-ST7's
-  sense.
+  Occupancy identities and the previous report the kernel or the store
+  keeps decide which teardowns an update issues and nothing else: no
+  declaration, output, admission, spawn, or delivery decision carries or
+  reads them, so the previous report is not per-scope state in RFC 0013
+  INV-ST7's sense.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
   `Reducer` and on `Application`, and it is a pure function of state:
   for a given state it reports the same pairs in the same order, it
@@ -503,18 +504,19 @@ Contract:
   it places work, by itself or through a reducer it reduces. One that
   qualifies commands — a child's or its own — with a row's key or a
   slot's segment reports each row or occupant it places work under
-  through `keyed` or `slot`, unless a combinator built on it — one it is
-  the parent of — already reports that row or occupant at the path the
-  work runs under; composed without that combinator, it reports them
-  itself. For each child state it reduces a reducer over, it forwards
-  that reducer's report over that state, through the projection pair it
-  uses, under the path it scopes that child's work under: through
-  `keyed` or `slot` for a row or occupant, then `scoped` for each
-  further segment, and under none when it adds none, as a reducer that
-  hands its whole `reduce` to a combinator stack does. It owes this
-  for every such row, occupant, and child state the state holds, whether
-  or not the last message reached it, and whether or not it declares any
-  subscription. One that reduces no other reducer and qualifies no
+  through `keyed` or `slot`, unless the report it gives already places
+  that row or occupant at the path the work runs under, through a
+  reducer whose report it forwards or through a combinator built on it
+  (one it is the parent of) where it is composed under one. For each
+  child state it reduces a reducer over, it forwards that reducer's
+  report over that state, through the projection pair it uses, under the
+  path it scopes that child's work under: through `keyed` or `slot` for
+  a row or occupant, then `scoped` for each further segment, and under
+  none when it adds none, as a reducer that hands its whole `reduce` to
+  a combinator stack does. It owes this for every such row, occupant,
+  and child state the state holds, whether or not the last message
+  reached it, and whether or not it declares any subscription. One that
+  reduces no other reducer and qualifies no
   command under a row or occupant owes no report, even when its state
   holds a `Keyed` or `Slot` that a combinator built on it reduces. The
   combinators meet this themselves, as they meet INV-RC2: each reports
@@ -541,8 +543,8 @@ Contract:
   not observed until a later reconciliation, if one runs, on the terms
   `Application::subscriptions` already states for such changes. And two
   occupancies reported under one path are torn down together, because
-  teardown selects by prefix (RFC 0013 §3.1) — two sibling `for_each`
-  boundaries over collections with one key type report that way (issue
+  teardown selects by prefix (RFC 0013 §3.1) — sibling boundaries whose
+  keys or segments coincide in type and value report that way (issue
   #424).
 - **Message routing is typed.** `extract` either claims a message for
   the child or returns it unchanged to the parent; a message for a
@@ -1246,7 +1248,7 @@ the owner document that edits in place.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake and the `instances` its INV-T1 and INV-T4 name; RFC 0011's bootstrap order, dispatch step, panic inventory, and the call lists `instances` joins; RFC 0005's pointer to the mechanism and its account of what the combinators provide |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store and driver wherever they reach the reconciliation; RFC 0011's bootstrap order, dispatch step, panic inventory, and the call lists `instances` joins; RFC 0005's pointer to the mechanism and its account of what the combinators provide |
 
 Count: thirteen rows — five supersessions (rows 1, 2, 3, 4 — the public
 constructor change belongs to row 4's cluster and the keyed-capacity
@@ -1451,15 +1453,16 @@ regression suite.
   Behavioral at the lowering seam: nested-combinator programs assert
   the qualified identities, including the sibling-isolation case.
 - **INV-RC3 — live-instance reconciliation.** After every `reduce` the
-  kernel drives returns, the command dispatched for that update carries,
-  beyond the entries `reduce` returned, exactly one teardown of each
-  disappearing path that no other disappearing path is a proper prefix
-  of, in a reproducible order, and no other entry; the first report is
-  the one `init`'s state yields (§2.5). Same-update reinsertion still
-  yields the old occupancy's teardown and a fresh successor. Behavioral,
-  at the driven-transition seam the kernel and the store share — every
-  row reads the dispatched command, never `reduce`'s return value: one
-  row per way a pair disappears — `remove`, `dismiss`, occupied-key
+  kernel or the store drives returns, the command dispatched for that
+  update carries, beyond the entries `reduce` returned, exactly one
+  teardown of each disappearing path that no other disappearing path is
+  a proper prefix of, in a reproducible order, and no other entry; the
+  first report is the one `init`'s state yields (§2.5). Same-update
+  reinsertion still yields the old occupancy's teardown and a fresh
+  successor. Behavioral, at the driven-transition seam the kernel and
+  the store share — every row reads what the dispatched command carries
+  or does, never `reduce`'s return value: one row per way a pair
+  disappears — `remove`, `dismiss`, occupied-key
   `insert`, occupied-slot `present`, assignment of a populated
   collection holding the same keys, `mem::take`, a swap of two occupied
   slots reported under different segments, a `Keyed` moved to another
@@ -1495,11 +1498,12 @@ regression suite.
   `Reducer` and `Application` and pure — the same state reports the same
   pairs in the same order, with no side effects and no reads of external
   mutable state — and a reducer reports every row and occupant it places
-  work under, except one a combinator built on it already reports at
-  that work's path, and forwards, for every child state it reduces a
-  reducer over, that reducer's report, through the projection pair and
-  under the segments it uses, or under none when it adds none, whatever
-  route the last message took (§2.5). Its two halves
+  work under, except one its report already places at that work's path,
+  through a reducer it forwards or a combinator built on it, and
+  forwards, for every child state it reduces a reducer over, that
+  reducer's report, through the projection pair and under the segments
+  it uses, or under none when it adds none, whatever route the last
+  message took (§2.5). Its two halves
   take different classes. The combinators' half is behavioral: nested
   stacks report each occupancy under the path INV-RC2 qualifies its
   child's carriers with, including an occupancy under a child the last
@@ -1729,7 +1733,7 @@ INV-RC3a, which were not part of that gate), the observability
 vocabulary mapping (§9 row 9), the
 production arbitration policy (§3.5's unbiased pass initiation, whose
 check is the structural review named there), and
-the remaining §12 behavioral rows.
+the remaining §12 behavioral rows but INV-RC3's and INV-RC3a's.
 **Order**, as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so
 §9's rows 1–12 stood on the owner documents before the kernel entered
