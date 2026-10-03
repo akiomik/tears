@@ -5,8 +5,6 @@
   owner-document edits this contract requires landed with that RFC's
   acceptance (§8), and the implementation landed with that kernel,
   after RFC 0014 §13.1's implementation-acceptance tier closed.
-  R8's second origin, RFC 0014 §2.5's live-instance reconciliation, is
-  Accepted.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
   RFC 0014's breaking changes, recorded there. R8's reconciliation
