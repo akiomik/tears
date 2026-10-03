@@ -419,12 +419,14 @@ un-consume input the run already read (§3.8).
 A teardown's subscription stops are not self-defeating for a declaration
 that leaves the state with the removed occupancy — as one does under the
 combinators, which declare a child's subscriptions from the state they
-compose: a re-evaluation restarts a stopped run only for an identity the
-state it reads declares (RFC 0005 INV-13). A declaration that outlives
-the occupancy, like the manual primitive applied to a *still-declared*
-subscription, restarts the run at the next re-evaluation, which
-makes that use self-defeating by design; the primitive is sound for
-subscriptions only when the caller also removes the declarations.
+compose: a re-evaluation restarts a stopped run only for an identity
+the state it reads declares (RFC 0005 INV-13). A run whose identity
+the state still declares then is restarted: for a successor declaring
+it under the same path, that is R4's replacement, behind the stopped
+run's quiescence; for the manual primitive applied to a *still-declared*
+subscription, it makes that use self-defeating by design, and the
+primitive is sound for subscriptions only when the caller also removes
+the declarations.
 
 ### 4.3 Admission under the uniform barrier
 

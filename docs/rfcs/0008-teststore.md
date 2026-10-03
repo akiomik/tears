@@ -1280,7 +1280,8 @@ its API. Stated over this surface:
   name, not a handle to the run — so it cannot keep a run alive past
   the kernel's own bookkeeping.
 - **Reimplemented reconciliation** has no constructor: no method
-  applies a cancel, a teardown, or a keyed admission decision. Those
+  applies a cancel, a teardown, or a keyed admission
+  decision, or reads or compares a live-instance report. Those
   reach the kernel only as the lowered parts of a command the
   application returned, or as RFC 0014 §2.5's live-instance
   reconciliation teardowns, exactly as in production.

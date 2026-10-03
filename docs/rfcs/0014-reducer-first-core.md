@@ -90,9 +90,10 @@ Eight decisions:
    result classification — executed through the adapter (§2.4).
 2. **Composition with automatic scoping** (§2.5). `for_each`,
    `presented`, and `scope` apply scopes structurally; after every
-   update the kernel tears down each instance that has left the
-   program's report, and the combinators report theirs. Code that
-   composes through the combinators writes no manual scoping.
+   update the kernel, and the store, tear down the paths at which
+   the program's report no longer holds an instance it held, and the
+   combinators report theirs. Code that composes through the combinators
+   writes no manual scoping.
 3. **Unified delivery with revocation filtering** (§3). Producer
    output travels one origin-tagged lane; cancellation and teardown
    revoke at the delivery decision point, so a revoked run's
@@ -457,18 +458,20 @@ Contract:
   state and compares it with the previous one. A path *disappears* when
   the previous report holds a pair at it that the new one lacks. For
   each disappearing path that no other disappearing path is a proper
-  prefix of, one teardown of that path joins the command dispatched for
-  that update, before the dispatch; those teardowns follow the previous
-  report's order, so a script whose reports come in a reproducible
-  order yields one teardown sequence (INV-RC14). Nothing else is
-  added, and nothing `reduce` returned changes. A same-update removal
-  and reinsertion under one key therefore yields the old occupancy's
-  teardown, the reinserted one having another identity, and the new
-  one's fresh spawns in one dispatched command (§3.4, RFC 0013 R4).
-  Identities and the previous report decide which teardowns an update
-  issues and nothing else: no declaration, output, admission, spawn, or
-  delivery decision carries or reads them, so the previous report is not
-  per-scope state in RFC 0013 INV-ST7's sense.
+  prefix of, one teardown of that path joins the command dispatched
+  for that update, before the dispatch; those teardowns follow the
+  order in which their paths first appear in the previous report, so a
+  script whose reports come in a reproducible order yields one teardown
+  sequence (INV-RC14). Nothing else is added, and nothing `reduce`
+  returned changes. A same-update removal and reinsertion under one
+  key therefore yields the old occupancy's teardown, the reinserted
+  one having another identity, and the new one's fresh spawns in one
+  dispatched command (§3.4, RFC 0013 R4). Identities and the previous
+  report decide which teardowns an update issues and nothing else: no
+  declaration, output, admission, spawn, or delivery decision carries or
+  reads them, so the previous report is not per-scope state in RFC 0013
+  INV-ST7's sense. Reconciliation follows the report, not a dropped
+  value or an omitted command, so RFC 0005 INV-21 holds.
 - **Reporting (INV-RC3a).** `instances` is required on `Reducer` and
   on `Application`, and pure in the state: a given state reports the
   same pairs in the same order, and reporting runs no side effect and
@@ -476,10 +479,16 @@ Contract:
   reconciliation reaches: an occupancy's removal tears down the work
   that runs beneath a path the occupancy is reported at, and everything
   else beneath that path. Work of an occupancy that runs beneath no
-  path it is reported at outlives its removal. The combinators report
-  each occupancy they compose at their boundary path, beneath which they
-  scope its work (INV-RC2), with their parent's report beside it. The
-  runtime does not check the report.
+  path it is reported at gets no teardown from its removal; only another
+  disappearing path above it can still select it. `Instances` reports
+  beneath a current path, empty at the root: `scoped(seg, f)` has `f`
+  report beneath that path extended by `seg`; `keyed(rows, f)` adds each
+  row's pair at the path extended by its key, and has `f` report beneath
+  that; `slot(seg, slot, f)` does the same for the occupant, if any,
+  at the path extended by `seg`. The combinators report each occupancy
+  they compose at their boundary path, beneath which they scope its work
+  (INV-RC2), with their parent's report beside it. The runtime does not
+  check the report.
 - **What reconciliation does not reach.** Work an update's command
   carries for an occupancy that update removes, replaces, or moves —
   including one inserted and removed within it — is not suppressed:
@@ -1359,8 +1368,8 @@ since §2.5 states it and INV-RC3's structural review covers the sites
 that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
 — INV-RC3 quantifies over the pairs reported, INV-RC3a over the report's
 purity and what the combinators report. The teardown order is pinned
-only as the previous report's, which is what INV-RC14 and RFC 0008
-INV-T4 need.
+only as the previous report's first appearances, which is what INV-RC14
+and RFC 0008 INV-T4 need.
 
 ## 12. Invariants
 
@@ -1415,13 +1424,15 @@ regression suite.
 - **INV-RC3a — reporting.** §2.5's reporting clause. Purity is
   structural, as INV-SE6 is: the rustdoc of `Reducer::instances`
   and `Application::instances` carries it citing this RFC. What the
-  combinators report is behavioral: nested stacks report each occupancy
-  at the path INV-RC2 qualifies its child's carriers with, including
-  one the last message did not reach; structurally, review of the
-  crate's own `Reducer` implementations outside its tests confirms each
-  forwards the reports of the reducers it composes. No check reaches
-  an application's own composition, since no oracle independent of the
-  report can find what it leaves out.
+  collector and the combinators report is behavioral: a hand-written
+  reducer reporting through `scoped`, `keyed`, and `slot` gets the pairs
+  §2.5 states for each, and nested stacks report each occupancy at the
+  path INV-RC2 qualifies its child's carriers with, including one the
+  last message did not reach; structurally, review of the crate's own
+  `Reducer` implementations outside its tests confirms each forwards the
+  reports of the reducers it composes. No check reaches an application's
+  own composition, since no oracle independent of the report can find
+  what it leaves out.
 - **INV-RC4 — multi-keyed lowering.** Batch children lower to
   independent entries; the combined cancel phase precedes every spawn
   of the same command; the §3.4 interaction rules hold. Behavioral:
@@ -1634,13 +1645,14 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2, INV-RC4), the observability vocabulary
-mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
-pass initiation, whose check is the structural review named there), and
-the remaining §12 behavioral rows.
-Neither tier includes §2.5's live-instance reconciliation
-(INV-RC3, INV-RC3a), implemented after mainlining. **Order**,
-as it ran: the spike tier preceded acceptance, acceptance
+full combinator surface of the time — INV-RC2, INV-RC4, and
+the completeness of the removal journals §11 describes — the
+observability vocabulary mapping (§9 row 9), the production
+arbitration policy (§3.5's unbiased pass initiation, whose check
+is the structural review named there), and the remaining §12
+behavioral rows. Neither tier includes §2.5's live-instance
+reconciliation (INV-RC3, INV-RC3a), implemented after mainlining.
+**Order**, as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so
 §9's rows 1–12 stood on the owner documents before the kernel
 entered the crate, and every document those rows reach states the

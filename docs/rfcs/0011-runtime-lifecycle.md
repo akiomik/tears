@@ -568,10 +568,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   runtime with an init effect and a subscription source that record
   execution, under a `tracing` recorder; drop it without running; assert
   neither ran and no producer-gauge event fired during construction.
-- **INV-LC4**: inside `run()`, the first live-instance
-  report is read before the init command is dispatched,
-  and the init command is dispatched before the initial
-  subscription reconcile starts any source, and the first render
+- **INV-LC4**: inside `run()`, the first live-instance report is read
+  before the init command is dispatched, so a panicking `instances`
+  starts nothing, and the init command is dispatched before the
+  initial subscription reconcile starts any source, and the first render
   starts out pending — unconditionally, independent of the init
   command's redraw directive. Execution order beyond intake is not
   pinned: the init effect's first poll, initial subscription output, and
