@@ -108,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   }
   ```
 
+- `Keyed::insert`, `Keyed`'s `FromIterator` and `Slot::present` panic once
+  the process has drawn every occupancy identity
 - When one update removes several instances, the teardowns the runtime adds
   for them come in the order `instances` reported them before the update
   rather than the order they were removed in, which can change the order

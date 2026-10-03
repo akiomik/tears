@@ -1287,7 +1287,10 @@ mod tests {
         );
     }
 
-    // The first report is read from `init`'s state.
+    // A stack closed with `into_program` forwards its report, so an occupancy
+    // in the state its `init` returns is torn down by the first update. That
+    // the kernel and the store read the first report from that state is
+    // their rows' to pin.
     #[test]
     fn an_occupancy_in_init_s_state_is_torn_down_by_the_first_update() {
         let program = stack().into_program(
