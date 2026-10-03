@@ -1,9 +1,7 @@
 # RFC 0005: Structural Lifecycle Identity and Composition Scopes
 
 - Status: Implemented (Phase A shipped in 0.10.0; Phase B shipped additively
-  after 0.10.0). §4.5's pointer to RFC 0014 §2.5's live-instance
-  reconciliation describes a mechanism accepted there and not yet
-  implemented
+  after 0.10.0)
 - Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive)
 - Scope: collision-safe subscription identity and hierarchical identity
   namespacing for composed command and subscription lifecycles
