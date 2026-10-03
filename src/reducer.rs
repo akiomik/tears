@@ -270,12 +270,12 @@ pub trait Reducer {
     ///   segment instead is not torn down with the row; segments added
     ///   beneath the key are;
     /// - for each child state it calls a reducer's `reduce` on, that
-    ///   reducer's report over the state, through the projection it uses:
-    ///   beneath the row or occupant when the child state is one, under
-    ///   [`Instances::scoped`] with the segment it scopes the child's work
-    ///   under otherwise, and as it is when it scopes that work under none —
-    ///   as a reducer that hands its whole `reduce` to a combinator stack
-    ///   does.
+    ///   reducer's report over the state, through the projection it uses,
+    ///   under the path it scopes the child's work under: through
+    ///   [`Instances::keyed`] or [`Instances::slot`] for a row or occupant,
+    ///   then [`Instances::scoped`] for each further segment, and under none
+    ///   when it adds none — as a reducer that hands its whole `reduce` to a
+    ///   combinator stack does.
     ///
     /// It reports all of them on every call, whichever of them the last
     /// message reached. One that calls no other reducer and qualifies no
