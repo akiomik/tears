@@ -258,37 +258,22 @@ pub trait Reducer {
     ///
     /// Pure in the state, order included: a given state reports the same
     /// sequence every time, and reporting runs no side effect and reads no
-    /// external mutable state. What a reducer owes follows from the work its
-    /// `reduce` returns, placed by itself or by a reducer it calls:
+    /// external mutable state.
     ///
-    /// - each row or occupant it qualifies commands under, a child's or its
-    ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless the
-    ///   report it gives already places it at the path that work runs under,
-    ///   through a reducer whose report it forwards or a combinator built on
-    ///   it (one it is the parent of). A row's work belongs to it only
-    ///   when its path runs through the row's key, the value `keyed` reports,
-    ///   at the row's place in the stack. Work scoped there under another
-    ///   segment instead is not torn down with the row; segments added
-    ///   beneath the key are;
-    /// - for each child state it calls a reducer's `reduce` on, that
-    ///   reducer's report over the state, through the projection it uses,
-    ///   under the path it scopes the child's work under: through
-    ///   [`Instances::keyed`] or [`Instances::slot`] for a row or occupant,
-    ///   then [`Instances::scoped`] for each further segment, and under none
-    ///   when it adds none — as a reducer that hands its whole `reduce` to a
-    ///   combinator stack does.
+    /// Report each row or occupant the state holds at every path that ends in
+    /// its key or segment and that `reduce` scopes work under, by itself or
+    /// through a reducer it calls. [`Instances::keyed`] and
+    /// [`Instances::slot`] report a row or an occupant, and
+    /// [`Instances::scoped`] adds a segment above what its closure reports;
+    /// forward a called reducer's report inside them, nested as `reduce`
+    /// nests that reducer's commands. Report all of them on every call,
+    /// whichever the last message reached. A reducer that scopes no work and
+    /// calls no reducer reports nothing, and the combinators do all of this
+    /// for you.
     ///
-    /// It reports all of them on every call, whichever of them the last
-    /// message reached. One that calls no other reducer and qualifies no
-    /// command under a row or occupant reports nothing — write an empty
-    /// body — even when its state holds a [`Keyed`] or [`Slot`] that a
-    /// combinator built on it reduces. The combinators do all of this for
-    /// you.
-    ///
-    /// Being required makes every implementor face this; nothing checks the
-    /// report. An occupancy never reported originates no teardown of its
-    /// own, and one reported only on some calls is torn down when a report
-    /// first leaves it out, while the state still holds it.
+    /// Nothing checks the report. An occupancy left out is not torn down when
+    /// it is removed, and one left out of some reports is torn down while the
+    /// state still holds it.
     ///
     /// A reducer that reduces a child per row, scoping each row's commands
     /// under its key, reports the rows and forwards the child's report
