@@ -10,9 +10,11 @@
   **implementation-acceptance tier** that gated mainlining — cleanup
   hooks, the full combinator surface, the observability vocabulary, the
   production arbitration policy, and the remaining §12 behavioral rows
-  — is closed, and its checks are the regression suite. The §9
-  supersessions and amendments landed on their owner documents at
-  acceptance, in §13.1's order, ahead of that mainlining.
+  — is closed, and its checks are the regression suite. Rows 1–12 of
+  §9's supersessions and amendments landed on their owner documents at
+  acceptance, in §13.1's order, ahead of that mainlining. §2.5's
+  live-instance reconciliation, with its INV-RC3/INV-RC3a rows and §9
+  row 13, landed after that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)
@@ -60,8 +62,8 @@
   composition layer's teardowns share is RFC 0013's, and the stage-3
   `TestDriver` is RFC 0008's, entered by that RFC's amendment (§13.2, §9
   row 11). Landed with the implementation, after §13.1's gate. The
-  live-instance reconciliation carries its own entries, in 0.12.0's
-  section.
+  live-instance reconciliation carries its own entries, in the
+  changelog section of the release that ships it.
 
 ## Summary
 
@@ -435,7 +437,7 @@ Contract:
   directive names no run for a segment to place. They are the update's,
   not the boundary's. RFC 0005's scope laws (INV-14–INV-21) hold through
   the combinators — the laws' bodies are unchanged; the two clauses
-  that must be amended to *cover* the new carriers (teardown prefixes
+  amended to *cover* the new carriers (teardown prefixes
   under INV-18, `batch` under INV-20) are §9's rows 6 and 3.
 - **Occupancies.** A `Keyed` row and an occupied `Slot` are
   *occupancies*, each with an identity no other occupancy shares. One
@@ -496,27 +498,29 @@ Contract:
   it places work, by itself or through a reducer it reduces. One that
   qualifies commands — a child's or its own — with a row's key or a
   slot's segment reports each row or occupant it places work under
-  through `keyed` or `slot`, unless a combinator built on it already
-  reports that row or occupant. It forwards the report of each reducer
-  it reduces, through the projection pair it reduces that reducer with:
-  beneath the row or occupant it reduces it for, under `scoped` when it
-  reduces it under a fixed segment, and as it is when it reduces it
-  under none, as a reducer that hands its whole `reduce` to a combinator
-  stack does. It owes this for every such row and occupant the state
-  holds and every reducer it reduces, whether or not the last message
-  reached it, and whether or not it declares any subscription. One that
-  reduces no other reducer and qualifies no command under a row or
-  occupant owes no report, even when its state holds a `Keyed` or `Slot`
-  that a combinator built on it reduces. The combinators meet this
-  themselves, as they meet INV-RC2: each reports its parent composition
-  and its child's occupancies under its boundary (`scoped` for `scope`,
-  `keyed` for `for_each`, `slot` for `presented`). Requiring the method
-  makes every implementor face the obligation; it does not check the
-  report. The runtime does not detect an omission: an occupancy never
-  reported originates no teardown of its own, though another path's
-  teardown can still select its runs, and one reported only
-  intermittently is torn down while still in the state. §11 records the
-  designs rejected in favor of this one.
+  through `keyed` or `slot`, unless a combinator built on it — one it is
+  the parent of — already reports that row or occupant at the path the
+  work runs under; composed without that combinator, it reports them
+  itself. For each child state it reduces a reducer over, it forwards
+  that reducer's report over that state, through the projection pair it
+  uses: beneath the row or occupant when the child state is one, under
+  `scoped` with the segment it scopes the child's work under otherwise,
+  and as it is when it scopes that work under no segment, as a reducer
+  that hands its whole `reduce` to a combinator stack does. It owes this
+  for every such row, occupant, and child state the state holds, whether
+  or not the last message reached it, and whether or not it declares any
+  subscription. One that reduces no other reducer and qualifies no
+  command under a row or occupant owes no report, even when its state
+  holds a `Keyed` or `Slot` that a combinator built on it reduces. The
+  combinators meet this themselves, as they meet INV-RC2: each reports
+  its parent composition and its child's occupancies under its boundary
+  (`scoped` for `scope`, `keyed` for `for_each`, `slot` for
+  `presented`). Requiring the method makes every implementor face the
+  obligation; it does not check the report. The runtime does not detect
+  an omission: an occupancy never reported originates no teardown of its
+  own, though another path's teardown can still select its runs, and one
+  reported only intermittently is torn down while still in the state.
+  §11 records the designs rejected in favor of this one.
 - **What reconciliation does not reach.** Three classes, as negative
   space. Work an update's command carries for an occupancy whose pair is
   not in the report that update leaves — one inserted and removed within
@@ -1485,10 +1489,11 @@ Both tiers are met, and both are the regression suite now.
   `Reducer` and `Application` and pure — the same state reports the same
   pairs in the same order, with no side effects and no reads of external
   mutable state — and a reducer reports every row and occupant it places
-  work under that no combinator built on it already reports, and
-  forwards the report of every reducer it reduces, through the
-  projection pair and under the segments it uses, or under none when it
-  adds none, whatever route the last message took (§2.5). Its two halves
+  work under, except one a combinator built on it already reports at
+  that work's path, and forwards, for every child state it reduces a
+  reducer over, that reducer's report, through the projection pair and
+  under the segments it uses, or under none when it adds none, whatever
+  route the last message took (§2.5). Its two halves
   take different classes. The combinators' half is behavioral: nested
   stacks report each occupancy under the path INV-RC2 qualifies its
   child's carriers with, including an occupancy under a child the last
@@ -1661,7 +1666,9 @@ Surface–invariant coverage: `Reducer`/`Program`/adapter (INV-RC1;
 purity via RFC 0012 INV-SE6's transfer, §2.1), combinators
 (INV-RC2/INV-RC3a), `Keyed`/`Slot` and their occupancies (INV-RC3),
 `instances` on `Reducer` and `Application` and the `Instances`
-collector (INV-RC3a), batch lowering
+collector (INV-RC3a), `Instances`' public path (structural: review
+against `docs/api-guidelines.md`, whose single-path and prelude-subset
+rules `tests/api_surface.rs` checks), batch lowering
 (INV-RC4), lane topology (INV-RC15), delivery and revocation
 (INV-RC5/INV-RC6/INV-RC10), park and wake (INV-RC16),
 teardown and `on_teardown` (INV-RC7/INV-RC8, §4.2's successor table),
@@ -1673,7 +1680,10 @@ per-command capacity control's removal (§9 row 2) needs no invariant
 of its own beyond INV-RC15: that row's two-lane topology is what
 leaves nothing per command to size or isolate.
 `ScopeValue` carries no separate invariant: it is the RFC 0005
-segment-value contract restated as a bound.
+segment-value contract restated as a bound, plus `Clone`, which a
+boundary needs to reuse its segment or key on every update. A segment
+`Instances::scoped` or `Instances::slot` only moves into a path takes
+the contract alone, as `Command::scoped` does.
 
 ## 13. Open questions
 
@@ -1708,9 +1718,11 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
-mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
-pass initiation, whose check is the structural review named there), and
+full combinator surface (INV-RC2–INV-RC4, apart from INV-RC3 and
+INV-RC3a, which §2.5's live-instance reconciliation met after
+mainlining), the observability vocabulary mapping (§9 row 9), the
+production arbitration policy (§3.5's unbiased pass initiation, whose
+check is the structural review named there), and
 the remaining §12 behavioral rows.
 **Order**, as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so the

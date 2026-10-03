@@ -1,6 +1,9 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Implemented
+- Status: Implemented. The parts RFC 0014 §2.5's live-instance
+  reconciliation brings — §2.1's reconciled dispatch, §3.2's first
+  report, and the `instances` call sites this RFC lists — landed with
+  it, in 0.12.0.
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
