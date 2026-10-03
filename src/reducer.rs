@@ -263,16 +263,19 @@ pub trait Reducer {
     ///
     /// - each row or occupant it qualifies commands under, a child's or its
     ///   own, through [`Instances::keyed`] or [`Instances::slot`], unless a
-    ///   combinator built on it already reports it. A row's work belongs to
-    ///   it only when its path runs through the row's key, the value `keyed`
-    ///   reports, at the row's place in the stack. Work scoped there under
-    ///   another segment instead is not torn down with the row; segments
-    ///   added beneath the key are;
-    /// - the report of each reducer it calls `reduce` on, through the
-    ///   projection it calls it with: beneath the row or occupant it calls it
-    ///   for, under [`Instances::scoped`] when it calls it under a fixed
-    ///   segment, and as it is when it calls it under none — as a reducer
-    ///   that hands its whole `reduce` to a combinator stack does.
+    ///   combinator built on it (one it is the parent of) already reports it
+    ///   at the path that work runs under. A row's work belongs to it only
+    ///   when its path runs through the row's key, the value `keyed` reports,
+    ///   at the row's place in the stack. Work scoped there under another
+    ///   segment instead is not torn down with the row; segments added
+    ///   beneath the key are;
+    /// - for each child state it calls a reducer's `reduce` on, that
+    ///   reducer's report over the state, through the projection it uses:
+    ///   beneath the row or occupant when the child state is one, under
+    ///   [`Instances::scoped`] with the segment it scopes the child's work
+    ///   under otherwise, and as it is when it scopes that work under none —
+    ///   as a reducer that hands its whole `reduce` to a combinator stack
+    ///   does.
     ///
     /// It reports all of them on every call, whichever of them the last
     /// message reached. One that calls no other reducer and qualifies no
