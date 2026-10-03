@@ -423,10 +423,10 @@ removability.
   alternative state machine appears.
 - **Composition shares the phase machine.** RFC 0011 states the phase
   machine over the `Application` boundary (`new`/`update`/`view`/
-  `subscriptions`/`instances`); a composition core implements that
-  boundary as a single aggregate `Application` adapter rather than a
-  second runtime, so the projection closes in the composition direction
-  too — the reason the composition RFC is gated on this bundle.
+  `subscriptions`); a composition core implements that boundary as a
+  single aggregate `Application` adapter rather than a second runtime,
+  so the projection closes in the composition direction too — the
+  reason the composition RFC is gated on this bundle.
 
 ### 2.4 Ledger replay summary (dated snapshot)
 

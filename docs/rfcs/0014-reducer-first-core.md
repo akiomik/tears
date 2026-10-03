@@ -459,19 +459,20 @@ Contract:
   the previous report holds a pair at it that the new one lacks. For
   each disappearing path that no other disappearing path is a proper
   prefix of, one teardown of that path joins the command dispatched
-  for that update, before the dispatch; those teardowns follow the
-  order in which their paths first appear in the previous report, so a
-  script whose reports come in a reproducible order yields one teardown
-  sequence (INV-RC14). Nothing else is added, and nothing `reduce`
-  returned changes. A same-update removal and reinsertion under one
-  key therefore yields the old occupancy's teardown, the reinserted
-  one having another identity, and the new one's fresh spawns in one
-  dispatched command (§3.4, RFC 0013 R4). Identities and the previous
-  report decide which teardowns an update issues and nothing else: no
-  declaration, output, admission, spawn, or delivery decision carries or
-  reads them, so the previous report is not per-scope state in RFC 0013
-  INV-ST7's sense. Reconciliation follows the report, not a dropped
-  value or an omitted command, so RFC 0005 INV-21 holds.
+  for that update, after the teardowns `reduce` returned and before
+  the dispatch; those teardowns are ordered by where, in the previous
+  report, the first pair each path lost stands, so a script whose
+  reports come in a reproducible order yields one teardown sequence
+  (INV-RC14). Nothing else is added, and nothing `reduce` returned
+  changes. A same-update removal and reinsertion under one key therefore
+  yields the old occupancy's teardown, the reinserted one having another
+  identity, and the new one's fresh spawns in one dispatched command
+  (§3.4, RFC 0013 R4). Identities and the previous report decide which
+  teardowns an update issues and nothing else: no declaration, output,
+  admission, spawn, or delivery decision carries or reads them, so the
+  previous report is not per-scope state in RFC 0013 INV-ST7's sense.
+  Reconciliation follows the report, not a dropped value or an omitted
+  command, so RFC 0005 INV-21 holds.
 - **Reporting (INV-RC3a).** `instances` is required on `Reducer` and
   on `Application`, and pure in the state: a given state reports the
   same pairs in the same order, and reporting runs no side effect and
@@ -482,13 +483,15 @@ Contract:
   path it is reported at gets no teardown from its removal; only another
   disappearing path above it can still select it. `Instances` reports
   beneath a current path, empty at the root: `scoped(seg, f)` has `f`
-  report beneath that path extended by `seg`; `keyed(rows, f)` adds each
-  row's pair at the path extended by its key, and has `f` report beneath
-  that; `slot(seg, slot, f)` does the same for the occupant, if any,
-  at the path extended by `seg`. The combinators report each occupancy
-  they compose at their boundary path, beneath which they scope its work
-  (INV-RC2), with their parent's report beside it. The runtime does not
-  check the report.
+  report beneath that path extended by `seg`; `keyed(rows, f)` adds
+  each row's pair at the path extended by its key, and has `f` report
+  beneath that; `slot(seg, slot, f)` does the same for the occupant, if
+  any, at the path extended by `seg`. Each combinator reports what its
+  parent reports and, at its boundary path, what its child reports —
+  `for_each` and `presented` reporting each row or the occupant there,
+  with the child's report beneath it — so every occupancy a stack
+  composes is reported at the path beneath which the stack scopes its
+  work (INV-RC2). The runtime does not check the report.
 - **What reconciliation does not reach.** Work an update's command
   carries for an occupancy that update removes, replaces, or moves —
   including one inserted and removed within it — is not suppressed:
@@ -808,10 +811,10 @@ from the contract side:
    kernel's.
 2. **Subscription participation** (question 2): immediate stop —
    teardown's application point issues stop requests to the selected
-   subscription runs and revokes them; what only the removed
-   occupancy declared is no longer declared by the state that
-   update leaves, so the stop is not self-defeating for it
-   (RFC 0013 §4.2). The required RFC 0012 amendments are §5's. The
+   subscription runs and revokes them; under the combinators, what
+   only the removed occupancy declared is no longer declared by the
+   state that update leaves, so the stop is not self-defeating for
+   it (RFC 0013 §4.2). The required RFC 0012 amendments are §5's. The
    admission coupling stays the uniform barrier, accepted as
    documented negative space (§5.1).
 3. **Scope tree and unkeyed tracking** (question 3): the runtime
@@ -1201,7 +1204,7 @@ gated; row 13 landed with §2.5's live-instance reconciliation.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0010 / RFC 0011 / RFC 0013 | supersede + amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins; it supersedes RFC 0013 R8's single teardown surface with two origins |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | supersede + amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins; it supersedes RFC 0013 R8's single teardown surface with two origins |
 
 Preserved and worth naming: the effect-DI negative space (RFC 0012
 INV-SE8 — the driving seams are not an effect-executor abstraction:
@@ -1368,8 +1371,8 @@ since §2.5 states it and INV-RC3's structural review covers the sites
 that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
 — INV-RC3 quantifies over the pairs reported, INV-RC3a over the report's
 purity and what the combinators report. The teardown order is pinned
-only as the previous report's first appearances, which is what INV-RC14
-and RFC 0008 INV-T4 need.
+only by the previous report, which is what INV-RC14 and RFC 0008 INV-T4
+need.
 
 ## 12. Invariants
 
