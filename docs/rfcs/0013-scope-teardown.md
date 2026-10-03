@@ -9,7 +9,8 @@
   live-instance reconciliation.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
-  RFC 0014's breaking changes, recorded there.
+  RFC 0014's breaking changes, recorded there. R8's reconciliation
+  origin, in 0.12.0, with RFC 0014 §2.5.
 - Scope: prefix selection over scoped lifecycle identities across
   every run kind — keyed commands, anonymous effects, subscription
   runs — plus cleanup registrations; the public surface
@@ -99,7 +100,8 @@ each resolved in the section named:
 The one known client is TCA-parity collection composition: RFC 0014
 §2.5's `for_each` combinator, whose removed rows the kernel's
 live-instance reconciliation tears down in the command dispatched for
-the update that removed them (RFC 0014 INV-RC3), automatically
+the update that removed them (RFC 0014 INV-RC3) wherever the program
+forwards the combinators' report (RFC 0014 INV-RC3a), automatically
 cancelling a removed child instance's in-flight effects. Full effect
 parity in the composition surface depends on this contract, which is why
 this RFC gates it.
