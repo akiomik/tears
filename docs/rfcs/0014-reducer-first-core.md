@@ -13,8 +13,6 @@
   — is closed, and its checks are the regression suite. The §9
   supersessions and amendments landed on their owner documents at
   acceptance, in §13.1's order, ahead of that mainlining.
-  §2.5's live-instance reconciliation (INV-RC3, INV-RC3a, §9 row 13) is
-  Accepted: those two rows are not yet met.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)

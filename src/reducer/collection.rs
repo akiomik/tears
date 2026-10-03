@@ -1,71 +1,35 @@
-//! The collections a combinator boundary composes over, and the removal
-//! journals that make their teardowns complete.
+//! The collections a combinator boundary composes over, and the identities
+//! that make their teardowns complete.
 //!
 //! [`Keyed`] holds one child state per key and [`Slot`] holds at most one.
-//! Both record **removals** rather than exposing their contents for a
-//! diff — that difference is the whole contract here (RFC 0014 INV-RC3).
+//! Each row and each occupant is an *occupancy* with an identity of its own,
+//! drawn when the occupancy begins and shared with no other (RFC 0014 §2.5).
+//! The kernel and the store compare the (path, identity) pairs a state
+//! reports after every update with the ones it reported before, and tear
+//! down the paths whose pairs disappeared (INV-RC3). Nothing here records a
+//! removal: whatever takes an occupancy out of the state or moves it — a
+//! removal method, an assignment, a swap, a reducer above the boundary —
+//! changes the next report.
 //!
-//! # Why a journal and not a diff
+//! # Why identities and not keys
 //!
-//! A combinator that compared the collection before and after an update
-//! would see nothing at all in the one case that matters: remove key `k` and
-//! re-insert `k` in the same update, and the before/after states are equal
-//! while the *instance* under `k` is a different one. The old instance's
-//! runs would then never be torn down — RFC 0014 §11's *diff-based removal
-//! detection* adversary, which passes every single-removal test. A journal
-//! records the removal when it happens, so the same-update reinsertion still
-//! yields the old instance's teardown and the new instance's fresh spawns.
+//! Remove key `k` and re-insert `k` in one update, and the keys before and
+//! after are equal while the instance under `k` is a different one. Compared
+//! by key, the old instance's runs would never be torn down — RFC 0014
+//! §11's *key-only removal detection* adversary. The reinserted row carries a
+//! new identity, so the old one's pair disappears and its path is torn down,
+//! and the new one starts fresh.
 //!
-//! # The four removal shapes
-//!
-//! INV-RC3 quantifies over exactly four, and each records one entry:
-//!
-//! | shape | method |
-//! | --- | --- |
-//! | explicit removal by key | [`Keyed::remove`] |
-//! | explicit dismissal | [`Slot::dismiss`] |
-//! | replacement over an occupied key | [`Keyed::insert`] |
-//! | replacement over an occupied slot | [`Slot::present`] |
-//!
-//! The two replacement shapes are removals because that is what replacement
-//! *means* here: the old instance is torn down and the new one starts fresh
-//! (RFC 0014 §2.5) — each on the timing its boundary's combinator states.
-//! Insertion into an absent key and presentation into an empty slot record
-//! nothing — there was no instance to remove.
-//!
-//! **Four shapes is the whole surface, and that is deliberate.** There is no
-//! `retain`, no `clear`, no `drain`, no `IndexMut`, and no `&mut` iterator:
-//! removing several rows is several [`Keyed::remove`] calls, which is the
-//! only thing that keeps INV-RC3's "every removal shape" exhaustive by
-//! construction rather than by review. Any bulk operation added later
-//! **must record one journal entry per instance it removes** — a `retain`
-//! that quietly kept the surviving rows and dropped the rest would leak
-//! every dropped row's runs, which is §11's diff-based adversary arriving
-//! through a convenience method. The same goes for any accessor that hands
-//! out mutable access to the backing sequence.
-//!
-//! Draining is the combinator's, not the application's: the two `drain_*`
-//! methods are crate-private, so an application can neither consume a
-//! pending removal before the boundary sees it nor manufacture one.
-//!
-//! # Mutating outside a `reduce`
-//!
-//! A journal entry is drained by the next `reduce` the boundary runs, so a
-//! mutation made *outside* one is still owed its teardown — and will get it
-//! at the first message that reaches the boundary. That is right for a
-//! removal and wrong for construction, where no instance ever ran.
-//!
-//! Only the four removal shapes record anything, so only they are affected.
-//! [`Keyed::from_iter`], a collected literal, [`Keyed::insert`] into an
-//! absent key, and [`Slot::present`] into an empty slot record nothing and
-//! are as safe outside a `reduce` as inside one — growing a collection
-//! during `Program::init` is fine. What belongs inside a `reduce` is the
-//! four that do record: `insert` over an occupied key, `present` over an
-//! occupied slot, `remove`, and `dismiss`, whose entries the boundary drains
-//! in the same update.
+//! An identity begins at [`Keyed::insert`] — into an absent or an occupied
+//! key — at [`Keyed::from_iter`], and at [`Slot::present`], and nowhere else.
+//! It is not readable, copyable, or assignable from outside the crate, so a
+//! collection built anew holds new identities even under keys an earlier one
+//! held, and moving a collection value carries its identities with it.
+//! Mutating a row or an occupant in place keeps its identity.
 
 use std::hash::Hash;
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The values a composition boundary may be segmented by.
 ///
@@ -78,15 +42,38 @@ use std::mem;
 ///
 /// The blanket implementation below is the whole of it: nothing opts in, and
 /// no type that satisfies the bound can be excluded.
-///
-/// RFC 0014 §2.5's block writes `PartialEq + Eq + …`, which `Eq: PartialEq`
-/// makes redundant; the bound is written here without it, and the RFC's
-/// wording is synced when §2.5's surface is made public at the switch.
 pub trait ScopeValue: Eq + Hash + Clone + Send + Sync + 'static {}
 
 impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 
-/// A keyed collection of child states, with a removal journal.
+/// The identity of one occupancy: a row of a [`Keyed`] or the occupant of a
+/// [`Slot`].
+///
+/// Drawn from one process-wide counter, so no two occupancies ever share one
+/// — not in one collection, not across collections, not across runtimes.
+/// Drawing never wraps, since a reused identity would make a replacement
+/// look like continuity: once the counter is exhausted it stays there, and
+/// every later draw in the process panics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InstanceId(u64);
+
+impl InstanceId {
+    /// The placeholder an empty slot holds. Never drawn: the counter starts
+    /// above it.
+    const NONE: Self = Self(0);
+
+    fn draw() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let drawn = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("occupancy identities are exhausted");
+        Self(drawn)
+    }
+}
+
+/// A keyed collection of child states, each one an occupancy.
 ///
 /// Iteration is insertion order and lookup is a scan. Which structure this
 /// is stays mechanism; what is not mechanism is that the order is
@@ -94,63 +81,69 @@ impl<T> ScopeValue for T where T: Eq + Hash + Clone + Send + Sync + 'static {}
 /// boundary derives from a walk of this collection are observed in it
 /// (RFC 0014 INV-RC14).
 pub struct Keyed<K: ScopeValue, V> {
-    rows: Vec<(K, V)>,
-    /// Keys whose instance was removed since the last drain, in removal
-    /// order. One entry per removal, so a remove-and-reinsert-and-remove
-    /// within one update records two.
-    removals: Vec<K>,
+    rows: Vec<Row<K, V>>,
+}
+
+struct Row<K, V> {
+    key: K,
+    value: V,
+    id: InstanceId,
 }
 
 impl<K: ScopeValue, V> Keyed<K, V> {
     /// An empty collection.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            removals: Vec::new(),
-        }
+        Self { rows: Vec::new() }
     }
 
     /// Inserts `value` under `key`, returning the instance it replaced.
     ///
-    /// Replacing an occupied key **records a removal**: the old instance is
-    /// torn down and the new one starts fresh (RFC 0014 §2.5), on the timing
+    /// Inserting always begins a new occupancy, over an occupied key too:
+    /// where the collection is reported
+    /// ([`Reducer::instances`](crate::reducer::Reducer::instances)), the old
+    /// instance is torn down and the new one starts fresh (RFC 0014 §2.5), on
+    /// the timing
     /// [`ReducerExt::for_each`](crate::reducer::ReducerExt::for_each)
     /// states. The position in the iteration order is the old instance's, so
     /// a replacement does not reorder the collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if let Some(row) = self.rows.iter_mut().find(|(held, _)| *held == key) {
-            self.removals.push(key);
-            return Some(mem::replace(&mut row.1, value));
+        let id = InstanceId::draw();
+        if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) {
+            row.id = id;
+            return Some(mem::replace(&mut row.value, value));
         }
-        self.rows.push((key, value));
+        self.rows.push(Row { key, value, id });
         None
     }
 
-    /// Removes the instance under `key`, recording the removal.
-    ///
-    /// Removing an absent key records nothing: there is no instance whose
-    /// runs would need tearing down.
+    /// Removes the instance under `key`.
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        let position = self.rows.iter().position(|(held, _)| held == key)?;
-        self.removals.push(key.clone());
-        Some(self.rows.remove(position).1)
+        let position = self.rows.iter().position(|row| row.key == *key)?;
+        Some(self.rows.remove(position).value)
     }
 
     /// The instance under `key`.
     pub fn get(&self, key: &K) -> Option<&V> {
         self.rows
             .iter()
-            .find(|(held, _)| held == key)
-            .map(|(_, value)| value)
+            .find(|row| row.key == *key)
+            .map(|row| &row.value)
     }
 
-    /// The instance under `key`, mutably.
+    /// The instance under `key`, mutably. The occupancy continues, even when
+    /// the value is replaced through it; [`insert`](Self::insert) starts a
+    /// new one.
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.rows
             .iter_mut()
-            .find(|(held, _)| held == key)
-            .map(|(_, value)| value)
+            .find(|row| row.key == *key)
+            .map(|row| &mut row.value)
     }
 
     /// Whether `key` holds an instance.
@@ -173,23 +166,18 @@ impl<K: ScopeValue, V> Keyed<K, V> {
     /// The instances, in insertion order.
     #[must_use]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&K, &V)> {
-        self.rows.iter().map(|(key, value)| (key, value))
+        self.rows.iter().map(|row| (&row.key, &row.value))
     }
 
     /// The keys, in insertion order.
     #[must_use]
     pub fn keys(&self) -> impl ExactSizeIterator<Item = &K> {
-        self.rows.iter().map(|(key, _)| key)
+        self.rows.iter().map(|row| &row.key)
     }
 
-    /// Takes the recorded removals, in removal order.
-    ///
-    /// Crate-private: the boundary drains this once per `reduce` it runs and
-    /// turns each entry into one teardown (RFC 0014 INV-RC3). An application
-    /// draining it would be able to lose a removal the boundary has not seen
-    /// yet, which is the completeness the invariant is about.
-    pub(crate) fn drain_removals(&mut self) -> Vec<K> {
-        mem::take(&mut self.removals)
+    /// The rows with their identities, in insertion order, for the report.
+    pub(crate) fn occupancies(&self) -> impl Iterator<Item = (&K, &V, InstanceId)> {
+        self.rows.iter().map(|row| (&row.key, &row.value, row.id))
     }
 }
 
@@ -200,41 +188,34 @@ impl<K: ScopeValue, V> Default for Keyed<K, V> {
 }
 
 impl<K: ScopeValue, V> FromIterator<(K, V)> for Keyed<K, V> {
-    /// Builds a collection from `(key, value)` pairs, recording **no**
-    /// removal — a duplicate key in the input included.
+    /// Builds a collection from `(key, value)` pairs, each row a new
+    /// occupancy; a later pair for a key already collected replaces the
+    /// earlier one, as [`insert`](Keyed::insert) would.
     ///
-    /// Construction is not replacement. What the journal records is that an
-    /// *instance* left the collection, and an instance that only ever
-    /// existed as an entry in this iterator never ran anything: nothing was
-    /// spawned under its key, nothing declared, nothing to tear down. A
-    /// teardown emitted for it would name a prefix no run was ever placed
-    /// under. That makes this — and a sequence of [`insert`](Keyed::insert)
-    /// calls into absent keys, which record nothing either — the ways to
-    /// build initial state; see the module note on mutating outside a
-    /// `reduce`.
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
     fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
         let mut collection = Self::new();
         for (key, value) in pairs {
-            if let Some(row) = collection.rows.iter_mut().find(|(held, _)| *held == key) {
-                row.1 = value;
-            } else {
-                collection.rows.push((key, value));
-            }
+            collection.insert(key, value);
         }
         collection
     }
 }
 
-/// At most one child state, with a dismissal journal.
+/// At most one child state, an occupancy while it is present.
 ///
 /// The one-instance counterpart of [`Keyed`]: what a modal, a detail pane,
 /// or any other optionally-present child lives in.
 pub struct Slot<S> {
     value: Option<S>,
-    /// How many instances have been removed since the last drain. A count
-    /// rather than a list because a dismissed instance has no key — what a
-    /// boundary derives from each entry is one teardown of its own segment.
-    dismissals: usize,
+    /// The occupant's identity. Meaningful only while `value` is `Some`; a
+    /// field beside the value rather than inside the option, so emptying
+    /// the slot moves the occupant out without a destructor to run and
+    /// `dismiss` stays a `const fn`.
+    id: InstanceId,
 }
 
 impl<S> Slot<S> {
@@ -243,34 +224,31 @@ impl<S> Slot<S> {
     pub const fn empty() -> Self {
         Self {
             value: None,
-            dismissals: 0,
+            id: InstanceId::NONE,
         }
     }
 
     /// Puts `value` in the slot, returning the instance it replaced.
     ///
-    /// Presenting over an occupied slot **records a removal**, for the reason
-    /// [`Keyed::insert`] does: replacement is a teardown of the old instance
-    /// and a fresh start for the new one, on the timing
+    /// Presenting always begins a new occupancy, over an occupied slot too,
+    /// for the reason [`Keyed::insert`] does: where the slot is reported,
+    /// replacement is a teardown of the old instance and a fresh start for
+    /// the new one, on the timing
     /// [`ReducerExt::presented`](crate::reducer::ReducerExt::presented)
-    /// states.
-    pub const fn present(&mut self, value: S) -> Option<S> {
-        let replaced = self.value.replace(value);
-        if replaced.is_some() {
-            self.dismissals += 1;
-        }
-        replaced
+    /// states. Drawing the identity is why this is not a `const fn`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process has drawn every occupancy identity: identities
+    /// are never reused, so the counter stops rather than wrap.
+    pub fn present(&mut self, value: S) -> Option<S> {
+        self.id = InstanceId::draw();
+        self.value.replace(value)
     }
 
-    /// Empties the slot, recording the removal.
-    ///
-    /// Dismissing an empty slot records nothing.
+    /// Empties the slot.
     pub const fn dismiss(&mut self) -> Option<S> {
-        let dismissed = self.value.take();
-        if dismissed.is_some() {
-            self.dismissals += 1;
-        }
-        dismissed
+        self.value.take()
     }
 
     /// The instance, if the slot holds one.
@@ -278,7 +256,8 @@ impl<S> Slot<S> {
         self.value.as_ref()
     }
 
-    /// The instance, mutably.
+    /// The instance, mutably. The occupancy continues, even when the value is
+    /// replaced through it; [`present`](Self::present) starts a new one.
     pub const fn get_mut(&mut self) -> Option<&mut S> {
         self.value.as_mut()
     }
@@ -289,11 +268,9 @@ impl<S> Slot<S> {
         self.value.is_some()
     }
 
-    /// Takes the recorded dismissals.
-    ///
-    /// Crate-private for the reason [`Keyed::drain_removals`] is.
-    pub(crate) const fn drain_dismissals(&mut self) -> usize {
-        mem::replace(&mut self.dismissals, 0)
+    /// The occupant with its identity, for the report.
+    pub(crate) fn occupancy(&self) -> Option<(&S, InstanceId)> {
+        self.value.as_ref().map(|value| (value, self.id))
     }
 }
 
@@ -307,163 +284,135 @@ impl<S> Default for Slot<S> {
 mod tests {
     use super::*;
 
-    // The four removal shapes of INV-RC3, one test each.
+    fn ids<K: ScopeValue, V>(rows: &Keyed<K, V>) -> Vec<InstanceId> {
+        rows.occupancies().map(|(_, _, id)| id).collect()
+    }
 
-    #[test]
-    fn removing_a_key_records_the_removal() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        rows.insert("a", 1);
-        rows.drain_removals();
-
-        assert_eq!(rows.remove(&"a"), Some(1));
-
-        assert_eq!(rows.drain_removals(), vec!["a"]);
-        assert!(rows.is_empty());
+    fn slot_id<S>(slot: &Slot<S>) -> Option<InstanceId> {
+        slot.occupancy().map(|(_, id)| id)
     }
 
     #[test]
-    fn dismissing_an_occupied_slot_records_the_removal() {
-        let mut slot: Slot<u8> = Slot::empty();
-        slot.present(1);
-        slot.drain_dismissals();
-
-        assert_eq!(slot.dismiss(), Some(1));
-
-        assert_eq!(slot.drain_dismissals(), 1);
-        assert!(!slot.is_present());
-    }
-
-    #[test]
-    fn inserting_over_an_occupied_key_records_the_removal() {
+    fn inserting_over_an_occupied_key_begins_a_new_occupancy_in_place() {
         let mut rows: Keyed<&str, u8> = Keyed::new();
         rows.insert("a", 1);
-        rows.drain_removals();
+        rows.insert("b", 2);
+        let before = ids(&rows);
 
-        assert_eq!(rows.insert("a", 2), Some(1));
+        assert_eq!(rows.insert("a", 9), Some(1));
 
+        let after = ids(&rows);
+        assert_ne!(before[0], after[0], "the replacement is a new occupancy");
+        assert_eq!(before[1], after[1], "the other row continues");
         assert_eq!(
-            rows.drain_removals(),
-            vec!["a"],
-            "replacement tears the old instance down and starts the new one fresh"
+            rows.keys().copied().collect::<Vec<_>>(),
+            vec!["a", "b"],
+            "and keeps the replaced row's position"
         );
-        assert_eq!(rows.get(&"a"), Some(&2));
     }
 
     #[test]
-    fn presenting_over_an_occupied_slot_records_the_removal() {
+    fn a_same_key_remove_and_reinsert_is_a_new_occupancy() {
+        let mut rows: Keyed<&str, u8> = Keyed::new();
+        rows.insert("a", 1);
+        let before = ids(&rows);
+
+        rows.remove(&"a");
+        rows.insert("a", 1);
+
+        assert_ne!(before, ids(&rows), "equal keys and values, a new identity");
+    }
+
+    #[test]
+    fn mutating_in_place_continues_the_occupancy() {
+        let mut rows: Keyed<&str, u8> = Keyed::new();
+        let mut slot: Slot<u8> = Slot::empty();
+        rows.insert("a", 1);
+        slot.present(1);
+        let (row_before, slot_before) = (ids(&rows), slot_id(&slot));
+
+        *rows.get_mut(&"a").expect("the row is present") = 7;
+        *slot.get_mut().expect("the slot is occupied") = 7;
+
+        assert_eq!(rows.get(&"a"), Some(&7));
+        assert_eq!(slot.get(), Some(&7));
+        assert_eq!(ids(&rows), row_before);
+        assert_eq!(slot_id(&slot), slot_before);
+    }
+
+    #[test]
+    fn an_absent_row_and_an_empty_slot_are_not_reachable_mutably() {
+        let mut rows: Keyed<&str, u8> = Keyed::new();
+        let mut slot: Slot<u8> = Slot::empty();
+        rows.insert("a", 1);
+
+        assert!(rows.get_mut(&"missing").is_none());
+        assert!(slot.get_mut().is_none());
+        slot.present(1);
+        slot.dismiss();
+        assert!(slot.get_mut().is_none(), "a dismissed slot is empty again");
+    }
+
+    #[test]
+    fn a_collection_built_anew_holds_new_identities_under_the_same_keys() {
+        let old: Keyed<&str, u8> = [("a", 1), ("b", 2)].into_iter().collect();
+        let new: Keyed<&str, u8> = [("a", 1), ("b", 2)].into_iter().collect();
+
+        assert!(ids(&old).iter().all(|id| !ids(&new).contains(id)));
+    }
+
+    #[test]
+    fn moving_a_collection_carries_its_identities() {
+        let mut held: Keyed<&str, u8> = Keyed::new();
+        held.insert("a", 1);
+        let before = ids(&held);
+
+        let taken = mem::take(&mut held);
+
+        assert_eq!(ids(&taken), before);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn presenting_over_an_occupied_slot_begins_a_new_occupancy() {
         let mut slot: Slot<u8> = Slot::empty();
         slot.present(1);
-        slot.drain_dismissals();
+        let before = slot_id(&slot);
 
         assert_eq!(slot.present(2), Some(1));
 
-        assert_eq!(slot.drain_dismissals(), 1);
+        assert_ne!(slot_id(&slot), before);
         assert_eq!(slot.get(), Some(&2));
     }
 
-    // The two shapes that are *not* removals: there was no instance.
-
     #[test]
-    fn a_first_insertion_and_a_first_presentation_record_nothing() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        let mut slot: Slot<u8> = Slot::empty();
-
-        assert_eq!(rows.insert("a", 1), None);
-        assert_eq!(slot.present(1), None);
-
-        assert!(rows.drain_removals().is_empty());
-        assert_eq!(slot.drain_dismissals(), 0);
-    }
-
-    #[test]
-    fn removing_an_absent_key_and_dismissing_an_empty_slot_record_nothing() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        let mut slot: Slot<u8> = Slot::empty();
-
-        assert_eq!(rows.remove(&"missing"), None);
-        assert_eq!(slot.dismiss(), None);
-
-        assert!(rows.drain_removals().is_empty());
-        assert_eq!(slot.drain_dismissals(), 0);
-    }
-
-    // RFC 0014 §11's *diff-based removal detection* adversary, at the
-    // collection level: the state before and after is identical, and the
-    // journal is what still reports that an instance was removed.
-    #[test]
-    fn a_same_update_remove_and_reinsert_leaves_no_state_difference_but_a_recorded_removal() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        rows.insert("a", 1);
-        rows.drain_removals();
-        let before: Vec<(&str, u8)> = rows.iter().map(|(key, value)| (*key, *value)).collect();
-
-        rows.remove(&"a");
-        rows.insert("a", 1);
-
-        let after: Vec<(&str, u8)> = rows.iter().map(|(key, value)| (*key, *value)).collect();
-        assert_eq!(before, after, "no diff distinguishes the two instances");
-        assert_eq!(
-            rows.drain_removals(),
-            vec!["a"],
-            "the journal records the removal a diff cannot see"
-        );
-    }
-
-    #[test]
-    fn every_removal_in_one_update_is_recorded_in_order() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        rows.insert("a", 1);
-        rows.insert("b", 2);
-        rows.drain_removals();
-
-        rows.remove(&"b");
-        rows.insert("a", 9);
-        rows.insert("b", 8);
-
-        assert_eq!(
-            rows.drain_removals(),
-            vec!["b", "a"],
-            "one entry per removal, in removal order"
-        );
-    }
-
-    #[test]
-    fn a_drain_leaves_the_journal_empty() {
+    fn removing_and_dismissing_end_the_occupancy() {
         let mut rows: Keyed<&str, u8> = Keyed::new();
         let mut slot: Slot<u8> = Slot::empty();
         rows.insert("a", 1);
         slot.present(1);
-        rows.remove(&"a");
-        slot.dismiss();
 
-        assert_eq!(rows.drain_removals().len(), 1);
-        assert_eq!(slot.drain_dismissals(), 1);
-        assert!(
-            rows.drain_removals().is_empty(),
-            "a removal is reported to exactly one drain"
-        );
-        assert_eq!(slot.drain_dismissals(), 0);
-    }
+        assert_eq!(rows.remove(&"a"), Some(1));
+        assert_eq!(slot.dismiss(), Some(1));
 
-    // Iteration order is insertion order, and a replacement keeps the
-    // replaced instance's position — what a boundary's walk of the
-    // collection is observed in (INV-RC14).
-    #[test]
-    fn iteration_is_insertion_order_and_replacement_keeps_its_position() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        rows.insert("a", 1);
-        rows.insert("b", 2);
-        rows.insert("c", 3);
-        rows.insert("a", 9);
-
-        assert_eq!(
-            rows.keys().copied().collect::<Vec<_>>(),
-            vec!["a", "b", "c"]
-        );
+        assert!(rows.is_empty());
+        assert_eq!(slot_id(&slot), None);
+        assert_eq!(rows.remove(&"missing"), None);
+        assert_eq!(slot.dismiss(), None);
     }
 
     #[test]
-    fn removal_closes_the_gap_it_leaves() {
+    fn collecting_a_duplicate_key_keeps_the_later_pair() {
+        let rows: Keyed<&str, u8> = [("a", 1), ("b", 2), ("a", 3)].into_iter().collect();
+
+        assert_eq!(rows.get(&"a"), Some(&3));
+        assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    // Iteration is insertion order and removal closes the gap — what a
+    // boundary's walk of the collection is observed in (INV-RC14).
+    #[test]
+    fn iteration_is_insertion_order_and_removal_closes_the_gap() {
         let mut rows: Keyed<&str, u8> = Keyed::new();
         rows.insert("a", 1);
         rows.insert("b", 2);
@@ -474,42 +423,5 @@ mod tests {
         assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec!["a", "c"]);
         assert_eq!(rows.len(), 2);
         assert!(!rows.contains_key(&"b"));
-    }
-
-    // Construction is not replacement: an instance that only ever existed as
-    // an entry in the input iterator never ran anything, so a teardown for
-    // it would name a prefix no run was placed under.
-    #[test]
-    fn collecting_duplicate_keys_records_no_removal() {
-        let mut rows: Keyed<&str, u8> = [("a", 1), ("b", 2), ("a", 3)].into_iter().collect();
-
-        assert_eq!(rows.get(&"a"), Some(&3));
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.drain_removals().is_empty(),
-            "nothing had run under the key the later pair replaced"
-        );
-    }
-
-    #[test]
-    fn a_row_is_reachable_mutably_and_a_missing_one_is_not() {
-        let mut rows: Keyed<&str, u8> = Keyed::new();
-        rows.insert("a", 1);
-
-        *rows.get_mut(&"a").expect("the row is present") = 7;
-
-        assert_eq!(rows.get(&"a"), Some(&7));
-        assert!(rows.get_mut(&"missing").is_none());
-    }
-
-    #[test]
-    fn a_slot_is_reachable_mutably_and_an_empty_one_is_not() {
-        let mut slot: Slot<u8> = Slot::empty();
-
-        assert!(slot.get_mut().is_none());
-        slot.present(1);
-        *slot.get_mut().expect("the slot is occupied") = 7;
-
-        assert_eq!(slot.get(), Some(&7));
     }
 }

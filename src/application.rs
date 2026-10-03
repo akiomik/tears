@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 
-use crate::{command::Command, subscription::Subscription};
+use crate::{Instances, command::Command, subscription::Subscription};
 
 /// The main trait for defining TUI applications following The Elm Architecture.
 ///
@@ -48,6 +48,8 @@ use crate::{command::Command, subscription::Subscription};
 ///     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 ///         vec![]
 ///     }
+///
+///     fn instances(&self, _out: &mut Instances<'_>) {}
 /// }
 /// ```
 pub trait Application: Sized {
@@ -78,6 +80,7 @@ pub trait Application: Sized {
     /// #     fn update(&mut self, msg: Message) -> Command<Message> { Command::none() }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn new(flags: Self::Flags) -> (Self, Command<Self::Message>);
@@ -106,6 +109,7 @@ pub trait Application: Sized {
     /// }
     /// #     fn view(&self, frame: &mut Frame<'_>) {}
     /// #     fn subscriptions(&self) -> Vec<Subscription<Message>> { vec![] }
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn update(&mut self, msg: Self::Message) -> Command<Self::Message>;
@@ -154,9 +158,9 @@ pub trait Application: Sized {
     ///   replacing a live task, or a scope teardown selecting the run
     ///   (RFC 0012 §4.2).
     ///
-    /// The second needs no message, so a reconcile that had to wait for a stopped
-    /// task to finish does not also wait for the next message to arrive. A source
-    /// that merely *finishes* marks nothing dirty on its own.
+    /// The second needs no message, so a subscription reconcile that had to wait
+    /// for a stopped task to finish does not also wait for the next message to
+    /// arrive. A source that merely *finishes* marks nothing dirty on its own.
     ///
     /// A new or restarted subscription is admitted only after every previously
     /// stopped task has quiesced (RFC 0012 §4); a re-evaluation with no outstanding
@@ -199,9 +203,40 @@ pub trait Application: Sized {
     ///         vec![]
     ///     }
     /// }
+    /// #     fn instances(&self, _out: &mut Instances<'_>) {}
     /// # }
     /// ```
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>>;
+
+    /// Reports the occupancies of the composed children this application
+    /// holds, so the runtime can tear down the ones an update removes
+    /// (RFC 0014 INV-RC3a).
+    ///
+    /// An application that calls no reducer and places no command or
+    /// subscription under a row or occupant — the usual case — reports
+    /// nothing: write an empty body. One whose `update` calls a combinator
+    /// stack's `reduce` forwards that stack's report,
+    /// `stack().instances(self, out)`, and reports beside it any row or
+    /// occupant whose work it places itself;
+    /// [`Reducer::instances`](crate::reducer::Reducer::instances) says what to
+    /// report. Pure in the state, order included: reporting runs no side
+    /// effect and reads no external mutable state.
+    ///
+    /// ```
+    /// # use ratatui::Frame;
+    /// # use tears::prelude::*;
+    /// # struct App;
+    /// # impl Application for App {
+    /// #     type Message = ();
+    /// #     type Flags = ();
+    /// #     fn new((): ()) -> (Self, Command<()>) { (App, Command::none()) }
+    /// #     fn update(&mut self, (): ()) -> Command<()> { Command::none() }
+    /// #     fn view(&self, _: &mut Frame<'_>) {}
+    /// #     fn subscriptions(&self) -> Vec<Subscription<()>> { vec![] }
+    /// fn instances(&self, _out: &mut Instances<'_>) {}
+    /// # }
+    /// ```
+    fn instances(&self, out: &mut Instances<'_>);
 }
 
 #[cfg(test)]
@@ -259,6 +294,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]
@@ -343,6 +380,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[tokio::test]
@@ -384,6 +423,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<BareMessage>> {
             vec![]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]

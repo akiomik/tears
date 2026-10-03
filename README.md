@@ -39,7 +39,7 @@ See the [Optional Features](#optional-features) section for information about en
 
 ### Minimal Example
 
-A tears application implements the `Application` trait, which has four required methods ([Composing Reducers](#composing-reducers) is the other way to write a program):
+A tears application implements the `Application` trait, which has five required methods ([Composing Reducers](#composing-reducers) is the other way to write a program):
 
 ```rust
 use tears::prelude::*;
@@ -72,6 +72,8 @@ impl Application for App {
     fn subscriptions(&self) -> Vec<Subscription<Message>> {
         vec![]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 ```
 
@@ -157,6 +159,8 @@ impl Application for Counter {
             }),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::main]
@@ -226,12 +230,14 @@ optionally-present child in a `Slot`. `into_program` closes the stack into a
 Composition pays off where a feature exists more than once at a time or comes
 and goes. Every row can declare the same timer and give its commands the same
 command id, and the timer and the commands still run as that row's own. When
-the parent removes a row or dismisses a pane, the boundary tears that child
-down, cancelling the child's commands still in flight and running the cleanup
-the child registered with `Command::on_teardown`; the parent tracks none of
-it. `Runtime` runs an `Application` through an adapter on the same kernel as
-`ProgramRuntime`, so composing changes how a program is written, not how it
-is executed.
+the parent removes a row or dismisses a pane — or replaces the collection, or
+a reducer further up does — the runtime tears that child down, cancelling the
+child's commands still in flight and running the cleanup the child registered
+with `Command::on_teardown`; the parent tracks none of it. `Runtime` runs an
+`Application` through an adapter on the same kernel as `ProgramRuntime`, so
+composing changes how a program is written, not how it is executed. An
+`Application` whose `update` calls a stack's `reduce` forwards the stack's
+report from `instances`.
 
 The [`tears::reducer`](https://docs.rs/tears/latest/tears/reducer/#composing-reducers)
 module docs say when composing is worth it and how it works.
@@ -347,15 +353,17 @@ thread that is already driving tasks. So a `#[tokio::test]` that builds a
 driver in its own body and never drives it still fails, at the drop.
 
 Driving the real kernel is what puts two things within reach. A declared
-subscription source runs; and in a composed program, the teardown a boundary
-originates when a child leaves runs too, where `TestStore` has no boundary to
-originate one. So reach for `TestStore` when the assertion is about an
-`Application`'s `update` transitions and command effects, and for `TestDriver`
-when it is about a source running at all, or — in a composed program — a
-child's arrival and removal across passes. Not about *when* a time-gated
-source produces, though: that needs a paused runtime the driver cannot be
-given, and so a different test shape, the one *deterministic time without
-`TestStore`* describes in the module docs linked above.
+subscription source runs; and in a composed program, the teardown that
+follows a child's removal stops runs that really started. `TestStore` starts
+none, though it applies the same teardown to the output it holds pending and
+runs the cleanup hooks registered there. So reach for `TestStore` when the
+assertion is about an `Application`'s `update` transitions and command
+effects, and for `TestDriver` when it is about a source running at all, or —
+in a composed program — a child's arrival and removal across passes. Not
+about *when* a time-gated source produces, though: that needs a paused
+runtime the driver cannot be given, and so a different test shape, the one
+*deterministic time without `TestStore`* describes in the module docs linked
+above.
 
 `examples/dashboard_composed.rs` carries worked `TestDriver` tests:
 

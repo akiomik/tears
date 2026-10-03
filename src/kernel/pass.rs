@@ -190,8 +190,12 @@ impl<P: Program> Kernel<P> {
             let Payload::Msg(message) = envelope.payload else {
                 continue;
             };
-            let state = self.state.as_mut().expect("kernel booted");
-            let command = self.program.reduce(state, message);
+            let booted = self.booted.as_mut().expect("kernel booted");
+            // `reduce`, then live-instance reconciliation, before the
+            // dispatch and never as a later command (RFC 0014 INV-RC3).
+            let command = booted
+                .live_instances
+                .update(&self.program, &mut booted.state, message);
             updated += 1;
             self.dispatch(command);
         }
@@ -211,7 +215,7 @@ impl<P: Program> Kernel<P> {
         if self.redraw_pending {
             self.redraw_pending = false;
             let program = &self.program;
-            let state = self.state.as_ref().expect("kernel booted");
+            let state = &self.booted.as_ref().expect("kernel booted").state;
             let rendered = terminal.draw(|frame| program.view(state, frame)).map(drop);
             if let Err(error) = rendered {
                 // The failure's *value* leaves through the caller's
@@ -246,7 +250,7 @@ impl<P: Program> Kernel<P> {
     /// contained (RFC 0011 INV-LC8).
     pub(super) fn reconcile(&mut self) {
         let declarations = {
-            let state = self.state.as_ref().expect("kernel booted");
+            let state = &self.booted.as_ref().expect("kernel booted").state;
             self.program.subscriptions(state)
         };
         let declared: Vec<SubscriptionId> = declarations

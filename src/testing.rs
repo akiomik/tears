@@ -122,6 +122,8 @@ use tokio::time;
 use crate::application::Application;
 use crate::command::{Action, CancelPolicy, CommandId, RuntimeCommandParts, SpawnEntry};
 use crate::noop_waker::noop_context;
+use crate::reducer::AppProgram;
+use crate::reducer::instances::LiveInstances;
 use crate::structural_key::ScopePath;
 use crate::subscription::core::SubscriptionId;
 
@@ -248,6 +250,8 @@ impl<Msg: Send + 'static> PendingLeaf<Msg> {
 ///     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 ///         vec![]
 ///     }
+///
+///     fn instances(&self, _out: &mut Instances<'_>) {}
 /// }
 ///
 /// let mut store = TestStore::<Counter>::new(0);
@@ -281,6 +285,9 @@ where
     /// the set shrinks as the test makes progress — a count could only grow.
     running_cleanups: Vec<RunningCleanup>,
     redraw_requested: bool,
+    /// The previous live-instance report — the kernel's own reconciliation,
+    /// shared rather than re-derived (RFC 0008 INV-T3, RFC 0014 INV-RC3).
+    live_instances: LiveInstances,
     /// Where the store is between running and a quit the test has assented
     /// to. Three states rather than two booleans, because the middle one is
     /// real: a quit applies at its dispatch and is only *observed* later, and
@@ -304,7 +311,8 @@ impl<App: Application> TestStore<App>
 where
     App::Message: Debug,
 {
-    /// Runs [`Application::new`] with `flags` and enqueues the init command.
+    /// Runs [`Application::new`] with `flags`, reads the first live-instance
+    /// report from the state it returns, and enqueues the init command.
     ///
     /// Exhaustiveness applies from construction: the init command's
     /// deliverable output is held to the same `receive*` / [`finish`] / drop
@@ -339,8 +347,10 @@ where
             .build()
             .expect("controlled time context construction should not fail");
         let (app, init_command) = App::new(flags);
+        let live_instances = LiveInstances::new(&AppProgram::<App>::new(), &app);
         let mut store = Self {
             app,
+            live_instances,
             context,
             pending: Vec::new(),
             armed: Vec::new(),
@@ -363,7 +373,8 @@ where
     }
 
     /// Applies `msg` through [`Application::update`] and enqueues the
-    /// returned command's effects.
+    /// returned command's effects, with the teardowns reconciliation adds for
+    /// the instances that left the report (RFC 0014 INV-RC3).
     ///
     /// `send` is one synchronous `update` call plus bookkeeping: it spawns no
     /// task and delivers no pending output. Deliverable output left by
@@ -566,9 +577,10 @@ where
     /// This is the same *desired set* the runtime's subscription
     /// reconciliation computes as its input — not a prediction of which ids
     /// it spawns or already has running. Pure observation: no source's
-    /// stream is started, no reconciliation machinery runs, and no
+    /// stream is started, no subscription reconciliation runs, and no
     /// duplicate-ignored warning is emitted (that event belongs to the
-    /// runtime's reconciliation, which this call never invokes).
+    /// runtime's subscription reconciliation, which this call never
+    /// invokes).
     #[must_use]
     pub fn subscription_ids(&self) -> Vec<SubscriptionId> {
         let mut ids: Vec<SubscriptionId> = Vec::new();
@@ -603,7 +615,9 @@ where
     /// One synchronous `update` plus command intake — the shared tail of
     /// `send` and the `receive*` deliveries.
     fn apply_update(&mut self, msg: App::Message) {
-        let command = self.app.update(msg);
+        let command = self
+            .live_instances
+            .update(&AppProgram::<App>::new(), &mut self.app, msg);
         self.enqueue_command(command.into_runtime_parts());
     }
 
@@ -1015,6 +1029,8 @@ mod tests {
     use futures::channel::oneshot;
     use futures::stream;
     use ratatui::Frame;
+
+    use crate::reducer::{ForEach, Instances, Keyed, Reducer, ReducerExt};
     // Tokio's I/O resources are compiled out under `--cfg loom` (tokio gates
     // them), so the I/O-dependent leaf helper and its tests are too.
     #[cfg(all(not(loom), unix))]
@@ -1067,6 +1083,8 @@ mod tests {
         fn subscriptions(&self) -> Vec<Subscription<Msg>> {
             Vec::new()
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     fn store_with<Msg: Send + Debug + 'static>(
@@ -1950,6 +1968,8 @@ mod tests {
                 vec![Subscription::new(self.first.clone())]
             }
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     #[test]
@@ -2003,6 +2023,8 @@ mod tests {
                 Subscription::new(self.first.clone()),
             ]
         }
+
+        fn instances(&self, _out: &mut Instances<'_>) {}
     }
 
     // INV-T11: duplicates collapse to their first occurrence, at its
@@ -2039,8 +2061,8 @@ mod tests {
     }
 
     // INV-T11: no duplicate-ignored warning fires from `subscription_ids` —
-    // that tracing event belongs to the runtime's reconciliation, which the
-    // store never runs.
+    // that tracing event belongs to the runtime's subscription reconciliation,
+    // which the store never runs.
     #[test]
     fn subscription_ids_emits_no_duplicate_ignored_warning() {
         let recorder = TraceRecorder::new()
@@ -2054,7 +2076,8 @@ mod tests {
         assert_eq!(
             recorder.event_count(),
             0,
-            "the duplicate-ignored warning is reconciliation's side effect, not the store's"
+            "the duplicate-ignored warning is subscription reconciliation's side effect, not \
+             the store's"
         );
         store.finish();
     }
@@ -2260,6 +2283,193 @@ mod tests {
     #[should_panic(expected = "effect leaf(s) not driven to completion")]
     fn finish_fails_on_an_unadvanced_timeout_leaf() {
         let store = store_with(timeout_command(60), |_| Command::none());
+        store.finish();
+    }
+
+    // --- Live-instance reconciliation (RFC 0008 §3.2, INV-T3; RFC 0014
+    // INV-RC3): an application holding a `Keyed`, reducing a `for_each`
+    // stack inside `update` and forwarding the stack's report.
+
+    #[derive(Debug, PartialEq)]
+    enum BoardMsg {
+        Open(u8),
+        Close(u8),
+        Row(u8, RowMsg),
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum RowMsg {
+        Work,
+        Done,
+    }
+
+    struct Row {
+        cleaned: Arc<AtomicBool>,
+    }
+
+    /// A row's `Work` leaves keyed output pending under the row and
+    /// registers a cleanup there.
+    struct RowReducer;
+
+    impl Reducer for RowReducer {
+        type State = Row;
+        type Message = RowMsg;
+
+        fn reduce(&self, row: &mut Row, msg: RowMsg) -> Command<RowMsg> {
+            match msg {
+                RowMsg::Work => {
+                    let cleaned = Arc::clone(&row.cleaned);
+                    Command::batch([
+                        Command::message(RowMsg::Done)
+                            .cancellable(CommandId::new("work"))
+                            .into(),
+                        Command::on_teardown(async move {
+                            cleaned.store(true, Ordering::SeqCst);
+                        }),
+                    ])
+                }
+                RowMsg::Done => Command::none(),
+            }
+        }
+
+        fn instances(&self, _row: &Row, _out: &mut Instances<'_>) {}
+    }
+
+    struct BoardReducer;
+
+    impl Reducer for BoardReducer {
+        type State = Board;
+        type Message = BoardMsg;
+
+        fn reduce(&self, board: &mut Board, msg: BoardMsg) -> Command<BoardMsg> {
+            match msg {
+                BoardMsg::Open(key) => {
+                    let row = Row {
+                        cleaned: Arc::clone(&board.cleaned),
+                    };
+                    board.rows.insert(key, row);
+                }
+                BoardMsg::Close(key) => {
+                    board.rows.remove(&key);
+                }
+                BoardMsg::Row(..) => {}
+            }
+            Command::none()
+        }
+
+        fn instances(&self, _board: &Board, _out: &mut Instances<'_>) {}
+    }
+
+    fn board_stack() -> ForEach<BoardReducer, RowReducer, u8> {
+        BoardReducer.for_each(
+            RowReducer,
+            |board: &Board| &board.rows,
+            |board: &mut Board| &mut board.rows,
+            |msg| match msg {
+                BoardMsg::Row(key, row) => Ok((key, row)),
+                other => Err(other),
+            },
+            BoardMsg::Row,
+        )
+    }
+
+    /// Row 1 is open from `new`, whose command leaves keyed output pending
+    /// under it. `reports` is whether `instances` forwards the stack's
+    /// report.
+    struct Board {
+        rows: Keyed<u8, Row>,
+        cleaned: Arc<AtomicBool>,
+        reports: bool,
+    }
+
+    impl Application for Board {
+        type Message = BoardMsg;
+        type Flags = (bool, Arc<AtomicBool>);
+
+        fn new((reports, cleaned): Self::Flags) -> (Self, Command<BoardMsg>) {
+            let first = Row {
+                cleaned: Arc::clone(&cleaned),
+            };
+            let mut rows = Keyed::new();
+            rows.insert(1, first);
+            let board = Self {
+                rows,
+                cleaned,
+                reports,
+            };
+            let pending = Command::message(BoardMsg::Row(1, RowMsg::Done))
+                .cancellable(CommandId::new("work"))
+                .scoped(1_u8);
+            (board, pending.into())
+        }
+
+        fn update(&mut self, msg: BoardMsg) -> Command<BoardMsg> {
+            board_stack().reduce(self, msg)
+        }
+
+        fn view(&self, _frame: &mut Frame<'_>) {}
+
+        fn subscriptions(&self) -> Vec<Subscription<BoardMsg>> {
+            Vec::new()
+        }
+
+        fn instances(&self, out: &mut Instances<'_>) {
+            if self.reports {
+                board_stack().instances(self, out);
+            }
+        }
+    }
+
+    fn assert_nothing_deliverable(store: &mut TestStore<Board>, row: u8, what: &str) {
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            store.receive(BoardMsg::Row(row, RowMsg::Done));
+        }));
+        assert!(
+            failure_message(failure).contains("no pending effects"),
+            "{what}"
+        );
+    }
+
+    // The first report is read from the state `new` returns, so removing the
+    // row open there tears down the output pending under it.
+    #[test]
+    fn removing_a_row_held_from_new_tears_down_its_pending_output() {
+        let mut store = TestStore::<Board>::new((true, Arc::default()));
+        store.send(BoardMsg::Close(1));
+        assert_nothing_deliverable(&mut store, 1, "the closed row's output was torn down");
+        store.finish();
+    }
+
+    // A row inserted by a later step is reconciled the same way: removing it
+    // discards its pending output and runs its cleanup.
+    #[cfg(not(loom))]
+    #[test]
+    fn removing_a_row_inserted_later_tears_down_its_output_and_runs_its_cleanup() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let mut store = TestStore::<Board>::new((true, Arc::clone(&cleaned)));
+        store.receive(BoardMsg::Row(1, RowMsg::Done));
+
+        store.send(BoardMsg::Open(2));
+        store.send(BoardMsg::Row(2, RowMsg::Work));
+        assert!(!cleaned.load(Ordering::SeqCst), "arming starts nothing");
+
+        store.send(BoardMsg::Close(2));
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "the removal ran the cleanup"
+        );
+        assert_nothing_deliverable(&mut store, 2, "the closed row's output was torn down");
+        store.finish();
+    }
+
+    // The negative control: the same application reporting nothing leaves
+    // the removed row's output deliverable — the report is what tears it
+    // down.
+    #[test]
+    fn an_unreported_row_s_removal_leaves_its_output_deliverable() {
+        let mut store = TestStore::<Board>::new((false, Arc::default()));
+        store.send(BoardMsg::Close(1));
+        store.receive(BoardMsg::Row(1, RowMsg::Done));
         store.finish();
     }
 }

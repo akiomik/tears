@@ -24,9 +24,9 @@
 //! | INV-LC1 (rendering and re-evaluation only in the frame stage, at most one of each) | this file, `a_multi_message_batch_renders_once_and_re_evaluates_once_after_it` |
 //! | INV-LC2 (render before re-evaluation, both on the pass's current state) | this file, plus `kernel`'s own order and `without_redraw` rows |
 //! | INV-LC3 (construction is inert) | this file, `constructing_a_driver_starts_nothing_and_dropping_it_winds_nothing_down` |
-//! | INV-LC4 (bootstrap intake; first render eligible unconditionally) | `kernel`'s intake row, plus this file's `without_redraw` init row |
+//! | INV-LC4 (bootstrap intake; first render eligible unconditionally) | `kernel`'s intake row, plus this file's `without_redraw` init row; the first live-instance report's place is `tests/lifecycle.rs`'s `a_panic_in_the_first_report_leaves_the_init_command_undispatched` |
 //! | INV-LC5 (controlled causes, with the return classification) | `termination under owned work`, above |
-//! | INV-LC6 (abrupt causes, one row per cause and call site) | `both panic classes` and `termination under owned work`, above, plus this file's `view`, `subscriptions` (both call sites), lazy-constructor, and never-run rows |
+//! | INV-LC6 (abrupt causes, one row per cause and call site) | `both panic classes` and `termination under owned work`, above, plus this file's `view`, `subscriptions` (both call sites), lazy-constructor, and never-run rows; `instances` (both call sites) is `tests/lifecycle.rs`'s |
 //! | INV-LC7 (two-stage postcondition, bounded settle, gauges zero) | `kernel`'s settle row, at the gauge surface — a narrowing: one row reads the invariant's three clauses at their common observable, the post-settle gauge state, rather than one row per clause |
 //! | INV-LC8 (containment, one row per producer kind) | `both panic classes`, above, plus this file's keyed and subscription-forwarder rows |
 //! | INV-LC9 (one driver at a time) | structural: every driving call takes `&mut self`, `boot` runs once, and the production entry consumes its kernel — a reentrant path is unrepresentable rather than untested |
@@ -460,9 +460,17 @@ fn a_producer_quit_reclaims_owned_work() {
         .step_pass(WakeSource::Control)
         .expect("the quit is on the control lane");
 
-    assert!(stepped.terminated.is_some(), "the quit applied");
+    assert!(
+        matches!(stepped.terminated, Some(Ok(Exit::Quit))),
+        "the quit applied, as a quit"
+    );
     assert!(journal.reduced().is_empty(), "the backlog went untouched");
     assert!(reclaimed.marked(), "and the owned work was reclaimed");
+    assert_eq!(
+        journal.reports(),
+        1,
+        "the first report and no other: no update ran, and nothing is called after termination"
+    );
 }
 
 // The render-failure cause: it routes through the same termination, and only
@@ -617,7 +625,9 @@ fn a_stopping_command_run_defers_no_subscription_admission() {
 // nowhere else, and one pass performs at most one of each however many
 // messages its batch delivered. The whole claim reads off one call
 // sequence: three `Reduce`s with nothing between them, then exactly one
-// `View` and one `Subscriptions`.
+// `View` and one `Subscriptions`. The live-instance report is the other
+// side of the same line: RFC 0014 INV-RC3 reads one after every update, so
+// the batch reads three, not one after it.
 #[test]
 fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
     let (mut driver, journal) = driver_with(
@@ -629,6 +639,7 @@ fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
         accept(&mut driver, sender.clone());
     }
     let before = journal.calls().len();
+    let reports_before = journal.reports();
 
     driver
         .step_pass(WakeSource::Data)
@@ -644,6 +655,11 @@ fn a_multi_message_batch_renders_once_and_re_evaluates_once_after_it() {
             Call::Subscriptions,
         ],
         "no render and no re-evaluation inside the batch, and one of each after it"
+    );
+    assert_eq!(
+        journal.reports() - reports_before,
+        3,
+        "one live-instance report per update, inside the batch"
     );
 }
 

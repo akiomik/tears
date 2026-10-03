@@ -1,8 +1,7 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
 - Status: Implemented — stages 1–2 with the store, stage 3 (§9) with
-  the reducer-first kernel, at the paths §9.1 places it; the amendments
-  RFC 0014 §2.5's live-instance reconciliation brings are Accepted
+  the reducer-first kernel, at the paths §9.1 places it
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled

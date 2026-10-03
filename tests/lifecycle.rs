@@ -1,8 +1,8 @@
 //! Integration tests for RFC 0011's runtime lifecycle contract at the layer
 //! its invariants place them: the controlled and abrupt termination routes and
 //! their two-stage postconditions (INV-LC5/INV-LC6/INV-LC7), panic containment
-//! for runtime-owned producer tasks (INV-LC8), and construction inertness
-//! (INV-LC3, RFC 0011 §3.4).
+//! for runtime-owned producer tasks (INV-LC8), construction inertness
+//! (INV-LC3, RFC 0011 §3.4), and INV-LC4's first-report order.
 //!
 //! The steady-state phase-order invariants (INV-LC1/INV-LC2) and the
 //! first-render eligibility half of INV-LC4 are white-box and live with the
@@ -57,14 +57,15 @@ fn timer_subscription<Msg: Send + 'static>(make: fn() -> Msg) -> Subscription<Ms
 
 // --- Shared observation surfaces --------------------------------------------
 
-/// Counts every application transition the runtime invokes, so a test can
-/// assert that none of them runs again after a terminating operation (RFC 0011
-/// §4.4's immediate postcondition, item 1).
+/// Counts every application transition and `instances` report the runtime
+/// invokes, so a test can assert that none of them runs again after a
+/// terminating operation (RFC 0011 §4.4's immediate postcondition, item 1).
 #[derive(Clone, Default)]
 struct Transitions {
     updates: Arc<AtomicUsize>,
     views: Arc<AtomicUsize>,
     subscriptions: Arc<AtomicUsize>,
+    instances: Arc<AtomicUsize>,
 }
 
 /// One reading of [`Transitions`]. Named after the counters rather than
@@ -75,6 +76,7 @@ struct TransitionCounts {
     updates: usize,
     views: usize,
     subscriptions: usize,
+    instances: usize,
 }
 
 impl Transitions {
@@ -83,6 +85,7 @@ impl Transitions {
             updates: self.updates.load(Ordering::SeqCst),
             views: self.views.load(Ordering::SeqCst),
             subscriptions: self.subscriptions.load(Ordering::SeqCst),
+            instances: self.instances.load(Ordering::SeqCst),
         }
     }
 }
@@ -155,7 +158,7 @@ async fn assert_two_stage_postconditions(
         assert_eq!(
             transitions.snapshot(),
             immediate,
-            "no update/view/subscriptions call may run after the terminating operation"
+            "no update/view/subscriptions/instances call may run after the terminating operation"
         );
         if producer_gauges_are_zero(recorder, expected_active)
             && dismantled
@@ -272,6 +275,13 @@ impl Application for QuitApp {
             .fetch_add(1, Ordering::SeqCst);
         vec![timer_subscription(|| QuitMessage::Tick)]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {
+        self.flags
+            .transitions
+            .instances
+            .fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 async fn assert_quit_terminates() -> Result<()> {
@@ -294,6 +304,11 @@ async fn assert_quit_terminates() -> Result<()> {
     assert!(
         immediate.updates >= 2,
         "the run should reach the quitting message: {immediate:?}"
+    );
+    assert_eq!(
+        immediate.instances,
+        immediate.updates + 1,
+        "one report from the initial state and one after every update: {immediate:?}"
     );
 
     // A run that reaches its second message has started all three producer
@@ -430,6 +445,10 @@ async fn render_error_returns_err_and_reaches_both_postconditions() -> Result<()
         immediate.updates, 0,
         "the render fails before any message is delivered: {immediate:?}"
     );
+    assert_eq!(
+        immediate.instances, 1,
+        "only the first report, from the initial state: {immediate:?}"
+    );
 
     assert_two_stage_postconditions(
         &recorder,
@@ -452,7 +471,21 @@ enum PanicSite {
     View,
     SubscriptionsBootstrap,
     SubscriptionsSteady,
+    InstancesBootstrap,
+    InstancesSteady,
     SourceConstructor,
+}
+
+/// How far a panic row's run gets before the panic, which fixes the producers
+/// it can be held to winding down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reached {
+    /// The panic precedes the init dispatch, so nothing was started.
+    Nothing,
+    /// The init effect was dispatched; no subscription stream exists.
+    InitEffect,
+    /// The init effect and the subscription's stream are both running.
+    InitEffectAndSource,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -579,6 +612,24 @@ impl Application for AbruptApp {
             panic_in_constructor: self.flags.site == PanicSite::SourceConstructor,
         })]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {
+        let previous = self
+            .flags
+            .transitions
+            .instances
+            .fetch_add(1, Ordering::SeqCst);
+        assert!(
+            self.flags.site != PanicSite::InstancesBootstrap,
+            "deliberate panic: instances, at the bootstrap call site"
+        );
+        // The first call reads the initial state; a later call can only follow
+        // a processed message.
+        assert!(
+            self.flags.site != PanicSite::InstancesSteady || previous == 0,
+            "deliberate panic: instances, at the steady call site"
+        );
+    }
 }
 
 /// Drives one INV-LC6 panic row: the unwind must propagate to `run()`'s caller,
@@ -586,10 +637,10 @@ impl Application for AbruptApp {
 /// and re-checked across the settle loop — while the runtime-owned tasks are
 /// wound down.
 ///
-/// `source_starts` says whether the row got far enough to start the
-/// subscription's stream; the bootstrap-`subscriptions` and source-constructor
-/// rows panic before any stream exists.
-async fn assert_transition_panic_tears_down(site: PanicSite, source_starts: bool) -> Result<()> {
+/// `reached` says what the row started before panicking: the
+/// bootstrap-`instances` row starts nothing, and the bootstrap-`subscriptions`
+/// and source-constructor rows panic before any stream exists.
+async fn assert_transition_panic_tears_down(site: PanicSite, reached: Reached) -> Result<()> {
     let recorder = TraceRecorder::new().with_target("tears::runtime::load");
     let _guard = recorder.set_default();
 
@@ -608,19 +659,37 @@ async fn assert_transition_panic_tears_down(site: PanicSite, source_starts: bool
         "the {site:?} panic must propagate to run()'s caller"
     );
 
+    let immediate = flags.transitions.snapshot();
+    if reached == Reached::Nothing {
+        // Nothing to wind down: the census is that nothing ever started.
+        for _ in 0..DRAIN_PASSES {
+            assert_eq!(
+                flags.transitions.snapshot(),
+                immediate,
+                "no update/view/subscriptions/instances call may run after the panic"
+            );
+            yield_now().await;
+        }
+        assert!(
+            no_producer_gauge_event_fired(&recorder),
+            "a panic before the init dispatch starts no producer: {:?}",
+            producer_gauge_report(&recorder),
+        );
+        return Ok(());
+    }
+
     // `AbruptApp` starts a keyed init effect and, once a stream exists, one
     // subscription; its `update` returns `Command::none()`, so the
     // `unkeyed_commands` gauge is never raised on any of these rows.
     let mut expected_active = vec!["keyed_commands"];
     let mut dismantled = vec![("the keyed init effect", &flags.keyed_effect_dropped)];
-    if source_starts {
+    if reached == Reached::InitEffectAndSource {
         expected_active.push("subscriptions");
         // Once the stream is dropped it can never be polled again — a stronger
         // witness than counting polls over a finite window.
         dismantled.push(("the subscription's stream", &flags.source_dropped));
     }
 
-    let immediate = flags.transitions.snapshot();
     assert_two_stage_postconditions(
         &recorder,
         &flags.transitions,
@@ -677,13 +746,13 @@ async fn dropping_the_run_future_reaches_both_postconditions() -> Result<()> {
 // fail-fast and propagates, and the unwind still performs the teardown.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_panic_in_update_propagates_and_reaches_both_postconditions() -> Result<()> {
-    assert_transition_panic_tears_down(PanicSite::Update, true).await
+    assert_transition_panic_tears_down(PanicSite::Update, Reached::InitEffectAndSource).await
 }
 
 // INV-LC6: same for a panic in `view`.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_panic_in_view_propagates_and_reaches_both_postconditions() -> Result<()> {
-    assert_transition_panic_tears_down(PanicSite::View, true).await
+    assert_transition_panic_tears_down(PanicSite::View, Reached::InitEffectAndSource).await
 }
 
 // INV-LC6: same for a panic in `subscriptions` at the bootstrap call site,
@@ -691,14 +760,33 @@ async fn a_panic_in_view_propagates_and_reaches_both_postconditions() -> Result<
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_bootstrap_subscriptions_panic_propagates_and_reaches_both_postconditions() -> Result<()>
 {
-    assert_transition_panic_tears_down(PanicSite::SubscriptionsBootstrap, false).await
+    assert_transition_panic_tears_down(PanicSite::SubscriptionsBootstrap, Reached::InitEffect).await
 }
 
 // INV-LC6: same for a panic in `subscriptions` at the steady call site, raised
 // only on a re-evaluation after a processed message.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_steady_subscriptions_panic_propagates_and_reaches_both_postconditions() -> Result<()> {
-    assert_transition_panic_tears_down(PanicSite::SubscriptionsSteady, true).await
+    assert_transition_panic_tears_down(PanicSite::SubscriptionsSteady, Reached::InitEffectAndSource)
+        .await
+}
+
+// INV-LC6: same for a panic in `instances` at the bootstrap call site, raised
+// on its first call, on the initial state — before the init dispatch, so the
+// row holds it to having started nothing.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_bootstrap_instances_panic_propagates_and_starts_nothing() -> Result<()> {
+    assert_transition_panic_tears_down(PanicSite::InstancesBootstrap, Reached::Nothing).await
+}
+
+// INV-LC6: same for a panic in `instances` at the steady call site, raised
+// only on the call after a processed message. That message's `update`
+// returns no command, so this row pins the propagation and the
+// postconditions, not where the report sits relative to the dispatch.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_steady_instances_panic_propagates_and_reaches_both_postconditions() -> Result<()> {
+    assert_transition_panic_tears_down(PanicSite::InstancesSteady, Reached::InitEffectAndSource)
+        .await
 }
 
 // INV-LC6: same for a panic in a declared subscription's lazy source
@@ -706,7 +794,7 @@ async fn a_steady_subscriptions_panic_propagates_and_reaches_both_postconditions
 // from INV-LC8's forwarder-task row.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_source_constructor_panic_propagates_and_reaches_both_postconditions() -> Result<()> {
-    assert_transition_panic_tears_down(PanicSite::SourceConstructor, false).await
+    assert_transition_panic_tears_down(PanicSite::SourceConstructor, Reached::InitEffect).await
 }
 
 // --- INV-LC3 and the never-run-drop row of INV-LC6 --------------------------
@@ -715,6 +803,8 @@ async fn a_source_constructor_panic_propagates_and_reaches_both_postconditions()
 struct InertProbe {
     effect_started: Arc<AtomicBool>,
     source_started: Arc<AtomicBool>,
+    /// Panics in the first `instances` call, on the initial state.
+    panic_in_instances: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -772,6 +862,13 @@ impl Application for InertApp {
         vec![Subscription::new(InertSource {
             started: Arc::clone(&self.probe.source_started),
         })]
+    }
+
+    fn instances(&self, _out: &mut Instances<'_>) {
+        assert!(
+            !self.probe.panic_in_instances,
+            "deliberate panic: instances, on the initial state"
+        );
     }
 }
 
@@ -849,6 +946,55 @@ async fn dropping_a_never_run_runtime_winds_down_nothing() {
         no_producer_gauge_event_fired(&recorder),
         "a never-run runtime's lifetime must fire no producer-gauge event"
     );
+}
+
+// INV-LC4 (first-report order): the first live-instance report is read before
+// the init command is dispatched, so a panic in `instances` on the initial
+// state leaves the init command undispatched. The producer-gauge event, read
+// through INV-LC3's recorder setup, is what tells the order apart: an init
+// command dispatched and then aborted by the unwind never starts its effect
+// either, but it does raise the gauge. INV-LC6's bootstrap `instances` row
+// above reaches the same panic for its own invariant, which asks for one row
+// per cause and call site; this row is INV-LC4's.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_panic_in_the_first_report_leaves_the_init_command_undispatched() -> Result<()> {
+    let recorder = TraceRecorder::new().with_target("tears::runtime::load");
+    let _guard = recorder.set_default();
+
+    let probe = InertProbe {
+        panic_in_instances: true,
+        ..InertProbe::default()
+    };
+    let mut terminal = common::test_terminal()?;
+    let runtime = Runtime::<InertApp>::new(probe.clone());
+
+    let outcome = panic_hook::with_silent_panic_hook(
+        AssertUnwindSafe(timeout(Duration::from_secs(5), runtime.run(&mut terminal)))
+            .catch_unwind(),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "the instances panic must propagate to run()'s caller"
+    );
+
+    drain_executor().await;
+
+    assert!(
+        !probe.effect_started.load(Ordering::SeqCst),
+        "the init command's effect must not have run"
+    );
+    assert!(
+        !probe.source_started.load(Ordering::SeqCst),
+        "no subscription source may have started"
+    );
+    assert!(
+        no_producer_gauge_event_fired(&recorder),
+        "the init command must not have been dispatched: {:?}",
+        producer_gauge_report(&recorder),
+    );
+
+    Ok(())
 }
 
 // --- INV-LC8: panic containment for runtime-owned producer tasks ------------
@@ -966,6 +1112,8 @@ impl Application for ContainmentApp {
             vec![surviving]
         }
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 async fn assert_producer_panic_is_contained(kind: PanickingProducer) -> Result<()> {

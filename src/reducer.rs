@@ -9,7 +9,9 @@
 //! [`Reducer::subscriptions`] is a pure function of state exactly as
 //! RFC 0012 INV-SE6 states for `Application::subscriptions`: the runtime may
 //! evaluate it at any re-evaluation frequency, so it must not carry
-//! per-evaluation effects of its own.
+//! per-evaluation effects of its own. [`Reducer::instances`] is pure in the
+//! state on the same terms, and is read from the initial state and after
+//! every update.
 //!
 //! Views are root-level by design. [`Reducer`] deliberately has no `view`;
 //! only [`Program`] does. Composing child views is ordinary function calls
@@ -101,18 +103,27 @@
 //!   segment. Two rows declaring the same timer are two subscriptions; two rows
 //!   keyed on the same command id occupy two slots. Application code writes no
 //!   `.scoped(...)`, and cannot omit or double-apply one.
-//! - **It tears removed instances down.** `Keyed` and `Slot` record a removal
-//!   when one happens — [`Keyed::remove`], [`Slot::dismiss`], and the two
-//!   replacing shapes, [`Keyed::insert`] over an occupied key and
-//!   [`Slot::present`] over an occupied slot — and the boundary turns each
-//!   recorded removal into one teardown of that instance's scope. The removed
-//!   instance's subscriptions stop, its in-flight commands are cancelled, and
-//!   the cleanup hooks it registered run. Stopping a subscription reaches past
-//!   the instance that declared it: while any subscription run is stopping the
-//!   runtime starts none, so a replacement's successor — and any other row's
-//!   new declarations — wait for that run to quiesce. The combinators state the
+//! - **It reports its instances, so removed ones are torn down.** Every row of
+//!   a `Keyed` and the occupant of a `Slot` is an instance with an identity of
+//!   its own, and the boundary reports the ones its state holds — through
+//!   whatever holds the stack, which forwards the report (below). After every
+//!   update the runtime compares the instances the state reports with the ones
+//!   it reported before, and tears down each one that is gone, however it went
+//!   — [`Keyed::remove`], [`Slot::dismiss`], an insert or a present that
+//!   replaces an occupant, assigning or swapping the whole collection, a
+//!   reducer above the boundary changing it. The removed instance's
+//!   subscriptions stop, its in-flight commands are cancelled, and the cleanup
+//!   hooks it registered run. Stopping a subscription reaches past the instance
+//!   that declared it: while any subscription run is stopping the runtime
+//!   starts none, so a replacement's successor — and any other row's new
+//!   declarations — wait for that run to quiesce. The combinators state the
 //!   timing ([`for_each`](ReducerExt::for_each),
-//!   [`presented`](ReducerExt::presented)).
+//!   [`presented`](ReducerExt::presented)). A teardown ends an instance's work,
+//!   not its state: one torn down while the state still holds it — moved to
+//!   another path, or kept inside an occupant that was replaced — keeps
+//!   whatever its state records. Nothing restarts its commands or re-registers
+//!   its cleanup hooks; the subscriptions it still declares are admitted again
+//!   like any other.
 //! - **It discards what it cannot route.** A message addressed to a key the
 //!   collection no longer holds, or to a slot with no occupant, reaches no
 //!   reducer and is dropped — with no diagnostic, and with no way for the
@@ -122,15 +133,18 @@
 //!   the row's work simply not done. Where that matters, keep the decision and
 //!   the work in one reduce rather than splitting them across a message.
 //!
-//! Building initial state records nothing: [`Keyed::from_iter`] and an insert
-//! into an absent key remove no instance, so growing a collection during `init`
-//! is fine. The four shapes that *do* record belong inside a `reduce`, where
-//! the boundary drains them in the same update.
+//! The runtime learns what instances a state holds from
+//! [`instances`](Reducer::instances), which every reducer and
+//! [`Application`](crate::Application) implements, and which says what each
+//! one reports. The combinators report their own. A reducer you write by
+//! hand that calls another reducer's `reduce` — a whole combinator stack
+//! included — forwards that reducer's report; one that calls none and places
+//! no command or subscription under a row or occupant reports nothing.
 //!
 //! ## What stays at the root
 //!
 //! **`init`'s command does.** It is the root's command and crosses no boundary,
-//! so nothing it starts is scoped to a child. Work that belongs to a child —
+//! so no boundary scopes what it starts. Work that belongs to a child —
 //! the first fetch, a cleanup hook that must anchor at the child's scope —
 //! starts as a message routed *through* the boundary. In the worked example
 //! that is `TaskMessage::Watch`: the root inserts the row and returns
@@ -143,7 +157,8 @@
 //! applied to yet produces a second — and a teardown fires *every* registration
 //! its scope holds, so a child that arms on each one reports two teardowns for
 //! one removal. A flag on the child's state is enough; the successor instance a
-//! replacement creates gets a fresh one.
+//! replacement creates gets a fresh one. An instance torn down while the state
+//! still holds it keeps its flag, and so is not set up again.
 //!
 //! The same rule explains
 //! [`Command::on_teardown`](crate::Command::on_teardown)'s placement. A
@@ -191,31 +206,35 @@
 //! [dashboard]: https://docs.rs/crate/tears/latest/source/examples/dashboard.rs
 //! [dashboard_composed]: https://docs.rs/crate/tears/latest/source/examples/dashboard_composed.rs
 
-// The three submodules are file organization, not a hierarchy a user needs
+// These three submodules are file organization, not a hierarchy a user needs
 // to navigate: everything public in them is re-exported here, so each item
 // has exactly one public path (`docs/api-guidelines.md`, "Single Canonical
 // Path" and "Module Visibility").
 pub(crate) mod adapter;
 pub(crate) mod collection;
 pub(crate) mod combinator;
-// `Exit` is `ProgramRuntime::run`'s success type, so it shares its owner's
-// home at the crate root rather than sitting on this module's path — the
-// companion rule in `docs/api-guidelines.md`. Its module is `pub(crate)` so
-// the root re-export is the only public way to it, which is the same
+// `Exit` is `ProgramRuntime::run`'s success type and `Instances` is
+// `Application::instances`'s parameter type, so each shares its owner's home
+// at the crate root rather than sitting on this module's path — the
+// companion rule in `docs/api-guidelines.md`. Their modules are `pub(crate)`
+// so the root re-export is the only public way to them, which is the same
 // private-inner-module pattern `command::core` uses for `Command`.
 pub(crate) mod exit;
+pub(crate) mod instances;
 
 pub use adapter::AppProgram;
 pub use collection::{Keyed, ScopeValue, Slot};
 pub use combinator::{ForEach, IntoProgram, Presented, ReducerExt, Scoped};
 pub(crate) use exit::Exit;
+pub(crate) use instances::Instances;
 
 use ratatui::Frame;
 
 use crate::command::Command;
 use crate::subscription::Subscription;
 
-/// A state transition and the subscriptions that state declares.
+/// A state transition, the subscriptions that state declares, and the
+/// instances it holds.
 pub trait Reducer {
     /// The state this reducer owns.
     type State;
@@ -233,6 +252,76 @@ pub trait Reducer {
     fn subscriptions(&self, _state: &Self::State) -> Vec<Subscription<Self::Message>> {
         Vec::new()
     }
+
+    /// Reports the occupancies of the children this reducer composes, so the
+    /// runtime can tear down the ones an update removes (RFC 0014 INV-RC3a).
+    ///
+    /// Pure in the state, order included: a given state reports the same
+    /// sequence every time, and reporting runs no side effect and reads no
+    /// external mutable state.
+    ///
+    /// The runtime tears a row's or occupant's work down when a report no
+    /// longer holds it, beneath each path it was reported at, along with
+    /// everything else there. [`Instances::keyed`] reports each row at the
+    /// current path extended by its key, [`Instances::slot`] reports the
+    /// occupant at it extended by a segment, and [`Instances::scoped`]
+    /// extends it for what its closure reports. So scope each row's or
+    /// occupant's work — the commands and subscriptions this reducer and the
+    /// reducers it calls produce for it, and those the `init` of a program
+    /// built on it starts — beneath the path you report it at, and forward a
+    /// called reducer's report nested as this reducer nests that reducer's
+    /// commands. A pair a combinator built on this reducer already reports
+    /// need not be repeated. Report all of them on every call, whichever the
+    /// last message reached; the combinators do all of this for you.
+    ///
+    /// Nothing checks the report. Work beneath no path its row or occupant is
+    /// reported at gets no teardown from that removal, and a row or occupant
+    /// left out of some reports is torn down while the state still holds it.
+    ///
+    /// A reducer that reduces a child per row, scoping each row's commands
+    /// under its key, reports the rows and forwards the child's report
+    /// beneath each:
+    ///
+    /// ```
+    /// use tears::prelude::*;
+    /// use tears::reducer::{Keyed, Reducer};
+    ///
+    /// struct Counter;
+    ///
+    /// impl Reducer for Counter {
+    ///     type State = u32;
+    ///     type Message = ();
+    ///
+    ///     fn reduce(&self, count: &mut u32, (): ()) -> Command<()> {
+    ///         *count += 1;
+    ///         Command::none()
+    ///     }
+    ///
+    ///     fn instances(&self, _count: &u32, _out: &mut Instances<'_>) {}
+    /// }
+    ///
+    /// struct Counters;
+    ///
+    /// impl Reducer for Counters {
+    ///     type State = Keyed<u8, u32>;
+    ///     type Message = (u8, ());
+    ///
+    ///     fn reduce(
+    ///         &self,
+    ///         rows: &mut Keyed<u8, u32>,
+    ///         (key, message): (u8, ()),
+    ///     ) -> Command<(u8, ())> {
+    ///         rows.get_mut(&key).map_or_else(Command::none, |row| {
+    ///             Counter.reduce(row, message).map(move |m| (key, m)).scoped(key)
+    ///         })
+    ///     }
+    ///
+    ///     fn instances(&self, rows: &Keyed<u8, u32>, out: &mut Instances<'_>) {
+    ///         out.keyed(rows, |row, out| Counter.instances(row, out));
+    ///     }
+    /// }
+    /// ```
+    fn instances(&self, state: &Self::State, out: &mut Instances<'_>);
 }
 
 /// A reducer that can be run: it can produce its initial state and render.
@@ -243,7 +332,7 @@ pub trait Program: Reducer {
     /// Produces the initial state and the command dispatched at bootstrap.
     ///
     /// A quit returned here short-circuits bootstrap synchronously — the
-    /// initial reconcile does not run (RFC 0014 §6.2).
+    /// initial subscription reconcile does not run (RFC 0014 §6.2).
     fn init(&self, flags: Self::Flags) -> (Self::State, Command<Self::Message>);
 
     /// Renders the current state.

@@ -21,7 +21,8 @@
 //!
 //! There are two ways to write such a program, over one execution path.
 //! [`Application`] and its [`Runtime`] entry point are the facade: one type
-//! holds the state and supplies `new`, `update`, `view` and `subscriptions`.
+//! holds the state and supplies `new`, `update`, `view`, `subscriptions` and
+//! `instances`.
 //! Under them is the [`reducer`] core, where [`Reducer`](reducer::Reducer)
 //! is the state transition and a stack of composition combinators closes
 //! into a [`Program`](reducer::Program). [`ProgramRuntime`] runs any
@@ -41,8 +42,11 @@
 //!   [`SubscriptionSource`] implementation and identified by a
 //!   [`SubscriptionId`]
 //! - [`install_panic_hook`]: Restores the terminal if the application panics
-//! - [`reducer::Reducer`]: A state transition and the subscriptions that
-//!   state declares
+//! - [`reducer::Reducer`]: A state transition, the subscriptions that state
+//!   declares, and the instances it holds
+//! - [`Instances`]: What [`Application::instances`] and
+//!   [`reducer::Reducer::instances`] report the instances a state holds
+//!   through
 //! - [`reducer::Program`]: A reducer that can be run — it produces its
 //!   initial state and renders
 //! - [`ProgramRuntime`]: Runs any [`reducer::Program`]
@@ -83,6 +87,8 @@
 //!     fn subscriptions(&self) -> Vec<Subscription<Message>> {
 //!         vec![]
 //!     }
+//!
+//!     fn instances(&self, _out: &mut Instances<'_>) {}
 //! }
 //! ```
 //!
@@ -157,6 +163,11 @@ pub use panic::install_panic_hook;
 // on companion types). Not in the prelude: the facade's `run` returns
 // `Result<(), _>`, so a minimal skeleton never names it.
 pub use reducer::exit::Exit;
+// `Application::instances`'s parameter type, so every application names it:
+// at the crate root as that trait's companion, and in the prelude because a
+// skeleton writes it out (docs/api-guidelines.md, "Root Promotion Criteria"
+// and "Prelude Membership").
+pub use reducer::instances::Instances;
 pub use runtime::{ProgramRuntime, Runtime};
 // `RuntimeConfig` is `Runtime::with_config`'s companion type; re-exported at the
 // crate root but deliberately *not* in the prelude, since a minimal skeleton app
@@ -184,19 +195,6 @@ pub use runtime::load::{GAUGE_EVENT_FIELDS, LoadObserver};
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use kernel::bench_support::{BenchKernel, CleanupLedgerScan, RegistryScan, producer_quit};
-
-// The 0.10.x → 0.11.0 migration guide, compiled only when collecting
-// doctests, so every "after" snippet in it is checked against the API it
-// tells callers to move to and the guide cannot rot silently. That check is
-// only as real as the job that runs it: the `test` job passes explicit target
-// flags, which suppress the implicit doctest run, so the `doctest` job in
-// .github/workflows/ci.yml is what makes this load-bearing. `cfg(doctest)`
-// keeps the item off the public module tree: the guide is a transitional
-// artifact that should be deletable without touching the surface
-// (docs/api-guidelines.md, "Root Promotion Criteria").
-#[cfg(doctest)]
-#[doc = include_str!("../docs/migrations/0.10-to-0.11.md")]
-pub struct MigrationGuide0_11;
 
 #[cfg(test)]
 mod test_support;

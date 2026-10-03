@@ -69,6 +69,8 @@ impl Reducer for Counter {
             }
         }
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 impl Program for Counter {

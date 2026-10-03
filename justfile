@@ -12,21 +12,21 @@
 # What `--all-features` removed is the module from *test-target* builds, and
 # with it the three unit tests below. Measured, on rustc 1.97.0:
 #
-#     cargo test --lib                       573 total,  3 `signal::`
-#     cargo test --lib --all-features        624 total,  0 `signal::`
+#     cargo test --lib                       595 total,  3 `signal::`
+#     cargo test --lib --all-features        646 total,  0 `signal::`
 #     cargo test --lib --features {{build_features}}
-#                                            619 total,  3 `signal::`
+#                                            641 total,  3 `signal::`
 #
-#     cargo test --doc                        60 tests
-#     cargo test --doc --features loom-core   58 tests  (both `Signal` ones gone)
-#     cargo test --doc --all-features         70 tests  (both `Signal` ones gone)
+#     cargo test --doc                        50 tests
+#     cargo test --doc --features loom-core   48 tests  (both `Signal` ones gone)
+#     cargo test --doc --all-features         60 tests  (both `Signal` ones gone)
 #     cargo test --doc --features {{user_features}}
-#                                             72 tests  (superset of all above)
+#                                             62 tests  (superset of all above)
 #
 # Doctest rows are `-- --list` counts. What a run prints is split across
 # batches and moves when a doctest fails, so it is not the number above.
 #
-# The 624 and the 619 differ by the three `signal::` rows gained and eight
+# The 646 and the 641 differ by the three `signal::` rows gained and eight
 # lost: the four `cell_core` and four `accounting_core` rows, which
 # `test-loom` runs under `--cfg loom` — model-checked there rather than merely
 # executed once. So no *test* stops being run, and the three that were being
@@ -98,7 +98,7 @@ default:
 
 # `test` passes explicit target flags, which suppress the implicit doctest run,
 # so `test-doc` has to be listed separately here and in `pre-commit`; without it
-# nothing compiles the examples in rustdoc comments or in the
+# nothing compiles the examples in rustdoc comments or in a
 # `cfg(doctest)`-included migration guide.
 
 # Run all checks (fmt, clippy, test, doc tests)
@@ -229,10 +229,11 @@ test-integration:
 test-doc:
     cargo test --doc --features {{user_features}}
 
-# Guards the `include` entry that keeps `include_str!` resolvable once
-# published: `cargo publish`'s verification is a `cargo build`, which drops
-# the `cfg(doctest)` item before the macro runs, so a missing entry shows up
-# nowhere else. Packaging and extracting reproduces what a consumer gets.
+# Guards a migration guide's `include` entry, which keeps its `include_str!`
+# resolvable once published: `cargo publish`'s verification is a
+# `cargo build`, which drops the `cfg(doctest)` item before the macro runs,
+# so a missing entry shows up nowhere else. Packaging and extracting
+# reproduces what a consumer gets.
 #
 # `--allow-dirty` so this is usable before committing, which is when a bad
 # `include` is cheapest to catch; CI checks out clean, so it changes nothing

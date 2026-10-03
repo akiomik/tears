@@ -144,6 +144,8 @@ impl Application for App {
 
         subs
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 impl App {

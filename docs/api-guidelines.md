@@ -84,10 +84,13 @@ grab bag instead of a skeleton vocabulary.
 Companion types — most commonly the error type returned by a fallible
 constructor — share their owner's home even though they fail both tests
 individually. `RuntimeConfig` is at the crate root only because
-`Runtime::with_config` takes one, and `Exit` only because
-`ProgramRuntime::run` returns one. The "written out literally" test still
+`Runtime::with_config` takes one, `Exit` only because
+`ProgramRuntime::run` returns one, and `Instances` only because
+`Application::instances` takes one. The "written out literally" test still
 applies to companions, but it decides prelude membership (see "Prelude
-Membership"), not placement.
+Membership"), not placement: every `Application` writes `Instances` out in
+its `instances` signature, so it is in the prelude, while a skeleton never
+spells `RuntimeConfig`.
 
 ## External Crate Re-exports
 

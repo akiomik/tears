@@ -15,80 +15,32 @@
 //!   boundary's segment. That is one [`Command::scoped`] call and one
 //!   [`Subscription::scoped`] call per boundary; user code writes no
 //!   `.scoped(...)` and can neither omit nor double-apply one (INV-RC2).
-//! - **Drains its removal journal** after the reduce it ran, merging one
-//!   [`Command::teardown`] per recorded removal into the returned command
-//!   (INV-RC3). Only [`ForEach`] and [`Presented`] have a journal to drain;
-//!   [`Scoped`] has none, because it composes a single child in place and
-//!   there is no collection at its boundary for an instance to leave.
-//!
-//! # A boundary drains only when its own `reduce` runs
-//!
-//! In a stack, a message an *outer* boundary claims is routed to that
-//! boundary's child, and the boundaries below it — its parent chain — do not
-//! run at all. Their journals are therefore not drained by that message.
-//!
-//! For an entry a boundary recorded **itself**, this is invisible: only a
-//! boundary's parent branch can record (a child is handed a projection and
-//! cannot reach the collection), and that branch is the one that drains, in
-//! the same call. It is observable only for an entry recorded outside a
-//! `reduce`, which the [`collection`](super::collection) module's note tells
-//! an application not to do. Such an entry stays owed until the next message
-//! that reaches its boundary, and is paid in full then — nothing is lost,
-//! but the teardown is deferred.
-//!
-//! `an_outer_claim_leaves_an_inner_boundary_s_pending_removal_undrained` is
-//! the row, and it is the wall a future INV-RC3 extension would meet: making
-//! the timing unconditional means draining every boundary in the stack per
-//! message, which is a different contract from the one §2.5 states.
+//! - **Reports its occupancies** through
+//!   [`instances`](Reducer::instances): the parent composition's, then the
+//!   child's under the boundary — a [`Scoped`] child under its segment,
+//!   each [`ForEach`] row under its key, a [`Presented`] occupant under the
+//!   boundary's segment (INV-RC3a). A boundary originates no teardown of
+//!   its own. After every update, live-instance reconciliation compares
+//!   the report with the previous one and tears down the paths that
+//!   disappeared, one teardown for a path and those beneath it (INV-RC3),
+//!   whichever reducer changed the state and whichever route the message
+//!   took.
 //! - **Routes typed messages**: `extract` either claims a message for the
 //!   child or hands it back to the parent, and a message addressed to a key
 //!   or slot with no instance is routed to nothing and discarded.
 //!
-//! A boundary adds **identity carriers and nothing else**. It does not
-//! touch the returned command's runtime directives — a `without_redraw`
-//! update stays a `without_redraw` update through a boundary that removed a
-//! row — and it adds no effect, no cancel id, and no registration of its
-//! own. [`merge`] is where that is enforced, and its doc says why the fold
-//! is not a [`Command::batch`].
-//!
 //! # Read/write projection pairs
 //!
-//! Each boundary takes its projection as a pair, because the two `Reducer`
+//! Each boundary takes its projection as a pair, because the `Reducer`
 //! methods borrow the parent differently: `reduce` needs the mutable
-//! projection and `subscriptions` the shared one. A combinator holding only
-//! the mutable accessor could not aggregate its child's declarations from
-//! the `&Self::State` `subscriptions` gives it — it would have to fabricate
-//! an aliasing mutable borrow or drop the child's subscriptions, and
-//! INV-RC2's aggregation would be unimplementable. Both are projections of
-//! state the caller already holds, so RFC 0012 INV-SE6's purity is
-//! untouched. Two `fn` items per boundary is the whole cost; no lens trait
-//! is introduced and none is needed.
-//!
-//! # One teardown surface (RFC 0013 R8)
-//!
-//! Every teardown this module produces is a call to the public
-//! [`Command::teardown`] constructor, in exactly one place — [`merge`],
-//! which the **two** journal drains share ([`ForEach`] and [`Presented`];
-//! [`Scoped`] has no journal). There is no internal twin that builds a
-//! teardown entry from a raw prefix, and no other route below the public
-//! surface originates one. What the boundaries do to an
-//! *already-originated* teardown — `scoped`'s prefix qualification,
-//! [`Command::merging_teardowns`]'s aggregation, the lowering to runtime
-//! parts — is transformation and stays free.
-//!
-//! # The mutation run against the merge rows
-//!
-//! "A boundary adds nothing but identity carriers" is a claim about what is
-//! *absent* from the returned command, so the rows that hold it were checked
-//! by mutation rather than by reading. Restoring the fold to a
-//! [`Command::batch`] — the shape this module used before — leaves 53 rows
-//! passing and fails exactly two:
-//! `a_removing_boundary_preserves_the_update_s_redraw_directive` (the
-//! batch's directive fold hands a `without_redraw` update a redraw back) and
-//! `a_removing_boundary_reports_no_discarded_child_key` (the batch warns
-//! about a spawn key the boundary merely passed through). Nothing else
-//! moves, which is the record that those two rows are what stands between
-//! this contract and its regression.
+//! projection, while `subscriptions` and `instances` need the shared one. A
+//! combinator holding only the mutable accessor could not aggregate its
+//! child's declarations or report from the `&Self::State` those methods are
+//! given — it would have to fabricate an aliasing mutable borrow or drop the
+//! child's, and INV-RC2's aggregation would be unimplementable. Both are
+//! projections of state the caller already holds, so RFC 0012 INV-SE6's
+//! purity is untouched. Two `fn` items per boundary is the whole cost; no
+//! lens trait is introduced and none is needed.
 //!
 //! [`Subscription::scoped`]: crate::subscription::Subscription::scoped
 
@@ -103,17 +55,23 @@
     reason = "RFC 0014 §2.5 fixes these signatures verbatim; an alias would hide the contract"
 )]
 
-use std::iter;
-
 use ratatui::Frame;
 
 use crate::command::Command;
 use crate::subscription::Subscription;
 
 use super::collection::{Keyed, ScopeValue, Slot};
-use super::{Program, Reducer};
+use super::{Instances, Program, Reducer};
 
 /// The composition combinators, on every [`Reducer`].
+///
+/// Each takes a pair of projections from the parent's state to the child's,
+/// one to read and one to write. Both are expected to select the same
+/// state, and to select it every time. What the read half does not select
+/// is never reported, so it originates no teardown of its own; and a pair
+/// that switches between states — the active one of several tabs, say —
+/// stops reporting the instances inside the state it left, which are torn
+/// down although the parent still holds them.
 pub trait ReducerExt: Reducer + Sized {
     /// Composes one child under a fixed segment.
     ///
@@ -234,50 +192,6 @@ pub trait ReducerExt: Reducer + Sized {
 
 impl<R: Reducer + Sized> ReducerExt for R {}
 
-/// Merges one teardown per recorded removal into the command a boundary's
-/// reduce produced.
-///
-/// **The one origination site in this module** (RFC 0013 R8): every teardown
-/// a combinator produces is built here, by a call to the public
-/// [`Command::teardown`] constructor, from a segment value the application
-/// itself supplied as a key or as the boundary's `seg`. No raw prefix path
-/// is constructed anywhere in this module, and no other function here builds
-/// a teardown. What happens to an originated teardown afterwards —
-/// [`Command::merging_teardowns`] folding its entry onto the returned
-/// command — is aggregation, which §7.2's review leaves free.
-///
-/// **The fold is not a [`Command::batch`]**, and that is a contract point
-/// rather than a shortcut. A boundary adds identity carriers to what its
-/// child or its parent returned and nothing else (RFC 0014 §2.5); batching
-/// would add two things more. It folds the redraw directive across
-/// children, so an update that returned [`Command::without_redraw`] would
-/// silently regain its redraw the moment a row was removed in it. And it
-/// warns about a child spawn key — a diagnostic addressed to an application
-/// that keyed a batch, fired here for a command the boundary is only
-/// passing through. Both are observable differences a boundary is not
-/// entitled to make.
-///
-/// The phase order does not depend on the fold: the lowering applies every
-/// cancel-phase entry of a command before every spawn of it, however the
-/// entries got onto it (RFC 0014 §3.4).
-///
-/// One entry, one teardown — so a remove-and-reinsert-and-remove within a
-/// single update yields two, which is what "one teardown for the removed
-/// instance" means when two instances were removed. Repetition is harmless
-/// by INV-ST5's idempotence, and the alternative — collapsing them — would
-/// make the merge depend on a comparison of prefixes the boundary has no
-/// reason to perform.
-fn merge<Msg, Seg>(command: Command<Msg>, removed: impl IntoIterator<Item = Seg>) -> Command<Msg>
-where
-    Msg: Send + 'static,
-    Seg: ScopeValue,
-{
-    removed
-        .into_iter()
-        .map(Command::teardown)
-        .fold(command, Command::merging_teardowns)
-}
-
 /// One child under a fixed segment ([`ReducerExt::scope`]).
 pub struct Scoped<P: Reducer, C: Reducer, Seg> {
     parent: P,
@@ -303,14 +217,6 @@ where
     /// A message the child does not claim goes to the parent, whose command
     /// is *not* qualified: it is the parent's own command at the parent's
     /// own level, and this boundary is not one it crossed.
-    ///
-    /// **No journal drain here, and none is missing.** A journal records
-    /// that an *instance* left a collection, and this boundary has no
-    /// collection: it composes one child in place, whose state is a
-    /// projection of the parent's that is always there. There is no removal
-    /// for it to observe and therefore no teardown for it to originate — the
-    /// two boundaries that do hold collections ([`ForEach`], [`Presented`])
-    /// are where INV-RC3 lives.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
         match (self.extract)(message) {
             Ok(claimed) => {
@@ -336,6 +242,19 @@ where
         );
         declared
     }
+
+    /// The parent's report, then the child's under this boundary's segment.
+    ///
+    /// The boundary is not an occupancy of its own: it composes one child
+    /// in place, whose state is always there, so replacing that state
+    /// continues the prefix and only the occupancies inside it are
+    /// reconciled.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.scoped(self.seg.clone(), |out| {
+            self.child.instances((self.state)(state), out);
+        });
+    }
 }
 
 /// One child per row of a [`Keyed`] collection ([`ReducerExt::for_each`]).
@@ -357,25 +276,12 @@ where
     type State = P::State;
     type Message = P::Message;
 
-    /// Routes the message to its row, then drains the journal.
-    ///
-    /// **Only the parent branch can record**, and the drain still runs on
-    /// both. A row is handed the projected `&mut C::State` and nothing else,
-    /// so a child cannot reach the collection its state lives in; the
-    /// parent's `update` is the only place a row is removed *during* a
-    /// reduce, and that branch drains what it just recorded. What the drain
-    /// on the child branch is for is an entry recorded **before** this
-    /// reduce — by a mutation outside one, which [`Keyed`](super::Keyed)
-    /// discourages but nothing prevents.
-    /// Such an entry is owed its teardown whichever branch the next message
-    /// takes, and draining once per reduce is what pays it.
+    /// Routes the message to its row.
     ///
     /// A message addressed to a key the collection does not hold reaches no
-    /// reducer and is discarded (RFC 0014 §2.5's routing boundary). The
-    /// journal is drained on that path too, for the same reason —
-    /// `a_pending_removal_survives_a_discarded_message` is its row.
+    /// reducer and is discarded (RFC 0014 §2.5's routing boundary).
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
-        let command = match (self.extract)(message) {
+        match (self.extract)(message) {
             Ok((key, claimed)) => {
                 let embed = self.embed;
                 let addressed = key.clone();
@@ -389,8 +295,7 @@ where
                     })
             }
             Err(unclaimed) => self.parent.reduce(state, unclaimed),
-        };
-        merge(command, (self.rows_mut)(state).drain_removals())
+        }
     }
 
     /// The parent's declarations, then each row's under its own key.
@@ -411,6 +316,15 @@ where
             );
         }
         declared
+    }
+
+    /// The parent's report, then each row under its key with its child's
+    /// report beneath it.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.keyed((self.rows)(state), |row, out| {
+            self.child.instances(row, out);
+        });
     }
 }
 
@@ -434,24 +348,12 @@ where
     type State = P::State;
     type Message = P::Message;
 
-    /// Routes the message to the occupant, then drains the journal.
+    /// Routes the message to the occupant.
     ///
     /// A claimed message reaching an empty slot is discarded, for the reason
     /// a message for an absent key is.
-    ///
-    /// The drain runs on both branches, as [`ForEach`]'s does and for the
-    /// same reason: only the parent branch can record — an occupant is
-    /// handed the projected `&mut C::State` and cannot reach the slot it
-    /// sits in — while an entry recorded before this reduce is owed its
-    /// teardown on whichever branch the next message takes.
-    ///
-    /// What differs is the segment: a dismissed occupant has no key of its
-    /// own, so each recorded dismissal yields a teardown of this boundary's
-    /// own `seg` — which is exactly where the occupant's runs were placed.
-    /// The segment is cloned per recorded dismissal and not at all when
-    /// there are none, which is what the lazy repetition below is for.
     fn reduce(&self, state: &mut P::State, message: P::Message) -> Command<P::Message> {
-        let command = match (self.extract)(message) {
+        match (self.extract)(message) {
             Ok(claimed) => {
                 let embed = self.embed;
                 (self.slot_mut)(state)
@@ -464,12 +366,7 @@ where
                     })
             }
             Err(unclaimed) => self.parent.reduce(state, unclaimed),
-        };
-        let dismissals = (self.slot_mut)(state).drain_dismissals();
-        merge(
-            command,
-            iter::repeat_with(|| self.seg.clone()).take(dismissals),
-        )
+        }
     }
 
     /// The parent's declarations, then the occupant's if there is one.
@@ -486,14 +383,23 @@ where
         }
         declared
     }
+
+    /// The parent's report, then the occupant, if there is one, under this
+    /// boundary's segment with its child's report beneath it.
+    fn instances(&self, state: &P::State, out: &mut Instances<'_>) {
+        self.parent.instances(state, out);
+        out.slot(self.seg.clone(), (self.slot)(state), |occupant, out| {
+            self.child.instances(occupant, out);
+        });
+    }
 }
 
 /// A closed combinator stack ([`ReducerExt::into_program`]).
 ///
-/// Its `Reducer` half is the stack's, delegated verbatim: the same `reduce`
-/// and the same `subscriptions` a composed stack has when it is not closed,
-/// so closing a stack adds no execution path of its own. What it adds is the
-/// two root-level functions a [`Program`] needs.
+/// Its `Reducer` half is the stack's, delegated verbatim: the same `reduce`,
+/// `subscriptions`, and `instances` a composed stack has when it is not
+/// closed, so closing a stack adds no execution path of its own. What it adds
+/// is the two root-level functions a [`Program`] needs.
 pub struct IntoProgram<R: Reducer, Flags> {
     reducer: R,
     init: fn(Flags) -> (R::State, Command<R::Message>),
@@ -510,6 +416,10 @@ impl<R: Reducer, Flags> Reducer for IntoProgram<R, Flags> {
 
     fn subscriptions(&self, state: &R::State) -> Vec<Subscription<R::Message>> {
         self.reducer.subscriptions(state)
+    }
+
+    fn instances(&self, state: &R::State, out: &mut Instances<'_>) {
+        self.reducer.instances(state, out);
     }
 }
 
@@ -530,13 +440,14 @@ mod tests {
     use super::*;
 
     use std::collections::HashSet;
+    use std::mem;
 
     use futures::stream;
 
     use crate::command::{CommandId, KernelParts};
+    use crate::reducer::instances::{self, LiveInstances};
     use crate::structural_key::ScopePath;
     use crate::subscription::mock::MockSource;
-    use crate::test_support::TraceRecorder;
 
     // A child that answers each of its messages with a command carrying one
     // of every identity-bearing carrier, so a boundary's qualification can
@@ -596,6 +507,8 @@ mod tests {
                 Vec::new()
             }
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -606,24 +519,44 @@ mod tests {
         Right(ChildMessage),
         /// Addressed to one row of the collection.
         Row(&'static str, ChildMessage),
-        /// Addressed to the slot's occupant.
+        /// Addressed to the modal slot's occupant.
         Modal(ChildMessage),
-        /// Handled by the root: removes one row.
+        /// Addressed to the sheet slot's occupant.
+        Sheet(ChildMessage),
+        // The rest are handled by the root.
+        /// Removes one row.
         Close(&'static str),
-        /// Handled by the root: replaces one row's instance.
-        Replace(&'static str),
-        /// Handled by the root: removes and re-inserts one row.
+        /// Removes every row, the last inserted first.
+        CloseAll,
+        /// Removes one row and returns a teardown of its path.
+        CloseAndTeardown(&'static str),
+        /// Removes one row and returns the root's keyed work.
+        CloseAndWork(&'static str),
+        /// Removes one row and opts out of the redraw.
+        CloseWithoutRedraw(&'static str),
+        /// Inserts a fresh row, over an occupied key too.
+        Insert(&'static str),
+        /// Removes and re-inserts one row.
         Recreate(&'static str),
-        /// Handled by the root: dismisses the slot.
+        /// Replaces one row and the modal occupant in place.
+        Refresh(&'static str),
+        /// Assigns a collection built anew under the same keys.
+        Rebuild,
+        /// Takes the rows into the unreported stash.
+        Stash,
+        /// Restores the stash into the rows.
+        Unstash,
+        /// Takes the rows and restores them in one update.
+        Juggle,
+        /// Dismisses the modal slot.
         Dismiss,
-        /// Handled by the root: presents a fresh instance in the slot.
+        /// Presents a fresh occupant in the modal slot.
         Present,
-        /// Handled by the root, returning its own keyed command.
+        /// Swaps the modal and the sheet slots.
+        Swap,
+        /// Returns the root's own keyed command.
         RootWork,
-        /// Handled by the root, returning a command that opts out of the
-        /// redraw.
-        Silent,
-        /// Handled by the root, returning nothing.
+        /// Returns nothing.
         Idle,
     }
 
@@ -631,21 +564,41 @@ mod tests {
         left: ChildState,
         right: ChildState,
         rows: Keyed<&'static str, ChildState>,
+        /// Composed by no boundary, so never reported.
+        stash: Keyed<&'static str, ChildState>,
         modal: Slot<ChildState>,
+        sheet: Slot<ChildState>,
     }
 
     impl RootState {
         fn new() -> Self {
+            Self::with_rows(&[])
+        }
+
+        fn with_rows(keys: &[&'static str]) -> Self {
             Self {
                 left: ChildState::new(true),
                 right: ChildState::new(true),
-                rows: Keyed::new(),
+                rows: keys
+                    .iter()
+                    .map(|key| (*key, ChildState::new(true)))
+                    .collect(),
+                stash: Keyed::new(),
                 modal: Slot::empty(),
+                sheet: Slot::empty(),
             }
         }
     }
 
     struct Root;
+
+    impl Root {
+        fn work() -> Command<Message> {
+            Command::stream(stream::pending())
+                .cancellable(CommandId::new("root"))
+                .into()
+        }
+    }
 
     impl Reducer for Root {
         type State = RootState;
@@ -657,13 +610,58 @@ mod tests {
                     state.rows.remove(&key);
                     Command::none()
                 }
-                Message::Replace(key) => {
+                Message::CloseAll => {
+                    let keys: Vec<_> = state.rows.keys().copied().collect();
+                    for key in keys.into_iter().rev() {
+                        state.rows.remove(&key);
+                    }
+                    Command::none()
+                }
+                Message::CloseAndTeardown(key) => {
+                    state.rows.remove(&key);
+                    Command::teardown(key)
+                }
+                Message::CloseAndWork(key) => {
+                    state.rows.remove(&key);
+                    Self::work()
+                }
+                Message::CloseWithoutRedraw(key) => {
+                    state.rows.remove(&key);
+                    Command::none().without_redraw()
+                }
+                Message::Insert(key) => {
                     state.rows.insert(key, ChildState::new(true));
                     Command::none()
                 }
                 Message::Recreate(key) => {
                     state.rows.remove(&key);
                     state.rows.insert(key, ChildState::new(true));
+                    Command::none()
+                }
+                Message::Refresh(key) => {
+                    *state.rows.get_mut(&key).expect("the row is held") = ChildState::new(false);
+                    *state.modal.get_mut().expect("the slot is occupied") = ChildState::new(false);
+                    Command::none()
+                }
+                Message::Rebuild => {
+                    state.rows = state
+                        .rows
+                        .keys()
+                        .map(|key| (*key, ChildState::new(true)))
+                        .collect();
+                    Command::none()
+                }
+                Message::Stash => {
+                    state.stash = mem::take(&mut state.rows);
+                    Command::none()
+                }
+                Message::Unstash => {
+                    state.rows = mem::take(&mut state.stash);
+                    Command::none()
+                }
+                Message::Juggle => {
+                    let taken = mem::take(&mut state.rows);
+                    state.rows = taken;
                     Command::none()
                 }
                 Message::Dismiss => {
@@ -674,17 +672,25 @@ mod tests {
                     state.modal.present(ChildState::new(true));
                     Command::none()
                 }
-                Message::RootWork => Command::stream(stream::pending())
-                    .cancellable(CommandId::new("root"))
-                    .into(),
-                Message::Silent => Command::none().without_redraw(),
-                _ => Command::none(),
+                Message::Swap => {
+                    mem::swap(&mut state.modal, &mut state.sheet);
+                    Command::none()
+                }
+                Message::RootWork => Self::work(),
+                Message::Idle => Command::none(),
+                Message::Left(_)
+                | Message::Right(_)
+                | Message::Row(..)
+                | Message::Modal(_)
+                | Message::Sheet(_) => unreachable!("a boundary claims it first"),
             }
         }
 
         fn subscriptions(&self, _state: &RootState) -> Vec<Subscription<Message>> {
             vec![Subscription::new(MockSource::<Message>::new())]
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     fn left_extract(message: Message) -> Result<ChildMessage, Message> {
@@ -715,8 +721,15 @@ mod tests {
         }
     }
 
-    /// The stack every row below reduces through: two sibling `scope`
-    /// boundaries, a `for_each` over the collection, and a `presented` slot.
+    fn sheet_extract(message: Message) -> Result<ChildMessage, Message> {
+        match message {
+            Message::Sheet(child) => Ok(child),
+            other => Err(other),
+        }
+    }
+
+    /// The stack most rows below reduce through: two sibling `scope`
+    /// boundaries, a `for_each` over the rows, and two `presented` slots.
     fn stack() -> impl Reducer<State = RootState, Message = Message> {
         Root.scope(
             Child,
@@ -749,64 +762,262 @@ mod tests {
             modal_extract,
             Message::Modal,
         )
+        .presented(
+            Child,
+            "sheet",
+            |state: &RootState| &state.sheet,
+            |state: &mut RootState| &mut state.sheet,
+            sheet_extract,
+            Message::Sheet,
+        )
     }
 
-    /// A reducer one level above [`stack`]: its state holds the whole inner
-    /// state and its message wraps the inner message, so `scope` can compose
-    /// the entire combinator stack as one child.
+    /// One slot reported under two paths: two `presented` boundaries over
+    /// the same projection.
+    fn mirrored() -> impl Reducer<State = RootState, Message = Message> {
+        Root.presented(
+            Child,
+            "modal",
+            |state: &RootState| &state.modal,
+            |state: &mut RootState| &mut state.modal,
+            modal_extract,
+            Message::Modal,
+        )
+        .presented(
+            Child,
+            "mirror",
+            |state: &RootState| &state.modal,
+            |state: &mut RootState| &mut state.modal,
+            modal_extract,
+            Message::Modal,
+        )
+    }
+
+    /// The root one level above [`stack`]: [`nested`] composes a whole stack
+    /// under a fixed segment and one per pane, and `Outer` mutates both from
+    /// above those boundaries.
     struct Outer;
 
     struct OuterState {
         inner: RootState,
+        panes: Keyed<&'static str, RootState>,
     }
 
     impl OuterState {
         fn new() -> Self {
             Self {
                 inner: RootState::new(),
+                panes: Keyed::new(),
             }
         }
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum OuterMessage {
-        /// Claimed by the outer boundary and handed to the inner stack.
+        /// Claimed by the `scope` boundary and handed to the inner stack.
         Inner(Message),
-        /// Handled by `Outer` itself, so the outer `extract` has both
-        /// answers to give.
-        Own,
+        /// Claimed by the `for_each` boundary and handed to one pane's stack.
+        Pane(&'static str, Message),
+        // The rest are handled by `Outer` itself.
+        /// Removes one row of the inner stack's rows.
+        CloseInner(&'static str),
+        /// Assigns the inner stack an empty collection of rows.
+        ClearInner,
+        /// Replaces the inner stack's whole state.
+        ResetInner,
+        /// Moves the inner stack's rows into one pane.
+        MoveRows(&'static str),
+        /// Inserts a fresh pane holding a row, over an occupied key too.
+        ReplacePane(&'static str),
     }
 
     impl Reducer for Outer {
         type State = OuterState;
         type Message = OuterMessage;
 
-        fn reduce(&self, _state: &mut OuterState, message: OuterMessage) -> Command<OuterMessage> {
-            assert_eq!(
-                message,
-                OuterMessage::Own,
-                "the outer boundary claims everything else before it gets here"
-            );
+        fn reduce(&self, state: &mut OuterState, message: OuterMessage) -> Command<OuterMessage> {
+            match message {
+                OuterMessage::CloseInner(key) => {
+                    state.inner.rows.remove(&key);
+                }
+                OuterMessage::ClearInner => state.inner.rows = Keyed::new(),
+                OuterMessage::ResetInner => state.inner = RootState::new(),
+                OuterMessage::MoveRows(pane) => {
+                    state.panes.get_mut(&pane).expect("the pane is held").rows =
+                        mem::take(&mut state.inner.rows);
+                }
+                OuterMessage::ReplacePane(pane) => {
+                    state.panes.insert(pane, RootState::with_rows(&["row-x"]));
+                }
+                OuterMessage::Inner(_) | OuterMessage::Pane(..) => {
+                    unreachable!("a boundary claims it first")
+                }
+            }
             Command::none()
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     fn outer_extract(message: OuterMessage) -> Result<Message, OuterMessage> {
         match message {
             OuterMessage::Inner(inner) => Ok(inner),
-            other @ OuterMessage::Own => Err(other),
+            other => Err(other),
         }
     }
 
-    /// The whole of [`stack`] composed as the child of one more boundary.
+    fn pane_extract(message: OuterMessage) -> Result<(&'static str, Message), OuterMessage> {
+        match message {
+            OuterMessage::Pane(key, inner) => Ok((key, inner)),
+            other => Err(other),
+        }
+    }
+
+    /// [`stack`] composed once per pane and once more under `"outer"`.
     fn nested() -> impl Reducer<State = OuterState, Message = OuterMessage> {
-        Outer.scope(
+        Outer
+            .for_each(
+                stack(),
+                |state: &OuterState| &state.panes,
+                |state: &mut OuterState| &mut state.panes,
+                pane_extract,
+                OuterMessage::Pane,
+            )
+            .scope(
+                stack(),
+                "outer",
+                |state: &OuterState| &state.inner,
+                |state: &mut OuterState| &mut state.inner,
+                outer_extract,
+                OuterMessage::Inner,
+            )
+    }
+
+    /// [`stack`]'s slot below its rows: the `for_each` boundary's parent is
+    /// a `presented` one, so the slot is reported only if `for_each`
+    /// forwards its parent's report.
+    fn slot_beneath_rows() -> impl Reducer<State = RootState, Message = Message> {
+        Root.presented(
+            Child,
+            "modal",
+            |state: &RootState| &state.modal,
+            |state: &mut RootState| &mut state.modal,
+            modal_extract,
+            Message::Modal,
+        )
+        .for_each(
+            Child,
+            |state: &RootState| &state.rows,
+            |state: &mut RootState| &mut state.rows,
+            row_extract,
+            Message::Row,
+        )
+    }
+
+    /// A root whose slot's occupant is a whole [`stack`], so the occupant's
+    /// rows are reported only if `presented` forwards the occupant's report.
+    struct Host;
+
+    struct HostState {
+        modal: Slot<RootState>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum HostMessage {
+        /// Claimed by the `presented` boundary and handed to the occupant.
+        Modal(Message),
+    }
+
+    impl Reducer for Host {
+        type State = HostState;
+        type Message = HostMessage;
+
+        fn reduce(&self, _state: &mut HostState, _message: HostMessage) -> Command<HostMessage> {
+            unreachable!("the boundary claims every message")
+        }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`presented` takes an extract that can hand a message back"
+    )]
+    fn host_extract(message: HostMessage) -> Result<Message, HostMessage> {
+        let HostMessage::Modal(inner) = message;
+        Ok(inner)
+    }
+
+    fn hosted() -> impl Reducer<State = HostState, Message = HostMessage> {
+        Host.presented(
             stack(),
-            "outer",
-            |state: &OuterState| &state.inner,
-            |state: &mut OuterState| &mut state.inner,
-            outer_extract,
-            OuterMessage::Inner,
+            "modal",
+            |state: &HostState| &state.modal,
+            |state: &mut HostState| &mut state.modal,
+            host_extract,
+            HostMessage::Modal,
+        )
+    }
+
+    /// Two tabs of rows, and a `for_each` whose projections select the
+    /// active one — the switching pair `ReducerExt` warns about.
+    struct Tabs;
+
+    struct TabsState {
+        first_active: bool,
+        first: Keyed<&'static str, ChildState>,
+        second: Keyed<&'static str, ChildState>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum TabsMessage {
+        /// Claimed by the `for_each` boundary and handed to one row.
+        Row(&'static str, ChildMessage),
+        /// Handled by `Tabs` itself: makes the other tab active.
+        Switch,
+    }
+
+    impl Reducer for Tabs {
+        type State = TabsState;
+        type Message = TabsMessage;
+
+        fn reduce(&self, state: &mut TabsState, message: TabsMessage) -> Command<TabsMessage> {
+            match message {
+                TabsMessage::Switch => state.first_active = !state.first_active,
+                TabsMessage::Row(..) => unreachable!("the boundary claims it first"),
+            }
+            Command::none()
+        }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    }
+
+    fn tabs_extract(message: TabsMessage) -> Result<(&'static str, ChildMessage), TabsMessage> {
+        match message {
+            TabsMessage::Row(key, child) => Ok((key, child)),
+            other @ TabsMessage::Switch => Err(other),
+        }
+    }
+
+    fn tabs() -> impl Reducer<State = TabsState, Message = TabsMessage> {
+        Tabs.for_each(
+            Child,
+            |state: &TabsState| {
+                if state.first_active {
+                    &state.first
+                } else {
+                    &state.second
+                }
+            },
+            |state: &mut TabsState| {
+                if state.first_active {
+                    &mut state.first
+                } else {
+                    &mut state.second
+                }
+            },
+            tabs_extract,
+            TabsMessage::Row,
         )
     }
 
@@ -847,7 +1058,7 @@ mod tests {
             .expect("the command carries the one cancel id it was built with")
     }
 
-    fn spawn_scopes(parts: &KernelParts<Message>) -> Vec<ScopePath> {
+    fn spawn_scopes<M: Send + 'static>(parts: &KernelParts<M>) -> Vec<ScopePath> {
         parts
             .spawns
             .iter()
@@ -855,12 +1066,48 @@ mod tests {
             .collect()
     }
 
-    fn cleanup_scopes(parts: &KernelParts<Message>) -> Vec<ScopePath> {
+    fn cleanup_scopes<M: Send + 'static>(parts: &KernelParts<M>) -> Vec<ScopePath> {
         parts
             .cleanups
             .iter()
             .map(|registration| registration.scope.clone())
             .collect()
+    }
+
+    /// Drives updates through the seam the kernel and the store share:
+    /// `reduce`, the report, then reconciliation against the previous report,
+    /// seeded from the starting state.
+    struct Driven<R: Reducer> {
+        reducer: R,
+        state: R::State,
+        live: LiveInstances,
+    }
+
+    impl<R: Reducer> Driven<R> {
+        fn new(reducer: R, state: R::State) -> Self {
+            let live = LiveInstances::new(&reducer, &state);
+            Self {
+                reducer,
+                state,
+                live,
+            }
+        }
+
+        /// One update, lowered from the command reconciliation dispatches.
+        fn send(&mut self, message: R::Message) -> KernelParts<R::Message> {
+            self.live
+                .update(&self.reducer, &mut self.state, message)
+                .into_runtime_parts()
+                .into_kernel_parts()
+        }
+
+        /// The paths the current state reports, in report order.
+        fn reported(&self) -> Vec<ScopePath> {
+            instances::report(&self.reducer, &self.state)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect()
+        }
     }
 
     // INV-RC2: a boundary qualifies **every** identity-bearing carrier of
@@ -969,116 +1216,6 @@ mod tests {
         );
     }
 
-    // INV-RC3, the four removal shapes, each read as the teardown the
-    // boundary merged into that update's command.
-    #[test]
-    fn removing_a_row_yields_that_row_s_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Close("row-a"));
-
-        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
-    }
-
-    #[test]
-    fn replacing_a_row_yields_the_old_instance_s_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Replace("row-a"));
-
-        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
-    }
-
-    #[test]
-    fn dismissing_the_slot_yields_the_boundary_s_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.modal.present(ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Dismiss);
-
-        assert_eq!(parts.teardowns, vec![path(&["modal"])]);
-    }
-
-    #[test]
-    fn presenting_over_an_occupied_slot_yields_the_old_occupant_s_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.modal.present(ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Present);
-
-        assert_eq!(parts.teardowns, vec![path(&["modal"])]);
-    }
-
-    #[test]
-    fn an_update_that_removes_nothing_yields_no_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-
-        let parts = lowered(&stack, &mut state, Message::Idle);
-
-        assert!(parts.teardowns.is_empty());
-        assert!(parts.spawns.is_empty());
-    }
-
-    // RFC 0014 §11's *diff-based removal detection* adversary at the
-    // boundary: the collection is identical before and after, and the
-    // teardown is still emitted — so the old instance's runs are torn down
-    // and the new instance is a fresh occupant of the same key.
-    #[test]
-    fn a_same_update_remove_and_reinsert_still_yields_the_old_instance_s_teardown() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Recreate("row-a"));
-
-        assert_eq!(
-            parts.teardowns,
-            vec![path(&["row-a"])],
-            "a diff of the collection would report no change at all"
-        );
-        assert!(state.rows.contains_key(&"row-a"), "and the key is occupied");
-    }
-
-    // A boundary's teardown merges *with* the update's own command rather
-    // than replacing it — the removal and the parent's work travel in one
-    // command, which is what lets the same dispatch apply the cancel phase
-    // before the spawn (RFC 0013 R4).
-    #[test]
-    fn a_removal_and_the_update_s_own_command_travel_together() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.modal.present(ChildState::new(true));
-
-        // One message that both dismisses the slot and, through the root,
-        // starts work: `Dismiss` returns `Command::none()`, so the row below
-        // uses the slot boundary over a root command instead.
-        let parts = lowered(&stack, &mut state, Message::Dismiss);
-        assert_eq!(parts.teardowns, vec![path(&["modal"])]);
-
-        state.modal.present(ChildState::new(true));
-        state.rows.insert("row-a", ChildState::new(true));
-        state.rows.remove(&"row-a");
-        let parts = lowered(&stack, &mut state, Message::RootWork);
-
-        assert_eq!(
-            parts.teardowns,
-            vec![path(&["row-a"])],
-            "the pending removal is drained by the next reduce whichever branch it took"
-        );
-        assert_eq!(
-            parts.spawns.len(),
-            1,
-            "and the root's own spawn is in the same command"
-        );
-    }
-
     // RFC 0014 §2.5's routing boundary: a message addressed to a key the
     // collection does not hold reaches no reducer and is discarded.
     #[test]
@@ -1104,65 +1241,599 @@ mod tests {
 
         let parts = lowered(&stack, &mut state, Message::Modal(ChildMessage::Carriers));
 
+        assert!(parts.spawns.is_empty(), "no child ran");
+        assert!(parts.teardowns.is_empty());
+        assert!(parts.cleanups.is_empty());
+    }
+
+    // INV-RC3, read from the command reconciliation dispatches
+    // (`Driven::send`), never from `reduce`'s return value. First, one row
+    // per way a pair disappears.
+    #[test]
+    fn removing_a_row_yields_that_row_s_teardown() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a", "row-b"]));
+
+        let parts = driven.send(Message::Close("row-a"));
+
+        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert!(parts.redraw, "the update's own redraw is untouched");
+    }
+
+    #[test]
+    fn dismissing_the_slot_yields_its_occupant_s_teardown() {
+        let mut state = RootState::new();
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        assert_eq!(
+            driven.send(Message::Dismiss).teardowns,
+            vec![path(&["modal"])]
+        );
+    }
+
+    #[test]
+    fn replacing_a_row_yields_the_old_instance_s_teardown() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+
+        assert_eq!(
+            driven.send(Message::Insert("row-a")).teardowns,
+            vec![path(&["row-a"])]
+        );
+    }
+
+    #[test]
+    fn presenting_over_an_occupied_slot_yields_the_old_occupant_s_teardown() {
+        let mut state = RootState::new();
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        assert_eq!(
+            driven.send(Message::Present).teardowns,
+            vec![path(&["modal"])]
+        );
+    }
+
+    // Equal keys before and after: a key-only comparison sees no change.
+    #[test]
+    fn assigning_a_collection_with_the_same_keys_tears_down_every_row() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a", "row-b"]));
+
+        assert_eq!(
+            driven.send(Message::Rebuild).teardowns,
+            vec![path(&["row-a"]), path(&["row-b"])]
+        );
+    }
+
+    #[test]
+    fn taking_a_collection_tears_down_its_rows() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a", "row-b"]));
+
+        assert_eq!(
+            driven.send(Message::Stash).teardowns,
+            vec![path(&["row-a"]), path(&["row-b"])]
+        );
+    }
+
+    // Each slot keeps its identity across the swap; only its path changes.
+    #[test]
+    fn swapping_two_occupied_slots_tears_down_both_paths() {
+        let mut state = RootState::new();
+        state.modal.present(ChildState::new(true));
+        state.sheet.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        assert_eq!(
+            driven.send(Message::Swap).teardowns,
+            vec![path(&["modal"]), path(&["sheet"])]
+        );
+    }
+
+    // An occupancy that disappears inside one that stays: the inner path is
+    // torn down on its own, since no enclosing path disappeared with it.
+    #[test]
+    fn closing_a_row_inside_a_pane_tears_down_that_row_s_path() {
+        let mut state = OuterState::new();
+        state
+            .panes
+            .insert("pane-a", RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven
+                .send(OuterMessage::Pane("pane-a", Message::Close("row-x")))
+                .teardowns,
+            vec![path(&["pane-a", "row-x"])]
+        );
+    }
+
+    // `for_each` forwards its parent's report: the slot below it is reported,
+    // so dismissing it is torn down.
+    #[test]
+    fn a_slot_beneath_rows_is_torn_down_through_the_rows_boundary() {
+        let mut state = RootState::with_rows(&["row-a"]);
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(slot_beneath_rows(), state);
+
+        assert_eq!(
+            driven.send(Message::Dismiss).teardowns,
+            vec![path(&["modal"])]
+        );
+    }
+
+    // `presented` forwards its occupant's report beneath the slot's segment:
+    // a row the occupant closes is torn down under the slot.
+    #[test]
+    fn a_row_closed_inside_an_occupant_is_torn_down_beneath_the_slot() {
+        let mut modal = Slot::empty();
+        modal.present(RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(hosted(), HostState { modal });
+
+        assert_eq!(
+            driven
+                .send(HostMessage::Modal(Message::Close("row-x")))
+                .teardowns,
+            vec![path(&["modal", "row-x"])]
+        );
+    }
+
+    // A pair that switches between states stops reporting the rows of the
+    // state it left, and they are torn down although the parent holds them.
+    #[test]
+    fn switching_the_projected_tab_tears_down_the_rows_it_left() {
+        let mut state = TabsState {
+            first_active: true,
+            first: Keyed::new(),
+            second: Keyed::new(),
+        };
+        state.first.insert("row-a", ChildState::new(true));
+        state.second.insert("row-b", ChildState::new(true));
+        let mut driven = Driven::new(tabs(), state);
+
+        assert_eq!(
+            driven.send(TabsMessage::Switch).teardowns,
+            vec![path(&["row-a"])]
+        );
+    }
+
+    #[test]
+    fn moving_a_collection_to_another_path_tears_down_its_old_paths() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a"]);
+        state.panes.insert("pane-a", RootState::new());
+        let mut driven = Driven::new(nested(), state);
+
+        let parts = driven.send(OuterMessage::MoveRows("pane-a"));
+
+        assert_eq!(parts.teardowns, vec![path(&["outer", "row-a"])]);
+        assert_eq!(
+            driven.reported(),
+            vec![path(&["pane-a"]), path(&["pane-a", "row-a"])],
+            "the row is reported at its new path, under the same identity"
+        );
+    }
+
+    // A fixed `scope` boundary is no occupancy: its own path is not torn
+    // down, the occupancies inside the replaced state are.
+    #[test]
+    fn replacing_a_scope_boundary_s_child_state_tears_down_the_occupancies_inside() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a"]);
+        state.inner.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven.send(OuterMessage::ResetInner).teardowns,
+            vec![path(&["outer", "row-a"]), path(&["outer", "modal"])]
+        );
+    }
+
+    #[test]
+    fn replacing_an_occupancy_that_holds_occupancies_tears_down_only_its_path() {
+        let mut state = OuterState::new();
+        state
+            .panes
+            .insert("pane-a", RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven.send(OuterMessage::ReplacePane("pane-a")).teardowns,
+            vec![path(&["pane-a"])],
+            "[pane-a, row-x] disappears too, and the outer teardown selects it"
+        );
+    }
+
+    // A reducer above an enclosing `scope` boundary changes the state the
+    // boundary projects, in the same update it is torn down in.
+    #[test]
+    fn a_removal_above_an_enclosing_scope_is_torn_down_in_the_same_update() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a", "row-b"]);
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven.send(OuterMessage::CloseInner("row-a")).teardowns,
+            vec![path(&["outer", "row-a"])]
+        );
+    }
+
+    #[test]
+    fn an_assignment_above_an_enclosing_scope_is_torn_down_in_the_same_update() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a", "row-b"]);
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven.send(OuterMessage::ClearInner).teardowns,
+            vec![path(&["outer", "row-a"]), path(&["outer", "row-b"])]
+        );
+    }
+
+    // RFC 0014 §11's key-only removal detection adversary: the keys are
+    // equal before and after, and the old instance is still torn down.
+    #[test]
+    fn a_same_update_remove_and_reinsert_still_yields_the_old_instance_s_teardown() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+
+        let parts = driven.send(Message::Recreate("row-a"));
+
+        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert!(
+            driven.state.rows.contains_key(&"row-a"),
+            "the key is occupied"
+        );
+    }
+
+    // A stack closed with `into_program` forwards its report, so an occupancy
+    // in the state its `init` returns is torn down by the first update. That
+    // the kernel and the store read the first report from that state is
+    // their rows' to pin.
+    #[test]
+    fn an_occupancy_in_init_s_state_is_torn_down_by_the_first_update() {
+        let program = stack().into_program(
+            |()| (RootState::with_rows(&["row-a"]), Command::none()),
+            |_state: &RootState, _frame: &mut Frame<'_>| {},
+        );
+        let (state, _) = program.init(());
+        let mut driven = Driven::new(program, state);
+
+        assert_eq!(
+            driven.send(Message::Close("row-a")).teardowns,
+            vec![path(&["row-a"])]
+        );
+    }
+
+    #[test]
+    fn a_slot_reported_under_two_paths_is_torn_down_under_each() {
+        let mut state = RootState::new();
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(mirrored(), state);
+
+        assert!(
+            driven.send(Message::Idle).teardowns.is_empty(),
+            "an unrelated message tears neither path down"
+        );
+        assert_eq!(
+            driven.send(Message::Dismiss).teardowns,
+            vec![path(&["modal"]), path(&["mirror"])]
+        );
+    }
+
+    // Two occupancies reported under one path — two slots under one segment
+    // here, two sibling `for_each`s over one key type in an application
+    // (#424) — disappear together and yield one teardown of that path. The
+    // segment type is not `Clone`: `Instances` asks of a segment only what
+    // `Command::scoped` does.
+    #[test]
+    fn two_pairs_gone_from_one_path_yield_one_teardown_of_it() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct Pane;
+
+        struct Twins;
+
+        impl Reducer for Twins {
+            type State = (Slot<()>, Slot<()>);
+            type Message = ();
+
+            fn reduce(&self, state: &mut Self::State, (): ()) -> Command<()> {
+                state.0.dismiss();
+                state.1.dismiss();
+                Command::none()
+            }
+
+            fn instances(&self, state: &Self::State, out: &mut Instances<'_>) {
+                out.slot(Pane, &state.0, |(), _| {});
+                out.slot(Pane, &state.1, |(), _| {});
+            }
+        }
+
+        let mut state = (Slot::empty(), Slot::empty());
+        state.0.present(());
+        state.1.present(());
+        let mut driven = Driven::new(Twins, state);
+
+        assert_eq!(
+            driven.send(()).teardowns,
+            vec![ScopePath::empty().prefixed(Pane)]
+        );
+    }
+
+    // INV-RC3's order: a path's teardown stands where the first pair it lost
+    // stood in the previous report, not where the path first appeared. `A`
+    // appears first but loses its second pair, after `B` loses its only one.
+    #[test]
+    fn teardowns_are_ordered_by_the_first_pair_each_path_lost() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct A;
+
+        #[derive(PartialEq, Eq, Hash)]
+        struct B;
+
+        struct Three;
+
+        impl Reducer for Three {
+            type State = (Slot<()>, Slot<()>, Slot<()>);
+            type Message = ();
+
+            fn reduce(&self, state: &mut Self::State, (): ()) -> Command<()> {
+                state.1.dismiss();
+                state.2.dismiss();
+                Command::none()
+            }
+
+            fn instances(&self, state: &Self::State, out: &mut Instances<'_>) {
+                out.slot(A, &state.0, |(), _| {});
+                out.slot(B, &state.1, |(), _| {});
+                out.slot(A, &state.2, |(), _| {});
+            }
+        }
+
+        let mut state = (Slot::empty(), Slot::empty(), Slot::empty());
+        state.0.present(());
+        state.1.present(());
+        state.2.present(());
+        let mut driven = Driven::new(Three, state);
+
+        assert_eq!(
+            driven.send(()).teardowns,
+            vec![
+                ScopePath::empty().prefixed(B),
+                ScopePath::empty().prefixed(A),
+            ]
+        );
+    }
+
+    // Rows that tear nothing down.
+
+    // A row and an occupant replaced while the starting state was built —
+    // in `init`, in an application — were never reported, so the first
+    // update tears neither down. Recording replacements as they are made
+    // would tear down the path the successor holds at the first update
+    // through the boundary; this row is what fails if that comes back.
+    #[test]
+    fn a_replacement_made_before_the_first_report_tears_nothing_down() {
+        let mut state = RootState::with_rows(&["row-a"]);
+        state.rows.insert("row-a", ChildState::new(true));
+        state.modal.present(ChildState::new(true));
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        assert!(driven.send(Message::Idle).teardowns.is_empty());
+    }
+
+    #[test]
+    fn an_update_that_removes_nothing_yields_no_teardown() {
+        let mut state = RootState::with_rows(&["row-a"]);
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(stack(), state);
+
+        let parts = driven.send(Message::Idle);
+
+        assert!(parts.teardowns.is_empty());
         assert!(parts.spawns.is_empty());
     }
 
-    // A boundary drains only when its own `reduce` runs, and in a stack an
-    // outer boundary that claims a message routes it to its child — so the
-    // boundaries in its parent chain do not run and do not drain. Here the
-    // outermost boundary is the `presented` slot and the `for_each` sits
-    // below it: a `Modal(..)` message is claimed by the slot and never
-    // reaches the collection's boundary.
-    //
-    // Only an entry recorded *outside* a `reduce` can be observed this way,
-    // because an entry a boundary recorded itself was recorded on its parent
-    // branch, which is the branch that drains. Nothing is lost — the next
-    // message that reaches the boundary pays it in full — and that deferral
-    // is the wall a future INV-RC3 extension would meet.
     #[test]
-    fn an_outer_claim_leaves_an_inner_boundary_s_pending_removal_undrained() {
-        let stack = stack();
-        let mut state = RootState::new();
+    fn replacing_a_value_in_place_tears_nothing_down() {
+        let mut state = RootState::with_rows(&["row-a"]);
         state.modal.present(ChildState::new(true));
-        state.rows.insert("row-a", ChildState::new(true));
-        // The mutation the collection module tells an application not to
-        // make outside a `reduce`, which is the only way to have an entry
-        // pending when a reduce begins.
-        state.rows.remove(&"row-a");
+        let mut driven = Driven::new(stack(), state);
 
-        let claimed_by_the_slot = lowered(&stack, &mut state, Message::Modal(ChildMessage::Quiet));
+        assert!(driven.send(Message::Refresh("row-a")).teardowns.is_empty());
+    }
 
-        assert!(
-            claimed_by_the_slot.teardowns.is_empty(),
-            "the collection's boundary did not run, so it drained nothing"
+    #[test]
+    fn a_take_and_restore_within_one_update_tears_nothing_down() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+
+        assert!(driven.send(Message::Juggle).teardowns.is_empty());
+    }
+
+    #[test]
+    fn restoring_a_collection_taken_in_an_earlier_update_tears_nothing_down() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+        assert_eq!(
+            driven.send(Message::Stash).teardowns,
+            vec![path(&["row-a"])]
         );
 
-        let reaching_the_collection = lowered(&stack, &mut state, Message::Idle);
+        assert!(driven.send(Message::Unstash).teardowns.is_empty());
+    }
+
+    // The merge adds teardown entries and nothing else.
+    #[test]
+    fn an_update_s_own_teardown_of_a_reconciled_path_is_kept_beside_it() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
 
         assert_eq!(
-            reaching_the_collection.teardowns,
-            vec![path(&["row-a"])],
-            "and the first message that reaches it pays the entry in full"
+            driven.send(Message::CloseAndTeardown("row-a")).teardowns,
+            vec![path(&["row-a"]), path(&["row-a"])]
         );
     }
 
-    // A removal recorded before a message addressed to a *different*,
-    // now-absent key is still owed its teardown: the drain does not depend
-    // on the branch the message took.
+    // One command, so the cancel phase precedes the spawn (RFC 0013 R4).
     #[test]
-    fn a_pending_removal_survives_a_discarded_message() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-        state.rows.remove(&"row-a");
+    fn a_removal_and_the_update_s_own_command_travel_together() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
 
-        let parts = lowered(
-            &stack,
-            &mut state,
-            Message::Row("missing", ChildMessage::Quiet),
-        );
+        let parts = driven.send(Message::CloseAndWork("row-a"));
 
         assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert_eq!(spawn_scopes(&parts), vec![ScopePath::empty()]);
+        assert_eq!(
+            parts.spawns[0].key.as_ref().expect("keyed").id,
+            CommandId::new("root"),
+            "the update's own spawn keeps its key"
+        );
+    }
+
+    #[test]
+    fn a_removal_in_an_update_without_redraw_stays_without_redraw() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+
+        let parts = driven.send(Message::CloseWithoutRedraw("row-a"));
+
+        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
+        assert!(!parts.redraw);
+    }
+
+    // The baseline advances: the reinserted row is the next comparison's.
+    #[test]
+    fn a_key_reinserted_in_a_later_update_is_not_torn_down_again() {
+        let mut driven = Driven::new(stack(), RootState::with_rows(&["row-a"]));
+
+        assert_eq!(
+            driven.send(Message::Close("row-a")).teardowns,
+            vec![path(&["row-a"])]
+        );
+        assert!(driven.send(Message::Insert("row-a")).teardowns.is_empty());
+        assert!(driven.send(Message::Idle).teardowns.is_empty());
+    }
+
+    // INV-RC14: one script, one teardown sequence — the previous report's
+    // order, not a hash set's, and not the order the update removed them in,
+    // which is the reverse here.
+    #[test]
+    fn removing_sibling_rows_yields_one_teardown_sequence_per_script() {
+        const KEYS: [&str; 8] = [
+            "row-h", "row-c", "row-f", "row-a", "row-e", "row-b", "row-g", "row-d",
+        ];
+        let run = || {
+            Driven::new(stack(), RootState::with_rows(&KEYS))
+                .send(Message::CloseAll)
+                .teardowns
+        };
+
+        let first = run();
+
+        assert_eq!(first, run());
+        assert_eq!(first, KEYS.map(|key| path(&[key])).to_vec());
+    }
+
+    // INV-RC3a: a stack reports each occupancy under the path its child's
+    // carriers are qualified with.
+    #[test]
+    fn nested_stacks_report_each_occupancy_where_its_carriers_are_placed() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a"]);
+        state.inner.modal.present(ChildState::new(true));
+        state
+            .panes
+            .insert("pane-a", RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(nested(), state);
+
+        let placed: Vec<ScopePath> = [
+            OuterMessage::Pane("pane-a", Message::RootWork),
+            OuterMessage::Pane("pane-a", Message::Row("row-x", ChildMessage::Carriers)),
+            OuterMessage::Inner(Message::Row("row-a", ChildMessage::Carriers)),
+            OuterMessage::Inner(Message::Modal(ChildMessage::Carriers)),
+        ]
+        .into_iter()
+        .map(|message| spawn_scopes(&driven.send(message))[0].clone())
+        .collect();
+
+        assert_eq!(driven.reported(), placed);
+        assert_eq!(
+            placed,
+            vec![
+                path(&["pane-a"]),
+                path(&["pane-a", "row-x"]),
+                path(&["outer", "row-a"]),
+                path(&["outer", "modal"]),
+            ]
+        );
+    }
+
+    // INV-RC3a: the collector a hand-written reducer reports through appends
+    // what RFC 0014 §2.5 says each call appends, beneath the path it says.
+    #[test]
+    fn the_collector_reports_each_call_beneath_its_path() {
+        struct Pane {
+            modal: Slot<()>,
+        }
+
+        struct Panes;
+
+        impl Reducer for Panes {
+            type State = Keyed<&'static str, Pane>;
+            type Message = ();
+
+            fn reduce(&self, _: &mut Self::State, (): ()) -> Command<()> {
+                Command::none()
+            }
+
+            fn instances(&self, rows: &Self::State, out: &mut Instances<'_>) {
+                out.scoped("outer", |out| {
+                    out.keyed(rows, |pane, out| out.slot("modal", &pane.modal, |(), _| {}));
+                });
+            }
+        }
+
+        let mut open = Pane {
+            modal: Slot::empty(),
+        };
+        open.modal.present(());
+        let mut rows = Keyed::new();
+        rows.insert("row-a", open);
+        rows.insert(
+            "row-b",
+            Pane {
+                modal: Slot::empty(),
+            },
+        );
+
+        let reported: Vec<ScopePath> = instances::report(&Panes, &rows)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec![
+                path(&["outer", "row-a"]),
+                path(&["outer", "row-a", "modal"]),
+                path(&["outer", "row-b"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_occupancy_the_last_message_did_not_reach_stays_reported() {
+        let mut state = OuterState::new();
+        state.inner = RootState::with_rows(&["row-a"]);
+        state
+            .panes
+            .insert("pane-a", RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(nested(), state);
+        let before = driven.reported();
+
+        let parts = driven.send(OuterMessage::Inner(Message::Row(
+            "row-a",
+            ChildMessage::Quiet,
+        )));
+
+        assert!(parts.teardowns.is_empty());
+        assert_eq!(driven.reported(), before);
+        assert_eq!(before.len(), 3, "the pane, its row, and the inner row");
     }
 
     // INV-RC2's subscription half: the child's declarations are aggregated
@@ -1233,120 +1904,33 @@ mod tests {
         assert_eq!(stack.subscriptions(&state).len(), 2);
     }
 
-    // A boundary adds identity carriers and **nothing else**. Two rows, one
-    // per thing merging through `Command::batch` used to add.
-
-    // The child-key diagnostic is the application's, addressed to code that
-    // keyed a batch. A boundary merging a removal into a keyed command is
-    // not that code, and must not make it look like it is. The second half
-    // is the control: the same recorder still sees an application's own
-    // keyed batch child, so the zero above is this path's silence rather
-    // than a silenced diagnostic.
-    #[test]
-    fn a_removing_boundary_reports_no_discarded_child_key() {
-        let recorder = TraceRecorder::new().with_target("tears::command");
-        let _guard = recorder.set_default();
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-        state.rows.remove(&"row-a");
-
-        let before = recorder.event_count();
-        let parts = lowered(&stack, &mut state, Message::RootWork);
-
-        assert_eq!(
-            parts.teardowns,
-            vec![path(&["row-a"])],
-            "the removal was merged into the update's own keyed command"
-        );
-        assert_eq!(
-            recorder.event_count() - before,
-            0,
-            "and merging it warned about nothing"
-        );
-    }
-
-    // The redraw directive is the update's own (RFC 0002's separation). A
-    // boundary that merged through `batch` would fold it against a
-    // teardown's default and hand a `without_redraw` update a redraw it
-    // declined.
-    #[test]
-    fn a_removing_boundary_preserves_the_update_s_redraw_directive() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-        state.rows.remove(&"row-a");
-
-        let parts = lowered(&stack, &mut state, Message::Silent);
-
-        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
-        assert!(
-            !parts.redraw,
-            "the update opted out, and removing a row is not a boundary's licence to opt back in"
-        );
-    }
-
-    #[test]
-    fn a_removing_boundary_leaves_an_ordinary_update_redrawing() {
-        let stack = stack();
-        let mut state = RootState::new();
-        state.rows.insert("row-a", ChildState::new(true));
-
-        let parts = lowered(&stack, &mut state, Message::Close("row-a"));
-
-        assert_eq!(parts.teardowns, vec![path(&["row-a"])]);
-        assert!(parts.redraw, "the update's own default is untouched too");
-    }
-
-    // Two boundaries stacked over one another: the outer `scope` composes a
-    // whole `for_each` stack as its child. Every carrier the inner boundary
-    // qualified with a row key is re-anchored under the outer segment, so a
-    // run lands at `["outer", "row-b"]` and the inner stack's own journal
-    // teardown at `["outer", "row-a"]` — the qualification composes down the
-    // stack rather than stopping at the boundary that applied it.
+    // The outer `scope` composes a whole stack as its child: every carrier
+    // the inner boundary qualified with a row key is re-anchored under the
+    // outer segment, and so is the path a removal inside it is torn down at.
     #[test]
     fn two_stacked_boundaries_compose_their_segments() {
-        let nested = nested();
         let mut state = OuterState::new();
-        state.inner.rows.insert("row-a", ChildState::new(true));
-        state.inner.rows.insert("row-b", ChildState::new(true));
+        state.inner = RootState::with_rows(&["row-a", "row-b"]);
+        let mut driven = Driven::new(nested(), state);
 
-        let parts = nested
-            .reduce(
-                &mut state,
-                OuterMessage::Inner(Message::Row("row-b", ChildMessage::Carriers)),
-            )
-            .into_runtime_parts()
-            .into_kernel_parts();
+        let parts = driven.send(OuterMessage::Inner(Message::Row(
+            "row-b",
+            ChildMessage::Carriers,
+        )));
 
         assert_eq!(
-            parts
-                .spawns
-                .iter()
-                .map(|spawn| spawn.scope.clone())
-                .collect::<Vec<_>>(),
+            spawn_scopes(&parts),
             vec![path(&["outer", "row-b"]); 2],
             "the inner boundary placed the runs under the row key, the outer under its segment"
         );
         assert_eq!(parts.teardowns, vec![path(&["outer", "row-b", "inner"])]);
-        assert_eq!(
-            parts
-                .cleanups
-                .iter()
-                .map(|registration| registration.scope.clone())
-                .collect::<Vec<_>>(),
-            vec![path(&["outer", "row-b"])]
-        );
-
-        let parts = nested
-            .reduce(&mut state, OuterMessage::Inner(Message::Close("row-a")))
-            .into_runtime_parts()
-            .into_kernel_parts();
+        assert_eq!(cleanup_scopes(&parts), vec![path(&["outer", "row-b"])]);
 
         assert_eq!(
-            parts.teardowns,
-            vec![path(&["outer", "row-a"])],
-            "the inner stack's journal teardown is re-anchored by the outer boundary too"
+            driven
+                .send(OuterMessage::Inner(Message::Close("row-a")))
+                .teardowns,
+            vec![path(&["outer", "row-a"])]
         );
     }
 

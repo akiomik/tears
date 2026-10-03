@@ -73,6 +73,7 @@ use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
 use crate::command::{CleanupRegistration, Command, CommandId, SpawnEntry};
 use crate::reducer::Program;
+use crate::reducer::instances::LiveInstances;
 use crate::runtime::channel::channel_observed;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::{Channel, LoadObserver};
@@ -134,8 +135,8 @@ pub struct StartedRun {
 /// What bootstrap started, in spawn order.
 #[derive(Debug)]
 pub struct BootReport {
-    /// The producer runs the init dispatch, the initial reconcile, and the
-    /// continuation pass started.
+    /// The producer runs the init dispatch, the initial subscription
+    /// reconcile, and the continuation pass started.
     pub producers: Vec<StartedRun>,
 }
 
@@ -165,12 +166,20 @@ pub struct ExitReport {
     pub joined: usize,
 }
 
+/// What `boot` produces: the state, and the live-instance report each update
+/// is compared against, first read from that state (RFC 0014 INV-RC3). They
+/// are held together so that neither exists without the other.
+struct Booted<P: Program> {
+    state: P::State,
+    live_instances: LiveInstances,
+}
+
 /// The kernel: one driving task, two lanes, one join set, one authoritative
 /// registry.
 pub struct Kernel<P: Program> {
     program: P,
     flags: Option<P::Flags>,
-    state: Option<P::State>,
+    booted: Option<Booted<P>>,
     registry: ScopeRegistry,
     /// Armed, not-yet-fired cleanup finalizers (RFC 0014 §4.4).
     ///
@@ -243,7 +252,7 @@ impl<P: Program> Kernel<P> {
         Self {
             program,
             flags: Some(flags),
-            state: None,
+            booted: None,
             registry: ScopeRegistry::new(observer.clone()),
             cleanups: CleanupLedger::new(),
             join_set: JoinSet::new(),
@@ -272,20 +281,21 @@ impl<P: Program> Kernel<P> {
     /// Bootstrap: the pinned intake order, then the continuation pass that
     /// consumes the render it left pending.
     ///
-    /// Intake is RFC 0011 §3.2's, unchanged — dispatch the init command,
-    /// then the initial reconcile, then mark the first redraw
-    /// unconditionally and independently of the init command's own redraw
-    /// directive. That leaves work outstanding, so INV-RC16's park condition
-    /// ("nothing to make progress on") is not met and the kernel does not
-    /// park; the continuation pass is therefore run here rather than left
-    /// for a caller to remember, which is what makes the production loop and
-    /// the stage-3 driver reach the same post-boot state by the same route
-    /// (RFC 0008 §9.5).
+    /// Intake is RFC 0011 §3.2's — read the first live-instance report,
+    /// dispatch the init command, then the initial subscription reconcile,
+    /// then mark the first redraw unconditionally and independently of the
+    /// init command's own redraw directive. That leaves work outstanding, so
+    /// INV-RC16's park condition ("nothing to make progress on") is not met
+    /// and the kernel does not park; the continuation pass is therefore run
+    /// here rather than left for a caller to remember, which is what makes
+    /// the production loop and the stage-3 driver reach the same post-boot
+    /// state by the same route (RFC 0008 §9.5).
     ///
     /// A quit dispatched by `init` short-circuits synchronously: the
-    /// reconcile is skipped, no subscription source starts, no render
-    /// happens, the continuation pass never runs, and the kernel never
-    /// reaches steady state (RFC 0014 §6.2, amending RFC 0011's bootstrap).
+    /// subscription reconcile is skipped, no subscription source starts, no
+    /// render happens, the continuation pass never runs, and the kernel
+    /// never reaches steady state (RFC 0014 §6.2, amending RFC 0011's
+    /// bootstrap).
     ///
     /// # Errors
     ///
@@ -300,7 +310,13 @@ impl<P: Program> Kernel<P> {
         assert!(self.phase == KernelPhase::Boot, "boot runs once");
         let flags = self.flags.take().expect("boot consumes the flags once");
         let (state, init) = self.program.init(flags);
-        self.state = Some(state);
+        // The first live-instance report is read before the init dispatch
+        // (RFC 0011 §3.2); it tears nothing down.
+        let live_instances = LiveInstances::new(&self.program, &state);
+        self.booted = Some(Booted {
+            state,
+            live_instances,
+        });
 
         self.dispatch(init);
         if !self.terminating() {
@@ -324,7 +340,7 @@ impl<P: Program> Kernel<P> {
 
     /// The booted state.
     pub const fn state(&self) -> &P::State {
-        self.state.as_ref().expect("kernel booted")
+        &self.booted.as_ref().expect("kernel booted").state
     }
 
     /// Whether termination has been applied.
@@ -710,7 +726,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use tokio::task::yield_now;
 
-    use crate::reducer::Reducer;
+    use crate::reducer::{Instances, Reducer};
     use crate::subscription::Subscription;
     use crate::subscription::mock::MockSource;
     use crate::test_support::TraceRecorder;
@@ -722,9 +738,13 @@ mod tests {
 
     /// One recorded call into the program, in the order the kernel made it.
     ///
-    /// The four calls are the whole application surface a pass touches, so
-    /// this journal is what pins the intake order and the stage order
-    /// without any probe inside the kernel.
+    /// The four calls pin the intake order and the stage order without any
+    /// probe inside the kernel. `instances`, the fifth, is left unrecorded:
+    /// its place at boot is pinned by
+    /// `a_panic_in_the_first_report_leaves_the_init_command_undispatched` in
+    /// `tests/lifecycle.rs`, and its place between `reduce` and the dispatch
+    /// by `a_same_update_recreate_tears_the_old_instance_down_and_starts_the_successor_fresh`
+    /// in `conformance/combinator.rs`.
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum Call {
         Init,
@@ -782,7 +802,8 @@ mod tests {
         sources: Vec<MockSource<u8>>,
     }
 
-    /// A program that records every call the kernel makes into it.
+    /// A program that records every call the kernel makes into it but
+    /// `instances`.
     struct Probe {
         journal: Journal,
     }
@@ -804,6 +825,8 @@ mod tests {
                 .map(|source| Subscription::new(source.clone()))
                 .collect()
         }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
     }
 
     impl Program for Probe {

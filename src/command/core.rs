@@ -12,6 +12,7 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt, stream};
 
+use crate::reducer::instances::Disappeared;
 use crate::structural_key::{ScopePath, StructuralKey};
 
 use super::Action;
@@ -292,35 +293,22 @@ impl<Msg: Send + 'static> Command<Msg> {
         }
     }
 
-    /// Takes `other`'s teardown prefixes onto this command and **nothing
-    /// else** — not its effect, not its directives, not its cancellation
-    /// metadata, not its cleanup registrations.
+    /// Adds teardowns of the paths live-instance reconciliation found
+    /// disappeared — the one origin of a teardown besides
+    /// [`Command::teardown`] (RFC 0013 R8) — and **nothing else**: the
+    /// command's effect, directives, cancellation metadata, and cleanup
+    /// registrations are left as they are.
     ///
-    /// This is aggregation of an already-originated teardown, which RFC 0013
-    /// §7.2's origination review names as a free transformation: the entry
-    /// still comes from a [`Command::teardown`] call, and there is no route
-    /// here from a raw prefix. A `debug_assert` holds `other` to that shape
-    /// so this cannot quietly become a general-purpose merge.
-    ///
-    /// The one caller is a combinator's journal drain, which has to put a
-    /// removal's teardown on a command the application returned.
-    /// [`Command::batch`] would be wrong there twice over: it folds the
-    /// redraw directive across its children, so an update that returned
-    /// [`Command::without_redraw`] would silently regain its redraw, and it
-    /// warns about a child spawn key for a command the boundary is only
-    /// passing through. A boundary adds identity carriers and nothing else
+    /// Only reconciliation can build a `Disappeared`, so each path is one a
+    /// report built as it descended through the boundaries, ending in an
+    /// occupancy's own key or segment. It is therefore the prefix
+    /// `Command::teardown` over that segment, `scoped` by the ones above it,
+    /// would carry — never empty. [`Command::batch`] would be wrong here: it
+    /// folds the redraw directive across its children, so an update that
+    /// returned [`Command::without_redraw`] would silently regain its redraw
     /// (RFC 0014 §2.5).
-    pub(crate) fn merging_teardowns(mut self, other: Self) -> Self {
-        debug_assert!(
-            other.is_none()
-                && other.directives == RuntimeDirectives::DEFAULT
-                && other.cleanups.is_empty()
-                && other.cancellation.cancels.is_empty(),
-            "merging_teardowns aggregates teardown entries only; an effect, a redraw directive, a \
-             cleanup registration, a spawn key, or an explicit cancel on `other` would be dropped \
-             silently"
-        );
-        self.teardowns.extend(other.teardowns);
+    pub(crate) fn with_reconciled_teardowns(mut self, disappeared: Disappeared) -> Self {
+        self.teardowns.extend(disappeared.into_paths());
         self
     }
 

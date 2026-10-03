@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tears::Instances` (also in the prelude), the collector a reducer
+  reports the instances it composes through
+
+### Changed
+
+- **Breaking:** `Reducer` and `Application` gain a required `instances`
+  method, through which the runtime learns which `Keyed` rows and `Slot`
+  occupants a state holds, so that it can tear down the ones an update
+  removes
+
+  What an implementor owes follows from the work it places — the commands
+  it returns and the subscriptions it declares: it reports each row or
+  occupant that work is scoped under, and forwards the report of each
+  reducer it calls `reduce` on; the combinators already do. A removed
+  instance's teardown no longer travels in the `Command` a combinator
+  stack's `reduce` returns — the runtime adds it from the report — so an
+  `Application` whose `update` calls a stack's `reduce` must forward that
+  stack's report: an empty body there compiles and silently stops tearing
+  down its rows. One that calls no reducer and places no command or
+  subscription under a row or occupant writes an empty body.
+
+  Before:
+
+  ```rust
+  impl Application for MyApp {
+      // ...
+      fn subscriptions(&self) -> Vec<Subscription<Message>> {
+          vec![]
+      }
+  }
+
+  impl Application for MyComposedApp {
+      // ...
+      fn update(&mut self, msg: Message) -> Command<Message> {
+          stack().reduce(self, msg)
+      }
+  }
+  ```
+
+  After:
+
+  ```rust
+  impl Application for MyApp {
+      // ...
+      fn subscriptions(&self) -> Vec<Subscription<Message>> {
+          vec![]
+      }
+
+      fn instances(&self, _out: &mut Instances<'_>) {}
+  }
+
+  impl Application for MyComposedApp {
+      // ...
+      fn update(&mut self, msg: Message) -> Command<Message> {
+          stack().reduce(self, msg)
+      }
+
+      fn instances(&self, out: &mut Instances<'_>) {
+          stack().instances(self, out);
+      }
+  }
+  ```
+
+- **Breaking:** an instance that leaves its path while the state still holds
+  it is torn down: its commands are cancelled and its cleanup hooks run, and
+  nothing restarts them, where it now is or if it comes back. That covers
+  moving a `Keyed` or `Slot` to another path, swapping two, a collection
+  taken out in one update and restored in a later one, and a projection that
+  stops selecting the state holding it, such as the active one of several
+  tabs. Before, none of these tore anything down: commands and cleanup
+  registrations stayed under the path they left, where the commands' output
+  went to whichever instance held that path, or nowhere (#422)
+
+  ```rust
+  // Before: each occupant's commands and cleanup registrations stayed under
+  // the path it left, which the other now holds.
+  // After: both are torn down. An occupant that should keep working where
+  // it now is sets its work up again, as a new one would.
+  mem::swap(&mut state.modal, &mut state.sheet);
+  ```
+
+- **Breaking:** `Slot::present` is no longer a `const fn`, since presenting
+  begins an instance and draws its identity
+
+  Before:
+
+  ```rust
+  const fn open(details: &mut Slot<Details>, pane: Details) -> Option<Details> {
+      details.present(pane)
+  }
+  ```
+
+  After:
+
+  ```rust
+  fn open(details: &mut Slot<Details>, pane: Details) -> Option<Details> {
+      details.present(pane)
+  }
+  ```
+
+- `Keyed::insert`, `Keyed`'s `FromIterator` and `Slot::present` panic once
+  the process has drawn every occupancy identity
+- A removal made while the initial state is built (in `init` or
+  `Application::new`) tears nothing down: the first report is read from the
+  state that is returned, so the removed instance is never reported. Before,
+  the first message to reach the boundary tore its path down
+- When one update removes several instances, the teardowns the runtime adds
+  for them come in the order `instances` reported them before the update
+  rather than the order they were removed in, which can change the order
+  their cleanup hooks start in
+
+### Fixed
+
+- Replacing a whole `Keyed` or `Slot` (`state.rows = Keyed::default()`,
+  `mem::take`) now tears down the instances it held, and so does a reducer
+  above an enclosing `scope` boundary removing or replacing one. Before, such
+  removals were lost or deferred, and their in-flight commands and cleanup
+  hooks were left behind (#422)
+- An occupant that replaced another while the initial state was built (in
+  `init` or `Application::new`) no longer has its work torn down at the
+  first message that reaches its boundary. Before, the replacement's
+  deferred teardown stopped what the initial command and subscriptions had
+  started under that path, and ran the cleanup hooks registered there
+
 ## [0.11.1] - 2026-09-11
 
 ### Fixed

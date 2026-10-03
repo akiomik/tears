@@ -180,6 +180,8 @@ impl Application for App {
             }),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 impl App {

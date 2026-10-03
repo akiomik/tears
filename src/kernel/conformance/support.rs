@@ -4,11 +4,11 @@
 //!
 //! - **Application-side observation only.** The driver reports no state, no
 //!   frame, and no delivery transcript (RFC 0008 §9.11), so what a series
-//!   asserts about `update`, `view`, and `subscriptions` is recorded by the
-//!   program under test, in [`Journal`]. What a series asserts about a
-//!   producer's own progress — a run reaching its end, a subscription
-//!   source starting or stopping — is recorded by the effect or the source,
-//!   in a [`Beacon`]. Both are the "test's own application-side
+//!   asserts about `update`, `view`, `subscriptions` and `instances` is
+//!   recorded by the program under test, in [`Journal`]. What a series
+//!   asserts about a producer's own progress — a run reaching its end, a
+//!   subscription source starting or stopping — is recorded by the effect or
+//!   the source, in a [`Beacon`]. Both are the "test's own application-side
 //!   instrumentation" a `settle` predicate is meant to read (RFC 0008 §9.6).
 //! - **Bounded waiting, never timed.** Nothing here sleeps, arms a timer, or
 //!   reads a wall clock. A wait is bounded either by a counted number of
@@ -55,7 +55,7 @@ use crate::command::{Action, Command};
 use crate::kernel::Kernel;
 use crate::kernel::arbiter::WakeSource;
 use crate::kernel::lane::GateMode;
-use crate::reducer::{Exit, Program, Reducer};
+use crate::reducer::{Exit, Instances, Program, Reducer};
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::load::LoadObserver;
 use crate::subscription::mock::MockSource;
@@ -507,10 +507,11 @@ impl Latch {
 
 /// One call the kernel made into the program under test.
 ///
-/// These four are the whole application surface a pass touches, so this is
-/// what pins delivery, rendering, and re-evaluation without any probe inside
-/// the kernel — and it is the *only* render observation there is, the driver
-/// owning its terminal and reporting nothing about frames (RFC 0008 §9.11).
+/// These four, with the report count [`Journal`] keeps beside them, are the
+/// whole application surface a pass touches, so this is what pins delivery,
+/// rendering, and re-evaluation without any probe inside the kernel — and it
+/// is the *only* render observation there is, the driver owning its terminal
+/// and reporting nothing about frames (RFC 0008 §9.11).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Call {
     /// `init` ran.
@@ -545,6 +546,10 @@ pub enum Call {
 pub struct Journal {
     calls: Arc<Mutex<Vec<Call>>>,
     renders: Arc<Mutex<Vec<Option<u8>>>>,
+    /// How many live-instance reports were read. Counted beside `calls`
+    /// rather than in it, so the call sequences other rows assert stay as
+    /// they are.
+    reports: Arc<AtomicUsize>,
 }
 
 impl Journal {
@@ -562,6 +567,15 @@ impl Journal {
     /// What each render observed, in render order.
     pub fn rendered(&self) -> Vec<Option<u8>> {
         self.renders_mut().clone()
+    }
+
+    /// How many live-instance reports the kernel read.
+    pub fn reports(&self) -> usize {
+        self.reports.load(Ordering::SeqCst)
+    }
+
+    fn report(&self) {
+        self.reports.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Every call, in order.
@@ -1214,6 +1228,10 @@ impl Reducer for Scripted {
                     .map(Feed::declare),
             )
             .collect()
+    }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {
+        self.journal.report();
     }
 }
 

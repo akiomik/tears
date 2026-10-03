@@ -355,16 +355,17 @@ jobs:
       # The `test` job passes explicit target flags, which suppress the
       # implicit doctest run; `doc` builds docs without `cfg(doctest)`, and
       # `coverage` omits `--doctests`. Without this job nothing compiles the
-      # examples in rustdoc comments or in the `cfg(doctest)`-included
+      # examples in rustdoc comments or in a `cfg(doctest)`-included
       # migration guide, so an API rename could break every snippet and leave
       # CI green. Invoked via `just` so the local and CI invocations are
       # identical, as the bench job above does.
       - name: Run doc tests
         run: just test-doc
-      # Guards the `include` entry that keeps `include_str!` resolvable once
-      # published; the recipe explains why nothing else catches it. Invoked
-      # via `just` so the local and CI invocations are identical, and so the
-      # feature list lives in one place rather than being restated here.
+      # Guards a migration guide's `include` entry, which keeps its
+      # `include_str!` resolvable once published; the recipe explains why
+      # nothing else catches it. Invoked via `just` so the local and CI
+      # invocations are identical, and so the feature list lives in one place
+      # rather than being restated here.
       - name: Run doc tests against the packaged crate
         run: just test-doc-packaged
 

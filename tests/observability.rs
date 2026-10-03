@@ -69,6 +69,8 @@ impl Application for GaugeApp {
                 .map(|_| Msg::Tick),
         ]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 // Producer gauges over a real run: each producer kind raises its field, and

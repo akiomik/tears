@@ -39,6 +39,8 @@ impl Application for InitQuitApp {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::test]
@@ -105,6 +107,8 @@ impl Application for MultiMessageQuitApp {
     fn subscriptions(&self) -> Vec<Subscription<Self::Message>> {
         vec![]
     }
+
+    fn instances(&self, _out: &mut Instances<'_>) {}
 }
 
 #[tokio::test]

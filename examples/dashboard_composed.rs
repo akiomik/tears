@@ -30,13 +30,13 @@
 //!
 //! Removal is the other half. A row leaves through [`Keyed::remove`] or is
 //! replaced by [`Keyed::insert`]; the occupant leaves through [`Slot::dismiss`]
-//! or a replacing [`Slot::present`]. The boundary turns each of those into a
-//! teardown of that instance's scope, so its timer stops and its in-flight sync
-//! is cancelled without this file asking for either. The `on_teardown` hooks
-//! each child registers write the line the activity pane carries. A finalizer
-//! produces no message by design — which is why the log is a handle rather than
-//! a message, and why the pane shows that line the next time something draws
-//! rather than at the moment the hook runs.
+//! or a replacing [`Slot::present`]. However an instance leaves, the runtime
+//! tears down that instance's scope in the same update, so its timer stops and
+//! its in-flight sync is cancelled without this file asking for either. The
+//! `on_teardown` hooks each child registers write the line the activity pane
+//! carries. A finalizer produces no message by design — which is why the log
+//! is a handle rather than a message, and why the pane shows that line the
+//! next time something draws rather than at the moment the hook runs.
 //!
 //! Cross-child work stays the root's. Saving the details pane's notes back
 //! onto the task it was opened for touches two children, so it is a root
@@ -48,9 +48,10 @@
 //! - The **row children and the pane's occupant** have runs of their own — a
 //!   timer and a keyed request each — where `dashboard.rs` has neither, its one
 //!   subscription being the root's terminal source. That is not incidental:
-//!   qualification and teardown are about runs, so a child with none gives a
-//!   boundary nothing to do. `Navigation` and `Activity` are exactly that case
-//!   and are composed anyway, for the organisation rather than the separation.
+//!   a boundary's qualification and the runtime's teardown are about runs,
+//!   so a child with none gives them nothing to act on. `Navigation` and
+//!   `Activity` are exactly that case and are composed anyway, for the
+//!   organisation rather than the separation.
 //! - **Three keys are not the same.** `r` reloads a row, Enter opens the pane
 //!   from the task list, and Esc closes the pane, where `dashboard.rs` rereads
 //!   the selected task's notes into a panel that is always there.
@@ -71,16 +72,17 @@
 //!   add, a delete — so any of those throws an unsaved edit away; here the
 //!   occupant is fixed to the task it was opened for, because a `Slot` holds an
 //!   instance rather than a view of whatever is selected.
-//! - **The tasks arrive as messages** rather than being built into the initial
-//!   state. `init` could build them — `Keyed::from_iter` records no removal, so
-//!   growing a collection there is fine — and this file routes them through
-//!   `AddTask` so the seed and the `n` key take one path. What `init`'s command
-//!   cannot do is start work *under a child's scope*, so the row's own setup is
-//!   a message either way. That the rows start with the same notes and none
-//!   marked done is `AddTask`'s doing rather than composition's: it carries a
-//!   title and nothing else. So is the row selected at startup — adding a task
-//!   selects it, so this binary opens on the last of the three where
-//!   `dashboard.rs` opens on the first.
+//! - **The tasks arrive as messages** rather than being built into the
+//!   initial state. `init` could build them — the first report is read from
+//!   `init`'s state and tears nothing down, so growing a collection there is
+//!   fine — and this file routes them through `AddTask` so the seed and the
+//!   `n` key take one path. What `init`'s command does not get is a
+//!   boundary's scoping, so the row's own setup is a message either way.
+//!   That the rows start with the same notes and none marked done is
+//!   `AddTask`'s doing rather than composition's: it carries a title and
+//!   nothing else. So is the row selected at startup — adding a task selects
+//!   it, so this binary opens on the last of the three where `dashboard.rs`
+//!   opens on the first.
 //!
 //! Run with: `cargo run --example dashboard_composed`
 //! Test with: `cargo test --example dashboard_composed`
@@ -494,8 +496,7 @@ impl Reducer for Root {
                 // Esc is guarded on the focus rather than on `editing_notes`,
                 // so it is the way out of a `Details` focus with nothing behind
                 // it — which is also why the status has to say which of the two
-                // happened. Dismissing an empty slot removes no instance and
-                // records nothing.
+                // happened. Dismissing an empty slot removes no instance.
                 state.status = match (close_details(state), unsaved) {
                     (true, true) => "Closed the details pane, discarding notes nobody saved",
                     (true, false) => "Closed the details pane",
@@ -524,6 +525,8 @@ impl Reducer for Root {
             }),
         ]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// A fixed sibling with no runs of its own: `scope` buys code organisation
@@ -547,6 +550,8 @@ impl Reducer for Navigation {
         }
         Command::none()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The other fixed sibling.
@@ -566,6 +571,8 @@ impl Reducer for Activity {
         }
         Command::none()
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// One row of the keyed collection.
@@ -634,6 +641,8 @@ impl Reducer for Task {
     fn subscriptions(&self, _state: &TaskState) -> Vec<Subscription<TaskMessage>> {
         vec![tick(|TimerEvent::Tick| TaskMessage::Tick)]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The optionally-present child.
@@ -691,6 +700,8 @@ impl Reducer for Details {
     fn subscriptions(&self, _state: &DetailsState) -> Vec<Subscription<DetailsMessage>> {
         vec![tick(|TimerEvent::Tick| DetailsMessage::Tick)]
     }
+
+    fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
 }
 
 /// The composition: one root and four boundaries over it.
@@ -963,10 +974,9 @@ fn render_activity(state: &App, frame: &mut Frame<'_>, area: Rect) {
 /// Dismisses the details pane, reporting whether there was an occupant to
 /// dismiss.
 ///
-/// Dismissal is a removal, so the slot's boundary tears the occupant's runs
-/// down — but only when there was one, which is why the caller is told: an
-/// empty slot records nothing, and the status must not claim a close that did
-/// not happen.
+/// Dismissal is a removal, so the occupant's runs are torn down — but only
+/// when there was one, which is why the caller is told: an empty slot removes
+/// nothing, and the status must not claim a close that did not happen.
 ///
 /// Restoring the focus is this function's other half, and it guards nothing:
 /// [`editing_notes`] already asks the slot, so a `Details` focus over an empty
@@ -991,9 +1001,7 @@ fn close_details_opened_on(state: &mut App, task: TaskId) {
 fn add_task(state: &mut App, title: String) -> Command<Message> {
     let id = TaskId(state.next_id);
     state.next_id += 1;
-    // Insertion into an absent key records no removal: nothing was running
-    // under it to tear down. The key is fresh, so this is that case and never
-    // the replacing one.
+    // The key is fresh, so this begins an instance and replaces none.
     state.activity.push(format!("added: #{} {}", id.0, title));
     state.tasks.insert(
         id,
@@ -1014,8 +1022,9 @@ fn reload_task(state: &mut App, id: TaskId) -> Command<Message> {
         return Command::none();
     };
     // Inserting over an occupied key is a replacement, and a replacement is a
-    // removal: the boundary tears the old instance's runs down before this
-    // command's spawns start the successor's.
+    // removal: the old instance's runs are torn down in the command the
+    // runtime dispatches for this update, and the successor sets its own work
+    // up when the `Watch` returned below reaches it.
     let task_title = task.title.clone();
     state.tasks.insert(
         id,
@@ -1045,9 +1054,8 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     // Read before the removal, because it is a position in the collection and
     // the removal is what changes it.
     let position = state.tasks.keys().position(|key| *key == id);
-    // `remove` records the removal; the row boundary drains it in this same
-    // reduce and merges the row's teardown into the command returned here.
-    // Nothing below asks for that.
+    // The row leaves the state here; the runtime tears it down in the command
+    // it dispatches for this update. Nothing below asks for that.
     let Some(task) = state.tasks.remove(&id) else {
         state.status = "That task is gone";
         return Command::none();
@@ -1055,8 +1063,8 @@ fn delete_task(state: &mut App, id: TaskId) -> Command<Message> {
     state
         .activity
         .push(format!("deleted: #{} {}", id.0, task.title));
-    // A details pane open on the row that just left goes with it, and the
-    // slot's own boundary originates that teardown.
+    // A details pane open on the row that just left goes with it, and is
+    // torn down in the same update.
     close_details_opened_on(state, id);
     if state.selected == Some(id) {
         // The row that moved up into the position, or the new last row when
@@ -1583,8 +1591,8 @@ mod tests {
         );
     }
 
-    /// The four removal shapes a boundary tears down, and the one thing that is
-    /// not a removal.
+    /// The ways an instance leaves the state, each torn down, and the one thing
+    /// that is not a removal.
     ///
     /// The comparison below is exact, and holds however long the run takes:
     /// the rows' keyed requests sleep in real time, but `deliver` grants a
@@ -1594,7 +1602,7 @@ mod tests {
     ///
     /// Nothing in this file calls `Command::teardown`: each `stopped watching`
     /// and `closed details` line below is a hook a child registered, fired by
-    /// the teardown its boundary originated when the instance left.
+    /// the teardown reconciliation issued when the instance left.
     #[test]
     fn every_removal_tears_its_instance_down() {
         let activity = ActivityLog::default();
@@ -1611,8 +1619,7 @@ mod tests {
                 Message::CloseDetails,
                 // Inserting over an occupied key: a replacement, one collection
                 // over. The slot is empty by now, so this pass tears exactly
-                // one instance down and the order below stays the removal
-                // order rather than a race between two finalizers.
+                // one instance down, and its hook races no other finalizer.
                 Message::ReloadTask(TaskId(2)),
                 // A row leaving the keyed collection.
                 Message::DeleteTask(TaskId(1)),
@@ -1685,12 +1692,12 @@ mod tests {
                 "reloaded: #2 beta".to_owned(),
                 "stopped watching: #2 beta".to_owned(),
                 // The root's own line, written by the reduce that removed the
-                // row, before the teardown it originated ran.
+                // row, before that removal's teardown ran.
                 "deleted: #1 alpha".to_owned(),
                 "stopped watching: #1 alpha".to_owned(),
             ],
-            "one teardown per removal, in removal order, and none for the successor row that is \
-             still present"
+            "one teardown per removal, each after the update that made it, and none for the \
+             successor row that is still present"
         );
     }
 
@@ -1751,8 +1758,8 @@ mod tests {
     /// The pane holds the replaced instance's title and notes, so leaving it
     /// open would let a later `SaveNotes` write them back over the reload.
     ///
-    /// Both teardowns are originated by the same reduce, so this asserts which
-    /// hooks fired and not the order they finished in.
+    /// Both teardowns follow the same reduce, so this asserts which hooks
+    /// fired and not the order they finished in.
     #[test]
     fn replacing_a_row_closes_a_pane_opened_on_it() {
         let activity = ActivityLog::default();
@@ -1866,7 +1873,7 @@ mod tests {
         let _closed = Root.reduce(&mut state, Message::CloseDetails);
         assert!(
             !state.details.is_present(),
-            "an occupant is dismissed, which is the removal the boundary tears down"
+            "an occupant is dismissed, which is the removal that gets torn down"
         );
         assert_eq!(
             state.status, "Closed the details pane",
