@@ -1,8 +1,10 @@
 # RFC 0005: Structural Lifecycle Identity and Composition Scopes
 
 - Status: Implemented (Phase A shipped in 0.10.0; Phase B shipped additively
-  after 0.10.0)
-- Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive)
+  after 0.10.0); the amendment RFC 0014 §2.5's live-instance reconciliation
+  brings is Accepted
+- Target: Phase A in 0.10.0 (breaking); Phase B after 0.10.0 (additive);
+  RFC 0014 §2.5's amendment in 0.12.0
 - Scope: collision-safe subscription identity and hierarchical identity
   namespacing for composed command and subscription lifecycles
 - Feature flag: none
@@ -712,7 +714,7 @@ RFC 0013 — and it decides the six questions this section deferred:
 - running and finished-but-buffered output is revoked — nothing under the
   prefix is delivered after the application point (RFC 0013 §3.4);
 - subscriptions participate by immediate stop at that point, paired with
-  declaration removal by the composition layer (RFC 0013 §4); and
+  declaration removal as RFC 0013 §4.2 states; and
 - a later child reusing the same scope observes nothing stale (RFC 0013 §3.6).
 
 The structural path defined here is what that operation anchors on: a teardown
@@ -721,8 +723,9 @@ INV-18).
 
 The concrete client is served there as well: TCA-parity collection composition
 — `for_each` in RFC 0014 §2.5 — tears a removed child instance's in-flight
-effects down automatically, through a removal journal that issues the teardown,
-rather than through anything this RFC's manual scoping provides.
+effects down automatically, through the live-instance reconciliation of the
+instances a program reports, rather than through anything this RFC's manual
+scoping provides.
 
 ### 4.6 Residual composition risk
 

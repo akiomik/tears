@@ -1,11 +1,14 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Implemented
+- Status: Implemented; the amendments RFC 0014 §2.5's live-instance
+  reconciliation brings are Accepted
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
   §2.1's second dirty source, whose `Changed` entry RFC 0012 carries;
-  public signatures unchanged
+  public signatures unchanged in 0.11.0. RFC 0014 §2.5's live-instance
+  reconciliation adds `instances` to the calls this RFC orders, in
+  0.12.0
 - Scope: the runtime's steady-state phase order, the bootstrap contract,
   the termination model (controlled and abrupt routes, with two-stage
   postconditions), panic containment for runtime-owned tasks, and driver
@@ -37,8 +40,10 @@ down. This RFC is the owner of that contract. Five decisions:
    so whenever a redraw was pending at a frame pass, subscriptions start
    against a state that same pass has just rendered.
 2. **Bootstrap** (§3, INV-LC3/INV-LC4). Constructing a `Runtime` is
-   inert: no runtime-owned task is spawned, no command effect is polled,
-   no subscription source starts. Inside `run()`, the init command is
+   inert: no runtime-owned task is spawned, no command
+   effect is polled, no subscription source starts. Inside
+   `run()`, the first live-instance report is read before
+   the init command is dispatched, and the init command is
    dispatched before the initial subscription reconcile, and the first
    render starts out pending — eligible, not promised. `Application::new`
    is user code and runs at construction; this RFC claims nothing about
@@ -63,8 +68,8 @@ down. This RFC is the owner of that contract. Five decisions:
    through. A panic in the application's own code on the driving task is
    deliberately fail-fast (the abrupt route above).
 5. **Driver exclusivity** (§6, INV-LC9). At most one owner drives a
-   runtime instance at a time, and the state transitions —
-   `update`, `view`, `subscriptions` — execute serially and
+   runtime instance at a time, and the state transitions — `update`,
+   `view`, `subscriptions` — and `instances` execute serially and
    non-reentrantly. Pinned as a property, not as the absence of an API:
    a future `step`/handle surface is additive exactly as long as it
    preserves it.
@@ -124,8 +129,10 @@ two kinds of passes, both executed on the driving task — which kind runs
 next is §2.3's negative space, so no alternation or ratio between them
 is guaranteed:
 
-- **Input batch.** Inputs are processed one at a time: each message runs
-  `update`, and the returned command is dispatched before the next input
+- **Input batch.** Inputs are processed one at a time:
+  each message runs `update`, and the command it returns
+  — with RFC 0014 §2.5's live-instance reconciliation
+  teardowns merged in — is dispatched before the next input
   is pulled (RFC 0003 INV-10; window and cap per RFC 0003 §4.4 and
   RFC 0006 INV-L12). The batch records its outcome as pending work:
   redraw pending per RFC 0002's OR-fold over the batch, subscription
@@ -154,7 +161,11 @@ Rendering and subscription re-evaluation are frame-phase activities:
 neither runs inside an input batch, and one frame pass performs at most
 one render and at most one re-evaluation (INV-LC1). This is what makes
 render cost proportional to frames rather than messages (RFC 0002's
-premise) and keeps reconciliation from running per message.
+premise) and keeps subscription reconciliation from running per message.
+Live-instance reconciliation is not a frame-phase activity: it runs in
+the input batch, with each update, because a removal's teardown belongs
+to the command of the update that removed it (RFC 0014 §2.5, RFC 0013
+R4).
 
 ### 2.2 Render before subscription start
 
@@ -225,12 +236,14 @@ Two boundaries are explicit:
 
 Inside `run()`, before the steady-state loop:
 
-1. **The init command is dispatched** — its cancel list is applied and
+1. **The first live-instance report is read** from the initial state
+   (RFC 0014 §2.5) — before
+2. **the init command is dispatched** — its cancel list is applied and
    its keyed identity, if any, is admitted (RFC 0003 §4.3), and its
    effect becomes eligible to run — before
-2. **the initial subscription reconcile** starts any subscription
+3. **the initial subscription reconcile** starts any subscription
    source, and
-3. **the first render starts out pending**: eligible for the first
+4. **the first render starts out pending**: eligible for the first
    frame pass, unconditionally and independently of the init command's
    redraw directive, which the runtime never consults (the fact
    RFC 0008 §5.2 records).
@@ -249,7 +262,8 @@ though no message has been processed.
 ### 3.3 What TestStore maps
 
 `TestStore::new` maps the logical intake and accounting of this
-bootstrap — it applies `Application::new` and enqueues the init command
+bootstrap — it applies `Application::new`, reads the
+first live-instance report, and enqueues the init command
 with its metadata, cancel list, and keyed admission, exactly as RFC 0008
 §3.2 states. It does not map the temporal side: runtime task start,
 subscription start, and first render have no counterpart in the store,
@@ -323,10 +337,11 @@ tidying, not a contract deliverable, and carries no CHANGELOG entry.
 
 Causes: the `run` future is dropped (external cancellation — a caller's
 `select!`/timeout); a panic unwinds through `run` from application code
-invoked on the driving task — `update`, `view`, `subscriptions`
-(called during bootstrap *and* on every dirty frame), or a declared
+invoked on the driving task — `update`, `view`, `subscriptions` (called
+during bootstrap *and* on every dirty frame), `instances` (called on the
+initial state and after every `update`, RFC 0014 §2.5), or a declared
 subscription's lazy source constructor, which runs inside the same
-reconcile (all four sites are on the driving task, so all unwind
+reconcile (all five sites are on the driving task, so all unwind
 through `run`); the runtime value is dropped without ever being run —
 once `run` is called the value is owned by the future, so a mid-run
 drop *is* the run-future drop above.
@@ -339,9 +354,10 @@ synchronous half is exactly that: teardown of ownership and the abort
 requests. The task futures themselves are dismantled by the executor
 afterward, on the quiescent stage's schedule (§4.4) — synchrony is not
 claimed for them. A panic in the application's transition
-functions stays fail-fast: it propagates to `run()`'s caller (whether
-the implementation lets it unwind directly or resumes it after cleanup —
-open question 1) and is never converted into a continued run.
+functions or in `instances` stays fail-fast: it propagates to `run()`'s
+caller (whether the implementation lets it unwind directly or resumes it
+after cleanup — open question 1) and is never converted into a continued
+run.
 
 ### 4.4 Postconditions: immediate and quiescent
 
@@ -357,9 +373,10 @@ zero immediately — `tests/observability.rs`.)
 completion (`run()`'s return for controlled; completion of the drop or
 unwind for abrupt):
 
-1. No further transition: `update`, `view`, and `subscriptions` are
-   never invoked again for this runtime, and no producer output —
-   buffered or in flight — is ever delivered. Output undelivered at
+1. No further transition or report: `update`, `view`,
+   `subscriptions`, and `instances` are never invoked again
+   for this runtime, and no producer output — buffered or
+   in flight — is ever delivered. Output undelivered at
    termination is discarded, never delivered late (the discard RFC 0006
    INV-L2 already carves out and RFC 0008 §5.3 mirrors).
 2. Cancellation has been requested for every runtime-owned task. No
@@ -410,8 +427,8 @@ behavior, and that diagnostic requirement stays RFC 0003's (§5.1).
 
 The complement is deliberate: a panic in the application's own code on
 the driving task — `update`, `view`, `subscriptions`, a subscription's
-source constructor — is the application's own bug and stays fail-fast
-(§4.3); containment never extends to it.
+source constructor, `instances` — is the application's own bug and stays
+fail-fast (§4.3); containment never extends to it.
 
 ### 5.1 Negative space: diagnostics and exit causes
 
@@ -439,9 +456,9 @@ future supervision surface free to expose them additively.
 ## 6. Driver exclusivity
 
 At most one owner drives a runtime instance at a time, and the state
-transitions — `update`, `view`, `subscriptions` — execute serially and
-non-reentrantly: no transition begins before the previous one returns,
-and none is invoked from inside another (INV-LC9).
+transitions — `update`, `view`, `subscriptions` — and `instances`
+execute serially and non-reentrantly: none of them begins before the
+previous one returns, and none is invoked from inside another (INV-LC9).
 
 This is pinned as a *property*, not as the absence of an API. It is
 delivered by the single consuming `run(self)` entry point on one driving
@@ -551,7 +568,9 @@ Enforcement classes follow the pre-review checklist's definitions.
   runtime with an init effect and a subscription source that record
   execution, under a `tracing` recorder; drop it without running; assert
   neither ran and no producer-gauge event fired during construction.
-- **INV-LC4**: inside `run()`, the init command is dispatched before the
+- **INV-LC4**: inside `run()`, the first live-instance report is read
+  before the init command is dispatched, so a panicking `instances`
+  starts nothing, and the init command is dispatched before the
   initial subscription reconcile starts any source, and the first render
   starts out pending — unconditionally, independent of the init
   command's redraw directive. Execution order beyond intake is not
@@ -562,7 +581,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   observable phase between dispatch and first poll for a behavioral test
   to anchor on (§3.3). Behavioral for the eligibility half, at the
   runtime layer: a freshly constructed runtime's first frame pass
-  renders with no message processed.
+  renders with no message processed. Behavioral for the first-report
+  order, at the integration layer: a panic in `instances` on the
+  initial state leaves the init command undispatched — no spawn and no
+  producer-gauge event, through INV-LC3's recorder.
 - **INV-LC5**: each controlled cause — a quit returned from a
   transition, a producer-originated quit, render error — exits the
   loop, and the §4.4 immediate postcondition holds when `run()`
@@ -571,9 +593,9 @@ Enforcement classes follow the pre-review checklist's definitions.
   postcondition through the explicit shutdown routine or through the
   consumed runtime value's drop is mechanism (§4.1, §4.2). Behavioral,
   one row per cause, each row asserting the return classification, that
-  no further `update`/`view`/`subscriptions` call is observed
-  afterward, and — through the INV-LC7 settle loop — that producers
-  wind down:
+  no further `update`/`view`/`subscriptions`/`instances` call is
+  observed afterward, and — through the INV-LC7 settle loop — that
+  producers wind down:
   - a quit returned from a transition, under running producers, at the
     integration layer;
   - a producer-originated quit, under running producers. The keying of
@@ -587,9 +609,10 @@ Enforcement classes follow the pre-review checklist's definitions.
     return plus the same settle-loop quiescence as the quit rows, at
     the integration layer.
 - **INV-LC6**: each abrupt cause — drop of the `run` future, a panic
-  unwinding through `run` from application code on the driving task
-  (`update`, `view`, `subscriptions` at either call site, or a
-  subscription's lazy source constructor), drop of a never-run runtime
+  unwinding through `run` from application code on the
+  driving task (`update`, `view`, `subscriptions` or
+  `instances` at either call site, or a subscription's
+  lazy source constructor), drop of a never-run runtime
   value — performs the ownership teardown and cancellation requests
   synchronously during the drop or unwind, reaching the §4.4 immediate
   postcondition with no further call (task futures are dismantled
@@ -620,6 +643,11 @@ Enforcement classes follow the pre-review checklist's definitions.
     its first call, before the loop);
   - a panic in `subscriptions` at the steady call site (raised only on
     a re-evaluation after a processed message);
+  - a panic in `instances` at the bootstrap call site (raised on its
+    first call, on the initial state);
+  - a panic in `instances` at the steady call site (raised only on the
+    call after a processed message, before that message's command is
+    dispatched);
   - a panic in a subscription's lazy source constructor (raised at the
     reconcile that starts it);
   - a never-run runtime value dropped — with §3.4 landed there is
@@ -663,11 +691,11 @@ Enforcement classes follow the pre-review checklist's definitions.
   the same task body as the rest, and that sharing is structural at the
   construction site (RFC 0014 INV-RC8).
 - **INV-LC9**: at most one owner drives a runtime instance at a time,
-  and `update`/`view`/`subscriptions` execute serially and
+  and `update`/`view`/`subscriptions`/`instances` execute serially and
   non-reentrantly; a future driving surface is additive iff it preserves
-  this (§6). Structural: the property is delivered by construction
-  (the consuming `run(self)` as the sole driving entry point,
-  transitions invoked only from the driving task) and reviewed at those
+  this (§6). Structural: the property is delivered by construction (the
+  consuming `run(self)` as the sole driving entry point, transitions and
+  `instances` invoked only from the driving task) and reviewed at those
   invocation sites — a behavioral test cannot prove the absence of a
   reentrant path.
 
@@ -725,7 +753,8 @@ RFC 0014 §12's.
   per pass, before re-evaluation, on the pass's current state.
 - **§3.2's intake order gains a bootstrap short-circuit, pinning
   INV-LC4's arbitration clause one case narrower.** The order itself
-  stands — init dispatch, then the initial reconcile, then the first
+  stands — the first live-instance report, then init dispatch,
+  then the initial subscription reconcile, then the first
   render pending unconditionally — but an init command whose
   `Command::quit()` part is present terminates deterministically
   *during* the init dispatch, before the initial reconcile runs and

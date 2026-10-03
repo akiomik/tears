@@ -1,12 +1,14 @@
 # RFC 0008: TestStore — deterministic update and effect testing
 
 - Status: Implemented — stages 1–2 with the store, stage 3 (§9) with
-  the reducer-first kernel, at the paths §9.1 places it
+  the reducer-first kernel, at the paths §9.1 places it; the amendments
+  RFC 0014 §2.5's live-instance reconciliation brings are Accepted
 - Target: an additive test harness for the current `Application` API:
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
   time context (stage 2); and, beside that store, a driving layer over
-  the reducer-first kernel (stage 3)
+  the reducer-first kernel (stage 3); RFC 0014 §2.5's live-instance
+  reconciliation joins the store's intake in 0.12.0
 - Scope: the `Message` trait-bound decision, the exhaustive-assertion
   decision, the `TestStore` public surface, its delivery-order and
   cancellation-parity contracts, the per-leaf `RuntimeCommandParts`
@@ -65,7 +67,8 @@ Three decisions, ordered by urgency:
 
 The harness itself: `tears::testing::TestStore<App>` wraps an
 `Application`, applies messages synchronously through `update`, consumes
-the returned `Command` through the same decomposition boundary the
+the returned `Command` — with RFC 0014's live-instance reconciliation
+teardowns merged in — through the same decomposition boundary the
 runtime uses (§4.1 records the named prerequisite refactor that makes
 that boundary carry per-leaf streams), and lets the test assert state,
 delivered messages, quit,
@@ -126,8 +129,8 @@ context the store itself owns (§4.3).
   the composition core is RFC 0014's — a reducer-first kernel over which
   `Application` is a single-feature adapter. That RFC discharges the
   no-second-harness obligation on this store's terms: the adapter and
-  composed programs are tested through this store's own intake,
-  unchanged (its §7.1, §7.3). Designing that core is that RFC's work,
+  composed programs are tested through this store's own intake
+  (its §7.1, §7.3). Designing that core is that RFC's work,
   not this one's; what it adds here is §1.3's delegated layer.
 
 ### 1.3 Delegated: the stage-3 driving layer
@@ -237,7 +240,8 @@ impl<App: Application> TestStore<App>
 where
     App::Message: Debug,
 {
-    /// Runs `Application::new(flags)` and enqueues the init command.
+    /// Runs `Application::new(flags)`, reads the first live-instance
+    /// report, and enqueues the init command.
     ///
     /// Panics if called while a Tokio runtime is already entered — for
     /// example, from inside `#[tokio::test]` (§4.3, INV-T10).
@@ -247,9 +251,10 @@ where
     /// The application state, for plain assertions.
     pub fn state(&self) -> &App;
 
-    /// Applies `msg` through `update` and enqueues the returned
-    /// command's effects. Does not deliver or poll pending output;
-    /// undelivered output stays caught by `receive*`/`finish`/drop (§6).
+    /// Applies `msg` through `update` and enqueues the effects of the
+    /// command the kernel would dispatch for it (§3.2). Does not deliver
+    /// or poll pending output; undelivered output stays caught by
+    /// `receive*`/`finish`/drop (§6).
     /// Fails the test on the quit state (§5.3); a keyed-intake
     /// reconciliation poll can additionally surface a leaf's own poll
     /// failure (§4.3).
@@ -280,9 +285,9 @@ where
     /// puts the store into the quit state (§5.3).
     pub fn receive_quit(&mut self);
 
-    /// Whether the command returned by the most recent `send`/`receive`
-    /// step requested a redraw (RFC 0002). `receive_quit` is not a
-    /// step (§5.2).
+    /// Whether the command the most recent `send`/`receive` step took
+    /// in requested a redraw (RFC 0002). `receive_quit` is not a step
+    /// (§5.2).
     pub fn redraw_requested(&self) -> bool;
 
     /// The `SubscriptionId`s the application currently declares. Pure
@@ -301,12 +306,17 @@ generic) are implementation latitude.
 
 ### 3.2 Method semantics
 
-- **`new`** applies `Application::new` and enqueues the init command
-  exactly as a `send` enqueues an update's command. The init command's
+- **`new`** applies `Application::new`, reads the live-instance
+  set the resulting application reports (RFC 0014 §2.5) as
+  the first one, and enqueues the init command exactly as
+  a `send` enqueues an update's command. The init command's
   deliverable output is subject to the same `receive*`/`finish`/drop
   accounting as any step's output (§6); `send` does not require it to
   be received first.
-- **`send`** is one synchronous `update` call plus bookkeeping. It
+- **`send`** is one synchronous `update` call plus bookkeeping.
+  The command it takes in is the one the kernel would dispatch
+  for that update: `update`'s, with RFC 0014 INV-RC3's
+  live-instance reconciliation teardowns merged in. It
   spawns no task, awaits nothing, and returns only after the
   command's metadata (directives, cancellation) has been applied to the
   store. It runs no deliverable-output exhaustiveness precondition and
@@ -314,8 +324,10 @@ generic) are implementation latitude.
   in place for a later `receive*` (or caught by `finish`/drop, §6),
   which lets a scripted `send` supersede or cancel an earlier step's
   not-yet-received keyed output — the store's own linearization, no
-  longer backed by a runtime schedule (§6). Its only poll is the keyed-intake reconciliation of §5.1,
-  and only when the returned command is keyed under
+  longer backed by a runtime schedule (§6). Its only poll
+  is the keyed-intake reconciliation of §5.1 — not the
+  live-instance reconciliation above, which polls nothing —
+  and only when the command `update` returns is keyed under
   `CancelPolicy::KeepInFlight`; it never delivers output, which happens
   only in `receive*` calls.
 - **`advance`** (stage 2) is the store's only time control. It fails on
@@ -345,7 +357,8 @@ generic) are implementation latitude.
 - **`receive` / `receive_matching`** select the next deliverable output
   under the canonical order (§4.2), assert it, and apply it through
   `update` — so the store advances exactly as the runtime would on that
-  delivery, including enqueuing the resulting command. If the next
+  delivery, including enqueuing the command `send` would
+  take in for that update (§3.2's `send` bullet). If the next
   deliverable output is a quit request, both fail with a diagnostic
   saying so (quit is asserted only via `receive_quit`). If nothing is
   deliverable, both fail with a diagnostic that distinguishes "no
@@ -738,10 +751,11 @@ applies).
 ### 5.2 Redraw directive (RFC 0002)
 
 `redraw_requested()` reports the folded redraw directive of the command
-returned by the most recent step (a `send`, or the `update` call inside
-a `receive` / `receive_matching`). Before any step completes it reports
-the init command's directive. `receive_quit` applies no message and is
-not a step: after it, `redraw_requested` keeps reporting the previous
+the most recent step took in (§3.2; a `send`, or the `update`
+call inside a `receive` / `receive_matching`). Before any
+step completes it reports the init command's directive.
+`receive_quit` applies no message and is not a step:
+after it, `redraw_requested` keeps reporting the previous
 step's directive. This makes `without_redraw` decisions assertable per
 transition, which is the granularity RFC 0002 defines them at.
 
@@ -924,7 +938,8 @@ Enforcement classes follow the pre-review checklist's definitions
 - **INV-T1**: `Application`'s definition is unchanged by this RFC —
   `type Message: Send + 'static` and no new bound on any associated
   item. Structural: review of `src/application.rs` against the pre-RFC
-  definition. Behavioral: a compile test, added with the
+  definition plus RFC 0014 §2.2's required `instances`, a method
+  that adds no bound. Behavioral: a compile test, added with the
   implementation, instantiates `Application` with a message type that
   implements nothing beyond `Send + 'static`. Two `src/application.rs`
   doctests already do this incidentally — `new`'s `enum Message { Init
@@ -945,9 +960,13 @@ Enforcement classes follow the pre-review checklist's definitions
   prerequisite refactor, a `RuntimeCommandParts` that carries the
   effect's leaves unfolded in declaration order, folded or driven only
   at each consumer's own site — never a parallel re-derivation of
-  directives, cancellation, or effects. Structural, in two parts:
+  directives, cancellation, or effects — and the command
+  it consumes for an update has passed through the kernel's
+  own live-instance reconciliation (RFC 0014 INV-RC3),
+  never a re-derivation of it. Structural, in two parts:
   review of the store's single command-intake site (it accepts the
-  parts type and touches no `Command` or `Effect` internals), and
+  parts type, touches no `Command` or `Effect` internals, and is reached
+  from `update` only through that live-instance reconciliation), and
   review of the runtime's spawn site for the prerequisite's
   behavior-preservation half (the relocated fold, `fold_leaves`, merges
   the leaves exactly as the pre-refactor `into_stream()` did). This is
@@ -958,9 +977,10 @@ Enforcement classes follow the pre-review checklist's definitions
   `send`, `advance`, and `receive*` are synchronous (no task spawn, no
   wall-clock waiting) and polling follows §4.1's fixed budget — so for
   an application whose `update` is deterministic (the store cannot
-  contract this for the application; `subscriptions` alone carries a
-  purity contract) and whose effects do not depend on spawned-task
-  progress (§4.3), two executions of one test program observe
+  contract this for the application; `subscriptions`
+  and `instances` alone carry a purity contract) and
+  whose effects do not depend on spawned-task progress
+  (§4.3), two executions of one test program observe
   identical state transitions and delivery sequences. Behavioral: a
   repeated-run test over a deterministic application asserts equal
   delivery transcripts across runs of a multi-leaf,
@@ -1261,9 +1281,11 @@ its API. Stated over this surface:
   name, not a handle to the run — so it cannot keep a run alive past
   the kernel's own bookkeeping.
 - **Reimplemented reconciliation** has no constructor: no method
-  applies a cancel, a teardown, or a keyed admission decision. Those
+  applies a cancel, a teardown, or a keyed admission
+  decision, or reads or compares a live-instance report. Those
   reach the kernel only as the lowered parts of a command the
-  application returned, exactly as in production.
+  application returned, or as RFC 0014 §2.5's live-instance
+  reconciliation teardowns, exactly as in production.
 - **A mirrored quit route** has no constructor: no method terminates
   the driven program. Quit reaches the kernel only through the two
   production routes (RFC 0014 §3.3).
@@ -1685,8 +1707,9 @@ type member for it would be dead surface, and a live one would widen
 the first driving differential past the wake sources RFC 0014 §7.2
 confines it to.
 
-**Bootstrap is where a pending frame does exist, and `boot` carries
-it.** RFC 0011 §3.2's intake order — init dispatch, then the initial
+**Bootstrap is where a pending frame does exist, and `boot`
+carries it.** RFC 0011 §3.2's intake order — the first
+live-instance report, then init dispatch, then the initial
 subscription reconcile, then the first render pending
 unconditionally — leaves the kernel with work outstanding, so
 INV-RC16's park condition ("nothing to make progress on") is not met
