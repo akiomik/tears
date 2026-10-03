@@ -133,8 +133,8 @@ message mapping.
 Commands have the corresponding global-slot problem. `Command::map` preserves
 `CommandId`, so two child instances using `CommandId::new(RequestId::Load)` can
 cancel, replace, or suppress each other's effects. This problem exists in the
-current manual `Application` composition style; it does not depend on the
-`Reducer` API of RFC 0014.
+current manual `Application` composition style; it does not depend on accepting
+a future `Reducer` API.
 
 ### 1.3 Terms
 
@@ -582,8 +582,8 @@ child
     })
 ```
 
-RFC 0014's composition combinators perform this operation automatically, under
-the identity laws in this RFC (RFC 0014 §2.5).
+Whether a future reducer API performs this operation automatically is left to
+that reducer RFC. It must preserve the identity laws in this RFC.
 
 ### 4.3 Command semantics
 
@@ -721,8 +721,8 @@ INV-18).
 
 The concrete client is served there as well: TCA-parity collection composition
 — `for_each` in RFC 0014 §2.5 — tears a removed child instance's in-flight
-effects down automatically, through the kernel's live-instance reconciliation
-wherever the program forwards the combinators' report (RFC 0014 INV-RC3a),
+effects down automatically, through the kernel's live-instance
+reconciliation of the instances a program reports (RFC 0014 §2.5),
 rather than through anything this RFC's manual scoping provides.
 
 ### 4.6 Residual composition risk
@@ -739,14 +739,12 @@ an unscoped or reused full `CommandId` is indistinguishable from the intentional
 root-global shared slot supported by RFC 0003, so replacement, suppression, or
 cross-cancellation may be silent.
 
-Making child-instance scoping correct by construction requires a composition
-layer that owns the boundary and applies the instance scope automatically.
-RFC 0014's combinators are that layer, which this RFC does not define. They
-qualify a child with its row key, slot segment, or fixed segment, so sibling
-boundaries whose keys or segments coincide in type and value give their
-children equal paths (issue #424). Phase B is therefore an explicit manual
-primitive and the prerequisite for that stronger design, not the construction
-guarantee for applications that scope by hand.
+Making child-instance scoping correct by construction requires a future
+composition layer to own the boundary and apply the instance scope
+automatically, such as collection/reducer composition keyed by the child
+instance ID. This RFC intentionally defers that API. Phase B is therefore an
+explicit manual primitive and a prerequisite for that stronger design, not the
+final construction guarantee for composed applications.
 
 ## 5. Compatibility and delivery
 
@@ -775,9 +773,8 @@ Phase B is additive. Unscoped subscriptions and commands keep an empty scope
 path and retain Phase A / RFC 0003 behavior. No application is automatically
 scoped based on closure type, message mapper, vector position, or memory
 address. As specified in section 4.6, forgetting or reusing a manual scope
-remains valid code, and command aliasing can be silent wherever two paths are
-built equal: by hand, or by sibling boundaries whose keys or segments coincide
-(issue #424).
+remains valid code, and command aliasing can be silent until a future
+composition API owns this boundary.
 
 Deferring Phase B implementation does not require another breaking change. The
 opaque public ID representations permit a later structural scope node without
@@ -1187,8 +1184,7 @@ plain `Vec<Subscription<Msg>>` and `Command<Msg>` values returned from
 `Application` methods: a second parallel type either bifurcates every consumer
 signature or is immediately erased back into the unscoped type, losing the
 guarantee it exists to provide. The type-level enforcement point belongs to
-the composition layer that owns the child boundary (section 4.6; RFC 0014's
-combinators), where
+the future composition layer that owns the child boundary (section 4.6), where
 the child instance key is available and the framework — not the application
 author — constructs the scoped value.
 
@@ -1230,8 +1226,7 @@ semantics are accepted now so Phase A does not close off the future path.
 This RFC does not:
 
 - add `Reducer`, `Store`, lens, or optics APIs;
-- decide how a reducer derives or applies child scopes automatically (RFC 0014
-  §2.5 does);
+- decide how a future reducer derives or applies child scopes automatically;
 - preserve independently keyed command children through `Command::batch`;
 - add prefix lookup, `cancel_scope`, or subscription subtree teardown;
 - merge or fan out duplicate subscription message mappings;
@@ -1241,7 +1236,8 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-The follow-up order was:
+The follow-up order was, with items 1–2 shipped and items 3–5 designed and
+awaiting implementation:
 
 1. implement Phase A for 0.10.0 (done);
 2. evaluate and, when scheduled, implement Phase B additively (done);
