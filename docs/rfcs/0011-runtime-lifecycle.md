@@ -8,7 +8,9 @@
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
   §2.1's second dirty source, whose `Changed` entry RFC 0012 carries;
-  public signatures unchanged
+  public signatures unchanged. RFC 0014 §2.5's live-instance
+  reconciliation adds `instances` to the calls this RFC orders, in
+  0.12.0
 - Scope: the runtime's steady-state phase order, the bootstrap contract,
   the termination model (controlled and abrupt routes, with two-stage
   postconditions), panic containment for runtime-owned tasks, and driver

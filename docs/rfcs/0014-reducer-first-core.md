@@ -92,8 +92,9 @@ Eight decisions:
    classification — executed through the adapter (§2.4).
 2. **Composition with automatic scoping** (§2.5). `for_each`,
    `presented`, and `scope` apply scopes structurally; after every
-   update the kernel reconciles the instances `Keyed`/`Slot` hold, so
-   removing one from state tears its runs down automatically. Code that
+   update the kernel reconciles the instances the program reports — the
+   combinators report theirs — so removing one from state tears its
+   runs down automatically. Code that
    composes through the combinators writes no manual scoping.
 3. **Unified delivery with revocation filtering** (§3). Producer
    output travels one origin-tagged lane; cancellation and teardown
@@ -1245,7 +1246,7 @@ the owner document that edits in place.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake; RFC 0011's bootstrap order, dispatch step, panic inventory, and the call lists `instances` joins; RFC 0005's pointer to the mechanism |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals or the composition layer's teardowns: RFC 0013's origination rule (R8) and its review, its declaration pairing, and the §10 rejections it re-justifies; RFC 0008's store intake and the `instances` its INV-T1 and INV-T4 name; RFC 0011's bootstrap order, dispatch step, panic inventory, and the call lists `instances` joins; RFC 0005's pointer to the mechanism and its account of what the combinators provide |
 
 Count: thirteen rows — five supersessions (rows 1, 2, 3, 4 — the public
 constructor change belongs to row 4's cluster and the keyed-capacity
@@ -1425,11 +1426,10 @@ Enforcement classes per the pre-review checklist. The behavioral
 checks divide into two tiers (§13.1): the **spike tier** — the four
 kernel claims and the twelve-series conformance suite, which gated this
 RFC's acceptance and ran on a prototype kernel — and the
-**implementation-acceptance tier** — every remaining behavioral row
-below but INV-RC3's and INV-RC3a's, which gated implementation
-mainlining rather than acceptance. Both tiers are met, and both are the
-regression suite now; so are INV-RC3's and INV-RC3a's rows, met with
-§2.5's live-instance reconciliation after mainlining.
+**implementation-acceptance tier** — the behavioral rows that gated
+implementation mainlining rather than acceptance, which §13.1 lists.
+Both tiers are met, and every behavioral row below is part of the
+regression suite.
 
 - **INV-RC1 — single execution path.** For every kernel concern — state
   ownership, lane topology, input delivery, quit delivery, park and
@@ -1725,8 +1725,8 @@ than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
 full combinator surface (INV-RC2–INV-RC4, apart from INV-RC3 and
-INV-RC3a, which §2.5's live-instance reconciliation met after
-mainlining), the observability vocabulary mapping (§9 row 9), the
+INV-RC3a, which were not part of that gate), the observability
+vocabulary mapping (§9 row 9), the
 production arbitration policy (§3.5's unbiased pass initiation, whose
 check is the structural review named there), and
 the remaining §12 behavioral rows.
