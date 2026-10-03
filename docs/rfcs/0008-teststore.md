@@ -936,9 +936,9 @@ Enforcement classes follow the pre-review checklist's definitions
 
 - **INV-T1**: `Application`'s definition is unchanged by this RFC —
   `type Message: Send + 'static` and no new bound on any associated
-  item. Structural: review of `src/application.rs` for a bound added
-  to an associated item (RFC 0014 §2.2's required `instances` is a
-  method, not a bound). Behavioral: a compile test, added with the
+  item. Structural: review of `src/application.rs` against the pre-RFC
+  definition plus RFC 0014 §2.2's required `instances`, a method
+  that adds no bound. Behavioral: a compile test, added with the
   implementation, instantiates `Application` with a message type that
   implements nothing beyond `Send + 'static`. Two `src/application.rs`
   doctests already do this incidentally — `new`'s `enum Message { Init
