@@ -1557,6 +1557,51 @@ mod tests {
         );
     }
 
+    // INV-RC3's order: a path's teardown stands where the first pair it lost
+    // stood in the previous report, not where the path first appeared. `A`
+    // appears first but loses its second pair, after `B` loses its only one.
+    #[test]
+    fn teardowns_are_ordered_by_the_first_pair_each_path_lost() {
+        #[derive(PartialEq, Eq, Hash)]
+        struct A;
+
+        #[derive(PartialEq, Eq, Hash)]
+        struct B;
+
+        struct Three;
+
+        impl Reducer for Three {
+            type State = (Slot<()>, Slot<()>, Slot<()>);
+            type Message = ();
+
+            fn reduce(&self, state: &mut Self::State, (): ()) -> Command<()> {
+                state.1.dismiss();
+                state.2.dismiss();
+                Command::none()
+            }
+
+            fn instances(&self, state: &Self::State, out: &mut Instances<'_>) {
+                out.slot(A, &state.0, |(), _| {});
+                out.slot(B, &state.1, |(), _| {});
+                out.slot(A, &state.2, |(), _| {});
+            }
+        }
+
+        let mut state = (Slot::empty(), Slot::empty(), Slot::empty());
+        state.0.present(());
+        state.1.present(());
+        state.2.present(());
+        let mut driven = Driven::new(Three, state);
+
+        assert_eq!(
+            driven.send(()).teardowns,
+            vec![
+                ScopePath::empty().prefixed(B),
+                ScopePath::empty().prefixed(A),
+            ]
+        );
+    }
+
     // Rows that tear nothing down.
 
     // A row and an occupant replaced while the starting state was built —

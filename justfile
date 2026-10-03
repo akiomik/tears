@@ -12,10 +12,10 @@
 # What `--all-features` removed is the module from *test-target* builds, and
 # with it the three unit tests below. Measured, on rustc 1.97.0:
 #
-#     cargo test --lib                       594 total,  3 `signal::`
-#     cargo test --lib --all-features        645 total,  0 `signal::`
+#     cargo test --lib                       595 total,  3 `signal::`
+#     cargo test --lib --all-features        646 total,  0 `signal::`
 #     cargo test --lib --features {{build_features}}
-#                                            640 total,  3 `signal::`
+#                                            641 total,  3 `signal::`
 #
 #     cargo test --doc                        50 tests
 #     cargo test --doc --features loom-core   48 tests  (both `Signal` ones gone)
@@ -26,7 +26,7 @@
 # Doctest rows are `-- --list` counts. What a run prints is split across
 # batches and moves when a doctest fails, so it is not the number above.
 #
-# The 645 and the 640 differ by the three `signal::` rows gained and eight
+# The 646 and the 641 differ by the three `signal::` rows gained and eight
 # lost: the four `cell_core` and four `accounting_core` rows, which
 # `test-loom` runs under `--cfg loom` — model-checked there rather than merely
 # executed once. So no *test* stops being run, and the three that were being
