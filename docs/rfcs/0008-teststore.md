@@ -7,7 +7,8 @@
   pure `update` transitions and immediately ready effects (stage 1),
   plus time-dependent command effects under a store-held controlled
   time context (stage 2); and, beside that store, a driving layer over
-  the reducer-first kernel (stage 3)
+  the reducer-first kernel (stage 3); RFC 0014 §2.5's live-instance
+  reconciliation joins the store's intake in 0.12.0
 - Scope: the `Message` trait-bound decision, the exhaustive-assertion
   decision, the `TestStore` public surface, its delivery-order and
   cancellation-parity contracts, the per-leaf `RuntimeCommandParts`

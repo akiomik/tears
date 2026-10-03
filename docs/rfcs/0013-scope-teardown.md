@@ -199,14 +199,14 @@ The teardown contract is reviewed against this list:
 - **R8 — two layers, one operation.** A teardown has exactly two
   origins: the public `Command::teardown` constructor, and RFC 0014
   §2.5's live-instance reconciliation, which originates the composition
-  layer's. Reconciliation tears down a path an instance — RFC 0014
-  §2.5's occupancy — was reported at — nonempty, and the prefix
-  `Command::teardown` over its last segment, `scoped` by the segments
-  above it, would carry — so it adds no reach the primitive lacks.
-  Both produce the same teardown entry, lowered and applied by the same
-  kernel path, so correctness of child teardown under the combinators
-  does not rest on hand-written anchors. Checked structurally (§7.2's
-  origination review).
+  layer's. Reconciliation tears down a path at which an instance
+  (RFC 0014 §2.5's occupancy) was reported. That path is nonempty,
+  and it is the prefix `Command::teardown` over its last segment would
+  carry once `scoped` by the segments above it, so reconciliation adds
+  no reach the primitive lacks. Both produce the same teardown entry,
+  lowered and applied by the same kernel path, so child teardown under
+  the combinators rests on no hand-written anchor beyond forwarding
+  their report. Checked structurally (§7.2's origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
