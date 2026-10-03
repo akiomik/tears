@@ -336,13 +336,12 @@ tidying, not a contract deliverable, and carries no CHANGELOG entry.
 
 Causes: the `run` future is dropped (external cancellation — a caller's
 `select!`/timeout); a panic unwinds through `run` from application code
-invoked on the driving task — `update`, `view`, `subscriptions`
-(called during bootstrap *and* on every dirty frame), or a declared
+invoked on the driving task — `update`, `view`, `subscriptions` (called
+during bootstrap *and* on every dirty frame), `instances` (called on the
+initial state and after every `update`, RFC 0014 §2.5), or a declared
 subscription's lazy source constructor, which runs inside the same
-reconcile, or `instances` (called once on the initial
-state and after every `update`, RFC 0014 §2.5) — all five
-sites are on the driving task, so all unwind through `run`;
-the runtime value is dropped without ever being run —
+reconcile (all five sites are on the driving task, so all unwind
+through `run`); the runtime value is dropped without ever being run —
 once `run` is called the value is owned by the future, so a mid-run
 drop *is* the run-future drop above.
 

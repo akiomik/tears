@@ -62,9 +62,9 @@ resolutions stand on:
    tokens and the fresh-slot rule carry the property.
 6. **Subscriptions participate by immediate stop** (§4) — the
    application point issues stop requests to the selected
-   subscription runs and revokes them; what only the removed
-   occupancy declared is no longer declared by the state
-   that update leaves (§4.2); admission stays ordered by
+   subscription runs and revokes them; under the combinators, what
+   only the removed instance declared is no longer declared by
+   the state that update leaves (§4.2); admission stays ordered by
    RFC 0012's uniform quiescence barrier.
 
 The lookup strategy — scanning entries versus a secondary index,
@@ -199,13 +199,14 @@ The teardown contract is reviewed against this list:
 - **R8 — two layers, one operation.** A teardown has exactly two
   origins: the public `Command::teardown` constructor, and RFC 0014
   §2.5's live-instance reconciliation, which originates the composition
-  layer's. Reconciliation tears down a path an occupancy was reported at
-  — nonempty, and the prefix `Command::teardown` over its last segment,
-  `scoped` by the segments above it, would carry — so it adds no reach
-  the primitive lacks. Both produce the same teardown entry, lowered
-  and applied by the same kernel path, so correctness of child teardown
-  under the combinators does not rest on hand-written anchors. Checked
-  structurally (§7.2's origination review).
+  layer's. Reconciliation tears down a path an instance — RFC 0014
+  §2.5's occupancy — was reported at — nonempty, and the prefix
+  `Command::teardown` over its last segment, `scoped` by the segments
+  above it, would carry — so it adds no reach the primitive lacks.
+  Both produce the same teardown entry, lowered and applied by the same
+  kernel path, so correctness of child teardown under the combinators
+  does not rest on hand-written anchors. Checked structurally (§7.2's
+  origination review).
 - **R9 — totality and idempotence.** Teardown is defined for every
   constructible prefix; zero matches is a no-op; reapplication is
   observationally a single application.
@@ -417,7 +418,7 @@ un-consume input the run already read (§3.8).
 ### 4.2 Declaration pairing
 
 A teardown's subscription stops are not self-defeating for a declaration
-that leaves the state with the removed occupancy — as one does under the
+that leaves the state with the removed instance — as one does under the
 combinators, which declare a child's subscriptions from the state they
 compose: a re-evaluation restarts a stopped run only for an identity
 the state it reads declares (RFC 0005 INV-13). A run whose identity
@@ -689,7 +690,7 @@ produces lowered entries identical to the other two. The review
 walks the teardown *origination* routes, confirming that every
 teardown operation originates either in a call to the public
 constructor or in live-instance reconciliation; that it builds
-its prefix only from a reported occupancy's path, never empty,
+its prefix only from a reported instance's path, never empty,
 never reordered, and never from a segment the report did not
 carry; and that no other route originates one from a raw prefix.
 Transformations of an already-originated operation are not
@@ -807,9 +808,9 @@ there, resolve in the body as follows:
    manual primitive; the composition layer's teardowns are live-instance
    reconciliation's, the one other origin (§3.2, R8).
 2. **Subscription participation and admission coupling.** Immediate
-   stop at the application point, paired with what only
-   the removed occupancy declared no longer being declared
-   (§4.2); the uniform barrier stays, its availability
+   stop at the application point, paired, under the combinators,
+   with what only the removed instance declared no longer being
+   declared (§4.2); the uniform barrier stays, its availability
    coupling accepted as documented negative space (§4).
 3. **Scope tree and unkeyed tracking (N30).** The runtime tracks
    task-by-scope first-class; anonymous effects spawned through a
