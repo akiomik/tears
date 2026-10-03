@@ -9,8 +9,8 @@
   live-instance reconciliation.
 - Target: the 0.11.0 composition window (RFC 0010 §1.8). The teardown
   operation is additive public surface; the kernel it lands on carries
-  RFC 0014's breaking changes, recorded there.
-  R8's reconciliation origin, in 0.12.0, with RFC 0014 §2.5.
+  RFC 0014's breaking changes, recorded there. R8's reconciliation
+  origin, in 0.12.0, with RFC 0014 §2.5.
 - Scope: prefix selection over scoped lifecycle identities across
   every run kind — keyed commands, anonymous effects, subscription runs
   — plus cleanup registrations; the public surface (`Command::teardown`)
@@ -45,8 +45,8 @@ resolutions stand on:
    (§10).
 2. **One operation for both layers** (§3.2) — `Command::teardown(seg)`
    is the manual primitive, the composition layer's teardowns
-   come from RFC 0014's live-instance reconciliation as
-   the same operation over the same kind of prefix, and
+   come from RFC 0014's live-instance reconciliation as the same
+   operation over the same kind of prefix, and the primitive's
    anchoring composes through `scoped` exactly as explicit cancel IDs
    do.
 3. **Teardown applies in the cancel phase** (§3.3) — before every
@@ -416,14 +416,15 @@ un-consume input the run already read (§3.8).
 
 ### 4.2 Declaration pairing
 
-A teardown's subscription stops are not self-defeating for what only the
-removed occupancy declared: the state the tearing-down update leaves no
-longer declares it, and a re-evaluation restarts a stopped run only for
-an identity the state declares (RFC 0005 INV-13). The manual primitive
-applied to a *still-declared* subscription stops the run, and the next
-re-evaluation restarts it, which makes that use self-defeating by
-design; the primitive is sound for subscriptions only when the caller
-also removes the declarations.
+A teardown's subscription stops are not self-defeating for a declaration
+that leaves the state with the removed occupancy — as one does under the
+combinators, which declare a child's subscriptions from the state they
+compose: a re-evaluation restarts a stopped run only for an identity the
+state it reads declares (RFC 0005 INV-13). A declaration that outlives
+the occupancy, like the manual primitive applied to a *still-declared*
+subscription, restarts the run at the next re-evaluation, which
+makes that use self-defeating by design; the primitive is sound for
+subscriptions only when the caller also removes the declarations.
 
 ### 4.3 Admission under the uniform barrier
 
@@ -869,9 +870,9 @@ output. It adds registry state and a second identity axis for a
 property the strict frame already provides through per-run tokens and
 the fresh-slot rule (§3.6). Rejected for the strict frame; a graceful
 window must re-justify it if the preservation obligation (§3.4)
-cannot be met otherwise.
-RFC 0014 §2.5's occupancy identity is not this axis: it decides which
-teardowns an update issues, and tags no declaration or output.
+cannot be met otherwise. RFC 0014 §2.5's occupancy identity is not
+this axis: it decides which teardowns an update issues, and tags no
+declaration or output.
 
 ### Policy-parameterized teardown
 
