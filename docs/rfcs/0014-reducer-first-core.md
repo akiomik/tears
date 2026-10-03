@@ -13,8 +13,8 @@
   — is closed, and its checks are the regression suite. Rows 1–12 of
   §9's supersessions and amendments landed on their owner documents at
   acceptance, in §13.1's order, ahead of that mainlining. §2.5's
-  live-instance reconciliation, with its INV-RC3/INV-RC3a rows and §9
-  row 13, landed after that mainlining.
+  live-instance reconciliation and its INV-RC3/INV-RC3a rows were
+  implemented after that mainlining.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)
@@ -158,8 +158,8 @@ acceptance and its mainlining each passed.
 - **Identity law bodies.** What makes two identities equal — typed and
   tagged segments, ordered nesting, structural equality, collision
   safety — stays RFC 0005 (INV-14–INV-21); §2.5 and §4 state how the
-  new surfaces satisfy those laws, and §9 lists the two clauses that
-  need amendment (INV-18's coverage, INV-20's batch statement).
+  new surfaces satisfy those laws, and §9 lists the two clauses amended
+  to cover them (INV-18's coverage, INV-20's batch statement).
 - **Subscription execution bodies.** The source template, the three
   boundaries, purity, and the effect-DI negative space stay RFC 0012;
   §5 adds to that contract and redesigns none of it.
@@ -1227,9 +1227,9 @@ the driver drives the kernel itself.
 ## 9. Supersessions and amendments
 
 Rows 1–12 landed on their owner documents with this RFC's acceptance,
-ahead of the mainlining §13.1's second tier gated; row 13 landed with
-§2.5's live-instance reconciliation. Each row names the owner document
-that edits in place.
+ahead of the mainlining §13.1's second tier gated; row 13 holds the
+owner edits §2.5's live-instance reconciliation brings. Each row names
+the owner document that edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
@@ -1686,8 +1686,8 @@ per-command capacity control's removal (§9 row 2) needs no invariant
 of its own beyond INV-RC15: that row's two-lane topology is what
 leaves nothing per command to size or isolate.
 `ScopeValue` carries no separate invariant: it is the RFC 0005
-segment-value contract restated as a bound, plus `Clone`, which a
-boundary needs to reuse its segment or key on every update. A segment
+segment-value contract restated as a bound, plus `Clone`, which the
+combinators use to reuse a segment or key on every update. A segment
 `Instances::scoped` or `Instances::slot` only moves into a path takes
 the contract alone, as `Command::scoped` does.
 

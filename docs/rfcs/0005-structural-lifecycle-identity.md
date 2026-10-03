@@ -133,8 +133,8 @@ message mapping.
 Commands have the corresponding global-slot problem. `Command::map` preserves
 `CommandId`, so two child instances using `CommandId::new(RequestId::Load)` can
 cancel, replace, or suppress each other's effects. This problem exists in the
-current manual `Application` composition style; it does not depend on accepting
-a future `Reducer` API.
+current manual `Application` composition style; it does not depend on the
+`Reducer` API of RFC 0014.
 
 ### 1.3 Terms
 
