@@ -721,9 +721,9 @@ INV-18).
 
 The concrete client is served there as well: TCA-parity collection composition
 — `for_each` in RFC 0014 §2.5 — tears a removed child instance's in-flight
-effects down automatically, through the kernel's live-instance
-reconciliation of the instances a program reports (RFC 0014 §2.5),
-rather than through anything this RFC's manual scoping provides.
+effects down automatically, through the live-instance reconciliation of the
+instances a program reports, rather than through anything this RFC's manual
+scoping provides.
 
 ### 4.6 Residual composition risk
 
