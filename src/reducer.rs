@@ -260,18 +260,18 @@ pub trait Reducer {
     /// sequence every time, and reporting runs no side effect and reads no
     /// external mutable state.
     ///
-    /// Report each row or occupant the state holds at every path where this
-    /// reducer places its work — the commands it returns and the
-    /// subscriptions it declares for it, by itself or through a reducer it
-    /// calls — and at no other path. [`Instances::keyed`] and
-    /// [`Instances::slot`] report a row or an occupant, and
-    /// [`Instances::scoped`] adds a segment above what its closure reports;
-    /// forward a called reducer's report inside them, nested as this reducer
-    /// nests that reducer's commands. A pair a combinator built on this
-    /// reducer already reports need not be repeated. Report all of them on
-    /// every call, whichever the last message reached. A reducer that places
-    /// no work and calls no reducer reports nothing, and the combinators do
-    /// all of this for you.
+    /// Report each row or occupant the state holds at each of its places, and
+    /// at no other path. A place is a path beneath which all of its work
+    /// runs: the commands and subscriptions produced for it by this reducer,
+    /// by a reducer it calls, or by the `init` of a program built on it.
+    /// [`Instances::keyed`] and [`Instances::slot`] report a row or an
+    /// occupant, and [`Instances::scoped`] adds a segment above what its
+    /// closure reports; forward a called reducer's report inside them,
+    /// nested as this reducer nests that reducer's commands. A pair a
+    /// combinator built on this reducer already reports need not be
+    /// repeated. Report all of them on every call, whichever the last
+    /// message reached. A row or occupant nothing places work for has no
+    /// place, and the combinators do all of this for you.
     ///
     /// Nothing checks the report. An occupancy left out is not torn down when
     /// it is removed, and one left out of some reports is torn down while the
