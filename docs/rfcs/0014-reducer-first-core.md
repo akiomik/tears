@@ -400,15 +400,16 @@ nest.
 **Each projection is supplied as a read/write pair**, because the
 `Reducer` methods borrow the parent differently: `reduce` takes
 `&mut Self::State` and needs the mutable projection, while
-`subscriptions` and `instances` take `&Self::State` and need
-the shared one. A combinator holding only the mutable accessor
-could not aggregate its child's declarations from the borrow
-`subscriptions` gives it — it would have to fabricate an
-aliasing mutable borrow, or drop the child's subscriptions —
-and the aggregation INV-RC2 requires would be unimplementable as
-written. The pair closes that: `subscriptions` and `instances`
-project with `state`/`rows`/`slot` and walk a collection shared,
-`reduce` projects with `state_mut`/`rows_mut`/`slot_mut`. Both are
+`subscriptions` and `instances` take `&Self::State` and need the shared
+one. A combinator holding only the mutable accessor could not aggregate
+its child's declarations from the borrow `subscriptions` gives it — it
+would have to fabricate an aliasing mutable borrow, or drop the child's
+subscriptions — and the aggregation INV-RC2 requires would be
+unimplementable as written. The pair closes that: `subscriptions`
+and `instances` project with `state`/`rows`/`slot` and walk a collection
+shared, `reduce` projects with `state_mut`/`rows_mut`/`slot_mut`.
+The two must select the same state, on every call: what a combinator
+reduces, aggregates, and reports is that state's. Both are
 projections of state the caller already holds, so the purity RFC 0012
 INV-SE6 transfers to `Reducer::subscriptions` (§2.1) is untouched:
 aggregating reads the declared set out of state and reaches nothing
@@ -467,16 +468,17 @@ Contract:
   admission, spawn, or delivery decision carries or reads them, so the
   previous report is not per-scope state in RFC 0013 INV-ST7's sense.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
-  `Reducer` and on `Application`. It is pure in the state — a given
-  state reports the same pairs in the same order, and reporting runs
-  no side effect and reads no external mutable state — and it is called
-  for the first report and after every update the kernel or the store
-  drives, and nowhere else. For every occupancy its state holds, a
-  reducer's report holds that occupancy's pair at each path, relative
-  to the reducer, that ends in the occupancy's key or segment and under
-  which the reducer scopes work, by itself or through a reducer it
-  reduces. The combinators meet this themselves, as they meet INV-RC2.
-  The runtime does not check the report.
+  `Reducer` and on `Application`, and pure in the state: a given state
+  reports the same pairs in the same order, and reporting runs no side
+  effect and reads no external mutable state. A program places each
+  occupancy's work — the commands and the subscriptions it produces for
+  that occupancy — under one or more paths, the occupancy's *places*.
+  For every occupancy the state holds, the program's report, the one
+  `instances` gives for the program's state, holds that occupancy's
+  pair at each of its places and at no other path. The obligation is on
+  that report as a whole: a pair one reducer in the composition reports,
+  another need not repeat. The combinators report for the occupancies
+  they compose. The runtime does not check the report.
 - **What reconciliation does not reach.** Work an update's command
   carries for an occupancy absent from the report that update leaves
   — one inserted and removed within the update, or one removed after
@@ -966,7 +968,7 @@ alike.
 
 ### 6.1 What is preserved
 
-On the new kernel, unchanged and re-checked rather than re-stated:
+On the new kernel, re-checked rather than re-stated:
 construction inertness (INV-LC3, both entry types); the steady-state
 phase order — input batches with one-item drain, frame passes with at
 most one render then at most one re-evaluation, both observing the
@@ -1189,7 +1191,7 @@ gated; row 13 landed with §2.5's live-instance reconciliation.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins |
+| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | supersede + amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins; it supersedes RFC 0013 R8's single teardown surface with two origins |
 
 Preserved and worth naming: the effect-DI negative space (RFC 0012
 INV-SE8 — the driving seams are not an effect-executor abstraction:
@@ -1407,10 +1409,10 @@ regression suite.
   of the report can find an occupancy it omits: the rustdoc of
   `Reducer::instances` and `Application::instances` carries the
   obligation citing this RFC, and review of the crate's own `Reducer`
-  implementations outside its tests confirms each meets it. Behavioral
-  for the combinators: nested stacks report each occupancy at the path
-  INV-RC2 qualifies its child's carriers with, including one the last
-  message did not reach.
+  implementations outside its tests confirms the reports they assemble
+  meet it. Behavioral for the combinators: nested stacks report each
+  occupancy at the path INV-RC2 qualifies its child's carriers with,
+  including one the last message did not reach.
 - **INV-RC4 — multi-keyed lowering.** Batch children lower to
   independent entries; the combined cancel phase precedes every spawn
   of the same command; the §3.4 interaction rules hold. Behavioral:
@@ -1623,12 +1625,14 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2, INV-RC4), the observability vocabulary
+full combinator surface (INV-RC2–INV-RC4, INV-RC3 then
+checking the removal journals that §2.5's live-instance
+reconciliation replaced), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
 the remaining §12 behavioral rows.
-Neither tier includes §2.5's live-instance reconciliation
-(INV-RC3, INV-RC3a), implemented after mainlining. **Order**,
+Neither tier includes the reconciliation, whose INV-RC3
+and INV-RC3a were implemented after mainlining. **Order**,
 as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so
 §9's rows 1–12 stood on the owner documents before the kernel
@@ -1698,8 +1702,10 @@ that satisfy them live.
 INV-RC3 reads every occupancy a state reports after every update, where
 recording removals as they are made would cost work in proportion to the
 removals. No bound on that cost is claimed. It is measured before the
-release that ships it (issue #429), and the measurement decides whether
-a cheaper mechanism with INV-RC3's results is needed.
+release that ships it (issue #429) — a large collection that does not
+change, deep nesting, one slot reported through two boundaries, a flood
+of small messages, and a mass removal — and the measurement decides
+whether a cheaper mechanism with INV-RC3's results is needed.
 
 ## 14. References
 

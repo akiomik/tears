@@ -866,9 +866,9 @@ as `Partially Implemented (Phase A)` until both public phases ship.
   lowering replaces — child keys were ignored while scoped explicit cancels
   folded; the invariant held there too, over the smaller set of IDs that
   boundary carried.
-- **INV-21: no implicit teardown on drop or omission.** Dropping a value
-  returned by `scoped` or omitting one scoped command does not issue prefix
-  cancellation beyond the lifecycle's existing ID-specific rules.
+- **INV-21: no implicit teardown.** Dropping a value returned by `scoped` or
+  omitting one scoped command does not issue prefix cancellation beyond the
+  lifecycle's existing ID-specific rules.
 
 ### 6.4 Required tests
 
