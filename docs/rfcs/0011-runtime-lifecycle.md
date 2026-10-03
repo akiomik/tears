@@ -1,7 +1,7 @@
 # RFC 0011: Runtime Lifecycle
 
-- Status: Implemented; its `instances` clauses landed after the rest,
-  with RFC 0014 §2.5's live-instance reconciliation
+- Status: Implemented; the amendments RFC 0014 §2.5's live-instance
+  reconciliation brings are Accepted
 - Target: 0.11.0 — two behavior changes: one owned here (construction no
   longer starts the init command's effect, §3.4) and the
   message-independent re-evaluation trigger RFC 0012 introduces through
