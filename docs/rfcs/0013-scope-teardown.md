@@ -257,8 +257,9 @@ composition boundary therefore targets that boundary's subtree and
 nothing above or beside it, and an aggregating parent needs no
 knowledge of its own ancestors (R2).
 
-The composition layer's teardowns are reconciliation's (R8, RFC 0014
-§2.5). Lowering, selection, and application are the kernel's.
+The composition layer's teardowns are live-instance reconciliation's
+(R8, RFC 0014 §2.5). Lowering, selection, and application are the
+kernel's.
 
 ### 3.3 Dispatch ordering: the cancel phase
 
@@ -288,7 +289,7 @@ the same command (RFC 0014 §3.4, INV-RC4). `scoped` applied to the
 batch distributes over children, qualifying teardown prefixes along
 with spawn keys, cancel IDs, and cleanup registrations. This is what
 makes same-update remove-and-reinsert work at batch granularity (R4):
-reconciliation puts the old occupancy's teardown and the
+live-instance reconciliation puts the old row's teardown and the
 reinserted child's fresh keyed spawns in one dispatched command.
 Cleanup registrations from the same command apply in the spawn
 phase (§5).
@@ -684,7 +685,7 @@ property, which no behavioral test can prove — a third origin
 produces lowered entries identical to the other two. The review
 walks the teardown *origination* routes, confirming that every
 teardown operation originates either in a call to the public
-constructor or in reconciliation; that reconciliation builds
+constructor or in live-instance reconciliation; that it builds
 its prefix only from a reported occupancy's path, never empty,
 never reordered, and never from a segment the report did not
 carry; and that no other route originates one from a raw prefix.
@@ -704,9 +705,9 @@ RFC 0014 INV-RC3's rows are its regression neighbors, not its proof.
 - *Spawn-before-cancel implementation* — kills the same command's
   reinserted child; excluded by INV-ST3's same-command spawn test.
 - *Third-origin constructor* — machinery that originates teardown
-  operations from raw prefixes outside the two R8 names, or
-  a reconciliation that builds a prefix its report did not
-  carry, produces the same lowered entries and passes every
+  operations from raw prefixes outside the two R8 names, or a
+  live-instance reconciliation that builds a prefix its report did
+  not carry, produces the same lowered entries and passes every
   behavioral test while violating R8; excluded by §7.2's structural
   origination review.
 - *Filter-at-update and tombstone-expiry implementations* — deliver a
@@ -800,7 +801,7 @@ The four questions RFC 0014 §4 answers for this contract, numbered as
 there, resolve in the body as follows:
 
 1. **Public surface and owner.** `Command::teardown(seg)` is the
-   manual primitive; the composition layer's teardowns are
+   manual primitive; the composition layer's teardowns are live-instance
    reconciliation's, the one other origin (§3.2, R8).
 2. **Subscription participation and admission coupling.** Immediate
    stop at the application point, paired with what only
@@ -884,7 +885,8 @@ Tearing down when a scoped value is dropped or a scoped command is
 omitted contradicts RFC 0005 INV-21 and makes teardown unobservable in
 the declaration. Rejected: dropping a scoped value or omitting a scoped
 command tears nothing down, and the composition layer's teardowns follow
-the state's report, not drops (RFC 0014 §2.5).
+the state's report — itself a declaration, `instances` — not drops
+(RFC 0014 §2.5).
 
 ### Root cancel-all
 

@@ -457,39 +457,41 @@ Contract:
   state and compares it with the previous one. A path *disappears* when
   the previous report holds a pair at it that the new one lacks. For
   each disappearing path that no other disappearing path is a proper
-  prefix of, one teardown of that path joins the command dispatched
-  for that update, before the dispatch; the order of those teardowns
-  is reproducible — one script yields one teardown sequence (INV-RC14).
-  Nothing else is added, and nothing `reduce` returned changes. A
-  same-update removal and reinsertion under one key therefore yields
-  the old occupancy's teardown, the reinserted one having another
-  identity, and the new one's fresh spawns in one dispatched command
-  (§3.4, RFC 0013 R4). Identities and the previous report decide which
-  teardowns an update issues and nothing else: no declaration, output,
-  admission, spawn, or delivery decision carries or reads them, so the
-  previous report is not per-scope state in RFC 0013 INV-ST7's sense.
+  prefix of, one teardown of that path joins the command dispatched for
+  that update, before the dispatch; those teardowns follow the previous
+  report's order, so a script whose reports come in a reproducible
+  order yields one teardown sequence (INV-RC14). Nothing else is
+  added, and nothing `reduce` returned changes. A same-update removal
+  and reinsertion under one key therefore yields the old occupancy's
+  teardown, the reinserted one having another identity, and the new
+  one's fresh spawns in one dispatched command (§3.4, RFC 0013 R4).
+  Identities and the previous report decide which teardowns an update
+  issues and nothing else: no declaration, output, admission, spawn, or
+  delivery decision carries or reads them, so the previous report is not
+  per-scope state in RFC 0013 INV-ST7's sense.
 - **The reporting obligation (INV-RC3a).** `instances` is required on
   `Reducer` and on `Application`, and pure in the state: a given state
   reports the same pairs in the same order, and reporting runs no side
-  effect and reads no external mutable state. A program places each
-  occupancy's work — the commands and the subscriptions it produces for
-  that occupancy — under one or more paths, the occupancy's *places*.
-  For every occupancy the state holds, the program's report, the one
-  `instances` gives for the program's state, holds that occupancy's
-  pair at each of its places and at no other path. The obligation is on
-  that report as a whole: a pair one reducer in the composition reports,
-  another need not repeat. The combinators report for the occupancies
-  they compose. The runtime does not check the report.
+  effect and reads no external mutable state. An occupancy's *places*
+  are the paths beneath which a program scopes all of that occupancy's
+  work — the commands and subscriptions it produces for it, from `init`,
+  `reduce`, or `subscriptions`. A combinator's boundary path is a place
+  of each occupancy it composes; an occupancy whose work the program
+  places nowhere has none. For every occupancy the state holds, the
+  program's report, the one `instances` gives for the program's state,
+  holds that occupancy's pair at each of its places and at no other
+  path. The obligation is on that report as a whole: a pair one reducer
+  in the composition reports, another need not repeat. The combinators
+  report for the occupancies they compose. The runtime does not check
+  the report.
 - **What reconciliation does not reach.** Work an update's command
-  carries for an occupancy absent from the report that update leaves
-  — one inserted and removed within the update, or one removed after
-  producing that work — is not suppressed: any teardown of its path
-  applies in the cancel phase, before that command's spawns (§3.4),
-  and its output, which carries its key, reaches whatever occupancy
-  later holds that key. A state change made outside a `reduce` the
-  kernel or the store drives — interior mutability, state shared with a
-  background task — is seen only by a later reconciliation, if one runs.
-  A teardown ends work, not occupancies: an occupancy still reported —
+  carries beneath a path at which the report that update leaves holds
+  no pair — for an occupancy inserted and removed within the update,
+  removed after producing that work, or moved away from that path —
+  is not suppressed: any teardown of its path applies in the cancel
+  phase, before that command's spawns (§3.4), and its output, which
+  carries its key, reaches whatever occupancy later holds that key. A
+  teardown ends work, not occupancies: an occupancy still reported —
   moved to another path, or kept beneath a disappearing one — keeps its
   identity, while its runs under the vacated path end with that path's
   teardown. And occupancies reported at one path are torn down together,
@@ -1195,7 +1197,7 @@ gated; row 13 landed with §2.5's live-instance reconciliation.
 | 10 | RFC 0006 | supersede + clarification | INV-L10 keyed-quit ordering and INV-L11 shared-first precedence → §3.3's successor statement (backlog-independent, cancellable-until-applied, no same-run ordering); R4 splits — its backlog independence preserved for the control lane, its always-armed select branch superseded with the successor INV-RC16 (§3.5's wake arming), so the drain guarantee it hands over does not hold vacuously; §4.3's shutdown closure-observation guarantee split into its two layers — the full-topology producer reclaimed by the cancellation request, and the component-level obligation of the producer body (§6.1); INV-L4's acceptance re-derivation is §13.5 |
 | 11 | RFC 0008 | amendment (additive) | the stage-3 driver (§7.2), gated on this RFC; store parity extension to teardown entries and batch children (§7.1) |
 | 12 | RFC 0012 | amendment | INV-SE6's purity obligation generalized from `Application::subscriptions` to the `subscriptions` of every reducer the runtime drives — the adapter's and each composed one's — as one clause with one owner of record: the declared set is a pure function of state, evaluated at any re-evaluation frequency (§2.1) |
-| 13 | RFC 0005 / RFC 0008 / RFC 0011 / RFC 0013 | supersede + amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins; it supersedes RFC 0013 R8's single teardown surface with two origins |
+| 13 | RFC 0005 / RFC 0008 / RFC 0010 / RFC 0011 / RFC 0013 | supersede + amendment | §2.5's live-instance reconciliation in place of removal journals, wherever an owner's text reaches the journals, the composition layer's teardowns, or the application calls `instances` joins; it supersedes RFC 0013 R8's single teardown surface with two origins |
 
 Preserved and worth naming: the effect-DI negative space (RFC 0012
 INV-SE8 — the driving seams are not an effect-executor abstraction:
@@ -1360,8 +1362,8 @@ it; the uniqueness of occupancy identities gets no invariant of its own,
 since §2.5 states it and INV-RC3's structural review covers the sites
 that create one; kept separate is INV-RC3a, which INV-RC3 does not imply
 — INV-RC3 quantifies over the pairs reported, INV-RC3a over which pairs
-must be. The teardown order is pinned only as reproducible, which is
-what INV-RC14 and RFC 0008 INV-T4 need.
+must be. The teardown order is pinned only as the previous report's,
+which is what INV-RC14 and RFC 0008 INV-T4 need.
 
 ## 12. Invariants
 
@@ -1634,8 +1636,7 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface (INV-RC2, INV-RC4, and the removal
-journals' completeness), the observability vocabulary
+full combinator surface (INV-RC2, INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
 the remaining §12 behavioral rows.

@@ -284,9 +284,9 @@ where
     /// puts the store into the quit state (§5.3).
     pub fn receive_quit(&mut self);
 
-    /// Whether the command returned by the most recent `send`/`receive`
-    /// step requested a redraw (RFC 0002). `receive_quit` is not a
-    /// step (§5.2).
+    /// Whether the command the most recent `send`/`receive` step took
+    /// in requested a redraw (RFC 0002). `receive_quit` is not a step
+    /// (§5.2).
     pub fn redraw_requested(&self) -> bool;
 
     /// The `SubscriptionId`s the application currently declares. Pure
