@@ -741,7 +741,8 @@ cross-cancellation may be silent.
 Making child-instance scoping correct by construction requires a composition
 layer that owns the boundary and applies the instance scope automatically.
 RFC 0014's combinators are that layer, keyed by the child's row key or slot
-segment; this RFC does not define it. Phase B is therefore an explicit manual
+segment, apart from the aliasing RFC 0014 §2.5 records between sibling
+boundaries that qualify with equal segments; this RFC does not define it. Phase B is therefore an explicit manual
 primitive and the prerequisite for that stronger design, not the construction
 guarantee for applications that scope by hand.
 
@@ -773,7 +774,8 @@ path and retain Phase A / RFC 0003 behavior. No application is automatically
 scoped based on closure type, message mapper, vector position, or memory
 address. As specified in section 4.6, forgetting or reusing a manual scope
 remains valid code, and command aliasing can be silent wherever an application
-scopes by hand rather than through RFC 0014's combinators.
+scopes by hand, or where two of RFC 0014's boundaries qualify with equal
+segments (RFC 0014 §2.5).
 
 Deferring Phase B implementation does not require another breaking change. The
 opaque public ID representations permit a later structural scope node without
@@ -1237,8 +1239,7 @@ This RFC does not:
 - add runtime channel bounds, backpressure, or load-control policy; or
 - expose scope paths or erased key internals publicly.
 
-The follow-up order was, with items 1–2 shipped and items 3–5 designed and
-awaiting implementation:
+The follow-up order was as follows, and all five have shipped:
 
 1. implement Phase A for 0.10.0 (done);
 2. evaluate and, when scheduled, implement Phase B additively (done);
