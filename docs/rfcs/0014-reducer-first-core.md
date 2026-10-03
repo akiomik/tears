@@ -14,7 +14,7 @@
   supersessions and amendments landed on their owner documents at
   acceptance, in §13.1's order, ahead of that mainlining.
   §2.5's live-instance reconciliation (INV-RC3, INV-RC3a, §9 row 13) is
-  Accepted.
+  Accepted: those two rows are not yet met.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)
@@ -459,25 +459,25 @@ Contract:
   occupancies a state holds as (path, identity) pairs. The kernel or
   the store reads the first report from the state `init` returns; after
   every `reduce` it drives returns, it reads the report of the resulting
-  state and compares it with the previous one. A path *disappears* when
-  the previous report holds a pair at it that the new one lacks. For
-  each disappearing path that no other disappearing path is a proper
-  prefix of, one teardown of that path joins the command dispatched
-  for that update, after the teardowns `reduce` returned and before
-  the dispatch; those teardowns are ordered by where, in the previous
-  report, the first pair each path lost stands, so a script whose
-  reports come in a reproducible order yields one teardown sequence
-  (INV-RC14). Nothing else is added, and nothing `reduce` returned
-  changes. A same-update removal and reinsertion under one key therefore
-  yields the old occupancy's teardown, the reinserted one having another
-  identity, and the new one's fresh spawns in one dispatched command
-  (§3.4, RFC 0013 R4). Identities and the previous report decide which
-  teardowns an update issues and nothing else: no declaration, output,
-  admission, spawn, or delivery decision carries or reads them, so the
-  previous report is not per-scope state in RFC 0013 INV-ST7's sense.
-  Reconciliation follows the report, not a dropped value or an omitted
-  command, so RFC 0005 INV-21 holds. §11 records the designs rejected
-  for it.
+  state and compares it with the previous one. Reports are compared as
+  sets of pairs: a path *disappears* when the previous report holds a
+  pair at it that the new one lacks. For each disappearing path that no
+  other disappearing path is a proper prefix of, one teardown of that
+  path joins the command dispatched for that update, after the teardowns
+  `reduce` returned and before the dispatch; those teardowns are ordered
+  by where, in the previous report, the first pair each path lost
+  stands, so a script whose reports come in a reproducible order yields
+  one teardown sequence (INV-RC14). Nothing else is added, and nothing
+  `reduce` returned changes. A same-update removal and reinsertion under
+  one key therefore yields the old occupancy's teardown, the reinserted
+  one having another identity, and the new one's fresh spawns in one
+  dispatched command (§3.4, RFC 0013 R4). Identities and the previous
+  report decide which teardowns an update issues and nothing else: no
+  declaration, output, admission, spawn, or delivery decision carries or
+  reads them, so the previous report is not per-scope state in RFC 0013
+  INV-ST7's sense. Reconciliation follows the report, not a dropped
+  value or an omitted command, so RFC 0005 INV-21 holds. §11 records the
+  designs rejected for it.
 - **Reporting (INV-RC3a).** `instances` is required on `Reducer` and
   on `Application`, and pure in the state: a given state reports the
   same pairs in the same order, and reporting runs no side effect and
@@ -1271,27 +1271,25 @@ invariants of §12 are.
   runs; a snapshot the boundary takes around its parent's `reduce` still
   misses the second. Excluded by INV-RC3's reassignment and ancestor
   rows.
-- *State-held previous report* (rejected alternative, §2.5): keeping
-  the last report inside the state it describes, beside the collection
-  it records, lets a reassignment replace the record together with
-  the value, and lets the record drift from the runs it describes once
-  something other than its owner tears them down. Excluded by INV-RC3's
-  previous report, which the kernel or the store holds.
-- *Composition by description* (rejected alternative, §2.5): deriving
-  routing, reporting, and qualification from one framework-held
-  description of the composition would make an omitted report
-  unrepresentable instead of a stated cost. Rejected for its cost —
-  a second composition model beside the leaf `Reducer` a user writes
-  freely — given that INV-RC3a can take the form INV-SE6 already gives
-  `subscriptions`: a pure method whose omissions the runtime does not
-  detect. It would not reach INV-RC3's negative space either: a command
-  produced for an occupancy the update removes is a command, not a
-  report.
-- *Runtime-held child state* (rejected alternative, §2.5): holding
-  child instances in a registry beside `Reducer::State` would put
-  their removal under the runtime's control, and moves child state out
-  of the state the application owns (§2.1) without reaching that same
-  negative space.
+- *State-held previous report* — keeping the last report inside
+  the state it describes, beside the collection it records, lets a
+  reassignment replace the record together with the value, and lets the
+  record drift from the runs it describes once something other than its
+  owner tears them down. Excluded by INV-RC3's previous report, which
+  the kernel or the store holds.
+- *Composition by description* — deriving routing, reporting, and
+  qualification from one framework-held description of the composition
+  would make an omitted report unrepresentable instead of a stated cost.
+  Rejected for its cost — a second composition model beside the leaf
+  `Reducer` a user writes freely — given that INV-RC3a can take the form
+  INV-SE6 already gives `subscriptions`: a pure method whose omissions
+  the runtime does not detect. It would not reach INV-RC3's negative
+  space either: a command produced for an occupancy the update removes
+  is a command, not a report.
+- *Runtime-held child state* — holding child instances in a registry
+  beside `Reducer::State` would put their removal under the runtime's
+  control, and moves child state out of the state the application owns
+  (§2.1) without reaching that same negative space.
 - *Fold-era batch* — a lowering that folds child spawn keys satisfies
   every single-command test; excluded by INV-RC4's batch
   remove-and-reinsert test (old instance torn down, new instance's
@@ -1410,26 +1408,27 @@ acceptance. Both tiers are the regression suite.
   the qualified identities, including the sibling-isolation case.
 - **INV-RC3 — live-instance reconciliation.** §2.5's comparison of
   consecutive reports, and the teardowns it adds to the dispatched
-  command. Behavioral, at the driven-transition seam the kernel and the
-  store share, every row reading what the dispatched command carries or
-  does rather than `reduce`'s return value: one row per way an occupancy
-  leaves the report — `remove`, `dismiss`, and `insert` or `present`
-  over an occupied key or slot, replacing, taking, swapping, or moving
-  a collection value (assigning one populated with the same keys among
-  them), a removal by a reducer above an enclosing boundary, and
-  replacing an occupancy whose state holds occupancies (one teardown,
-  of the outer path); the key-only remove-reinsert adversary; a removal
-  by the first update, on the kernel and on the store; rows that tear
-  nothing down, among them an unrelated update after a removal, which
-  a reconciler that never advances its previous report fails; rows
-  confirming that what the update's own command carries — a teardown
-  of the same path, `without_redraw` — is kept; and a repeat row, in
-  which one script that removes eight sibling occupancies, run twice,
-  yields one teardown sequence. Structural: review of the kernel's and
-  the store's dispatch sites, confirming that each command a `reduce`
-  returns reaches dispatch or intake only through reconciliation; of the
-  sites §2.5 names as creating an identity, confirming each draws one no
-  earlier occupancy held; and of the reconciliation step, confirming its
+  command. Behavioral, at the step the kernel and the store share — the
+  one that runs `reduce` and reconciles its result — every row reading
+  what the dispatched command carries or does rather than `reduce`'s
+  return value: one row per way an occupancy leaves the report —
+  `remove`, `dismiss`, and `insert` or `present` over an occupied key
+  or slot, replacing, taking, swapping, or moving a collection value
+  (assigning one populated with the same keys among them), a removal
+  by a reducer above an enclosing boundary, and replacing an occupancy
+  whose state holds occupancies (one teardown, of the outer path); the
+  key-only remove-reinsert adversary; a removal by the first update,
+  on the kernel and on the store; rows that tear nothing down, among
+  them an unrelated update after a removal, which a reconciler that
+  never advances its previous report fails; rows confirming that what
+  the update's own command carries — a teardown of the same path,
+  `without_redraw` — is kept; and a repeat row, in which one script
+  that removes eight sibling occupancies, run twice, yields one teardown
+  sequence. Structural: review of the kernel's and the store's dispatch
+  sites, confirming that each command a `reduce` returns reaches
+  dispatch or intake only through reconciliation; of the sites §2.5
+  names as creating an identity, confirming each draws one no earlier
+  occupancy held; and of the reconciliation step, confirming its
   teardown order takes nothing from a randomized iteration, for which
   the repeat row is the regression check.
 - **INV-RC3a — reporting.** §2.5's reporting clause. Purity is
@@ -1660,13 +1659,13 @@ mainlining rather than acceptance: cleanup hooks (INV-RC8), the
 full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
 mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
 pass initiation, whose check is the structural review named there), and
-the remaining §12 behavioral rows. **Order**: the spike tier
-precedes acceptance, acceptance precedes every §9 edit, and
-the second tier precedes mainlining — so §9's rows stand on
-the owner documents before the implementation they describe
-enters the crate, and every document those rows reach states the
-successor contract as the one in force. A failure in that tier
-stops mainlining and reopens the design of whatever it fails;
+the remaining §12 behavioral rows. **Order**: acceptance — this RFC's
+behind the spike tier, an amendment's behind its own review — precedes
+every §9 edit it brings, and the second tier precedes mainlining —
+so §9's rows stand on the owner documents before the implementation
+they describe enters the crate, and every document those rows reach
+states the successor contract as the one in force. A failure in that
+tier stops mainlining and reopens the design of whatever it fails;
 the same is true of a later regression, and whether one reaches the
 architecture selection is RFC 0010 §1.9's counterexample-grade
 question.
@@ -1733,7 +1732,9 @@ removals. No bound on that cost is claimed. It is measured before the
 release that ships it (issue #429) — a large collection that does not
 change, deep nesting, one slot reported through two boundaries, a flood
 of small messages, and a mass removal — and the measurement decides
-whether a cheaper mechanism with INV-RC3's results is needed.
+whether a cheaper mechanism with INV-RC3's results is needed. It re-runs
+§13.5's RFC 0006 acceptance rows, which a report walk on every update
+can move.
 
 ## 14. References
 
