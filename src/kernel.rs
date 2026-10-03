@@ -166,9 +166,9 @@ pub struct ExitReport {
     pub joined: usize,
 }
 
-/// What `boot` produces: the state and the live-instance report read from
-/// it (RFC 0014 INV-RC3), held together so that neither exists without the
-/// other.
+/// What `boot` produces: the state, and the live-instance report each update
+/// is compared against, first read from that state (RFC 0014 INV-RC3). They
+/// are held together so that neither exists without the other.
 struct Booted<P: Program> {
     state: P::State,
     live_instances: LiveInstances,

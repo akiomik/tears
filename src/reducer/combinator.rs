@@ -21,9 +21,10 @@
 //!   each [`ForEach`] row under its key, a [`Presented`] occupant under the
 //!   boundary's segment (INV-RC3a). A boundary originates no teardown of
 //!   its own. After every update, live-instance reconciliation compares
-//!   the report with the previous one and tears down every path that
-//!   disappeared (INV-RC3), whichever reducer changed the state and
-//!   whichever route the message took.
+//!   the report with the previous one and tears down the paths that
+//!   disappeared, one teardown for a path and those beneath it (INV-RC3),
+//!   whichever reducer changed the state and whichever route the message
+//!   took.
 //! - **Routes typed messages**: `extract` either claims a message for the
 //!   child or hands it back to the parent, and a message addressed to a key
 //!   or slot with no instance is routed to nothing and discarded.
