@@ -30,8 +30,8 @@ which of these changes reaches me, and how do I tell?
   below, and the file stays as written. It adds no public module, so it can
   be deleted once the release it covers is far enough back.
 - **Adding a guide is four edits besides the file itself, and only one of
-  them fails loudly.** Removing a guide undoes the first three; the fourth
-  is repointed rather than removed.
+  them fails loudly.** Removing a guide undoes whichever of the first three
+  it still has; the fourth is repointed rather than removed.
 
   - `include_str!` in `src/lib.rs`, under `cfg(doctest)`.
   - The file in `include` in `Cargo.toml`, named individually so the

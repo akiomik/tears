@@ -958,6 +958,68 @@ mod tests {
         )
     }
 
+    /// Two tabs of rows, and a `for_each` whose projections select the
+    /// active one — the switching pair `ReducerExt` warns about.
+    struct Tabs;
+
+    struct TabsState {
+        first_active: bool,
+        first: Keyed<&'static str, ChildState>,
+        second: Keyed<&'static str, ChildState>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum TabsMessage {
+        /// Claimed by the `for_each` boundary and handed to one row.
+        Row(&'static str, ChildMessage),
+        /// Handled by `Tabs` itself: makes the other tab active.
+        Switch,
+    }
+
+    impl Reducer for Tabs {
+        type State = TabsState;
+        type Message = TabsMessage;
+
+        fn reduce(&self, state: &mut TabsState, message: TabsMessage) -> Command<TabsMessage> {
+            match message {
+                TabsMessage::Switch => state.first_active = !state.first_active,
+                TabsMessage::Row(..) => unreachable!("the boundary claims it first"),
+            }
+            Command::none()
+        }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    }
+
+    fn tabs_extract(message: TabsMessage) -> Result<(&'static str, ChildMessage), TabsMessage> {
+        match message {
+            TabsMessage::Row(key, child) => Ok((key, child)),
+            other @ TabsMessage::Switch => Err(other),
+        }
+    }
+
+    fn tabs() -> impl Reducer<State = TabsState, Message = TabsMessage> {
+        Tabs.for_each(
+            Child,
+            |state: &TabsState| {
+                if state.first_active {
+                    &state.first
+                } else {
+                    &state.second
+                }
+            },
+            |state: &mut TabsState| {
+                if state.first_active {
+                    &mut state.first
+                } else {
+                    &mut state.second
+                }
+            },
+            tabs_extract,
+            TabsMessage::Row,
+        )
+    }
+
     fn path(segments: &[&'static str]) -> ScopePath {
         // Root-first storage: the last `prefixed` call names the outermost
         // segment, so the slice reads root-first when applied in reverse.
@@ -1310,6 +1372,25 @@ mod tests {
                 .send(HostMessage::Modal(Message::Close("row-x")))
                 .teardowns,
             vec![path(&["modal", "row-x"])]
+        );
+    }
+
+    // A pair that switches between states stops reporting the rows of the
+    // state it left, and they are torn down although the parent holds them.
+    #[test]
+    fn switching_the_projected_tab_tears_down_the_rows_it_left() {
+        let mut state = TabsState {
+            first_active: true,
+            first: Keyed::new(),
+            second: Keyed::new(),
+        };
+        state.first.insert("row-a", ChildState::new(true));
+        state.second.insert("row-b", ChildState::new(true));
+        let mut driven = Driven::new(tabs(), state);
+
+        assert_eq!(
+            driven.send(TabsMessage::Switch).teardowns,
+            vec![path(&["row-a"])]
         );
     }
 

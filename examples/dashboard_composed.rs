@@ -1619,8 +1619,7 @@ mod tests {
                 Message::CloseDetails,
                 // Inserting over an occupied key: a replacement, one collection
                 // over. The slot is empty by now, so this pass tears exactly
-                // one instance down and the order below stays the removal
-                // order rather than a race between two finalizers.
+                // one instance down, and its hook races no other finalizer.
                 Message::ReloadTask(TaskId(2)),
                 // A row leaving the keyed collection.
                 Message::DeleteTask(TaskId(1)),
