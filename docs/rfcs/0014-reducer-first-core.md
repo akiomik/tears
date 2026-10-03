@@ -9,12 +9,12 @@
   three on the park-boundary probe §7.2 names. The
   **implementation-acceptance tier** that gated mainlining — cleanup
   hooks, the full combinator surface, the observability vocabulary, the
-  production arbitration policy, and the remaining §12 behavioral rows —
-  is closed, and its checks are the regression suite. Rows 1–12 of §9's
+  production arbitration policy, and the remaining §12 behavioral rows
+  — is closed, and its checks are the regression suite. The §9
   supersessions and amendments landed on their owner documents at
   acceptance, in §13.1's order, ahead of that mainlining.
-  §2.5's live-instance reconciliation (INV-RC3, INV-RC3a) was
-  implemented after that mainlining, outside the gate.
+  §2.5's live-instance reconciliation (INV-RC3, INV-RC3a, §9 row 13) is
+  Accepted.
 - Target: 0.11.0 — the breaking window reserved for composition
   (RFC 0010 §1.8); §2.5's live-instance reconciliation, in 0.12.0
   (breaking)
@@ -1186,9 +1186,9 @@ the driver drives the kernel itself.
 
 ## 9. Supersessions and amendments
 
-Each row names the owner document that edits in place. Rows 1–12 landed
-with this RFC's acceptance, ahead of the mainlining §13.1's second tier
-gated; row 13 landed with §2.5's live-instance reconciliation.
+These rows landed on their owner documents with this RFC's
+acceptance, ahead of the mainlining §13.1's second tier gated. Each row
+names the owner document that edits in place.
 
 | # | Owner | Kind | Object |
 | --- | --- | --- | --- |
@@ -1376,10 +1376,13 @@ need.
 
 ## 12. Invariants
 
-Enforcement classes per the pre-review checklist. §13.1 records
-which behavioral checks gated this RFC's acceptance and which gated
-implementation mainlining; every behavioral row below is part of the
-regression suite.
+Enforcement classes per the pre-review checklist. The behavioral
+checks divide into two tiers (§13.1): the **spike tier** — the four
+kernel claims and the twelve-series conformance suite, which gated this
+RFC's acceptance and ran on a prototype kernel — and the
+**implementation-acceptance tier** — every remaining behavioral row
+below, which gated implementation mainlining rather than acceptance.
+Both tiers are met, and both are the regression suite now.
 
 - **INV-RC1 — single execution path.** For every kernel concern —
   state ownership, lane topology, input delivery, quit delivery,
@@ -1648,16 +1651,13 @@ driving, which is why these three carry their own instrument rather
 than a weaker form of the same one; stage-granular probes are outside
 both groups. *Implementation-acceptance tier* — what gated mainlining
 rather than acceptance, and is now met: cleanup hooks (INV-RC8), the
-full combinator surface of the time — INV-RC2, INV-RC4, and
-the completeness of the removal journals §11 describes — the
-observability vocabulary mapping (§9 row 9), the production
-arbitration policy (§3.5's unbiased pass initiation, whose check
-is the structural review named there), and the remaining §12
-behavioral rows. Neither tier includes §2.5's live-instance
-reconciliation (INV-RC3, INV-RC3a), implemented after mainlining.
+full combinator surface (INV-RC2–INV-RC4), the observability vocabulary
+mapping (§9 row 9), the production arbitration policy (§3.5's unbiased
+pass initiation, whose check is the structural review named there), and
+the remaining §12 behavioral rows.
 **Order**, as it ran: the spike tier preceded acceptance, acceptance
 preceded every §9 edit, and the second tier preceded mainlining — so
-§9's rows 1–12 stood on the owner documents before the kernel
+the §9 supersessions stood on the owner documents before the kernel
 entered the crate, and every document those rows reach states the
 successor contract as the one in force. A failure in that tier would
 have stopped mainlining and reopened the design of whatever it failed;
