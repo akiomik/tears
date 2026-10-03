@@ -1718,6 +1718,59 @@ mod tests {
         );
     }
 
+    // INV-RC3a: the collector a hand-written reducer reports through appends
+    // what RFC 0014 §2.5 says each call appends, beneath the path it says.
+    #[test]
+    fn the_collector_reports_each_call_beneath_its_path() {
+        struct Pane {
+            modal: Slot<()>,
+        }
+
+        struct Panes;
+
+        impl Reducer for Panes {
+            type State = Keyed<&'static str, Pane>;
+            type Message = ();
+
+            fn reduce(&self, _: &mut Self::State, (): ()) -> Command<()> {
+                Command::none()
+            }
+
+            fn instances(&self, rows: &Self::State, out: &mut Instances<'_>) {
+                out.scoped("outer", |out| {
+                    out.keyed(rows, |pane, out| out.slot("modal", &pane.modal, |(), _| {}));
+                });
+            }
+        }
+
+        let mut open = Pane {
+            modal: Slot::empty(),
+        };
+        open.modal.present(());
+        let mut rows = Keyed::new();
+        rows.insert("row-a", open);
+        rows.insert(
+            "row-b",
+            Pane {
+                modal: Slot::empty(),
+            },
+        );
+
+        let reported: Vec<ScopePath> = instances::report(&Panes, &rows)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec![
+                path(&["outer", "row-a"]),
+                path(&["outer", "row-a", "modal"]),
+                path(&["outer", "row-b"]),
+            ]
+        );
+    }
+
     #[test]
     fn an_occupancy_the_last_message_did_not_reach_stays_reported() {
         let mut state = OuterState::new();

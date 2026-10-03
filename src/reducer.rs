@@ -260,24 +260,23 @@ pub trait Reducer {
     /// sequence every time, and reporting runs no side effect and reads no
     /// external mutable state.
     ///
-    /// The runtime tears down a row's or occupant's work when a report no
-    /// longer holds it, and only beneath the paths it was reported at, along
-    /// with everything else there. So report each row or occupant the state
-    /// holds at the path its work runs beneath, counting the commands and
-    /// subscriptions this reducer and the reducers it calls produce for it,
-    /// and those the `init` of a program built on it starts.
-    /// [`Instances::keyed`] and [`Instances::slot`] report a row or an
-    /// occupant, and [`Instances::scoped`] adds a segment above what its
-    /// closure reports; forward a called reducer's report inside them, nested
-    /// as this reducer nests that reducer's commands. A pair a combinator built
-    /// on this reducer already reports need not be repeated. Report all of
-    /// them on every call, whichever the last message reached. A reducer
-    /// whose rows and occupants have no work reports nothing, and the
-    /// combinators do all of this for you.
+    /// The runtime tears a row's or occupant's work down when a report no
+    /// longer holds it, beneath each path it was reported at, along with
+    /// everything else there. [`Instances::keyed`] reports each row at the
+    /// current path extended by its key, [`Instances::slot`] reports the
+    /// occupant at it extended by a segment, and [`Instances::scoped`]
+    /// extends it for what its closure reports. So scope each row's or
+    /// occupant's work — the commands and subscriptions this reducer and the
+    /// reducers it calls produce for it, and those the `init` of a program
+    /// built on it starts — beneath the path you report it at, and forward a
+    /// called reducer's report nested as this reducer nests that reducer's
+    /// commands. A pair a combinator built on this reducer already reports
+    /// need not be repeated. Report all of them on every call, whichever the
+    /// last message reached; the combinators do all of this for you.
     ///
     /// Nothing checks the report. Work beneath no path its row or occupant is
-    /// reported at outlives the removal, and a row or occupant left out of
-    /// some reports is torn down while the state still holds it.
+    /// reported at gets no teardown from that removal, and a row or occupant
+    /// left out of some reports is torn down while the state still holds it.
     ///
     /// A reducer that reduces a child per row, scoping each row's commands
     /// under its key, reports the rows and forwards the child's report
