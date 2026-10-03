@@ -216,10 +216,11 @@ pub trait Application: Sized {
     /// subscription under a row or occupant — the usual case — reports
     /// nothing: write an empty body. One whose `update` calls a combinator
     /// stack's `reduce` forwards that stack's report,
-    /// `stack().instances(self, out)`;
-    /// [`Reducer::instances`](crate::reducer::Reducer::instances) states the
-    /// obligation in full. Pure in the state, order included: reporting runs
-    /// no side effect and reads no external mutable state.
+    /// `stack().instances(self, out)`, and reports beside it any row or
+    /// occupant whose work it places itself;
+    /// [`Reducer::instances`](crate::reducer::Reducer::instances) says what to
+    /// report. Pure in the state, order included: reporting runs no side
+    /// effect and reads no external mutable state.
     ///
     /// ```
     /// # use ratatui::Frame;
