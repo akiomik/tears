@@ -139,7 +139,7 @@
 //! one reports. The combinators report their own. A reducer you write by
 //! hand that calls another reducer's `reduce` — a whole combinator stack
 //! included — forwards that reducer's report; one that calls none and places
-//! no command under a row or occupant reports nothing.
+//! no command or subscription under a row or occupant reports nothing.
 //!
 //! ## What stays at the root
 //!
@@ -260,16 +260,18 @@ pub trait Reducer {
     /// sequence every time, and reporting runs no side effect and reads no
     /// external mutable state.
     ///
-    /// Report each row or occupant the state holds at every path that ends in
-    /// its key or segment and that `reduce` scopes work under, by itself or
-    /// through a reducer it calls. [`Instances::keyed`] and
+    /// Report each row or occupant the state holds at every path where this
+    /// reducer places its work — the commands it returns and the
+    /// subscriptions it declares for it, by itself or through a reducer it
+    /// calls — and at no other path. [`Instances::keyed`] and
     /// [`Instances::slot`] report a row or an occupant, and
     /// [`Instances::scoped`] adds a segment above what its closure reports;
-    /// forward a called reducer's report inside them, nested as `reduce`
-    /// nests that reducer's commands. Report all of them on every call,
-    /// whichever the last message reached. A reducer that scopes no work and
-    /// calls no reducer reports nothing, and the combinators do all of this
-    /// for you.
+    /// forward a called reducer's report inside them, nested as this reducer
+    /// nests that reducer's commands. A pair a combinator built on this
+    /// reducer already reports need not be repeated. Report all of them on
+    /// every call, whichever the last message reached. A reducer that places
+    /// no work and calls no reducer reports nothing, and the combinators do
+    /// all of this for you.
     ///
     /// Nothing checks the report. An occupancy left out is not torn down when
     /// it is removed, and one left out of some reports is torn down while the

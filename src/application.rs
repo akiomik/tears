@@ -212,10 +212,11 @@ pub trait Application: Sized {
     /// holds, so the runtime can tear down the ones an update removes
     /// (RFC 0014 INV-RC3a).
     ///
-    /// An application that calls no reducer and places no command under a
-    /// row or occupant — the usual case — reports nothing: write an empty
-    /// body. One whose `update` calls a combinator stack's `reduce` forwards
-    /// that stack's report, `stack().instances(self, out)`;
+    /// An application that calls no reducer and places no command or
+    /// subscription under a row or occupant — the usual case — reports
+    /// nothing: write an empty body. One whose `update` calls a combinator
+    /// stack's `reduce` forwards that stack's report,
+    /// `stack().instances(self, out)`;
     /// [`Reducer::instances`](crate::reducer::Reducer::instances) states the
     /// obligation in full. Pure in the state, order included: reporting runs
     /// no side effect and reads no external mutable state.

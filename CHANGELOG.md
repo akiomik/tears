@@ -19,15 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   occupants a state holds, so that it can tear down the ones an update
   removes
 
-  What an implementor owes follows from the work it returns: it reports each
-  row or occupant that work is scoped under, and forwards the report of each
+  What an implementor owes follows from the work it places — the commands
+  it returns and the subscriptions it declares: it reports each row or
+  occupant that work is scoped under, and forwards the report of each
   reducer it calls `reduce` on; the combinators already do. A removed
   instance's teardown no longer travels in the `Command` a combinator
   stack's `reduce` returns — the runtime adds it from the report — so an
   `Application` whose `update` calls a stack's `reduce` must forward that
   stack's report: an empty body there compiles and silently stops tearing
-  down its rows. One that calls no reducer and places no command under a
-  row or occupant writes an empty body.
+  down its rows. One that calls no reducer and places no command or
+  subscription under a row or occupant writes an empty body.
 
   Before:
 
