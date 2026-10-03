@@ -354,9 +354,10 @@ synchronous half is exactly that: teardown of ownership and the abort
 requests. The task futures themselves are dismantled by the executor
 afterward, on the quiescent stage's schedule (§4.4) — synchrony is not
 claimed for them. A panic in the application's transition
-functions stays fail-fast: it propagates to `run()`'s caller (whether
-the implementation lets it unwind directly or resumes it after cleanup —
-open question 1) and is never converted into a continued run.
+functions or in `instances` stays fail-fast: it propagates to `run()`'s
+caller (whether the implementation lets it unwind directly or resumes it
+after cleanup — open question 1) and is never converted into a continued
+run.
 
 ### 4.4 Postconditions: immediate and quiescent
 
@@ -580,11 +581,10 @@ Enforcement classes follow the pre-review checklist's definitions.
   observable phase between dispatch and first poll for a behavioral test
   to anchor on (§3.3). Behavioral for the eligibility half, at the
   runtime layer: a freshly constructed runtime's first frame pass
-  renders with no message processed.
-  Behavioral for the first-report order, at the integration layer: a
-  panic in `instances` on the initial state leaves the init command
-  undispatched — no spawn and no producer-gauge event, through INV-LC3's
-  recorder.
+  renders with no message processed. Behavioral for the first-report
+  order, at the integration layer: a panic in `instances` on the
+  initial state leaves the init command undispatched — no spawn and no
+  producer-gauge event, through INV-LC3's recorder.
 - **INV-LC5**: each controlled cause — a quit returned from a
   transition, a producer-originated quit, render error — exits the
   loop, and the §4.4 immediate postcondition holds when `run()`
