@@ -892,6 +892,72 @@ mod tests {
             )
     }
 
+    /// [`stack`]'s slot below its rows: the `for_each` boundary's parent is
+    /// a `presented` one, so the slot is reported only if `for_each`
+    /// forwards its parent's report.
+    fn slot_beneath_rows() -> impl Reducer<State = RootState, Message = Message> {
+        Root.presented(
+            Child,
+            "modal",
+            |state: &RootState| &state.modal,
+            |state: &mut RootState| &mut state.modal,
+            modal_extract,
+            Message::Modal,
+        )
+        .for_each(
+            Child,
+            |state: &RootState| &state.rows,
+            |state: &mut RootState| &mut state.rows,
+            row_extract,
+            Message::Row,
+        )
+    }
+
+    /// A root whose slot's occupant is a whole [`stack`], so the occupant's
+    /// rows are reported only if `presented` forwards the occupant's report.
+    struct Host;
+
+    struct HostState {
+        modal: Slot<RootState>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum HostMessage {
+        /// Claimed by the `presented` boundary and handed to the occupant.
+        Modal(Message),
+    }
+
+    impl Reducer for Host {
+        type State = HostState;
+        type Message = HostMessage;
+
+        fn reduce(&self, _state: &mut HostState, _message: HostMessage) -> Command<HostMessage> {
+            unreachable!("the boundary claims every message")
+        }
+
+        fn instances(&self, _state: &Self::State, _out: &mut Instances<'_>) {}
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`presented` takes an extract that can hand a message back"
+    )]
+    fn host_extract(message: HostMessage) -> Result<Message, HostMessage> {
+        let HostMessage::Modal(inner) = message;
+        Ok(inner)
+    }
+
+    fn hosted() -> impl Reducer<State = HostState, Message = HostMessage> {
+        Host.presented(
+            stack(),
+            "modal",
+            |state: &HostState| &state.modal,
+            |state: &mut HostState| &mut state.modal,
+            host_extract,
+            HostMessage::Modal,
+        )
+    }
+
     fn path(segments: &[&'static str]) -> ScopePath {
         // Root-first storage: the last `prefixed` call names the outermost
         // segment, so the slice reads root-first when applied in reverse.
@@ -1196,6 +1262,54 @@ mod tests {
         assert_eq!(
             driven.send(Message::Swap).teardowns,
             vec![path(&["modal"]), path(&["sheet"])]
+        );
+    }
+
+    // An occupancy that disappears inside one that stays: the inner path is
+    // torn down on its own, since no enclosing path disappeared with it.
+    #[test]
+    fn closing_a_row_inside_a_pane_tears_down_that_row_s_path() {
+        let mut state = OuterState::new();
+        state
+            .panes
+            .insert("pane-a", RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(nested(), state);
+
+        assert_eq!(
+            driven
+                .send(OuterMessage::Pane("pane-a", Message::Close("row-x")))
+                .teardowns,
+            vec![path(&["pane-a", "row-x"])]
+        );
+    }
+
+    // `for_each` forwards its parent's report: the slot below it is reported,
+    // so dismissing it is torn down.
+    #[test]
+    fn a_slot_beneath_rows_is_torn_down_through_the_rows_boundary() {
+        let mut state = RootState::with_rows(&["row-a"]);
+        state.modal.present(ChildState::new(true));
+        let mut driven = Driven::new(slot_beneath_rows(), state);
+
+        assert_eq!(
+            driven.send(Message::Dismiss).teardowns,
+            vec![path(&["modal"])]
+        );
+    }
+
+    // `presented` forwards its occupant's report beneath the slot's segment:
+    // a row the occupant closes is torn down under the slot.
+    #[test]
+    fn a_row_closed_inside_an_occupant_is_torn_down_beneath_the_slot() {
+        let mut modal = Slot::empty();
+        modal.present(RootState::with_rows(&["row-x"]));
+        let mut driven = Driven::new(hosted(), HostState { modal });
+
+        assert_eq!(
+            driven
+                .send(HostMessage::Modal(Message::Close("row-x")))
+                .teardowns,
+            vec![path(&["modal", "row-x"])]
         );
     }
 
