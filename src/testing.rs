@@ -1108,7 +1108,10 @@ mod tests {
     /// panic.
     #[cfg(all(not(loom), unix))]
     fn register_with_io_driver() {
-        drop(AsyncFd::new(stdin()).expect(
+        // SAFETY: `Stdin` always reports fd 0, which std's own `AsFd` impl
+        // lends out as a `BorrowedFd` for as long as the `Stdin` is borrowed,
+        // so it stays open while this `AsyncFd` holds its `Stdin`.
+        drop(unsafe { AsyncFd::register(stdin()) }.expect(
             "registering an fd should not have reached a fallible step in the store's context",
         ));
     }
