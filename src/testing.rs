@@ -1108,7 +1108,11 @@ mod tests {
     /// panic.
     #[cfg(all(not(loom), unix))]
     fn register_with_io_driver() {
-        drop(AsyncFd::new(stdin()).expect(
+        let stdin = stdin();
+        // SAFETY: `Stdin` always reports fd 0. Assume fd 0 is open and names
+        // the same file description throughout registration and any resulting
+        // `AsyncFd`'s lifetime; this crate does not close or replace it.
+        drop(unsafe { AsyncFd::register(stdin) }.expect(
             "registering an fd should not have reached a fallible step in the store's context",
         ));
     }
