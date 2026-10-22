@@ -14,36 +14,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Every job below names the toolchain it runs, and gets it from here rather
-  # than restating it.
+  # The pinned channel comes from rust-toolchain.toml. The versions job also
+  # reads it to select the pinned matrix leg and the declared MSRV. The beta
+  # and MSRV jobs override the file explicitly so those legs test the intended
+  # toolchain.
   #
-  # Why the indirection: `dtolnay/rust-toolchain` selects a toolchain with
-  # `rustup default` only, and rustup's precedence is a `+toolchain` argument >
-  # `RUSTUP_TOOLCHAIN` > directory override > `rust-toolchain.toml` >
-  # `rustup default`. So the pinned channel outranks whatever a job asks that
-  # action for, and asking for `stable` while running the pin is the state this
-  # indirection replaces: the toolchain the action installs is the one the
-  # job's components are added to, while the pin is what builds, so a job that
-  # named the wrong one installed its components somewhere it never built. It
-  # could also move the `Swatinem/rust-cache` key, which hashes the version of
-  # every installed toolchain and so picks up the action updating the one it
-  # names — though not by making the key stop describing the build, since
-  # `rustc -vV` runs in the workspace and so reports the pin either way.
-  #
-  # One consequence worth recording, because it stays silent until it bites:
-  # the action installs with `--profile minimal`, and it is now installing the
-  # pin itself. Before, the pin arrived by rustup auto-installing it from
-  # `rust-toolchain.toml`, which carries `profile = "default"` and so brought
-  # rustfmt, clippy and rust-docs along unasked. A job gets exactly what its
-  # `components:` names now. Every job here asks for what it uses, but one
-  # added later that runs, say, `just check` would fail on a component that
-  # used to be present by accident.
-  #
-  # Reading these out of the files that declare them is what keeps a job
-  # honest: the pin has one home (`rust-toolchain.toml`), the MSRV has one
-  # home (`Cargo.toml`'s `rust-version`), and the feature set has one home
-  # (the `justfile`), so bumping any of them moves CI with it instead of
-  # leaving a job checking something nothing claims any more.
+  # The feature set comes from justfile; CI uses build_features instead of
+  # --all-features because loom-core removes code from test builds.
   #
   # `features` is what the jobs below enable instead of `--all-features`.
   # `--all-features` turns on `loom-core`, which *removes* code from the
@@ -104,9 +81,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -121,9 +99,10 @@ jobs:
     # place where that difference is a failure rather than a warning.
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
@@ -189,8 +168,10 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ matrix.rust == 'pinned' && needs.versions.outputs.pinned || matrix.rust }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache: false
+          build-warnings: ''
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         shell: bash
@@ -240,9 +221,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
@@ -282,9 +264,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
@@ -302,9 +285,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
       # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
       # (rustdoc JSON output is nightly-only); this just makes that toolchain
       # available, it doesn't change what builds the test binary.
@@ -324,9 +308,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Build documentation
@@ -346,9 +331,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # The `test` job passes explicit target flags, which suppress the
@@ -384,8 +370,10 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ needs.versions.outputs.msrv }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache: false
+          build-warnings: ''
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         run: |
@@ -402,9 +390,10 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.versions.outputs.pinned }}
+          cache: false
+          build-warnings: ''
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
