@@ -27,7 +27,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       - name: Verify the toolchain
         run: |
           active=$(rustup show active-toolchain)
