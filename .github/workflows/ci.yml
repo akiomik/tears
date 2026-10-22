@@ -84,7 +84,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -102,7 +101,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
@@ -171,7 +169,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
+          # Beta can introduce deprecations before the pinned toolchain does.
+          # Keep that leg informative while denying warnings on the pinned leg.
+          build-warnings: ${{ matrix.rust == 'beta' && 'warn' || 'deny' }}
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         shell: bash
@@ -224,7 +224,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
@@ -267,7 +266,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
@@ -288,7 +286,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
       # (rustdoc JSON output is nightly-only); this just makes that toolchain
       # available, it doesn't change what builds the test binary.
@@ -300,6 +297,10 @@ jobs:
       # this job runs no recipe.
       - uses: taiki-e/install-action@just
       - name: Check public API surface
+        # The test shells out to nightly Cargo for rustdoc JSON. Nightly can
+        # add advisory manifest warnings before the pinned toolchain does.
+        env:
+          CARGO_BUILD_WARNINGS: warn
         run: cargo test --test api_surface -- --ignored
 
   doc:
@@ -311,7 +312,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Build documentation
@@ -334,7 +334,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # The `test` job passes explicit target flags, which suppress the
@@ -373,7 +372,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         run: |
@@ -393,7 +391,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: false
-          build-warnings: ''
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
