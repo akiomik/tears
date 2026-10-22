@@ -297,6 +297,10 @@ jobs:
       # this job runs no recipe.
       - uses: taiki-e/install-action@just
       - name: Check public API surface
+        # The test shells out to nightly Cargo for rustdoc JSON. Nightly can
+        # add advisory manifest warnings before the pinned toolchain does.
+        env:
+          CARGO_BUILD_WARNINGS: warn
         run: cargo test --test api_surface -- --ignored
 
   doc:

@@ -1023,6 +1023,7 @@ mod tests {
     use tokio::net::UdpSocket;
     use tracing::Level;
 
+    #[cfg(not(loom))]
     use crate::command::effect_command::EffectCommand;
     use crate::command::{Command, RetryPolicy};
     use crate::subscription::core::Subscription;
@@ -1091,7 +1092,9 @@ mod tests {
         Unrelated,
         Loud,
         StartQuit,
+        #[cfg(not(loom))]
         Arm,
+        #[cfg(not(loom))]
         Tear,
     }
 
