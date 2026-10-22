@@ -16,6 +16,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      - name: Validate release tag
+        run: bash .github/scripts/validate-release-tag.sh "$GITHUB_REF_NAME"
       # Read the pin for the release assertion. The setup action installs the
       # toolchain directly from rust-toolchain.toml.
       - id: versions

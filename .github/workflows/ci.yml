@@ -47,6 +47,8 @@ jobs:
       features: ${{ steps.read.outputs.features }}
     steps:
       - uses: actions/checkout@v7
+      - name: Test release tag validation
+        run: bash .github/scripts/test-validate-release-tag.sh
       - uses: taiki-e/install-action@just
       - id: read
         name: Read the pinned channel, the declared MSRV and the feature set
