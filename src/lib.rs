@@ -27,8 +27,8 @@
 //! into a [`Program`](reducer::Program). [`ProgramRuntime`] runs any
 //! [`Program`](reducer::Program). [`Runtime`] and [`ProgramRuntime`] build
 //! the same kernel and drive the same pass loop, so the choice changes how a
-//! program is written and not how it is executed. `examples/dashboard.rs` and
-//! `examples/dashboard_composed.rs` are one application written both ways.
+//! program is written and not how it is executed. The
+//! [`reducer`](reducer#composing-reducers) module docs say which to choose.
 //!
 //! ## Core Components
 //!
