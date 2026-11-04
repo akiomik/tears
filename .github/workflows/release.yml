@@ -33,7 +33,6 @@ jobs:
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]] \
             || { echo "active toolchain is not the pin ${RUSTUP_TOOLCHAIN}" >&2; exit 1; }
-      - uses: Swatinem/rust-cache@v2
 
       - name: Check package
         run: cargo publish --dry-run

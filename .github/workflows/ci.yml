@@ -100,9 +100,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache: false
           components: clippy
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run clippy
         run: just clippy
@@ -168,7 +166,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache: false
           # Beta can introduce deprecations before the pinned toolchain does.
           # Keep that leg informative while denying warnings on the pinned leg.
           build-warnings: ${{ matrix.rust == 'beta' && 'warn' || 'deny' }}
@@ -190,7 +187,6 @@ jobs:
           active=$(rustup show active-toolchain)
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run tests
         # Benches are excluded from this matrix (and run once, on Linux
@@ -222,9 +218,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Run criterion benchmarks in test mode
         id: criterion
@@ -264,9 +257,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
       # loom model checks are scoped to the `--lib` unit tests for the isolated
@@ -284,14 +274,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
       # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
       # (rustdoc JSON output is nightly-only); this just makes that toolchain
       # available, it doesn't change what builds the test binary.
       - name: Install nightly toolchain for rustdoc JSON
         run: rustup toolchain install nightly
-      - uses: Swatinem/rust-cache@v2
       # The test reads the feature set from `just --evaluate user_features`
       # rather than restating it, so `just` has to be on PATH here even though
       # this job runs no recipe.
@@ -310,9 +297,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       - name: Build documentation
         run: just doc-strict "${{ needs.versions.outputs.features }}"
@@ -332,9 +316,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          cache: false
-      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@just
       # The `test` job passes explicit target flags, which suppress the
       # implicit doctest run; `doc` builds docs without `cfg(doctest)`, and
@@ -371,14 +352,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache: false
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
         run: |
           active=$(rustup show active-toolchain)
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
-      - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --all-targets --features ${{ needs.versions.outputs.features }}
 
@@ -390,9 +369,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache: false
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@just
