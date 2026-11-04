@@ -15,7 +15,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # Read the pin for the release assertion. The setup action installs the
       # toolchain directly from rust-toolchain.toml.
       - id: versions
@@ -24,7 +24,7 @@ jobs:
           pinned=$(sed -ne 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           test -n "$pinned" || { echo "no channel in rust-toolchain.toml" >&2; exit 1; }
           echo "RUSTUP_TOOLCHAIN=$pinned" >> "$GITHUB_ENV"
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
         with:
           cache: false
       - name: Verify the toolchain
@@ -37,7 +37,7 @@ jobs:
       - name: Check package
         run: cargo publish --dry-run
 
-      - uses: rust-lang/crates-io-auth-action@v1
+      - uses: rust-lang/crates-io-auth-action@v1.0.6
         id: auth
 
       - run: cargo publish
