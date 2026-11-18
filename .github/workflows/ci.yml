@@ -47,7 +47,7 @@ jobs:
       features: ${{ steps.read.outputs.features }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - id: read
@@ -83,7 +83,7 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           cache: false
           components: rustfmt
@@ -100,10 +100,10 @@ jobs:
     # place where that difference is a failure rather than a warning.
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           components: clippy
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Run clippy
@@ -168,7 +168,7 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ matrix.rust == 'pinned' && needs.versions.outputs.pinned || matrix.rust }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           # Beta can introduce deprecations before the pinned toolchain does.
           # Keep that leg informative while denying warnings on the pinned leg.
@@ -191,7 +191,7 @@ jobs:
           active=$(rustup show active-toolchain)
           echo "$active"
           [[ $active == "${RUSTUP_TOOLCHAIN}-"* ]]
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Run tests
@@ -223,8 +223,8 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Run criterion benchmarks in test mode
@@ -264,8 +264,8 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       # `--cfg loom` reconfigures tokio (dropping modules like `signal`), so the
@@ -283,7 +283,7 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
       # `tests/api_surface.rs` shells out to `cargo +nightly rustdoc` itself
       # (rustdoc JSON output is nightly-only); this just makes that toolchain
       # available, it doesn't change what builds the test binary.
@@ -292,7 +292,7 @@ jobs:
       # The test reads the feature set from `just --evaluate user_features`
       # rather than restating it, so `just` has to be on PATH here even though
       # this job runs no recipe.
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Check public API surface
@@ -308,8 +308,8 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Build documentation
@@ -329,8 +329,8 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       # The `test` job passes explicit target flags, which suppress the
@@ -366,7 +366,7 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ needs.versions.outputs.msrv }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Verify the active toolchain
@@ -383,14 +383,14 @@ jobs:
     needs: versions
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2.0.1
         with:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.88.0
+        uses: taiki-e/install-action@v2.89.1
         with:
           tool: cargo-llvm-cov
-      - uses: taiki-e/install-action@v2.88.0
+      - uses: taiki-e/install-action@v2.89.1
         with:
           tool: just
       - name: Generate coverage
